@@ -1976,8 +1976,25 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                             .as_ref()
                             .filter(|jump| jump.message == message.id)
                             .map(|_| (ui.painter().add(egui::Shape::Noop), ui.cursor().top()));
-                        let response =
-                            bubble(ui, &view, message, show_sender, first_in_run, &mut actions);
+                        // A press can start text selection, causing earlier virtualized
+                        // rows to be laid out on the next frame. Keep this row's
+                        // widget IDs stable so the release still clicks its link.
+                        let response = ui
+                            .scope_builder(
+                                egui::UiBuilder::new()
+                                    .id(bubble_id(&chat.id, &message.id).with("row-ui")),
+                                |ui| {
+                                    bubble(
+                                        ui,
+                                        &view,
+                                        message,
+                                        show_sender,
+                                        first_in_run,
+                                        &mut actions,
+                                    )
+                                },
+                            )
+                            .inner;
                         if let Some((slot, top)) = flash {
                             if view.anchor == Some(message.id.as_str()) && response.is_some() {
                                 jump_since.set(Some(time));

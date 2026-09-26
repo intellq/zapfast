@@ -2938,6 +2938,125 @@ mod tests {
     }
 
     #[test]
+    fn clicking_link_text_below_a_preview_opens_the_url() {
+        let mut app = app();
+        let chat = SAMPLES[0].id;
+        let url = "https://www.instagram.com/reel/Example123-A/?stkn=abcdefghijklmnopqrst";
+        let mut row = message(
+            chat,
+            "preview-link-click",
+            false,
+            100,
+            Content::Text {
+                text: url.to_owned(),
+                preview: Some(LinkPreview {
+                    url: url.to_owned(),
+                    title: Some("Instagram".to_owned()),
+                    description: Some("An example preview".to_owned()),
+                }),
+            },
+        );
+        row.thumbnail = Some(sample_thumbnail(3));
+        let mut messages: Vec<_> = (0..100)
+            .map(|index| {
+                message(
+                    chat,
+                    &format!("older-{index}"),
+                    false,
+                    index,
+                    Content::text("An older message in the conversation"),
+                )
+            })
+            .collect();
+        messages.push(message(
+            chat,
+            "plain-before-link",
+            false,
+            101,
+            Content::text("Earlier words to select"),
+        ));
+        messages.push(row);
+        app.conversations.get_mut(chat).unwrap().messages = messages;
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let id = crate::ui::conversation::bubble_id(chat, "preview-link-click");
+        let body = ctx
+            .data(|data| data.get_temp::<egui::Rect>(id.with("body")))
+            .expect("the link text is visible");
+        let preview = ctx
+            .data(|data| data.get_temp::<egui::Rect>(id.with("preview")))
+            .expect("the preview card is visible");
+        let run = |app: &mut App, events| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1180.0, 780.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    let ctx = ui.ctx().clone();
+                    app.background_frame(&ctx);
+                    app.frame_ui(ui);
+                },
+            );
+            output.textures_delta.clear();
+            output.platform_output
+        };
+        let plain = ctx
+            .data(|data| {
+                data.get_temp::<egui::Rect>(
+                    crate::ui::conversation::bubble_id(chat, "plain-before-link").with("body"),
+                )
+            })
+            .expect("the earlier message is visible");
+        let from = plain.left_top() + egui::vec2(10.0, 9.0);
+        let to = body.left_top() + egui::vec2(35.0, 9.0);
+        let event = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            pressed,
+            button: egui::PointerButton::Primary,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let initial_hover = run(&mut app, vec![egui::Event::PointerMoved(to)]);
+        assert_eq!(initial_hover.cursor_icon, egui::CursorIcon::PointingHand);
+        run(&mut app, vec![event(to, true)]);
+        let first_click = run(&mut app, vec![event(to, false)]);
+        assert!(
+            first_click.commands.iter().any(|command| matches!(command,
+                egui::OutputCommand::OpenUrl(opened) if opened.url == url
+            )),
+            "first click after opening the conversation"
+        );
+        run(
+            &mut app,
+            vec![egui::Event::PointerMoved(from), event(from, true)],
+        );
+        run(&mut app, vec![egui::Event::PointerMoved(to)]);
+        run(&mut app, vec![event(to, false)]);
+        assert!(
+            ctx.plugin::<egui::text_selection::LabelSelectionState>()
+                .lock()
+                .has_selection()
+        );
+        let pos = body.left_top() + egui::vec2(35.0, 9.0);
+        assert!(
+            !preview.contains(pos),
+            "test clicks the link text, not the card"
+        );
+        let hovered = run(&mut app, vec![egui::Event::PointerMoved(pos)]);
+        assert_eq!(hovered.cursor_icon, egui::CursorIcon::PointingHand);
+        run(&mut app, vec![event(pos, true)]);
+        let released = run(&mut app, vec![event(pos, false)]);
+        assert!(released.commands.iter().any(|command| matches!(command,
+            egui::OutputCommand::OpenUrl(opened) if opened.url == url
+        )));
+    }
+
+    #[test]
     fn interactive_lists_copy_codes_and_unavailable_actions_use_the_correct_paths() {
         let mut app = app();
         apply_flags(&mut app, Some("interactive-actions"));
