@@ -23,7 +23,7 @@ See **[zapfast.rocks](https://zapfast.rocks)** for downloads and guides.
 ## Alterações deste fork (`intellq`)
 
 Este fork acompanha o [projeto original](https://github.com/crmne/zapfast)
-até o commit [`05a1291`](https://github.com/crmne/zapfast/commit/05a1291).
+até o commit [`9aedc8d`](https://github.com/crmne/zapfast/commit/9aedc8d).
 Além das novidades do upstream, esta branch inclui as seguintes mudanças:
 
 - **Links clicáveis desde o primeiro clique.** Em conversas longas, a
@@ -186,6 +186,9 @@ paletas embutidas copiadas para a pasta de temas e mais contraste entre
 conversa, balões e painéis (fastframe v0.1.6), limite de 32 notificações
 do Linux aguardando clique (evita esgotar recursos no KDE Plasma), faixas de
 resposta, edição e voz mais próximas do compositor,
+balões com cauda e sombra suave (com relevo ajustado a temas claros e
+escuros), etiquetas de data em relevo, lista de conversas com cartões
+arredondados,
 edição de nome e foto de grupos, guia para criar temas e rótulos de
 acessibilidade nos botões. A confirmação de mensagens veio do upstream; a opção
 de sincronizar a exclusão "para mim" com o celular é uma extensão deste fork.
