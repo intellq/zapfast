@@ -23,7 +23,8 @@ See **[zapfast.rocks](https://zapfast.rocks)** for downloads and guides.
 ## Alterações deste fork (`intellq`)
 
 Este fork acompanha o [projeto original](https://github.com/crmne/zapfast)
-até o commit [`1f2c4d3`](https://github.com/crmne/zapfast/commit/1f2c4d3).
+até o commit [`f0a7706`](https://github.com/crmne/zapfast/commit/f0a7706)
+(versão 0.17.0 e ajustes seguintes).
 Além das novidades do upstream, esta branch inclui as seguintes mudanças:
 
 - **Interface inteiramente em português brasileiro.** Com o idioma pt-BR, todo
@@ -212,7 +213,10 @@ escuros, com sombra mais leve nos escuros), etiquetas de data em relevo,
 lista de conversas com cartões arredondados, relevo também na conversa
 destacada, no compositor e nas faixas acima dele,
 edição de nome e foto de grupos, guia para criar temas e rótulos de
-acessibilidade nos botões. A confirmação de mensagens veio do upstream; a opção
+acessibilidade nos botões. Da versão 0.17.0 vieram ainda o fastframe v0.1.7
+(árabe desenhado em Segoe UI no Windows), o corte de textos de uma linha em
+árabe e hebraico no fim lógico e os nomes das fontes de reserva no log. A
+confirmação de mensagens veio do upstream; a opção
 de sincronizar a exclusão "para mim" com o celular é uma extensão deste fork.
 
 <picture>
