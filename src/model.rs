@@ -449,7 +449,10 @@ pub enum Content {
         state: PollState,
     },
     /// "This message was deleted."
-    Revoked,
+    Revoked {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kept: Option<Box<Content>>,
+    },
     /// Unsupported content with a user-facing description.
     Unsupported {
         what: String,
@@ -703,7 +706,7 @@ impl Content {
                 tr("Contact: {name}").replace("{name}", display_name)
             }
             Self::Poll { question, .. } => tr("Poll: {question}").replace("{question}", question),
-            Self::Revoked => tr("This message was deleted").to_owned(),
+            Self::Revoked { .. } => tr("This message was deleted").to_owned(),
             Self::Unsupported { what } => {
                 tr("Unsupported message ({what})").replace("{what}", &unsupported_kind(what))
             }
@@ -723,8 +726,12 @@ impl Content {
         matches!(self, Self::Unsupported { .. } | Self::PhoneOnly { .. })
     }
 
+    /// A deleted message with nothing kept.
+    pub const REVOKED: Content = Content::Revoked { kept: None };
+
     pub fn media(&self) -> Option<&Media> {
         match self {
+            Self::Revoked { kept: Some(kept) } => kept.media(),
             Self::Image { media, .. }
             | Self::Video { media, .. }
             | Self::Audio { media, .. }
@@ -738,6 +745,9 @@ impl Content {
     }
 
     pub fn media_at_mut(&mut self, card_index: Option<usize>) -> Option<&mut Media> {
+        if let Self::Revoked { kept: Some(kept) } = self {
+            return kept.media_at_mut(card_index);
+        }
         match card_index {
             None => self.media_mut(),
             Some(index) => match self {
@@ -774,6 +784,7 @@ impl Content {
 
     pub fn media_mut(&mut self) -> Option<&mut Media> {
         match self {
+            Self::Revoked { kept: Some(kept) } => kept.media_mut(),
             Self::Image { media, .. }
             | Self::Video { media, .. }
             | Self::Audio { media, .. }

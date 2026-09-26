@@ -778,9 +778,8 @@ fn about(app: &mut App, ui: &mut egui::Ui) {
         }
     });
     ui.add_space(4.0);
-    if super::widgets::credit(ui, &palette, app.locale) {
-        app.actions
-            .push(Action::OpenUrl(super::widgets::AUTHOR_URL.to_owned()));
+    if let Some(url) = super::widgets::credit(ui, &palette, app.locale) {
+        app.actions.push(Action::OpenUrl(url.to_owned()));
     }
 }
 
@@ -1165,12 +1164,19 @@ fn confirm_delete_message(
     on_phone: bool,
 ) {
     let palette = app.palette;
+    // A deleted message exists only here, so it is never deleted on the phone.
+    let local_only = !for_everyone && app.is_revoked(chat, id);
     let (heading, body) = if for_everyone {
         (
             tr("Delete for everyone?"),
             tr(
                 "Everyone in this chat will see \"This message was deleted\" instead. It cannot be undone.",
             ),
+        )
+    } else if local_only {
+        (
+            tr("Delete for me?"),
+            tr("This removes the message from this computer."),
         )
     } else {
         (
@@ -1187,8 +1193,8 @@ fn confirm_delete_message(
         theme::regular(13.5),
         palette.text,
     );
-    let mut selected = on_phone;
-    if !for_everyone {
+    let mut selected = on_phone && !local_only;
+    if !for_everyone && !local_only {
         ui.add_space(6.0);
         if ui
             .checkbox(

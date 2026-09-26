@@ -781,7 +781,7 @@ pub fn populate(app: &mut App) {
             row.thumbnail = Some(sample_map());
             row
         },
-        message(ada, "ada-deleted", false, older + 60 * 25, Content::Revoked),
+        message(ada, "ada-deleted", false, older + 60 * 25, Content::REVOKED),
     ];
     let conversation = app.conversations.get_mut(ada).expect("sample chat");
     conversation.messages.splice(0..0, extra);
@@ -3854,7 +3854,7 @@ mod tests {
         assert!(
             ada.messages
                 .iter()
-                .any(|m| matches!(m.content, Content::Revoked))
+                .any(|m| matches!(m.content, Content::Revoked { .. }))
         );
         assert!(ada.messages.iter().any(|m| m.quoted.is_some()));
     }
@@ -4642,14 +4642,19 @@ mod tests {
             .expect("Tab focuses a preview control");
         assert_eq!(focused.layer_id.id, egui::Id::new("image-preview"));
 
-        // The first control is Close; Enter activates it.
+        // The first control is 100%; Enter activates it.
         frame_with(
             &mut app,
             &ctx,
             vec![key(egui::Key::Enter, egui::Modifiers::NONE)],
         );
         render(&mut app, &ctx);
-        assert!(app.image_preview.is_none(), "Enter activates Close");
+        assert!(
+            app.image_preview
+                .as_ref()
+                .is_some_and(|preview| !preview.is_fit()),
+            "Enter activates 100%"
+        );
         assert_eq!(app.composer, "draft");
     }
 
@@ -6310,7 +6315,7 @@ mod tests {
                 assert!(
                     matches!(
                         row.map(|message| &message.content),
-                        Some(crate::model::Content::Revoked)
+                        Some(crate::model::Content::Revoked { .. })
                     ),
                     "{page}: a revoked message stays as a tombstone"
                 );
@@ -7346,7 +7351,7 @@ mod tests {
         let chat = sample_ids()[0].to_owned();
         app.conversations.get_mut(&chat).unwrap().messages = vec![
             message(&chat, "text", false, 100, Content::text("Double-click me")),
-            message(&chat, "gone", false, 200, Content::Revoked),
+            message(&chat, "gone", false, 200, Content::REVOKED),
         ];
         let ctx = egui::Context::default();
         app.attach(&ctx);

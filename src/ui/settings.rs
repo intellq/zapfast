@@ -480,6 +480,8 @@ fn sections(app: &App) -> Vec<Section> {
     if cfg!(target_os = "linux") {
         ffmpeg_row(&mut chats, locale);
     }
+    #[cfg(windows)]
+    windows_video_row(&mut chats, locale);
     chats.toggle(
         translated(locale, "Download audio automatically"),
         translated(locale, "Includes voice messages."),
@@ -668,6 +670,13 @@ fn sections(app: &App) -> Vec<Section> {
         privacy.row(title, description, move |ui, app| {
             ui.add_enabled_ui(editable, |ui| privacy_control(ui, app, kind));
         });
+    }
+    if app.settings_more {
+        privacy.toggle(
+            translated(locale, "Keep deleted messages"),
+            "",
+            |settings| &mut settings.keep_deleted_messages,
+        );
     }
 
     let mut system = Section::new(translated(locale, "System"));
@@ -1058,6 +1067,61 @@ fn ffmpeg_row(chats: &mut Section, locale: Locale) {
     chats.unavailable(title, description);
     chats.unavailable(gpu, translated(locale, "Needs FFmpeg."));
     chats.indent_last();
+}
+
+/// Playing videos through Windows' own decoders: on by default, and naming
+/// the free Microsoft Store extensions this computer still lacks.
+#[cfg(windows)]
+fn windows_video_row(chats: &mut Section, locale: Locale) {
+    let title = translated(locale, "Play videos with the Windows decoders");
+    if !crate::media_foundation::available() {
+        chats.unavailable(
+            title,
+            translated(
+                locale,
+                "Windows' media components are missing. On N editions of Windows, add the Media Feature Pack under Settings › Apps › Optional features. Videos the built-in player cannot read open in the system player.",
+            ),
+        );
+        return;
+    }
+    const PLAYS: &str = crate::i18n::n_(
+        "Plays H.264 videos of every profile, and HE-AAC or AC-3 sound, inside the chat with the decoders built into Windows. Videos they cannot read use the built-in player.",
+    );
+    const MORE: &str =
+        crate::i18n::n_("For HEVC, VP9 or AV1 videos, install from the Microsoft Store:");
+    let codecs = crate::media_foundation::codecs();
+    let missing: Vec<&'static str> = [
+        (!codecs.hevc).then_some(crate::i18n::n_(
+            "HEVC Video Extensions from Device Manufacturer",
+        )),
+        (!codecs.vp9).then_some(crate::i18n::n_("VP9 Video Extensions")),
+        (!codecs.av1).then_some(crate::i18n::n_("AV1 Video Extension")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let mut shown = crate::i18n::gettext(locale, PLAYS).into_owned();
+    let mut source = PLAYS.to_owned();
+    if !missing.is_empty() {
+        let names: Vec<String> = missing
+            .iter()
+            .map(|name| crate::i18n::gettext(locale, name).into_owned())
+            .collect();
+        shown = format!(
+            "{shown}\n{} {}.",
+            crate::i18n::gettext(locale, MORE),
+            names.join(", ")
+        );
+        source = format!("{source} {MORE} {}.", missing.join(", "));
+    }
+    chats.toggle(
+        title,
+        Text {
+            shown: shown.into(),
+            source: source.into(),
+        },
+        |settings| &mut settings.ffmpeg_video,
+    );
 }
 
 /// The website's page on writing a theme.
@@ -1586,9 +1650,8 @@ fn about(app: &mut App, ui: &mut egui::Ui) {
         }
     });
     ui.add_space(14.0);
-    if widgets::credit(ui, &palette, app.locale) {
-        app.actions
-            .push(Action::OpenUrl(widgets::AUTHOR_URL.to_owned()));
+    if let Some(url) = widgets::credit(ui, &palette, app.locale) {
+        app.actions.push(Action::OpenUrl(url.to_owned()));
     }
 }
 

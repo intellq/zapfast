@@ -649,6 +649,7 @@ fn emoji_grid(
         if query_changed {
             app.picker_search = search;
             app.emoji_selected = 0;
+            app.emoji_selection_shown = false;
             app.emoji_tone_target = None;
         }
         if app.picker_focus {
@@ -719,11 +720,19 @@ fn emoji_grid(
     let cell = width / columns as f32;
     if newly_opened || app.emoji_recent_shown.is_none() {
         app.emoji_recent_shown = Some(if app.reaction_target.is_some() {
-            app.settings
-                .reaction_emoji
-                .iter()
-                .map(|(emoji, _)| emoji.clone())
-                .collect()
+            if app.settings.reaction_emoji.is_empty() {
+                // Before the first reaction, WhatsApp's six defaults.
+                super::conversation::QUICK_REACTIONS
+                    .iter()
+                    .map(|emoji| (*emoji).to_owned())
+                    .collect()
+            } else {
+                app.settings
+                    .reaction_emoji
+                    .iter()
+                    .map(|(emoji, _)| emoji.clone())
+                    .collect()
+            }
         } else {
             app.settings.recent_emoji.clone()
         });
@@ -737,8 +746,12 @@ fn emoji_grid(
             Row::Emoji { values, .. } => values.len(),
         })
         .sum();
+    if newly_opened {
+        app.emoji_selection_shown = false;
+    }
     if let Some(key) = movement {
         app.emoji_selected = move_emoji_selection(app.emoji_selected, emoji_count, columns, key);
+        app.emoji_selection_shown = true;
     } else if emoji_count == 0 {
         app.emoji_selected = 0;
     } else {
@@ -833,7 +846,12 @@ fn emoji_grid(
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing = Vec2::ZERO;
                         for (offset, emoji) in values.iter().enumerate() {
-                            let selected = *first + offset == app.emoji_selected;
+                            // Outlined in the full picker once chosen by a
+                            // click or the arrows; the reaction picker, with
+                            // no search field, never outlines one.
+                            let selected = search_id.is_some()
+                                && app.emoji_selection_shown
+                                && *first + offset == app.emoji_selected;
                             let (rect, response) =
                                 ui.allocate_exact_size(vec2(cell, row_height), Sense::click());
                             if ui.is_rect_visible(rect) {
@@ -887,6 +905,7 @@ fn emoji_grid(
                                 .clicked()
                             {
                                 app.emoji_selected = *first + offset;
+                                app.emoji_selection_shown = true;
                                 if tones(emoji) {
                                     app.emoji_tone_target = Some((*emoji).to_owned());
                                 } else {

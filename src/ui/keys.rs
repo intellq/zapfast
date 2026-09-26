@@ -104,6 +104,11 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
             }
         });
     }
+    if app.page == Page::Settings
+        && ctx.input_mut(|input| input.consume_key(Modifiers::COMMAND, Key::I))
+    {
+        app.settings_more = !app.settings_more;
+    }
     let escape = (!menu_open || app.reaction_target.is_some())
         && ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape));
     if escape {

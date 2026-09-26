@@ -609,6 +609,8 @@ fastframe_icons::icons! {
         VolumeX => lucide "volume-x",
         WifiOff => "wifi-off",
         X => lucide "x",
+        ZoomIn => "zoom-in",
+        ZoomOut => "zoom-out",
     }
 }
 

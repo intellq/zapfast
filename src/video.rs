@@ -7,9 +7,11 @@
 //! texture. Sound plays through rodio, whose symphonia backend decodes the
 //! AAC track, and its position steers the clock while it lasts. On Linux,
 //! with FFmpeg installed and allowed in Settings, both come from the system's
-//! `ffmpeg` instead (see `crate::ffmpeg`), which reads nearly any codec; a
-//! file it fails on falls back to the built-in decoders. Other codecs are
-//! reported so the video can open in the system player instead.
+//! `ffmpeg` instead (see `crate::ffmpeg`), which reads nearly any codec; on
+//! Windows they come from Media Foundation (see `crate::media_foundation`),
+//! which reads what Windows has decoders for. A file either fails on falls
+//! back to the built-in decoders. Other codecs are reported so the video can
+//! open in the system player instead.
 
 use std::cell::Cell;
 use std::cmp::Reverse;
@@ -175,14 +177,35 @@ pub fn arc(center: egui::Pos2, radius: f32, fraction: f32) -> Vec<egui::Pos2> {
         .collect()
 }
 
+/// Decoders outside the built-in player that a video can play through.
+#[derive(Clone, Debug)]
+enum Backend {
+    /// The system's `ffmpeg` and `ffprobe`, on Linux.
+    #[cfg_attr(windows, allow(dead_code))]
+    Ffmpeg(crate::ffmpeg::Tools),
+    /// Windows' own decoders.
+    #[cfg(windows)]
+    MediaFoundation,
+}
+
+impl Backend {
+    fn name(&self) -> &'static str {
+        match self {
+            Backend::Ffmpeg(_) => "FFmpeg",
+            #[cfg(windows)]
+            Backend::MediaFoundation => "Media Foundation",
+        }
+    }
+}
+
 /// The sound of the playing video on the default output device.
 struct Sound {
     device: rodio::MixerDeviceSink,
     sink: rodio::Player,
     /// Video time the queued decoder started from.
     base: Duration,
-    /// Decodes through the system's FFmpeg rather than symphonia.
-    ffmpeg: Option<crate::ffmpeg::Tools>,
+    /// Decodes through FFmpeg or Media Foundation rather than symphonia.
+    backend: Option<Backend>,
 }
 
 impl Sound {
@@ -193,9 +216,18 @@ impl Sound {
         path: &Path,
         from: Duration,
         muted: bool,
-        ffmpeg: Option<crate::ffmpeg::Tools>,
+        mut backend: Option<Backend>,
     ) -> Result<Option<Self>, String> {
-        let source = match source(path, from, ffmpeg.as_ref()) {
+        // Sound FFmpeg or Media Foundation cannot read may still be AAC the
+        // built-in decoder reads; the picture keeps its own decoder.
+        let found = source(path, from, backend.as_ref()).or_else(|error| match backend.take() {
+            Some(external) => {
+                log::info!("{} could not read the sound: {error}", external.name());
+                source(path, from, None)
+            }
+            None => Err(error),
+        });
+        let source = match found {
             Ok(source) => source,
             Err(_) if has_audio_track(path) == Some(false) => return Ok(None),
             Err(error) => return Err(error),
@@ -215,7 +247,7 @@ impl Sound {
             device,
             sink,
             base: from,
-            ffmpeg,
+            backend,
         }))
     }
 
@@ -225,7 +257,7 @@ impl Sound {
         let sink = rodio::Player::connect_new(self.device.mixer());
         sink.pause();
         sink.set_volume(if muted { 0.0 } else { 1.0 });
-        if let Ok(source) = source(path, from, self.ffmpeg.as_ref()) {
+        if let Ok(source) = source(path, from, self.backend.as_ref()) {
             sink.append(source);
         }
         self.sink = sink;
@@ -238,14 +270,17 @@ impl Sound {
     }
 }
 
-/// The video's sound from `from`, through FFmpeg when given.
+/// The video's sound from `from`, through FFmpeg or Media Foundation when
+/// given.
 fn source(
     path: &Path,
     from: Duration,
-    ffmpeg: Option<&crate::ffmpeg::Tools>,
+    backend: Option<&Backend>,
 ) -> Result<Box<dyn Source + Send>, String> {
-    Ok(match ffmpeg {
-        Some(tools) => Box::new(crate::ffmpeg::samples(tools, path, from)?),
+    Ok(match backend {
+        Some(Backend::Ffmpeg(tools)) => Box::new(crate::ffmpeg::samples(tools, path, from)?),
+        #[cfg(windows)]
+        Some(Backend::MediaFoundation) => Box::new(crate::media_foundation::samples(path, from)?),
         None => Box::new(sound_decoder(path, from)?),
     })
 }
@@ -292,8 +327,8 @@ struct Session {
     sound: Option<Sound>,
     unsupported_audio: bool,
     total: Duration,
-    /// Decodes through the system's FFmpeg; cleared when it fails.
-    ffmpeg: Option<crate::ffmpeg::Tools>,
+    /// Decodes through FFmpeg or Media Foundation; cleared when it fails.
+    backend: Option<Backend>,
 }
 
 impl Session {
@@ -345,7 +380,8 @@ pub struct Player {
     audible: bool,
     /// When the playing video's message was last drawn on screen.
     seen: Cell<Instant>,
-    /// Whether videos play through the system's FFmpeg when installed.
+    /// Whether videos play through the system's FFmpeg when installed, or
+    /// through Media Foundation on Windows.
     ffmpeg: bool,
     /// Whether FFmpeg decodes on the graphics card when it can.
     gpu: bool,
@@ -396,7 +432,7 @@ impl Player {
         session.clock.seek(at, now);
         session.queue.clear();
         session.decoded = false;
-        session.frames = spawn_decoder(&session.path, at, waker, session.ffmpeg.clone(), max_side);
+        session.frames = spawn_decoder(&session.path, at, waker, session.backend.clone(), max_side);
         if let Some(sound) = &mut session.sound {
             sound.restart(&session.path, at, self.muted);
         }
@@ -409,8 +445,9 @@ impl Player {
             .map(|session| (session.message.as_str(), session.path.as_path()))
     }
 
-    /// Follows the Settings switches for playing videos through FFmpeg and
-    /// decoding them on the graphics card. They apply from the next video.
+    /// Follows the Settings switches for playing videos through FFmpeg (or
+    /// Media Foundation on Windows) and decoding them on the graphics card.
+    /// They apply from the next video.
     pub fn use_ffmpeg(&mut self, on: bool, gpu: bool) {
         self.ffmpeg = on;
         self.gpu = gpu;
@@ -471,7 +508,7 @@ impl Player {
             &session.path,
             to,
             self.waker.clone(),
-            session.ffmpeg.clone(),
+            session.backend.clone(),
             max_side,
         );
         if let Some(sound) = &mut session.sound {
@@ -545,19 +582,9 @@ impl Player {
         self.seen.set(now);
         let mut clock = Clock::default();
         clock.seek(from, now);
-        let gpu = self.gpu;
-        let ffmpeg = self
-            .ffmpeg
-            .then(crate::ffmpeg::tools)
-            .flatten()
-            .map(|mut tools| {
-                if gpu {
-                    tools.accel = crate::ffmpeg::accel(&tools);
-                }
-                tools
-            });
+        let backend = self.backend();
         let (sound, unsupported_audio) = if self.audible {
-            match Sound::open(path, from, self.muted, ffmpeg.clone()) {
+            match Sound::open(path, from, self.muted, backend.clone()) {
                 Ok(sound) => (sound, false),
                 Err(error) => {
                     log::warn!("video audio could not be decoded: {error}");
@@ -576,7 +603,7 @@ impl Player {
                 path,
                 from,
                 self.waker.clone(),
-                ffmpeg.clone(),
+                backend.clone(),
                 self.max_side(),
             ),
             queue: VecDeque::new(),
@@ -586,20 +613,46 @@ impl Player {
             sound,
             unsupported_audio,
             total: Duration::ZERO,
-            ffmpeg,
+            backend,
         });
     }
 
+    /// The decoders a new video plays through, when Settings allows them and
+    /// the computer has them.
+    fn backend(&self) -> Option<Backend> {
+        if !self.ffmpeg {
+            return None;
+        }
+        #[cfg(windows)]
+        {
+            crate::media_foundation::available().then_some(Backend::MediaFoundation)
+        }
+        #[cfg(not(windows))]
+        {
+            let gpu = self.gpu;
+            crate::ffmpeg::tools().map(|mut tools| {
+                if gpu {
+                    tools.accel = crate::ffmpeg::accel(&tools);
+                }
+                Backend::Ffmpeg(tools)
+            })
+        }
+    }
+
     /// Plays the session's video with the built-in decoders from where it
-    /// was, after FFmpeg failed on it.
+    /// was, after FFmpeg or Media Foundation failed on it.
     fn fall_back(&mut self) {
         let (waker, audible, muted) = (self.waker.clone(), self.audible, self.muted);
         let max_side = self.max_side();
         let Some(session) = self.session.as_mut() else {
             return;
         };
-        log::info!("FFmpeg could not play the video; using the built-in player");
-        session.ffmpeg = None;
+        if let Some(backend) = session.backend.take() {
+            log::info!(
+                "{} could not play the video; using the built-in player",
+                backend.name()
+            );
+        }
         let from = session.clock.position(Instant::now());
         session.queue.clear();
         session.decoded = false;
@@ -640,7 +693,7 @@ impl Player {
                     session.decoded = true;
                     break;
                 }
-                Ok(Delivery::Unsupported(_)) if session.ffmpeg.is_some() => {
+                Ok(Delivery::Unsupported(_)) if session.backend.is_some() => {
                     self.fall_back();
                     return None;
                 }
@@ -660,7 +713,7 @@ impl Player {
                 if session.resume {
                     session.play(now);
                 }
-            } else if session.decoded && session.ffmpeg.is_some() {
+            } else if session.decoded && session.backend.is_some() {
                 self.fall_back();
                 return None;
             } else if session.decoded {
@@ -708,7 +761,7 @@ fn spawn_decoder(
     path: &Path,
     from: Duration,
     waker: Waker,
-    ffmpeg: Option<crate::ffmpeg::Tools>,
+    backend: Option<Backend>,
     max_side: u32,
 ) -> Receiver<Delivery> {
     let (sender, receiver) = std::sync::mpsc::sync_channel(AHEAD);
@@ -718,8 +771,14 @@ fn spawn_decoder(
         .spawn(move || {
             // A decoder panic reports the video as unsupported.
             let outcome =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match &ffmpeg {
-                    Some(tools) => decode_ffmpeg(tools, &path, from, &sender, &waker, max_side),
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match &backend {
+                    Some(Backend::Ffmpeg(tools)) => {
+                        decode_ffmpeg(tools, &path, from, &sender, &waker, max_side)
+                    }
+                    #[cfg(windows)]
+                    Some(Backend::MediaFoundation) => {
+                        decode_media_foundation(&path, from, &sender, &waker, max_side)
+                    }
                     None => decode(&path, from, &sender, &waker, max_side),
                 }))
                 .unwrap_or_else(|_| Err("the decoder stopped".to_owned()));
@@ -877,8 +936,39 @@ fn decode_ffmpeg(
     }
 }
 
+/// Sends the frames Media Foundation decodes from `from`. Errors, or no
+/// frame at all, send the video back to the built-in decoder.
+#[cfg(windows)]
+fn decode_media_foundation(
+    path: &Path,
+    from: Duration,
+    frames: &SyncSender<Delivery>,
+    waker: &Waker,
+    max_side: u32,
+) -> Result<(), String> {
+    let mut video = crate::media_foundation::Video::open(path, max_side)?;
+    if frames.send(Delivery::Length(video.duration())).is_err() {
+        return Ok(());
+    }
+    waker.wake();
+    video.seek(from)?;
+    let mut sent = false;
+    while let Some((at, image)) = video.next(from)? {
+        if frames.send(Delivery::Frame(at, image)).is_err() {
+            return Ok(());
+        }
+        sent = true;
+        waker.wake();
+    }
+    if sent {
+        Ok(())
+    } else {
+        Err("Media Foundation sent no frame".to_owned())
+    }
+}
+
 /// Size that fits `width` by `height` within `max_side` on its longest side.
-fn fitted(width: u32, height: u32, max_side: u32) -> (u32, u32) {
+pub(crate) fn fitted(width: u32, height: u32, max_side: u32) -> (u32, u32) {
     let longest = width.max(height);
     if longest <= max_side || longest == 0 {
         return (width, height);

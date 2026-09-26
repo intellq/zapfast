@@ -711,22 +711,46 @@ pub fn switch(ui: &mut Ui, palette: &Palette, on: &mut bool) -> egui::Response {
 /// The author's website, linked from the credit line.
 pub const AUTHOR_URL: &str = "https://paolino.me";
 
-/// "Built with love by Carmine Paolino", with the name linking to
-/// [`AUTHOR_URL`]. Returns whether the name was clicked.
-pub fn credit(ui: &mut Ui, palette: &Palette, locale: crate::i18n::Locale) -> bool {
+/// This fork's author's GitHub page, linked from the credit line.
+pub const FORK_AUTHOR_URL: &str = "https://github.com/intellq";
+
+/// "Built with love by Carmine Paolino (changes by @intell)", with each name
+/// linking to its page. Returns the page of the name clicked.
+pub fn credit(ui: &mut Ui, palette: &Palette, locale: crate::i18n::Locale) -> Option<&'static str> {
     // Translators: {name} is replaced by the author's name, shown as a link.
     let sentence = crate::i18n::gettext(locale, "Built with love by {name}");
     let (before, after) = sentence.split_once("{name}").unwrap_or((&sentence, ""));
-    let mut clicked = false;
+    // Translators: {name} is replaced by the fork author's handle, a link.
+    let changes = crate::i18n::gettext(locale, "(changes by {name})");
+    let (changes_before, changes_after) = changes.split_once("{name}").unwrap_or((&changes, ""));
+    let mut clicked = None;
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
         theme::text(ui, "\u{2665}  ", theme::regular(13.0), palette.danger);
         theme::text(ui, before, theme::regular(13.0), palette.secondary);
-        clicked = theme::link(ui, "Carmine Paolino", theme::medium(13.0), palette.link)
+        if theme::link(ui, "Carmine Paolino", theme::medium(13.0), palette.link)
             .on_hover_text(AUTHOR_URL)
-            .clicked();
+            .clicked()
+        {
+            clicked = Some(AUTHOR_URL);
+        }
         if !after.is_empty() {
             theme::text(ui, after, theme::regular(13.0), palette.secondary);
+        }
+        theme::text(
+            ui,
+            format!(" {changes_before}"),
+            theme::regular(13.0),
+            palette.secondary,
+        );
+        if theme::link(ui, "@intell", theme::medium(13.0), palette.link)
+            .on_hover_text(FORK_AUTHOR_URL)
+            .clicked()
+        {
+            clicked = Some(FORK_AUTHOR_URL);
+        }
+        if !changes_after.is_empty() {
+            theme::text(ui, changes_after, theme::regular(13.0), palette.secondary);
         }
     });
     clicked

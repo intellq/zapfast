@@ -18,6 +18,8 @@ pub mod image_preview;
 #[cfg(target_os = "macos")]
 pub mod macos;
 pub mod markup;
+#[cfg(windows)]
+pub mod media_foundation;
 pub mod media_pause;
 pub mod model;
 pub mod notify;

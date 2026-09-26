@@ -268,6 +268,9 @@ pub struct App {
     pub emoji_start: Option<usize>,
     /// Keyboard-highlighted emoji in suggestions or the full picker.
     pub emoji_selected: usize,
+    /// Whether the full picker outlines `emoji_selected`: only once an emoji
+    /// was clicked or the arrows moved, not as the picker opens.
+    pub emoji_selection_shown: bool,
     /// Byte offset of the `@` starting the active mention query.
     pub mention_start: Option<usize>,
     /// Keyboard-highlighted member in the mention suggestions.
@@ -527,6 +530,7 @@ pub struct App {
     pub focus_search: bool,
     /// What the Settings page is filtered by.
     pub settings_search: String,
+    pub settings_more: bool,
     pub focus_settings_search: bool,
     pub quit_requested: bool,
     pub window_focused: bool,
@@ -743,6 +747,9 @@ impl App {
         app.backend.send(Command::SetDownloadFolder(
             app.settings.download_folder.clone(),
         ));
+        app.backend.send(Command::SetKeepDeletedMessages(
+            app.settings.keep_deleted_messages,
+        ));
         if crate::autostart::supported() {
             app.start_with_system = Some(crate::autostart::enabled());
         }
@@ -819,6 +826,7 @@ impl App {
             composer_mentions: Vec::new(),
             emoji_start: None,
             emoji_selected: 0,
+            emoji_selection_shown: false,
             mention_start: None,
             mention_selected: 0,
             reply_to: None,
@@ -967,6 +975,7 @@ impl App {
             focus_composer: false,
             focus_search: false,
             settings_search: String::new(),
+            settings_more: false,
             focus_settings_search: false,
             quit_requested: false,
             window_focused: false,
@@ -1856,10 +1865,19 @@ impl App {
             && crate::util::now() - message.timestamp <= EDIT_WINDOW.as_secs() as i64
     }
 
+    /// Whether a loaded message was deleted for everyone. It then exists
+    /// only on this computer: there is nothing to delete on the phone.
+    pub fn is_revoked(&self, chat: &str, id: &str) -> bool {
+        self.conversations
+            .get(chat)
+            .and_then(|conversation| conversation.message(id))
+            .is_some_and(|message| matches!(message.content, Content::Revoked { .. }))
+    }
+
     /// Whether an outgoing message can still be revoked for everyone.
     pub fn can_revoke(&self, message: &Message) -> bool {
         message.from_me
-            && !matches!(message.content, Content::Revoked)
+            && !matches!(message.content, Content::Revoked { .. })
             && crate::util::now() - message.timestamp <= REVOKE_WINDOW.as_secs() as i64
     }
 
@@ -3446,6 +3464,7 @@ impl App {
                 self.emoji_start = None;
                 self.mention_start = None;
                 if opens_chats {
+                    self.settings_more = false;
                     // Settings open unfiltered next time.
                     self.settings_search.clear();
                     self.refocus_composer(ctx);
@@ -3868,7 +3887,7 @@ impl App {
                         // Deleted and placeholder messages cannot be forwarded.
                         if !matches!(
                             message.content,
-                            Content::Revoked
+                            Content::Revoked { .. }
                                 | Content::PhoneOnly { .. }
                                 | Content::Unsupported { .. }
                         ) && !ids.contains(&message.id)
@@ -3941,7 +3960,7 @@ impl App {
                         .get_mut(&chat)
                         .and_then(|conversation| conversation.message_mut(&id))
                     {
-                        message.content = Content::Revoked;
+                        message.content = Content::REVOKED;
                     }
                     self.backend.send(Command::Revoke { chat, id });
                 }
@@ -3950,11 +3969,14 @@ impl App {
                 chat,
                 message,
                 on_phone,
-            } => self.backend.send(Command::DeleteForMe {
-                chat,
-                id: message,
-                on_phone,
-            }),
+            } => {
+                let on_phone = on_phone && !self.is_revoked(&chat, &message);
+                self.backend.send(Command::DeleteForMe {
+                    chat,
+                    id: message,
+                    on_phone,
+                });
+            }
             Action::SetDeleteOnPhone(value) => {
                 if let Some(Dialog::ConfirmDeleteMessage { on_phone, .. }) = &mut self.dialog {
                     *on_phone = value;
@@ -4074,6 +4096,7 @@ impl App {
                     self.picker_search.clear();
                     self.picker_focus = tab == PickerTab::Emoji;
                     self.emoji_selected = 0;
+                    self.emoji_selection_shown = false;
                     self.emoji_jump = None;
                     if tab == PickerTab::Stickers {
                         self.stickers_pending = self.stickers.is_empty()
@@ -4845,6 +4868,9 @@ impl App {
                 );
                 self.backend.send(Command::SetAttachmentLimit(
                     self.settings.attachment_limit_bytes(),
+                ));
+                self.backend.send(Command::SetKeepDeletedMessages(
+                    self.settings.keep_deleted_messages,
                 ));
             }
             Action::SetAccountPrivacy { kind, choice } => {
@@ -7196,7 +7222,7 @@ mod tests {
         // Shift-click selects everything between the last click and this one,
         // skipping what cannot be forwarded.
         let mut deleted = message(chat, "gone", 4);
-        deleted.content = Content::Revoked;
+        deleted.content = Content::REVOKED;
         app.conversations
             .get_mut(chat)
             .unwrap()

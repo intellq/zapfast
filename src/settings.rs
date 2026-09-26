@@ -347,12 +347,14 @@ pub struct Settings {
     /// Draw emoji with an installed WhatsApp emoji font instead of the
     /// desktop's (or the bundled) Noto Color Emoji.
     pub whatsapp_emoji: bool,
-    /// Play videos through the system's FFmpeg when it is installed (Linux).
+    /// Play videos through the system's FFmpeg when it is installed (Linux),
+    /// or through Windows' own decoders (Media Foundation) on Windows.
     pub ffmpeg_video: bool,
     /// Let FFmpeg decode videos on the graphics card when it can.
     pub ffmpeg_gpu: bool,
     /// Send read receipts, subject to the account privacy setting.
     pub send_read_receipts: bool,
+    pub keep_deleted_messages: bool,
     /// Send typing state while composing.
     pub send_typing: bool,
     /// The former switch that downloaded every kind of file, read once and
@@ -451,6 +453,7 @@ impl Default for Settings {
             ffmpeg_video: true,
             ffmpeg_gpu: true,
             send_read_receipts: true,
+            keep_deleted_messages: false,
             send_typing: true,
             auto_download: None,
             auto_download_audio: true,

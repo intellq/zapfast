@@ -4,6 +4,7 @@
 //! its own thread because delivery and click handling can block. A click hands
 //! back the chat and the message it announced.
 
+#[cfg(target_os = "linux")]
 use crate::i18n::tr;
 use crate::settings::NotificationSound;
 use std::path::PathBuf;

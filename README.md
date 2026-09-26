@@ -80,7 +80,12 @@ Além das novidades do upstream, esta branch inclui as seguintes mudanças:
   reduzir saltos de rolagem ao navegar pelo histórico.
 - **Reações mais limpas.** O emoji de uma reação anexada à mensagem aparece
   sem o círculo ciano ao redor. A borda do menu usado para escolher a reação
-  foi preservada.
+  foi preservada. Na grade de emojis da reação não há mais contorno de
+  seleção; no seletor de emojis comum, o contorno só aparece depois de clicar
+  em um emoji ou de mover a seleção pelas setas, em vez de já vir marcado no
+  primeiro item dos recentes. Enquanto você ainda não reagiu a nada, a linha
+  **Mais usados** da janela de reação traz os seis emojis padrão do WhatsApp:
+  👍 ❤️ 😂 😮 😢 🙏.
 - **Tons de pele nos emojis de mãos.** O seletor oferece as variantes de tom
   para emojis compatíveis, como joinha, aperto de mãos e mãos juntas. No menu
   de reação, o seletor tem a mesma largura do seletor normal e dispensa a
@@ -191,6 +196,33 @@ Além das novidades do upstream, esta branch inclui as seguintes mudanças:
   por 1x, 1,5x, 2x, 2,5x e 3x. O menu do botão direito da mensagem mostra
   todas as velocidades em duas fileiras: 1x, 1,25x, 1,5x, 1,75x e 2x na
   primeira, e 2,5x e 3x na segunda. A voz mantém o tom em todas elas.
+- **Imagem ampliada sobre a conversa.** Clicar em uma
+  imagem no histórico não abre mais uma janela com cabeçalho: a imagem cresce
+  sobre a conversa escurecida, como o vídeo ampliado. Ao passar o mouse sobre
+  ela aparecem, no topo, três botões: **Ampliar para 100%** (que alterna com
+  ajustar à janela), **Copiar imagem** e **Abrir em outro app**. Um clique
+  fora da imagem ou Esc fecha. A roda do mouse, o gesto de pinça, o arrasto e
+  o duplo clique continuam funcionando como antes.
+- **Vídeos com os decodificadores do Windows.** No
+  Windows, a opção **Reproduzir vídeos com os decodificadores do Windows**
+  (ligada por padrão, em **Configurações › Conversas**) toca os vídeos na
+  conversa pelo Media Foundation: H.264 de qualquer perfil e som HE-AAC ou
+  AC-3 sem instalar nada, e HEVC, VP9 e AV1 depois de instalar as extensões
+  gratuitas da Microsoft Store. A própria opção lista as extensões que
+  faltam. Quadros e som vêm de um Source Reader (RGB32 já redimensionado e
+  som em float); se ele falhar com um arquivo, o player interno assume, e se
+  só o som falhar, o som vem do decodificador interno. As DLLs do Media
+  Foundation são carregadas sob demanda, para o ZapFast abrir também nas
+  edições N do Windows sem o Media Feature Pack (nesse caso a opção fica
+  indisponível com a explicação). No Windows, uma fonte `WhatsAppEmoji.ttf`
+  numa pasta `fonts` ao lado do `zapfast.exe` também é reconhecida. A
+  reprodução pelo Media Foundation ainda precisa ser conferida em um Windows
+  real; o programa já foi aberto numa máquina virtual.
+- **Créditos e código-fonte do fork.** Em **Configurações › Sobre** e no
+  diálogo **Sobre**, **Código-fonte** abre este repositório
+  (`intellq/zapfast`), e a linha "Feito com amor por Carmine Paolino" ganhou
+  "(modificações @intell)", com **@intell** levando a
+  [github.com/intellq](https://github.com/intellq).
 - **Menu de contexto na caixa de digitação.** O botão direito no compositor
   abre **Recortar**, **Copiar**, **Colar** e **Selecionar tudo**, em todas as
   plataformas (o `TextEdit` do egui não oferece menu próprio). A seleção feita
@@ -438,13 +470,15 @@ de sincronizar a exclusão "para mim" com o celular é uma extensão deste fork.
   Photos, stickers, GIFs, voice messages, audio,
   locations, contacts,
   polls, and link previews appear in the chat. Click a downloaded JPEG, PNG,
-  WebP, or GIF photo to preview it in ZapFast with fit and zoom controls, or
-  choose **Open externally**. In the preview, the mouse wheel and Ctrl+wheel
+  WebP, or GIF photo to expand it over the chat, as an expanded video is, or
+  choose **Open externally**. Hovering the picture shows buttons along its top
+  edge to switch to 100% and back, copy it, and open it in another app; a
+  click beside the picture or Esc closes it. In the preview, the mouse wheel and Ctrl+wheel
   (Cmd+wheel on macOS) zoom around the pointer, as does a trackpad pinch on
   macOS and Windows. Drag a zoomed picture to move it; where a trackpad scrolls
   smoothly (macOS, Wayland), two-finger scrolling moves it instead of zooming.
   Double-click to switch between fitting the window and the original size.
-  Copy the image to your clipboard via the copy button in the header, the
+  Copy the image to your clipboard via the copy button over the picture, the
   right-click menu (**Copy image**), or
   Ctrl+C (Cmd+C on macOS). Click a video to play it in its message, with
   sound, a seek bar, and a mute switch; round video messages play inside their

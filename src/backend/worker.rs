@@ -461,6 +461,7 @@ pub async fn run(
                 .is_ok());
     let mut worker = Worker {
         attachment_limit,
+        keep_deleted: false,
         privacy_ready: privacy_confirmed,
         privacy_confirmed,
         privacy_snapshot,
@@ -687,6 +688,7 @@ enum WithheldPage {
 
 struct Worker {
     attachment_limit: u64,
+    keep_deleted: bool,
     /// Private content may reach the UI.
     privacy_ready: bool,
     /// Phone lock state is known to be mirrored in the archive.
@@ -1336,7 +1338,7 @@ impl Worker {
             let Ok(Some(existing)) = self.archive.message(&chat, &id) else {
                 continue;
             };
-            if matches!(existing.content, Content::Revoked) {
+            if matches!(existing.content, Content::Revoked { .. }) {
                 continue;
             }
             // Edits do not replace the raw protobuf; keep an edited interactive
@@ -2937,10 +2939,8 @@ impl Worker {
             };
             match protocol.r#type {
                 Some(Type::REVOKE) => {
-                    if let Ok(true) =
-                        self.archive
-                            .set_content(&chat, &target, &Content::Revoked, false)
-                    {
+                    let revoked = self.revoked(&chat, &target);
+                    if let Ok(true) = self.archive.set_content(&chat, &target, &revoked, false) {
                         self.emit_message(&chat, &target);
                         self.emit_chat(&chat);
                     }
@@ -3906,9 +3906,8 @@ impl Worker {
                 );
             }
             for revoked in chat.revoked {
-                let _ = self
-                    .archive
-                    .set_content(&id, &revoked, &Content::Revoked, false);
+                let content = self.revoked(&id, &revoked);
+                let _ = self.archive.set_content(&id, &revoked, &content, false);
             }
             if (metadata || existing.is_none())
                 && let Some(snapshot_unread) = chat.unread
@@ -4240,7 +4239,12 @@ impl Worker {
             } => self.edit_text(chat, id, text, mentions),
             Command::Revoke { chat, id } => self.revoke(chat, id),
             Command::DeleteForMe { chat, id, on_phone } => {
-                if !on_phone {
+                // A deleted message exists only here: nothing to delete on the phone.
+                let revoked = matches!(
+                    self.archive.message(&chat, &id),
+                    Ok(Some(row)) if matches!(row.content, Content::Revoked { .. })
+                );
+                if !on_phone || revoked {
                     self.delete_for_me_local(chat, id);
                     return;
                 }
@@ -4367,6 +4371,7 @@ impl Worker {
                 }
                 self.download_folder = folder;
             }
+            Command::SetKeepDeletedMessages(keep) => self.keep_deleted = keep,
             Command::SetChatSound { chat, sound } => {
                 let _ = self.archive.set_notification_sound(&chat, sound.as_ref());
                 self.emit_chat(&chat);
@@ -5691,7 +5696,7 @@ impl Worker {
             .message(chat, id)
             .map_err(|_| unavailable)?
             .ok_or(unavailable)?;
-        if matches!(row.content, Content::Revoked) {
+        if matches!(row.content, Content::Revoked { .. }) {
             return Err(unavailable);
         }
         let raw = self
@@ -5991,7 +5996,7 @@ impl Worker {
         };
         if matches!(
             source.content,
-            Content::Revoked
+            Content::Revoked { .. }
                 | Content::Unsupported { .. }
                 | Content::PhoneOnly { .. }
                 | Content::Poll { .. }
@@ -6840,6 +6845,19 @@ impl Worker {
         });
     }
 
+    fn revoked(&self, chat: &str, id: &str) -> Content {
+        let Ok(Some(existing)) = self.archive.message(chat, id) else {
+            return Content::REVOKED;
+        };
+        match existing.content {
+            kept @ Content::Revoked { .. } => kept,
+            content if self.keep_deleted && !existing.from_me => Content::Revoked {
+                kept: Some(Box::new(content)),
+            },
+            _ => Content::REVOKED,
+        }
+    }
+
     fn revoke(&mut self, chat: ChatId, id: String) {
         let (Some(client), Some(jid)) = (self.client.clone(), Self::jid_of(&chat)) else {
             self.emit(Event::Error(tr("Not connected to WhatsApp").to_owned()));
@@ -6847,7 +6865,7 @@ impl Worker {
         };
         if let Ok(true) = self
             .archive
-            .set_content(&chat, &id, &Content::Revoked, false)
+            .set_content(&chat, &id, &Content::REVOKED, false)
         {
             self.emit_message(&chat, &id);
             self.emit_chat(&chat);
@@ -10884,6 +10902,7 @@ mod receipt_tests {
         let root = std::env::temp_dir().join(format!("zapfast-worker-test-{}", std::process::id()));
         let worker = Worker {
             attachment_limit: ATTACHMENT_DOWNLOAD_LIMIT,
+            keep_deleted: false,
             privacy_ready: true,
             privacy_confirmed: true,
             privacy_snapshot: false,
@@ -12575,7 +12594,7 @@ mod receipt_tests {
             .unwrap();
         assert!(worker.quote(PEER, Some("original")).unwrap().is_some());
         // A deleted original is not.
-        row.content = Content::Revoked;
+        row.content = Content::REVOKED;
         worker
             .archive
             .insert_message(&row, Some(&original))

@@ -802,7 +802,9 @@ impl Archive {
     pub fn media_paths(&self) -> Result<Vec<(String, String, std::path::PathBuf)>> {
         let mut statement = self.connection.prepare(
             "SELECT chat, id, coalesce(json_extract(content, '$.media.path'),
-                 json_extract(content, '$.card.image.path')) AS path
+                 json_extract(content, '$.card.image.path'),
+                 json_extract(content, '$.kept.media.path'),
+                 json_extract(content, '$.kept.card.image.path')) AS path
              FROM messages WHERE path IS NOT NULL",
         )?;
         let rows = statement.query_map([], |row| {
@@ -1375,6 +1377,10 @@ impl Archive {
                  SELECT json_extract(m.content, '$.media.path') AS file FROM messages m WHERE {filter}
                  UNION ALL
                  SELECT json_extract(m.content, '$.card.image.path') FROM messages m WHERE {filter}
+                 UNION ALL
+                 SELECT json_extract(m.content, '$.kept.media.path') FROM messages m WHERE {filter}
+                 UNION ALL
+                 SELECT json_extract(m.content, '$.kept.card.image.path') FROM messages m WHERE {filter}
                  UNION ALL
                  SELECT json_extract(c.value, '$.image.path')
                  FROM messages m, json_each(m.content, '$.card.carousel') c WHERE {filter}

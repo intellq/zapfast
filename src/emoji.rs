@@ -75,7 +75,8 @@ static USE_WHATSAPP: AtomicBool = AtomicBool::new(false);
 static WHATSAPP: Mutex<Option<&'static Font>> = Mutex::new(None);
 
 /// Where a WhatsApp emoji font is installed: ZapFast's own fonts folder
-/// first, then where a desktop package or the user puts fonts. Only CBDT
+/// first, then where a desktop package or the user puts fonts, or on
+/// Windows a `fonts` folder beside the program. Only CBDT
 /// builds, such as github.com/dmlls/whatsapp-emoji-linux, can be drawn.
 pub fn whatsapp_font_file(own: &Path) -> Option<PathBuf> {
     #[allow(unused_mut)]
@@ -93,6 +94,16 @@ pub fn whatsapp_font_file(own: &Path) -> Option<PathBuf> {
             let home = PathBuf::from(home);
             candidates.push(home.join(".local/share/fonts").join(WHATSAPP_FILE));
             candidates.push(home.join(".fonts").join(WHATSAPP_FILE));
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // A copy unpacked with the program, as in a zip: fonts\ beside it.
+        if let Some(dir) = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(Path::to_path_buf))
+        {
+            candidates.push(dir.join("fonts").join(WHATSAPP_FILE));
         }
     }
     candidates.into_iter().find(|path| path.is_file())
