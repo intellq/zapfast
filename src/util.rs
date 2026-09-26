@@ -262,6 +262,127 @@ pub fn day_label(locale: Locale, unix_seconds: i64) -> String {
     }
 }
 
+/// The day a transcript is scrolled through, as "26/09/2026 (sáb)": the
+/// numeric date in the order and separator of the system's region, then the
+/// weekday's first three letters.
+pub fn scroll_day(locale: Locale, unix_seconds: i64) -> String {
+    let Some(when) = zoned(unix_seconds) else {
+        return String::new();
+    };
+    let date = when.date();
+    let weekday: String = weekday_name(locale, date.weekday())
+        .chars()
+        .take(3)
+        .collect();
+    // English and German capitalize weekdays; the others write them small.
+    let weekday = match locale {
+        Locale::English | Locale::German => weekday,
+        _ => weekday.to_lowercase(),
+    };
+    let pattern = *DATE_PATTERN.get_or_init(|| system_date_pattern(locale));
+    format!("{} ({weekday})", numeric_date(pattern, date))
+}
+
+/// Order of day, month, and year in a numeric date, and what separates them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DatePattern {
+    order: DateOrder,
+    separator: char,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DateOrder {
+    DayMonthYear,
+    MonthDayYear,
+    YearMonthDay,
+}
+
+static DATE_PATTERN: std::sync::OnceLock<DatePattern> = std::sync::OnceLock::new();
+
+/// The pattern of the region in `LC_ALL`, `LC_TIME`, or `LANG`, or of the
+/// interface language where none is set, as on Windows.
+fn system_date_pattern(locale: Locale) -> DatePattern {
+    let region = ["LC_ALL", "LC_TIME", "LANG"]
+        .iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .find(|value| !value.is_empty() && value != "C" && value != "POSIX");
+    match region {
+        Some(value) => {
+            let tag = value.split(['.', '@']).next().unwrap_or_default();
+            let (language, region) = tag.split_once(['_', '-']).unwrap_or((tag, ""));
+            date_pattern(language, region)
+        }
+        None => {
+            let (language, region) = match locale {
+                Locale::English => ("en", "US"),
+                Locale::PortugueseBrazil => ("pt", "BR"),
+                Locale::German => ("de", "DE"),
+                Locale::Spanish => ("es", "ES"),
+                Locale::Italian => ("it", "IT"),
+                Locale::French => ("fr", "FR"),
+                Locale::Russian => ("ru", "RU"),
+                Locale::ChineseSimplified => ("zh", "CN"),
+            };
+            date_pattern(language, region)
+        }
+    }
+}
+
+fn date_pattern(language: &str, region: &str) -> DatePattern {
+    let language = language.to_ascii_lowercase();
+    let region = region.to_ascii_uppercase();
+    let (order, separator) = if matches!(region.as_str(), "US" | "PH" | "PR" | "FM" | "MH") {
+        (DateOrder::MonthDayYear, '/')
+    } else if matches!(language.as_str(), "zh" | "ja") {
+        (DateOrder::YearMonthDay, '/')
+    } else if matches!(language.as_str(), "ko" | "hu") {
+        (DateOrder::YearMonthDay, '.')
+    } else if matches!(language.as_str(), "sv" | "lt") || (language == "fr" && region == "CA") {
+        (DateOrder::YearMonthDay, '-')
+    } else if language == "nl" {
+        (DateOrder::DayMonthYear, '-')
+    } else if matches!(
+        language.as_str(),
+        "de" | "ru"
+            | "pl"
+            | "cs"
+            | "sk"
+            | "fi"
+            | "nb"
+            | "nn"
+            | "no"
+            | "da"
+            | "tr"
+            | "uk"
+            | "ro"
+            | "hr"
+            | "sl"
+            | "bg"
+            | "et"
+            | "lv"
+            | "sr"
+            | "be"
+            | "kk"
+            | "az"
+            | "is"
+    ) {
+        (DateOrder::DayMonthYear, '.')
+    } else {
+        (DateOrder::DayMonthYear, '/')
+    };
+    DatePattern { order, separator }
+}
+
+fn numeric_date(pattern: DatePattern, date: Date) -> String {
+    let (day, month, year) = (date.day(), date.month(), date.year());
+    let separator = pattern.separator;
+    match pattern.order {
+        DateOrder::DayMonthYear => format!("{day:02}{separator}{month:02}{separator}{year}"),
+        DateOrder::MonthDayYear => format!("{month:02}{separator}{day:02}{separator}{year}"),
+        DateOrder::YearMonthDay => format!("{year}{separator}{month:02}{separator}{day:02}"),
+    }
+}
+
 /// Local calendar day used to group messages.
 pub fn day_key(unix_seconds: i64) -> Option<Date> {
     zoned(unix_seconds).map(|when| when.date())
@@ -701,6 +822,26 @@ mod tests {
             ),
             "14 Nov 2023"
         );
+    }
+
+    #[test]
+    fn numeric_dates_follow_the_region() {
+        let date = jiff::civil::date(2026, 9, 26);
+        for (language, region, expected) in [
+            ("pt", "BR", "26/09/2026"),
+            ("en", "US", "09/26/2026"),
+            ("en", "GB", "26/09/2026"),
+            ("de", "DE", "26.09.2026"),
+            ("ja", "JP", "2026/09/26"),
+            ("sv", "SE", "2026-09-26"),
+            ("nl", "NL", "26-09-2026"),
+        ] {
+            assert_eq!(
+                numeric_date(date_pattern(language, region), date),
+                expected,
+                "{language}_{region}"
+            );
+        }
     }
 
     #[test]

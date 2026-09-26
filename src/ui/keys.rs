@@ -10,6 +10,10 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
         preview_keys(app, ctx);
         return;
     }
+    if app.video_expanded.is_some() {
+        video_keys(app, ctx);
+        return;
+    }
     let editing_text = ctx.text_edit_focused();
     let find = find_action(app);
     let mut actions = Vec::new();
@@ -286,6 +290,26 @@ fn preview_keys(app: &mut App, ctx: &egui::Context) {
             .retain(|event| !crate::image_preview::consumes_key(event));
     });
     app.actions.extend(actions);
+}
+
+/// Handles keys while a video is expanded: Escape returns it to its message
+/// and Space plays or pauses it. No chat shortcut runs.
+fn video_keys(app: &mut App, ctx: &egui::Context) {
+    let (escape, space) = ctx.input_mut(|input| {
+        (
+            input.consume_key(Modifiers::NONE, Key::Escape),
+            input.consume_key(Modifiers::NONE, Key::Space),
+        )
+    });
+    if escape {
+        app.actions.push(Action::CollapseVideo);
+    }
+    if space && let Some((message, path)) = app.video.loaded() {
+        app.actions.push(Action::PlayVideo {
+            message: message.to_owned(),
+            path: path.to_owned(),
+        });
+    }
 }
 
 /// Ctrl+F searches the open chat, as in WhatsApp, the chat list when no

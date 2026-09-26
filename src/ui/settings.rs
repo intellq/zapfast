@@ -105,6 +105,9 @@ enum Control {
     ),
     /// Something that lays itself out, like the account card.
     Block(Draw),
+    /// A switch shown off and disabled until what it needs is installed,
+    /// keeping the saved choice for then.
+    Unavailable,
 }
 
 /// A titled card of settings, drawn only when the search leaves a row in it.
@@ -176,6 +179,15 @@ impl Section {
             .push((row, Control::Toggle(field, Some(enabled))));
     }
 
+    fn unavailable(&mut self, title: impl Into<Text>, description: impl Into<Text>) {
+        let row = Row {
+            title: title.into(),
+            description: description.into(),
+            keywords: Vec::new(),
+        };
+        self.entries.push((row, Control::Unavailable));
+    }
+
     fn block(&mut self, keywords: Vec<Text>, draw: impl FnOnce(&mut egui::Ui, &mut App) + 'static) {
         let row = Row {
             keywords,
@@ -218,6 +230,17 @@ impl Section {
                         });
                     }
                     Control::Block(draw) => draw(ui, app),
+                    Control::Unavailable => {
+                        ui.add_enabled_ui(false, |ui| {
+                            switch_row(
+                                ui,
+                                app,
+                                &row.title.shown,
+                                &row.description.shown,
+                                &mut false,
+                            );
+                        });
+                    }
                 }
             }
         });
@@ -426,6 +449,9 @@ fn sections(app: &App) -> Vec<Section> {
         ),
         |settings| &mut settings.emoji_shortcuts,
     );
+    if cfg!(target_os = "linux") {
+        ffmpeg_row(&mut chats, locale);
+    }
     chats.toggle(
         translated(locale, "Download files automatically"),
         translated(locale, "Download all file types when they come into view."),
@@ -921,6 +947,49 @@ fn theme_picker(ui: &mut egui::Ui, app: &mut App) {
             app.actions.push(Action::OpenUrl(THEMES_GUIDE.to_owned()));
         }
     });
+}
+
+/// Playing videos through the system's FFmpeg: on by default when it is
+/// installed, and otherwise disabled with how to install it here.
+fn ffmpeg_row(chats: &mut Section, locale: Locale) {
+    let title = translated(locale, "Play videos with FFmpeg");
+    if crate::ffmpeg::tools().is_some() {
+        chats.toggle(
+            title,
+            translated(
+                locale,
+                "Plays HEVC, AV1, VP9 and 10-bit H.264 videos, and HE-AAC, Opus or AC-3 sound, inside the chat with the FFmpeg installed on this computer. Videos it cannot read use the built-in player.",
+            ),
+            |settings| &mut settings.ffmpeg_video,
+        );
+        return;
+    }
+    let description = if crate::ffmpeg::sandboxed() {
+        translated(
+            locale,
+            "The Flatpak version cannot use the FFmpeg installed on the computer. Videos the built-in player cannot read open in the system player.",
+        )
+    } else {
+        const MISSING: &str = "FFmpeg was not found. With it, HEVC, AV1, VP9 and 10-bit H.264 videos, and HE-AAC, Opus or AC-3 sound, play inside the chat instead of in the system player. Install it and this option turns on:";
+        const FEDORA: &str = "Enable RPM Fusion first: Fedora's own ffmpeg-free leaves codecs out.";
+        const OTHER: &str = "install the ffmpeg package of your distribution.";
+        let install = crate::ffmpeg::install();
+        let command = install.map_or_else(
+            || crate::i18n::gettext(locale, OTHER).into_owned(),
+            |install| install.command().to_owned(),
+        );
+        let mut shown = format!("{} {command}", crate::i18n::gettext(locale, MISSING));
+        let mut source = format!("{MISSING} {command}");
+        if install == Some(crate::ffmpeg::Install::Dnf) {
+            shown = format!("{shown}\n{}", crate::i18n::gettext(locale, FEDORA));
+            source = format!("{source} {FEDORA}");
+        }
+        Text {
+            shown: shown.into(),
+            source: source.into(),
+        }
+    };
+    chats.unavailable(title, description);
 }
 
 /// The website's page on writing a theme.
@@ -1462,6 +1531,22 @@ fn toggle(
     description: &str,
     field: impl Fn(&mut crate::settings::Settings) -> &mut bool,
 ) {
+    let mut value = *field(&mut app.settings);
+    if switch_row(ui, app, label, description, &mut value) {
+        *field(&mut app.settings) = value;
+        app.actions.push(Action::SettingsChanged);
+    }
+}
+
+/// A titled switch, dimmed when the row is disabled. Returns whether it was
+/// flipped.
+fn switch_row(
+    ui: &mut egui::Ui,
+    app: &App,
+    label: &str,
+    description: &str,
+    value: &mut bool,
+) -> bool {
     let mut palette = app.palette;
     if !ui.is_enabled() {
         palette.text = palette.dim;
@@ -1469,20 +1554,16 @@ fn toggle(
         palette.accent = palette.dim;
         palette.surface_active = palette.surface;
     }
-    let mut value = *field(&mut app.settings);
     let mut changed = false;
     widgets::setting_row(ui, &palette, label, description, 56.0, |ui| {
-        let response = widgets::switch(ui, &palette, &mut value);
+        let response = widgets::switch(ui, &palette, value);
         theme::reveal_focus(&response);
         response.widget_info(|| {
-            egui::WidgetInfo::selected(egui::WidgetType::Checkbox, ui.is_enabled(), value, label)
+            egui::WidgetInfo::selected(egui::WidgetType::Checkbox, ui.is_enabled(), *value, label)
         });
         changed = response.changed();
     });
-    if changed {
-        *field(&mut app.settings) = value;
-        app.actions.push(Action::SettingsChanged);
-    }
+    changed
 }
 
 /// Title and description of the sound for new messages or for mentions and

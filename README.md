@@ -123,6 +123,38 @@ Além das novidades do upstream, esta branch inclui as seguintes mudanças:
   aplicativo, com o mesmo tratamento de desfazer do Ctrl+V. Funciona em X11 e
   em Wayland com compositores que oferecem seleção primária via data-control
   (como o KWin); nos outros sistemas não há mudança.
+- **Vídeos em qualquer formato com o FFmpeg do sistema (Linux).** Em
+  **Configurações › Conversas**, **Reproduzir vídeos com o FFmpeg** usa os
+  programas `ffmpeg` e `ffprobe` instalados para tocar dentro da conversa
+  vídeos HEVC/H.265, AV1, VP9 e H.264 de 10 bits, com áudio HE-AAC, Opus ou
+  AC-3, em vez de abrir o player do sistema. Um processo envia os quadros já
+  reduzidos e girados, e outro envia o áudio; nenhuma biblioteca do FFmpeg é
+  ligada ao ZapFast, então qualquer versão instalada serve. A opção vem ligada
+  quando o FFmpeg é encontrado. Sem ele, fica desligada e bloqueada, explica
+  as vantagens e mostra o comando de instalação da distribuição detectada em
+  `/etc/os-release`: `pacman` (Arch, EndeavourOS, CachyOS), `dnf` (Fedora,
+  pelo RPM Fusion) ou `apt` (Debian, Ubuntu, Mint). A detecção é ao vivo:
+  instalado o FFmpeg, a opção libera sem reiniciar. Se o FFmpeg falhar com um
+  vídeo, ele volta ao player interno e, em último caso, ao player do sistema.
+  No Flatpak a opção fica indisponível, porque o sandbox não enxerga os
+  programas do sistema.
+- **Vídeo ampliado na janela.** Um botão no canto superior direito do vídeo,
+  que aparece junto com os controles (vídeo pausado ou mouse sobre ele),
+  mostra o vídeo em quase toda a altura da janela do ZapFast, sobre a conversa
+  escurecida, sem usar a tela cheia do sistema. Ali os mesmos controles
+  continuam disponíveis; clicar no vídeo pausa ou retoma, e o botão do mesmo
+  canto, a tecla Esc ou um clique fora do vídeo o devolvem à mensagem. Espaço
+  também pausa e retoma. Ao ampliar, os quadros são decodificados de novo, a
+  partir do ponto atual, com até 1440 px em vez de 720 px, para não ficarem
+  borrados.
+- **Data flutuante ao rolar o histórico.** Enquanto você rola a conversa
+  (roda do mouse, barra de rolagem ou teclado), a data das mensagens no topo
+  aparece centralizada acima delas, como no WhatsApp, no formato
+  `DD/MM/AAAA (sáb)`. A ordem e o separador seguem a região do sistema
+  (`LC_ALL`, `LC_TIME` ou `LANG`; por exemplo `MM/DD/AAAA` nos EUA e
+  `AAAA-MM-DD` na Suécia), e o dia da semana usa as três primeiras letras do
+  nome no idioma da interface. A data some cerca de 1 s depois que a rolagem
+  para, esmaecendo, e não aparece no fim da conversa.
 - **Menu de contexto na caixa de digitação.** O botão direito no compositor
   abre **Recortar**, **Copiar**, **Colar** e **Selecionar tudo**, em todas as
   plataformas (o `TextEdit` do egui não oferece menu próprio). A seleção feita
@@ -372,9 +404,15 @@ de sincronizar a exclusão "para mim" com o celular é uma extensão deste fork.
   Ctrl+C (Cmd+C on macOS). Click a video to play it in its message, with
   sound, a seek bar, and a mute switch; round video messages play inside their
   circle with a progress ring, like on the phone. A video that is not
-  downloaded yet downloads first and then plays. Videos in codecs other than
-  H.264, such as HEVC, or with an audio track ZapFast cannot decode open in
-  your system player. **Open in system player** in a video's right-click menu
+  downloaded yet downloads first and then plays. On Linux with FFmpeg
+  installed, **Play videos with FFmpeg** in Settings (on by default) plays
+  HEVC, AV1, VP9, 10-bit H.264, and HE-AAC, Opus, or AC-3 sound in the chat
+  through the system's `ffmpeg`; without it, the switch is disabled and names
+  the install command for Arch, Fedora, or Debian and Ubuntu. Otherwise,
+  videos in codecs other than H.264, such as HEVC, or with an audio track
+  ZapFast cannot decode open in your system player. The expand button in a
+  playing video's top right corner shows it nearly as tall as the window;
+  Escape brings it back. **Open in system player** in a video's right-click menu
   does the same. Unsupported pictures and documents keep opening in their
   default desktop apps. **Save as…** in a downloaded
   attachment's right-click menu keeps a copy wherever you choose, starting in
@@ -546,8 +584,8 @@ de sincronizar a exclusão "para mim" com o celular é uma extensão deste fork.
 
 ## What it does not do yet
 
-- Play videos in codecs other than H.264 in the app (they open in your system
-  player).
+- Play videos in codecs other than H.264 in the app on Windows, macOS, or
+  Linux without FFmpeg (they open in your system player).
 - Calls, status posts, communities, newsletters, and group administration
   beyond a group's name and photo (members, admins, descriptions, settings).
 - Submit interactive forms, payments, shopping flows, or carousel selections.

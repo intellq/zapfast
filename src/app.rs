@@ -379,6 +379,8 @@ pub struct App {
     pub video: crate::video::Player,
     /// Chat of the loaded video; leaving it stops the video.
     video_chat: Option<ChatId>,
+    /// The message whose video is shown over the window.
+    pub video_expanded: Option<String>,
     /// Video to play once its download finishes.
     video_wanted: Option<(ChatId, String)>,
     /// Chat whose voice messages carry on into the next unheard one when a
@@ -874,6 +876,7 @@ impl App {
             player: Player::new(waker.clone()),
             video: crate::video::Player::new(waker.clone()),
             video_chat: None,
+            video_expanded: None,
             video_wanted: None,
             voice_chat: None,
             voice_wanted: None,
@@ -974,6 +977,7 @@ impl App {
         // A hand-edited speed snaps to a supported one, so a speed control
         // always shows the speed that plays.
         app.settings.voice_speed = app.player.set_speed(app.settings.voice_speed);
+        app.video.use_ffmpeg(app.settings.ffmpeg_video);
         app
     }
 
@@ -3967,6 +3971,16 @@ impl App {
             }
             Action::SeekVideo { message, fraction } => self.video.seek(&message, fraction),
             Action::ToggleVideoSound => self.video.toggle_mute(),
+            Action::ExpandVideo(message) => {
+                if self.video.message() == Some(message.as_str()) {
+                    self.video.set_detail(true);
+                    self.video_expanded = Some(message);
+                }
+            }
+            Action::CollapseVideo => {
+                self.video_expanded = None;
+                self.video.set_detail(false);
+            }
             Action::SeekVoice {
                 message,
                 path,
@@ -4794,6 +4808,7 @@ impl App {
             }
             Action::SettingsChanged => {
                 self.mark_settings_dirty();
+                self.video.use_ffmpeg(self.settings.ffmpeg_video);
                 crate::emoji::use_whatsapp(
                     ctx,
                     self.settings.whatsapp_emoji,

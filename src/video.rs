@@ -5,8 +5,11 @@
 //! over scaled RGBA frames tagged with their presentation time. The interface
 //! thread shows the newest frame that is due and uploads it into a single
 //! texture. Sound plays through rodio, whose symphonia backend decodes the
-//! AAC track, and its position steers the clock while it lasts. Other codecs
-//! are reported so the video can open in the system player instead.
+//! AAC track, and its position steers the clock while it lasts. On Linux,
+//! with FFmpeg installed and allowed in Settings, both come from the system's
+//! `ffmpeg` instead (see `crate::ffmpeg`), which reads nearly any codec; a
+//! file it fails on falls back to the built-in decoders. Other codecs are
+//! reported so the video can open in the system player instead.
 
 use std::cell::Cell;
 use std::cmp::Reverse;
@@ -22,6 +25,8 @@ use crate::backend::Waker;
 
 /// Longest side of a decoded frame in pixels: about twice the widest bubble.
 const MAX_SIDE: u32 = 720;
+/// Longest side while the video is expanded over the window.
+const DETAIL_SIDE: u32 = 1440;
 /// Frames decoded ahead of the clock.
 const AHEAD: usize = 4;
 /// How far the clock may drift from the sound before it follows it.
@@ -176,15 +181,22 @@ struct Sound {
     sink: rodio::Player,
     /// Video time the queued decoder started from.
     base: Duration,
+    /// Decodes through the system's FFmpeg rather than symphonia.
+    ffmpeg: Option<crate::ffmpeg::Tools>,
 }
 
 impl Sound {
     /// Opens the file's sound, paused at `from`. A video without a sound
     /// track, or a computer without an output device, plays silently. A
     /// present but undecodable track goes to the system player instead.
-    fn open(path: &Path, from: Duration, muted: bool) -> Result<Option<Self>, String> {
-        let decoder = match sound_decoder(path, from) {
-            Ok(decoder) => decoder,
+    fn open(
+        path: &Path,
+        from: Duration,
+        muted: bool,
+        ffmpeg: Option<crate::ffmpeg::Tools>,
+    ) -> Result<Option<Self>, String> {
+        let source = match source(path, from, ffmpeg.as_ref()) {
+            Ok(source) => source,
             Err(_) if has_audio_track(path) == Some(false) => return Ok(None),
             Err(error) => return Err(error),
         };
@@ -198,11 +210,12 @@ impl Sound {
         let sink = rodio::Player::connect_new(device.mixer());
         sink.pause();
         sink.set_volume(if muted { 0.0 } else { 1.0 });
-        sink.append(decoder);
+        sink.append(source);
         Ok(Some(Self {
             device,
             sink,
             base: from,
+            ffmpeg,
         }))
     }
 
@@ -212,8 +225,8 @@ impl Sound {
         let sink = rodio::Player::connect_new(self.device.mixer());
         sink.pause();
         sink.set_volume(if muted { 0.0 } else { 1.0 });
-        if let Ok(decoder) = sound_decoder(path, from) {
-            sink.append(decoder);
+        if let Ok(source) = source(path, from, self.ffmpeg.as_ref()) {
+            sink.append(source);
         }
         self.sink = sink;
         self.base = from;
@@ -223,6 +236,18 @@ impl Sound {
     fn position(&self) -> Option<Duration> {
         (!self.sink.empty()).then(|| self.base + self.sink.get_pos())
     }
+}
+
+/// The video's sound from `from`, through FFmpeg when given.
+fn source(
+    path: &Path,
+    from: Duration,
+    ffmpeg: Option<&crate::ffmpeg::Tools>,
+) -> Result<Box<dyn Source + Send>, String> {
+    Ok(match ffmpeg {
+        Some(tools) => Box::new(crate::ffmpeg::samples(tools, path, from)?),
+        None => Box::new(sound_decoder(path, from)?),
+    })
 }
 
 fn sound_decoder(
@@ -267,6 +292,8 @@ struct Session {
     sound: Option<Sound>,
     unsupported_audio: bool,
     total: Duration,
+    /// Decodes through the system's FFmpeg; cleared when it fails.
+    ffmpeg: Option<crate::ffmpeg::Tools>,
 }
 
 impl Session {
@@ -318,6 +345,10 @@ pub struct Player {
     audible: bool,
     /// When the playing video's message was last drawn on screen.
     seen: Cell<Instant>,
+    /// Whether videos play through the system's FFmpeg when installed.
+    ffmpeg: bool,
+    /// Frames are decoded large enough for the expanded view.
+    detail: bool,
 }
 
 impl Player {
@@ -328,7 +359,57 @@ impl Player {
             muted: false,
             audible: true,
             seen: Cell::new(Instant::now()),
+            ffmpeg: false,
+            detail: false,
         }
+    }
+
+    /// Longest side frames are decoded at.
+    fn max_side(&self) -> u32 {
+        if self.detail { DETAIL_SIDE } else { MAX_SIDE }
+    }
+
+    /// Decodes larger frames for the expanded view. Turning it on decodes the
+    /// playing video again from where it is; turning it off keeps the large
+    /// frames until the next video or seek, so the picture does not blink.
+    pub fn set_detail(&mut self, detail: bool) {
+        if std::mem::replace(&mut self.detail, detail) == detail || !detail {
+            return;
+        }
+        let max_side = self.max_side();
+        let waker = self.waker.clone();
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+        let now = Instant::now();
+        let at = session.clock.position(now);
+        session.resume = match session.state {
+            State::Loading => session.resume,
+            State::Playing => true,
+            State::Paused => false,
+        };
+        session.state = State::Loading;
+        session.clock.pause(now);
+        session.clock.seek(at, now);
+        session.queue.clear();
+        session.decoded = false;
+        session.frames = spawn_decoder(&session.path, at, waker, session.ffmpeg.clone(), max_side);
+        if let Some(sound) = &mut session.sound {
+            sound.restart(&session.path, at, self.muted);
+        }
+    }
+
+    /// The loaded video's message and file.
+    pub fn loaded(&self) -> Option<(&str, &Path)> {
+        self.session
+            .as_ref()
+            .map(|session| (session.message.as_str(), session.path.as_path()))
+    }
+
+    /// Follows the Settings switch for playing videos through FFmpeg. It
+    /// applies from the next video.
+    pub fn use_ffmpeg(&mut self, on: bool) {
+        self.ffmpeg = on;
     }
 
     /// Plays videos without opening the sound device.
@@ -362,6 +443,7 @@ impl Player {
     /// playing or paused.
     pub fn seek(&mut self, message: &str, fraction: f32) {
         let muted = self.muted;
+        let max_side = self.max_side();
         let Some(session) = self
             .session
             .as_mut()
@@ -381,7 +463,13 @@ impl Player {
         session.clock.seek(to, now);
         session.queue.clear();
         session.decoded = false;
-        session.frames = spawn_decoder(&session.path, to, self.waker.clone());
+        session.frames = spawn_decoder(
+            &session.path,
+            to,
+            self.waker.clone(),
+            session.ffmpeg.clone(),
+            max_side,
+        );
         if let Some(sound) = &mut session.sound {
             sound.restart(&session.path, to, muted);
         }
@@ -453,8 +541,9 @@ impl Player {
         self.seen.set(now);
         let mut clock = Clock::default();
         clock.seek(from, now);
+        let ffmpeg = self.ffmpeg.then(crate::ffmpeg::tools).flatten();
         let (sound, unsupported_audio) = if self.audible {
-            match Sound::open(path, from, self.muted) {
+            match Sound::open(path, from, self.muted, ffmpeg.clone()) {
                 Ok(sound) => (sound, false),
                 Err(error) => {
                     log::warn!("video audio could not be decoded: {error}");
@@ -469,7 +558,13 @@ impl Player {
             path: path.to_owned(),
             state: State::Loading,
             resume: true,
-            frames: spawn_decoder(path, from, self.waker.clone()),
+            frames: spawn_decoder(
+                path,
+                from,
+                self.waker.clone(),
+                ffmpeg.clone(),
+                self.max_side(),
+            ),
             queue: VecDeque::new(),
             decoded: false,
             texture: None,
@@ -477,7 +572,37 @@ impl Player {
             sound,
             unsupported_audio,
             total: Duration::ZERO,
+            ffmpeg,
         });
+    }
+
+    /// Plays the session's video with the built-in decoders from where it
+    /// was, after FFmpeg failed on it.
+    fn fall_back(&mut self) {
+        let (waker, audible, muted) = (self.waker.clone(), self.audible, self.muted);
+        let max_side = self.max_side();
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+        log::info!("FFmpeg could not play the video; using the built-in player");
+        session.ffmpeg = None;
+        let from = session.clock.position(Instant::now());
+        session.queue.clear();
+        session.decoded = false;
+        session.frames = spawn_decoder(&session.path, from, waker, None, max_side);
+        let (sound, unsupported_audio) = if audible {
+            match Sound::open(&session.path, from, muted, None) {
+                Ok(sound) => (sound, false),
+                Err(error) => {
+                    log::warn!("video audio could not be decoded: {error}");
+                    (None, true)
+                }
+            }
+        } else {
+            (None, false)
+        };
+        session.sound = sound;
+        session.unsupported_audio = unsupported_audio;
     }
 
     /// Takes decoded frames, shows the one that is due, and schedules the
@@ -501,6 +626,10 @@ impl Player {
                     session.decoded = true;
                     break;
                 }
+                Ok(Delivery::Unsupported(_)) if session.ffmpeg.is_some() => {
+                    self.fall_back();
+                    return None;
+                }
                 Ok(Delivery::Unsupported(reason)) => {
                     log::info!("video opens in the system player: {reason}");
                     let path = session.path.clone();
@@ -517,6 +646,9 @@ impl Player {
                 if session.resume {
                     session.play(now);
                 }
+            } else if session.decoded && session.ffmpeg.is_some() {
+                self.fall_back();
+                return None;
             } else if session.decoded {
                 // Not one frame decoded: hand the file to the system player.
                 let path = session.path.clone();
@@ -558,17 +690,25 @@ impl Player {
 
 /// Starts decoding `path` from `from` on its own thread. Dropping the
 /// receiver stops the thread at its next frame.
-fn spawn_decoder(path: &Path, from: Duration, waker: Waker) -> Receiver<Delivery> {
+fn spawn_decoder(
+    path: &Path,
+    from: Duration,
+    waker: Waker,
+    ffmpeg: Option<crate::ffmpeg::Tools>,
+    max_side: u32,
+) -> Receiver<Delivery> {
     let (sender, receiver) = std::sync::mpsc::sync_channel(AHEAD);
     let path = path.to_owned();
     let spawned = std::thread::Builder::new()
         .name("video-decode".into())
         .spawn(move || {
             // A decoder panic reports the video as unsupported.
-            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                decode(&path, from, &sender, &waker)
-            }))
-            .unwrap_or_else(|_| Err("the decoder stopped".to_owned()));
+            let outcome =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match &ffmpeg {
+                    Some(tools) => decode_ffmpeg(tools, &path, from, &sender, &waker, max_side),
+                    None => decode(&path, from, &sender, &waker, max_side),
+                }))
+                .unwrap_or_else(|_| Err("the decoder stopped".to_owned()));
             let last = match outcome {
                 Ok(()) => Delivery::End,
                 Err(reason) => Delivery::Unsupported(reason),
@@ -692,6 +832,37 @@ fn quarter_turns(a: i32, b: i32, c: i32, d: i32) -> u8 {
     }
 }
 
+/// Sends the frames the system's FFmpeg decodes from `from`. Errors, or no
+/// frame at all, send the video back to the built-in decoder.
+fn decode_ffmpeg(
+    tools: &crate::ffmpeg::Tools,
+    path: &Path,
+    from: Duration,
+    frames: &SyncSender<Delivery>,
+    waker: &Waker,
+    max_side: u32,
+) -> Result<(), String> {
+    let probe = crate::ffmpeg::probe(tools, path)?;
+    if frames.send(Delivery::Length(probe.duration)).is_err() {
+        return Ok(());
+    }
+    waker.wake();
+    let (width, height) = fitted(probe.width, probe.height, max_side);
+    let mut sent = false;
+    for (at, image) in crate::ffmpeg::frames(tools, path, from, width, height, probe.rate)? {
+        if frames.send(Delivery::Frame(at, image)).is_err() {
+            return Ok(());
+        }
+        sent = true;
+        waker.wake();
+    }
+    if sent {
+        Ok(())
+    } else {
+        Err("FFmpeg sent no frame".to_owned())
+    }
+}
+
 /// Size that fits `width` by `height` within `max_side` on its longest side.
 fn fitted(width: u32, height: u32, max_side: u32) -> (u32, u32) {
     let longest = width.max(height);
@@ -711,6 +882,7 @@ fn decode(
     from: Duration,
     frames: &SyncSender<Delivery>,
     waker: &Waker,
+    max_side: u32,
 ) -> Result<(), String> {
     let file = std::fs::File::open(path).map_err(|error| error.to_string())?;
     let size = file.metadata().map_err(|error| error.to_string())?.len();
@@ -764,6 +936,7 @@ fn decode(
     let mut output = Output {
         from,
         turns,
+        max_side,
         held: None,
         frames,
         waker,
@@ -806,6 +979,7 @@ const FRAME: Duration = Duration::from_millis(100);
 struct Output<'a> {
     from: Duration,
     turns: u8,
+    max_side: u32,
     /// The newest frame before `from`, which shows at `from` until the next
     /// frame is due.
     held: Option<ColorImage>,
@@ -819,7 +993,7 @@ impl Output<'_> {
     fn frame(&mut self, at: Duration, yuv: &openh264::decoder::DecodedYUV<'_>) -> bool {
         if at < self.from {
             if at + FRAME >= self.from {
-                self.held = picture(yuv, self.turns);
+                self.held = picture(yuv, self.turns, self.max_side);
             }
             return true;
         }
@@ -829,7 +1003,7 @@ impl Output<'_> {
         {
             return false;
         }
-        let Some(image) = picture(yuv, self.turns) else {
+        let Some(image) = picture(yuv, self.turns, self.max_side) else {
             return true;
         };
         let sent = self.frames.send(Delivery::Frame(at, image)).is_ok();
@@ -839,15 +1013,19 @@ impl Output<'_> {
 }
 
 /// Turns one decoded frame into an upright picture no larger than
-/// [`MAX_SIDE`].
-fn picture(yuv: &openh264::decoder::DecodedYUV<'_>, turns: u8) -> Option<ColorImage> {
+/// `max_side`.
+fn picture(
+    yuv: &openh264::decoder::DecodedYUV<'_>,
+    turns: u8,
+    max_side: u32,
+) -> Option<ColorImage> {
     use openh264::formats::YUVSource;
 
     let (width, height) = yuv.dimensions();
     if width == 0 || height == 0 {
         return None;
     }
-    let (out_width, out_height) = fitted(width as u32, height as u32, MAX_SIDE);
+    let (out_width, out_height) = fitted(width as u32, height as u32, max_side);
     let planes = Planes {
         y: yuv.y(),
         u: yuv.u(),
@@ -948,7 +1126,7 @@ mod tests {
 
     fn collect(path: &Path, from: Duration) -> Vec<Delivery> {
         let (sender, receiver) = std::sync::mpsc::sync_channel(1024);
-        let outcome = decode(path, from, &sender, &Waker::default());
+        let outcome = decode(path, from, &sender, &Waker::default(), MAX_SIDE);
         if let Err(reason) = outcome {
             sender.send(Delivery::Unsupported(reason)).unwrap();
         }

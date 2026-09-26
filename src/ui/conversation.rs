@@ -1972,6 +1972,8 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
     // a held key's repeats, which restart it, never stall it.
     let key_start = time - f64::from(ui.input(|input| input.stable_dt.min(0.1)));
     let mut pinned = false;
+    // The newest day at the top of the view, for the floating date.
+    let mut top_day: Option<i64> = None;
     let output = egui::ScrollArea::vertical()
         .id_salt(("messages", &chat.id))
         .auto_shrink([false, false])
@@ -2205,6 +2207,9 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                         if before + height <= viewport.top() {
                             grew_above += measured - height;
                         }
+                        if top_day.is_none() && before + measured > viewport.top() {
+                            top_day = Some(message.timestamp);
+                        }
                         rows.insert(
                             message.id.clone(),
                             RowHeight {
@@ -2306,6 +2311,14 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                     .interact_pos()
                     .is_some_and(|pos| bar.contains(pos)))
     });
+    floating_day(
+        ui,
+        app,
+        &chat.id,
+        output.inner_rect,
+        top_day.filter(|_| !at_bottom),
+        reader_scrolled || key_scroll.is_some(),
+    );
     let complete = conversation.complete;
     let loading = conversation.loading_older;
     let fetching = conversation.fetching_phone;
@@ -5875,7 +5888,15 @@ fn video(
                 if status.state == State::Paused
                     || (status.state == State::Playing && ui.rect_contains_pointer(rect))
                 {
-                    video_controls(ui, view, message, path, rect, status, actions);
+                    let controls = VideoControls {
+                        palette: &view.palette,
+                        locale: view.locale,
+                        video: view.video,
+                        message: &message.id,
+                        path,
+                    };
+                    video_controls(ui, &controls, rect, status, actions);
+                    expand_button(ui, view.locale, &message.id, rect, actions);
                 }
             }
             _ => {
@@ -5969,15 +5990,29 @@ fn video_clicked(
 
 /// Play/pause, the time, a seek bar, and a sound switch along the bottom of
 /// a playing video.
-fn video_controls(
+/// What the controls of a loaded video act on and look like.
+pub(crate) struct VideoControls<'a> {
+    pub palette: &'a Palette,
+    pub locale: crate::i18n::Locale,
+    pub video: &'a crate::video::Player,
+    pub message: &'a str,
+    pub path: &'a Path,
+}
+
+pub(crate) fn video_controls(
     ui: &mut egui::Ui,
-    view: &View<'_>,
-    message: &Message,
-    path: &Path,
+    controls: &VideoControls<'_>,
     rect: Rect,
     status: &crate::video::Status,
     actions: &mut Vec<Action>,
 ) {
+    let VideoControls {
+        palette,
+        locale,
+        video,
+        message,
+        path,
+    } = *controls;
     let bar = Rect::from_min_max(pos2(rect.left(), rect.bottom() - 32.0), rect.max);
     ui.painter().rect_filled(
         bar,
@@ -5989,7 +6024,7 @@ fn video_controls(
         },
         Color32::from_black_alpha(150),
     );
-    let id = ui.id().with(("video-controls", &message.id));
+    let id = ui.id().with(("video-controls", message));
     let toggle = Rect::from_center_size(pos2(bar.left() + 18.0, bar.center().y), Vec2::splat(26.0));
     let playing = status.state == crate::video::State::Playing;
     theme::paint_icon(
@@ -6000,9 +6035,9 @@ fn video_controls(
         Color32::WHITE,
     );
     let tooltip = if playing {
-        crate::i18n::gettext(view.locale, "Pause")
+        crate::i18n::gettext(locale, "Pause")
     } else {
-        crate::i18n::gettext(view.locale, "Play")
+        crate::i18n::gettext(locale, "Play")
     };
     if ui
         .interact(toggle, id.with("toggle"), Sense::click())
@@ -6011,12 +6046,12 @@ fn video_controls(
         .clicked()
     {
         actions.push(Action::PlayVideo {
-            message: message.id.clone(),
+            message: message.to_owned(),
             path: path.to_owned(),
         });
     }
     let sound = Rect::from_center_size(pos2(bar.right() - 18.0, bar.center().y), Vec2::splat(26.0));
-    let muted = view.video.muted();
+    let muted = video.muted();
     theme::paint_icon(
         ui,
         if muted { Icon::VolumeX } else { Icon::Volume2 },
@@ -6025,9 +6060,9 @@ fn video_controls(
         Color32::WHITE,
     );
     let tooltip = if muted {
-        crate::i18n::gettext(view.locale, "Unmute")
+        crate::i18n::gettext(locale, "Unmute")
     } else {
-        crate::i18n::gettext(view.locale, "Mute")
+        crate::i18n::gettext(locale, "Mute")
     };
     if ui
         .interact(sound, id.with("sound"), Sense::click())
@@ -6072,17 +6107,98 @@ fn video_controls(
     ui.painter().rect_filled(
         Rect::from_min_max(line.min, pos2(played.x, line.bottom())),
         1.5,
-        view.palette.accent,
+        palette.accent,
     );
-    ui.painter().circle_filled(played, 5.0, view.palette.accent);
+    ui.painter().circle_filled(played, 5.0, palette.accent);
     if (response.clicked() || response.drag_stopped())
         && let Some(fraction) = pointed
     {
         actions.push(Action::SeekVideo {
-            message: message.id.clone(),
+            message: message.to_owned(),
             fraction,
         });
     }
+}
+
+/// A button in the top right corner of a video that shows it over the
+/// window, drawn with the other controls.
+fn expand_button(
+    ui: &mut egui::Ui,
+    locale: crate::i18n::Locale,
+    message: &str,
+    rect: Rect,
+    actions: &mut Vec<Action>,
+) {
+    if rect.width() < 80.0 || rect.height() < 80.0 {
+        return;
+    }
+    let button = Rect::from_center_size(
+        pos2(rect.right() - 20.0, rect.top() + 20.0),
+        Vec2::splat(28.0),
+    );
+    ui.painter()
+        .circle_filled(button.center(), 14.0, Color32::from_black_alpha(150));
+    theme::paint_icon(ui, Icon::Maximize, button, 15.0, Color32::WHITE);
+    if ui
+        .interact(
+            button,
+            ui.id().with(("video-expand", message)),
+            Sense::click(),
+        )
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(crate::i18n::gettext(locale, "Expand video").as_ref())
+        .clicked()
+    {
+        actions.push(Action::ExpandVideo(message.to_owned()));
+    }
+}
+
+/// How long the floating date stays after the scrolling stops, and how much
+/// of that it spends fading.
+const FLOATING_DAY: f64 = 1.2;
+const FLOATING_FADE: f64 = 0.3;
+
+/// The date of the messages at the top of the view, centred over it while
+/// the reader scrolls, as WhatsApp shows it. It fades once the scrolling
+/// stops and is gone at the end of the chat.
+fn floating_day(
+    ui: &egui::Ui,
+    app: &App,
+    chat: &str,
+    view: Rect,
+    day: Option<i64>,
+    scrolling: bool,
+) {
+    let id = egui::Id::new(("floating-day", chat));
+    let now = ui.input(|input| input.time);
+    if scrolling {
+        ui.ctx().data_mut(|data| data.insert_temp(id, now));
+    }
+    let Some(day) = day else {
+        return;
+    };
+    let Some(since) = ui
+        .ctx()
+        .data(|data| data.get_temp::<f64>(id))
+        .map(|last| now - last)
+        .filter(|since| *since < FLOATING_DAY)
+    else {
+        return;
+    };
+    let fade = ((FLOATING_DAY - since) / FLOATING_FADE).min(1.0) as f32;
+    let label = crate::util::scroll_day(app.locale, day);
+    let palette = app.palette;
+    egui::Area::new(id.with("area"))
+        .order(egui::Order::Middle)
+        .interactable(false)
+        .pivot(egui::Align2::CENTER_TOP)
+        .fixed_pos(pos2(view.center().x, view.top() + 10.0))
+        .show(ui.ctx(), |ui| {
+            ui.multiply_opacity(fade);
+            widgets::chip(ui, &palette, &label);
+        });
+    ui.ctx()
+        .request_repaint_after(std::time::Duration::from_millis(50));
 }
 
 /// Side of a round video message.
@@ -6231,7 +6347,13 @@ fn video_note(
 
 /// Paints a texture into `rect` with rounded corners; a radius of half the
 /// side makes a circle.
-fn paint_texture(ui: &egui::Ui, rect: Rect, texture: egui::TextureId, uv: Rect, radius: f32) {
+pub(crate) fn paint_texture(
+    ui: &egui::Ui,
+    rect: Rect,
+    texture: egui::TextureId,
+    uv: Rect,
+    radius: f32,
+) {
     ui.painter().add(
         egui::epaint::RectShape::filled(
             rect,
@@ -6243,7 +6365,7 @@ fn paint_texture(ui: &egui::Ui, rect: Rect, texture: egui::TextureId, uv: Rect, 
 }
 
 /// The largest rect with the proportions of `size` centred in `rect`.
-fn fit_within(size: Vec2, rect: Rect) -> Rect {
+pub(crate) fn fit_within(size: Vec2, rect: Rect) -> Rect {
     if size.x <= 0.0 || size.y <= 0.0 {
         return rect;
     }

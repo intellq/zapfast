@@ -575,6 +575,30 @@ msgstr ""
 "Ao digitar : seguido de um nome, sugere emojis; Enter ou Tab troca o texto "
 "pelo emoji."
 
+msgid "Expand video"
+msgstr "Expandir vídeo"
+
+msgid "Back to the message (Esc)"
+msgstr "Voltar à mensagem (Esc)"
+
+msgid "Play videos with FFmpeg"
+msgstr "Reproduzir vídeos com o FFmpeg"
+
+msgid "Plays HEVC, AV1, VP9 and 10-bit H.264 videos, and HE-AAC, Opus or AC-3 sound, inside the chat with the FFmpeg installed on this computer. Videos it cannot read use the built-in player."
+msgstr "Reproduz na conversa vídeos HEVC, AV1, VP9 e H.264 de 10 bits, e áudio HE-AAC, Opus ou AC-3, com o FFmpeg instalado neste computador. Vídeos que ele não conseguir ler usam o player interno."
+
+msgid "The Flatpak version cannot use the FFmpeg installed on the computer. Videos the built-in player cannot read open in the system player."
+msgstr "A versão Flatpak não consegue usar o FFmpeg instalado no computador. Vídeos que o player interno não consegue ler abrem no player do sistema."
+
+msgid "FFmpeg was not found. With it, HEVC, AV1, VP9 and 10-bit H.264 videos, and HE-AAC, Opus or AC-3 sound, play inside the chat instead of in the system player. Install it and this option turns on:"
+msgstr "O FFmpeg não foi encontrado. Com ele, vídeos HEVC, AV1, VP9 e H.264 de 10 bits, e áudio HE-AAC, Opus ou AC-3, tocam dentro da conversa em vez de no player do sistema. Instale-o e esta opção será ativada:"
+
+msgid "Enable RPM Fusion first: Fedora's own ffmpeg-free leaves codecs out."
+msgstr "Ative o RPM Fusion antes: o ffmpeg-free do próprio Fedora não inclui todos os codecs."
+
+msgid "install the ffmpeg package of your distribution."
+msgstr "instale o pacote ffmpeg da sua distribuição."
+
 msgid "WhatsApp emoji"
 msgstr "Emojis do WhatsApp"
 

@@ -1296,6 +1296,10 @@ pub enum Action {
     },
     /// Mutes or unmutes video playback.
     ToggleVideoSound,
+    /// Shows a loaded video over the window, nearly as tall as it.
+    ExpandVideo(String),
+    /// Returns the expanded video to its message.
+    CollapseVideo,
     /// Starts, cancels, or sends a voice recording.
     StartRecording,
     CancelRecording,

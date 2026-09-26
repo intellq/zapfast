@@ -346,6 +346,8 @@ pub struct Settings {
     /// Draw emoji with an installed WhatsApp emoji font instead of the
     /// desktop's (or the bundled) Noto Color Emoji.
     pub whatsapp_emoji: bool,
+    /// Play videos through the system's FFmpeg when it is installed (Linux).
+    pub ffmpeg_video: bool,
     /// Send read receipts, subject to the account privacy setting.
     pub send_read_receipts: bool,
     /// Send typing state while composing.
@@ -439,6 +441,7 @@ impl Default for Settings {
             enter_sends: true,
             emoji_shortcuts: false,
             whatsapp_emoji: false,
+            ffmpeg_video: true,
             send_read_receipts: true,
             send_typing: true,
             auto_download: true,
