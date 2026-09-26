@@ -338,7 +338,8 @@ fn bounded(image: image::DynamicImage) -> image::DynamicImage {
 /// it is. Earlier copies are removed once the new one is in place.
 pub fn import(source: &Path, dirs: &AppDirs) -> Result<PathBuf, String> {
     let bytes = std::fs::read(source).map_err(|error| error.to_string())?;
-    let format = image::guess_format(&bytes).map_err(|_| "not an image".to_owned())?;
+    let format =
+        image::guess_format(&bytes).map_err(|_| crate::i18n::tr("not an image").to_owned())?;
     let decoded =
         image::load_from_memory_with_format(&bytes, format).map_err(|error| error.to_string())?;
     let (contents, extension) = if decoded.width().max(decoded.height()) > MAX_SIDE {
@@ -349,7 +350,7 @@ pub fn import(source: &Path, dirs: &AppDirs) -> Result<PathBuf, String> {
             image::ImageFormat::Png => "png",
             image::ImageFormat::WebP => "webp",
             image::ImageFormat::Gif => "gif",
-            _ => return Err("unsupported image format".to_owned()),
+            _ => return Err(crate::i18n::tr("unsupported image format").to_owned()),
         };
         (bytes, extension)
     };

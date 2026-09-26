@@ -4,6 +4,7 @@
 //! the setting is empty. `http://`, `socks5://`, and `socks5h://` proxies
 //! are supported, with an optional `user:password@`.
 
+use crate::i18n::tr;
 use std::sync::{OnceLock, RwLock};
 use std::time::Duration;
 
@@ -53,22 +54,22 @@ impl Proxy {
             format!("http://{value}")
         };
         let url = reqwest::Url::parse(&with_scheme)
-            .map_err(|_| "Enter a proxy address like socks5://127.0.0.1:1080".to_owned())?;
+            .map_err(|_| tr("Enter a proxy address like socks5://127.0.0.1:1080").to_owned())?;
         let scheme = match url.scheme() {
             "http" => Scheme::Http,
             "socks5" | "socks" => Scheme::Socks5,
             "socks5h" => Scheme::Socks5h,
-            _ => return Err("Use an http://, socks5://, or socks5h:// proxy".to_owned()),
+            _ => return Err(tr("Use an http://, socks5://, or socks5h:// proxy").to_owned()),
         };
         let host = url
             .host_str()
             .filter(|host| !host.is_empty())
-            .ok_or_else(|| "The proxy address needs a host".to_owned())?
+            .ok_or_else(|| tr("The proxy address needs a host").to_owned())?
             .trim_start_matches('[')
             .trim_end_matches(']')
             .to_owned();
         if !matches!(url.path(), "" | "/") || url.query().is_some() {
-            return Err("A proxy address has no path".to_owned());
+            return Err(tr("A proxy address has no path").to_owned());
         }
         let port = match scheme {
             Scheme::Http => url.port_or_known_default().unwrap_or(80),
@@ -156,7 +157,7 @@ impl Proxy {
         let mut reply = Vec::with_capacity(256);
         while !reply.ends_with(b"\r\n\r\n") {
             if reply.len() >= MAX_REPLY {
-                return Err(proxy_error("The proxy sent an oversized reply"));
+                return Err(proxy_error(tr("The proxy sent an oversized reply")));
             }
             reply.push(stream.read_u8().await?);
         }
@@ -168,11 +169,14 @@ impl Proxy {
             .and_then(|code| code.parse::<u16>().ok());
         match status {
             Some(200..=299) => Ok(()),
-            Some(407) => Err(proxy_error("The proxy rejected the user name or password")),
-            Some(code) => Err(proxy_error(&format!(
-                "The proxy refused the tunnel ({code})"
+            Some(407) => Err(proxy_error(tr(
+                "The proxy rejected the user name or password",
             ))),
-            None => Err(proxy_error("The proxy did not answer as an HTTP proxy")),
+            Some(code) => Err(proxy_error(&format!(
+                "{} ({code})",
+                tr("The proxy refused the tunnel")
+            ))),
+            None => Err(proxy_error(tr("The proxy did not answer as an HTTP proxy"))),
         }
     }
 
@@ -192,14 +196,18 @@ impl Proxy {
         let mut choice = [0u8; 2];
         stream.read_exact(&mut choice).await?;
         if choice[0] != 5 {
-            return Err(proxy_error("The proxy did not answer as a SOCKS5 proxy"));
+            return Err(proxy_error(tr(
+                "The proxy did not answer as a SOCKS5 proxy",
+            )));
         }
         match (choice[1], &self.auth) {
             (0, _) => {}
             (2, Some((user, password))) => {
                 let (user, password) = (user.as_bytes(), password.as_bytes());
                 if user.len() > 255 || password.len() > 255 {
-                    return Err(proxy_error("The proxy user name or password is too long"));
+                    return Err(proxy_error(tr(
+                        "The proxy user name or password is too long",
+                    )));
                 }
                 let mut login = vec![1, user.len() as u8];
                 login.extend_from_slice(user);
@@ -209,11 +217,17 @@ impl Proxy {
                 let mut status = [0u8; 2];
                 stream.read_exact(&mut status).await?;
                 if status[1] != 0 {
-                    return Err(proxy_error("The proxy rejected the user name or password"));
+                    return Err(proxy_error(tr(
+                        "The proxy rejected the user name or password",
+                    )));
                 }
             }
-            (2, None) => return Err(proxy_error("The proxy needs a user name and password")),
-            _ => return Err(proxy_error("The proxy offered no usable sign-in method")),
+            (2, None) => return Err(proxy_error(tr("The proxy needs a user name and password"))),
+            _ => {
+                return Err(proxy_error(tr(
+                    "The proxy offered no usable sign-in method",
+                )));
+            }
         }
 
         let mut request = vec![5, 1, 0];
@@ -237,7 +251,7 @@ impl Proxy {
             _ => {
                 let name = host.as_bytes();
                 if name.len() > 255 {
-                    return Err(proxy_error("The host name is too long for SOCKS5"));
+                    return Err(proxy_error(tr("The host name is too long for SOCKS5")));
                 }
                 request.push(3);
                 request.push(name.len() as u8);
@@ -250,7 +264,9 @@ impl Proxy {
         let mut head = [0u8; 4];
         stream.read_exact(&mut head).await?;
         if head[0] != 5 {
-            return Err(proxy_error("The proxy did not answer as a SOCKS5 proxy"));
+            return Err(proxy_error(tr(
+                "The proxy did not answer as a SOCKS5 proxy",
+            )));
         }
         if head[1] != 0 {
             return Err(proxy_error(socks_reply(head[1])));
@@ -260,7 +276,7 @@ impl Proxy {
             1 => 4 + 2,
             4 => 16 + 2,
             3 => stream.read_u8().await? as usize + 2,
-            _ => return Err(proxy_error("The proxy sent an unknown address type")),
+            _ => return Err(proxy_error(tr("The proxy sent an unknown address type"))),
         };
         let mut rest = vec![0u8; skip];
         stream.read_exact(&mut rest).await?;
@@ -270,13 +286,13 @@ impl Proxy {
 
 fn socks_reply(code: u8) -> &'static str {
     match code {
-        1 => "The proxy failed",
-        2 => "The proxy does not allow this connection",
-        3 => "The proxy cannot reach the network",
-        4 => "The proxy cannot reach the host",
-        5 => "The host refused the proxy's connection",
-        6 => "The proxy connection timed out",
-        _ => "The proxy refused the connection",
+        1 => tr("The proxy failed"),
+        2 => tr("The proxy does not allow this connection"),
+        3 => tr("The proxy cannot reach the network"),
+        4 => tr("The proxy cannot reach the host"),
+        5 => tr("The host refused the proxy's connection"),
+        6 => tr("The proxy connection timed out"),
+        _ => tr("The proxy refused the connection"),
     }
 }
 
@@ -432,9 +448,17 @@ impl TransportFactory for ProxyTransportFactory {
         let port = uri.port_u16().unwrap_or(443);
         let stream = tokio::time::timeout(CONNECT_TIMEOUT, self.proxy.connect(&host, port))
             .await
-            .map_err(|_| anyhow::anyhow!("The proxy {} did not answer", self.proxy.redacted()))?
-            .map_err(|error| anyhow::anyhow!("Proxy {}: {error}", self.proxy.redacted()))?;
-        crate::transport::websocket(&self.connector, uri, &host, stream, "through the proxy").await
+            .map_err(|_| {
+                let what = tr("The proxy {proxy} did not answer")
+                    .replace("{proxy}", &self.proxy.redacted());
+                anyhow::anyhow!("{what}")
+            })?
+            .map_err(|error| {
+                let proxy = tr("Proxy");
+                anyhow::anyhow!("{proxy} {}: {error}", self.proxy.redacted())
+            })?;
+        crate::transport::websocket(&self.connector, uri, &host, stream, tr("through the proxy"))
+            .await
     }
 }
 

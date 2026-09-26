@@ -1,5 +1,6 @@
 //! Native preview for downloaded image attachments.
 
+use crate::i18n::tr;
 use egui::{Align, CornerRadius, Frame, Layout, Margin, Rect, Stroke, Vec2, vec2};
 
 use crate::app::App;
@@ -28,7 +29,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                     .path()
                     .file_name()
                     .and_then(|name| name.to_str())
-                    .unwrap_or("Image");
+                    .unwrap_or(tr("Image"));
                 crate::ui::widgets::rich_text(ui, name, theme::semibold(14.0), palette.text);
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if theme::icon_button(
@@ -37,7 +38,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                         18.0,
                         palette.secondary,
                         palette.text,
-                        "Close preview (Esc)",
+                        tr("Close preview (Esc)"),
                     )
                     .clicked()
                     {
@@ -49,7 +50,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                         18.0,
                         palette.secondary,
                         palette.text,
-                        "Open in another app",
+                        tr("Open in another app"),
                     )
                     .clicked()
                     {
@@ -82,7 +83,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                         18.0,
                         palette.secondary,
                         palette.text,
-                        "Zoom in",
+                        tr("Zoom in"),
                     )
                     .clicked()
                     {
@@ -92,14 +93,14 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                     // the window and the original size.
                     let (label, hint, action) = if preview.is_fit() {
                         (
-                            "Fit".to_owned(),
-                            "Show at original size",
+                            tr("Fit").to_owned(),
+                            tr("Show at original size"),
                             Action::ImageActualSize,
                         )
                     } else {
                         (
                             format!("{:.0}%", preview.zoom() * 100.0),
-                            "Fit to the window (0)",
+                            tr("Fit to the window (0)"),
                             Action::FitImage,
                         )
                     };
@@ -115,7 +116,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                         18.0,
                         palette.secondary,
                         palette.text,
-                        "Zoom out",
+                        tr("Zoom out"),
                     )
                     .clicked()
                     {
@@ -278,8 +279,8 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                         canvas,
                         Layout::centered_and_justified(egui::Direction::TopDown),
                         |ui| {
-                            ui.label("This image could not be displayed in ZapFast.");
-                            if ui.button("Open externally").clicked() {
+                            ui.label(tr("This image could not be displayed in ZapFast."));
+                            if ui.button(tr("Open externally")).clicked() {
                                 app.actions
                                     .push(Action::OpenFile(preview.path().to_owned()));
                             }

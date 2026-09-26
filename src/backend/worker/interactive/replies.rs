@@ -3,6 +3,7 @@
 
 use super::super::{ChatId, Delivery, Event, Message, MessageField, Quoted, send_outgoing};
 use super::*;
+use crate::i18n::tr;
 
 fn present(value: Option<&str>) -> Option<&str> {
     value.filter(|value| !value.trim().is_empty())
@@ -228,7 +229,7 @@ impl Worker {
             return;
         }
         let (Some(client), Some(jid)) = (self.client.clone(), Self::jid_of(&chat)) else {
-            self.emit(Event::Error("Not connected to WhatsApp".into()));
+            self.emit(Event::Error(tr("Not connected to WhatsApp").into()));
             return;
         };
         let prepared = (|| {
@@ -239,7 +240,7 @@ impl Worker {
             Some((row, reply))
         })();
         let Some((source, mut message)) = prepared else {
-            self.emit(Event::Error("This option is unavailable in ZapFast. Open the message in WhatsApp Web or on your phone.".into()));
+            self.emit(Event::Error(tr("This option is unavailable in ZapFast. Open the message in WhatsApp Web or on your phone.").into()));
             return;
         };
         let expiration = self.apply_ephemeral(&chat, &mut message);

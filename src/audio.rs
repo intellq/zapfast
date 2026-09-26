@@ -2,6 +2,7 @@
 //!
 //! Input and output devices are opened on demand and released when idle.
 
+use crate::i18n::tr;
 use std::collections::HashMap;
 use std::num::NonZero;
 use std::path::{Path, PathBuf};
@@ -391,7 +392,7 @@ impl Player {
             let Decoding { message, start, .. } = self.decoding.take().expect("just seen");
             let samples = result?;
             if samples.is_empty() {
-                return Err("The clip is empty".to_owned());
+                return Err(tr("The clip is empty").to_owned());
             }
             let samples = Arc::new(samples);
             self.bars
@@ -449,7 +450,7 @@ impl Player {
                 waker.wake();
             });
         if let Err(error) = spawned {
-            return Err(format!("Could not decode audio: {error}"));
+            return Err(format!("{}: {error}", tr("Could not decode audio")));
         }
         self.decoding = Some(Decoding {
             message: message.to_owned(),
@@ -471,7 +472,7 @@ impl Player {
         let offset = ((fraction.clamp(0.0, 1.0) * buffer.len() as f32) as usize).min(buffer.len());
         if self.output.is_none() {
             let device = rodio::DeviceSinkBuilder::open_default_sink()
-                .map_err(|error| format!("No sound output: {error}"))?;
+                .map_err(|error| format!("{}: {error}", tr("No sound output")))?;
             let sink = rodio::Player::connect_new(device.mixer());
             self.output = Some((device, sink));
         }
@@ -500,17 +501,17 @@ fn clip_length(samples: usize) -> Duration {
 /// Decodes a file to mono 48 kHz samples. OGG/Opus uses `voice`; other
 /// supported formats use rodio.
 fn decode_file(path: &Path) -> Result<Vec<f32>, String> {
-    let bytes =
-        std::fs::read(path).map_err(|error| format!("Could not read the audio: {error}"))?;
+    let bytes = std::fs::read(path)
+        .map_err(|error| format!("{}: {error}", tr("Could not read the audio")))?;
     if bytes.starts_with(b"OggS")
         && let Ok(samples) = voice::decode(&bytes)
     {
         return Ok(samples);
     }
-    let file =
-        std::fs::File::open(path).map_err(|error| format!("Could not read the audio: {error}"))?;
+    let file = std::fs::File::open(path)
+        .map_err(|error| format!("{}: {error}", tr("Could not read the audio")))?;
     let decoder = rodio::Decoder::new(std::io::BufReader::new(file))
-        .map_err(|error| format!("Could not decode the audio: {error}"))?;
+        .map_err(|error| format!("{}: {error}", tr("Could not decode the audio")))?;
     let channels = decoder.channels().get();
     let rate = decoder.sample_rate().get();
     let interleaved: Vec<f32> = decoder.collect();
@@ -627,7 +628,7 @@ impl Recorder {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .take()
-            .unwrap_or_else(|| Err("No audio was recorded".to_owned()))
+            .unwrap_or_else(|| Err(tr("No audio was recorded").to_owned()))
     }
 }
 
@@ -670,11 +671,11 @@ fn rehearse(
 fn record(stop: &AtomicBool, levels: &Mutex<Vec<f32>>, waker: &Waker) -> Result<Vec<f32>, String> {
     let mut microphone = rodio::microphone::MicrophoneBuilder::new()
         .default_device()
-        .map_err(|error| format!("No microphone available: {error}"))?
+        .map_err(|error| format!("{}: {error}", tr("No microphone available")))?
         .default_config()
-        .map_err(|error| format!("The microphone has no supported format: {error}"))?
+        .map_err(|error| format!("{}: {error}", tr("The microphone has no supported format")))?
         .open_stream()
-        .map_err(|error| format!("Could not open the microphone: {error}"))?;
+        .map_err(|error| format!("{}: {error}", tr("Could not open the microphone")))?;
     let channels = microphone.channels().get();
     let rate = microphone.sample_rate().get();
     let chunk = (rate as usize * usize::from(channels) / 20).max(1);
@@ -699,7 +700,7 @@ fn record(stop: &AtomicBool, levels: &Mutex<Vec<f32>>, waker: &Waker) -> Result<
         }
     }
     if heard.is_empty() {
-        return Err("The microphone did not record any audio".to_owned());
+        return Err(tr("The microphone did not record any audio").to_owned());
     }
     Ok(voice::mono_at_rate(&heard, channels, rate))
 }

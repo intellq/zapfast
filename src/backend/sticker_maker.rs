@@ -2,6 +2,7 @@
 //! pixels, encoded as a still WebP under WhatsApp's 100 KB limit, with the
 //! chosen emojis in its metadata.
 
+use crate::i18n::tr;
 use crate::model::StickerCrop;
 
 /// WhatsApp's sticker side, in pixels.
@@ -83,14 +84,14 @@ fn encode_at(sticker: &image::RgbaImage, quality: f32) -> Result<Vec<u8>, String
             &mut output,
         );
         if output.is_null() {
-            return Err("Could not encode the sticker".to_owned());
+            return Err(tr("Could not encode the sticker").to_owned());
         }
         let bytes = std::slice::from_raw_parts(output, size).to_vec();
         libwebp_sys::WebPFree(output.cast());
         bytes
     };
     if bytes.is_empty() {
-        return Err("Could not encode the sticker".to_owned());
+        return Err(tr("Could not encode the sticker").to_owned());
     }
     Ok(bytes)
 }

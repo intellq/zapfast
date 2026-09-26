@@ -26,8 +26,12 @@ pub fn set(enabled: bool) -> io::Result<()> {
     if !enabled {
         return platform::remove();
     }
-    let executable = executable()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "cannot locate ZapFast"))?;
+    let executable = executable().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            crate::i18n::tr("cannot locate ZapFast"),
+        )
+    })?;
     platform::install(&executable)
 }
 
@@ -56,7 +60,8 @@ mod platform {
     }
 
     pub fn install(executable: &Path) -> io::Result<()> {
-        let path = entry().ok_or_else(|| io::Error::other("no configuration directory"))?;
+        let path = entry()
+            .ok_or_else(|| io::Error::other(crate::i18n::tr("no configuration directory")))?;
         std::fs::create_dir_all(path.parent().expect("autostart folder"))?;
         std::fs::write(path, desktop_entry(executable))
     }
@@ -74,6 +79,7 @@ mod platform {
              Type=Application\n\
              Name=ZapFast\n\
              Comment=Start ZapFast in the tray\n\
+             Comment[pt_BR]=Inicia o ZapFast na bandeja do sistema\n\
              Exec={} {HIDDEN}\n\
              Icon=zapfast\n\
              Terminal=false\n\
@@ -119,7 +125,7 @@ mod platform {
     }
 
     pub fn install(executable: &Path) -> io::Result<()> {
-        let path = entry().ok_or_else(|| io::Error::other("no home directory"))?;
+        let path = entry().ok_or_else(|| io::Error::other(crate::i18n::tr("no home directory")))?;
         std::fs::create_dir_all(path.parent().expect("LaunchAgents folder"))?;
         std::fs::write(path, launch_agent(executable))
     }

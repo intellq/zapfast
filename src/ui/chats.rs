@@ -1,5 +1,6 @@
 //! The left panel: the chat list.
 
+use crate::i18n::tr;
 use egui::{Align, Frame, Layout, Margin, Rect, Sense, Vec2, pos2, vec2};
 
 use crate::app::App;
@@ -70,7 +71,7 @@ fn header(app: &mut App, ui: &mut egui::Ui) {
                         18.0,
                         palette.secondary,
                         palette.text,
-                        "Back to chats",
+                        tr("Back to chats"),
                     )
                     .tab_stop(Stop::Back)
                     .clicked()
@@ -83,16 +84,16 @@ fn header(app: &mut App, ui: &mut egui::Ui) {
                     theme::text(
                         ui,
                         if app.locked_folder {
-                            "Locked chats"
+                            tr("Locked chats")
                         } else {
-                            "Archived"
+                            tr("Archived")
                         },
                         theme::bold(20.0),
                         palette.text,
                     );
                 } else {
                     let me = app.me.clone().unwrap_or_default();
-                    let name = app.me_name.clone().unwrap_or_else(|| "You".to_owned());
+                    let name = app.me_name.clone().unwrap_or_else(|| tr("You").to_owned());
                     let picture = app.avatar(&me);
                     let tooltip = match &app.me_about {
                         Some(about) => format!("{name}\n{about}"),
@@ -108,9 +109,9 @@ fn header(app: &mut App, ui: &mut egui::Ui) {
                         // The label follows the action: while Settings are
                         // showing, this click closes them.
                         if app.page == Page::Settings {
-                            "Close settings"
+                            tr("Close settings")
                         } else {
-                            "Your profile and settings"
+                            tr("Your profile and settings")
                         },
                     )
                     .tab_stop(Stop::Profile)
@@ -141,9 +142,9 @@ fn header(app: &mut App, ui: &mut egui::Ui) {
                         // Same as the avatar: the label says what the click
                         // does now, not what it opened.
                         if app.page == Page::Settings {
-                            "Close settings (Ctrl+,)"
+                            tr("Close settings (Ctrl+,)")
                         } else {
-                            "Settings (Ctrl+,)"
+                            tr("Settings (Ctrl+,)")
                         },
                     )
                     .tab_stop(Stop::Settings)
@@ -157,7 +158,7 @@ fn header(app: &mut App, ui: &mut egui::Ui) {
                         18.0,
                         palette.secondary,
                         palette.text,
-                        "New chat",
+                        tr("New chat"),
                     )
                     .tab_stop(Stop::NewChat)
                     .clicked()
@@ -171,7 +172,7 @@ fn header(app: &mut App, ui: &mut egui::Ui) {
                         18.0,
                         palette.secondary,
                         palette.text,
-                        "Hide the chat list (Ctrl+B)",
+                        tr("Hide the chat list (Ctrl+B)"),
                     )
                     .tab_stop(Stop::Sidebar)
                     .clicked()
@@ -224,7 +225,7 @@ fn macos_header(app: &mut App, ui: &mut egui::Ui) {
                         18.0,
                         palette.secondary,
                         palette.text,
-                        "Back to chats",
+                        tr("Back to chats"),
                     )
                     .tab_stop(Stop::Back)
                     .clicked()
@@ -237,9 +238,9 @@ fn macos_header(app: &mut App, ui: &mut egui::Ui) {
                     theme::text(
                         ui,
                         if app.locked_folder {
-                            "Locked chats"
+                            tr("Locked chats")
                         } else {
-                            "Archived"
+                            tr("Archived")
                         },
                         theme::bold(16.0),
                         palette.text,
@@ -259,7 +260,7 @@ fn macos_header(app: &mut App, ui: &mut egui::Ui) {
                         18.0,
                         palette.secondary,
                         palette.text,
-                        "New chat (⌘N)",
+                        tr("New chat (⌘N)"),
                     )
                     .tab_stop(Stop::NewChat)
                     .clicked()
@@ -272,7 +273,7 @@ fn macos_header(app: &mut App, ui: &mut egui::Ui) {
                         18.0,
                         palette.secondary,
                         palette.text,
-                        "Hide the chat list (⌘B)",
+                        tr("Hide the chat list (⌘B)"),
                     )
                     .tab_stop(Stop::Sidebar)
                     .clicked()
@@ -364,9 +365,9 @@ fn filter_chips(app: &mut App, ui: &mut egui::Ui) {
                             .all(|chat| chat.muted(now));
                         chip.context_menu(|ui| {
                             let (icon, label) = if all_muted {
-                                (Icon::Bell, "Unmute all channels")
+                                (Icon::Bell, tr("Unmute all channels"))
                             } else {
-                                (Icon::BellOff, "Mute all channels")
+                                (Icon::BellOff, tr("Mute all channels"))
                             };
                             if widgets::menu_item(ui, &palette, Some(icon), label) {
                                 app.actions.push(Action::MuteAllChannels(!all_muted));
@@ -410,7 +411,7 @@ fn filter_chips(app: &mut App, ui: &mut egui::Ui) {
                         selected,
                     )
                     .tab_stop(Stop::Locked)
-                    .on_hover_text("Open locked chats with your local code");
+                    .on_hover_text(tr("Open locked chats with your local code"));
                     ui.ctx()
                         .data_mut(|data| data.insert_temp(egui::Id::new("locked-chip"), chip.rect));
                     if chip.clicked() {
@@ -448,25 +449,28 @@ fn list(app: &mut App, ui: &mut egui::Ui) {
         // below borrows it for this frame, and every other arm stays a literal.
         let favorites_title;
         let (title, body) = if app.show_archived {
-            ("Nothing archived", "Archived chats appear here.")
+            (tr("Nothing archived"), tr("Archived chats appear here."))
         } else if app.chat_filter != ChatFilter::All {
             let title = match app.chat_filter {
-                ChatFilter::Unread => "No unread chats",
-                ChatFilter::Private => "No private chats",
-                ChatFilter::Channels => "No channels",
+                ChatFilter::Unread => tr("No unread chats"),
+                ChatFilter::Private => tr("No private chats"),
+                ChatFilter::Channels => tr("No channels"),
                 ChatFilter::Favorites => {
                     favorites_title = crate::i18n::gettext(app.locale, "No favorites yet");
                     favorites_title.as_ref()
                 }
-                _ => "No groups",
+                _ => tr("No groups"),
             };
-            (title, "Choose All to see every chat.")
+            (title, tr("Choose All to see every chat."))
         } else if app.syncing {
-            ("Loading your chats", "Receiving history from your phone.")
+            (
+                tr("Loading your chats"),
+                tr("Receiving history from your phone."),
+            )
         } else {
             (
-                "No chats yet",
-                "Use New chat to message a contact or yourself.",
+                tr("No chats yet"),
+                tr("Use New chat to message a contact or yourself."),
             )
         };
         widgets::empty_state(ui, &palette, Icon::MessageCircle, title, body);
@@ -540,7 +544,7 @@ fn locked_entry(app: &mut App, ui: &mut egui::Ui) {
         ui.painter().text(
             pos2(rect.left() + 76.0, rect.center().y),
             egui::Align2::LEFT_CENTER,
-            "Locked chats",
+            tr("Locked chats"),
             theme::medium(14.5),
             palette.text,
         );
@@ -569,8 +573,8 @@ fn locked_list(app: &mut App, ui: &mut egui::Ui) {
             ui,
             &palette,
             Icon::LockOpen,
-            "No locked chats",
-            "Lock a chat from its context menu to hide it here.",
+            tr("No locked chats"),
+            tr("Lock a chat from its context menu to hide it here."),
         );
         return;
     }
@@ -622,8 +626,8 @@ fn results(app: &mut App, ui: &mut egui::Ui) {
             ui,
             &palette,
             Icon::Search,
-            "No results",
-            "Try another name, number, or message text.",
+            tr("No results"),
+            tr("Try another name, number, or message text."),
         );
         return;
     }
@@ -633,7 +637,7 @@ fn results(app: &mut App, ui: &mut egui::Ui) {
         .auto_shrink([false, false])
         .show(ui, |ui| {
             if !chats.is_empty() {
-                section(ui, &palette, "Chats");
+                section(ui, &palette, tr("Chats"));
                 for chat in &chats {
                     let reveal = app.scroll_chat_into_view.as_deref() == Some(chat.id.as_str());
                     let response = ui
@@ -646,13 +650,13 @@ fn results(app: &mut App, ui: &mut egui::Ui) {
                 }
             }
             if !hits.is_empty() {
-                section(ui, &palette, "Messages");
+                section(ui, &palette, tr("Messages"));
                 for hit in &hits {
                     ui.push_id(("hit", &hit.chat, &hit.id), |ui| hit_row(app, ui, hit));
                 }
             }
             if !contacts.is_empty() || offer_self {
-                section(ui, &palette, "Contacts");
+                section(ui, &palette, tr("Contacts"));
                 if offer_self {
                     ui.push_id("self", |ui| self_row(app, ui));
                 }
@@ -727,7 +731,7 @@ fn hit_row(app: &mut App, ui: &mut egui::Ui, hit: &Message) {
         if hit.from_me {
             let who = widgets::line(
                 ui,
-                "You: ",
+                &format!("{}: ", tr("You")),
                 theme::regular(13.0),
                 palette.dim,
                 (right - x) * 0.5,
@@ -948,9 +952,9 @@ fn row(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> egui::Response {
         };
         let preview = if !typing.is_empty() {
             let who = if chat.is_group() {
-                format!("{} is typing…", typing[0].1.trim_start_matches('~'))
+                tr("{name} is typing…").replace("{name}", typing[0].1.trim_start_matches('~'))
             } else {
-                "typing…".to_owned()
+                tr("typing…").to_owned()
             };
             widgets::line(
                 ui,
@@ -1024,18 +1028,18 @@ fn row(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> egui::Response {
     let menu_width = widgets::menu_width(
         ui,
         &[
-            "Mark as read",
-            "Mark as unread",
-            "Pin to top",
+            tr("Mark as read"),
+            tr("Mark as unread"),
+            tr("Pin to top"),
             favorite_label.as_ref(),
-            "Unarchive",
+            tr("Unarchive"),
             &crate::i18n::gettext(app.locale, "Leave group"),
             &crate::i18n::gettext(app.locale, "Leave channel"),
-            "Mute for 8 hours",
-            "Mute for a week",
-            "Mute indefinitely",
-            "Unlock chat",
-            "Copy number",
+            tr("Mute for 8 hours"),
+            tr("Mute for a week"),
+            tr("Mute indefinitely"),
+            tr("Unlock chat"),
+            tr("Copy number"),
         ],
         true,
     )
@@ -1044,7 +1048,7 @@ fn row(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> egui::Response {
         widgets::menu_width(
             ui,
             &[
-                "Notification sound",
+                tr("Notification sound"),
                 &crate::i18n::gettext(app.locale, "Labels"),
             ],
             true,
@@ -1168,7 +1172,7 @@ pub fn compact_show(app: &mut App, ui: &mut egui::Ui) {
                     18.0,
                     palette.secondary,
                     palette.text,
-                    &super::keys::label("Show the chat list (Ctrl+B)"),
+                    &super::keys::label(tr("Show the chat list (Ctrl+B)")),
                 )
                 .tab_stop(Stop::Sidebar)
                 .clicked()
@@ -1241,7 +1245,11 @@ fn compact_locked_entry(app: &mut App, ui: &mut egui::Ui) {
         ui.allocate_exact_size(vec2(ui.available_width(), COMPACT_CELL), Sense::click());
     theme::reveal_focus(&response);
     response.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), "Locked chats")
+        egui::WidgetInfo::labeled(
+            egui::WidgetType::Button,
+            ui.is_enabled(),
+            tr("Locked chats"),
+        )
     });
     if ui.is_rect_visible(rect) {
         if response.hovered() {
@@ -1259,7 +1267,7 @@ fn compact_locked_entry(app: &mut App, ui: &mut egui::Ui) {
         .data_mut(|data| data.insert_temp(compact_locked_id(), response.rect));
     if response
         .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text("Locked chats")
+        .on_hover_text(tr("Locked chats"))
         .clicked()
     {
         app.actions.push(Action::OpenLockedFolder);
@@ -1353,12 +1361,12 @@ fn compact_badge_center(avatar: Rect) -> egui::Pos2 {
 
 fn context_menu(app: &mut App, ui: &mut egui::Ui, chat: &Chat, palette: &Palette) {
     if chat.looks_unread()
-        && widgets::menu_item(ui, palette, Some(Icon::CheckCheck), "Mark as read")
+        && widgets::menu_item(ui, palette, Some(Icon::CheckCheck), tr("Mark as read"))
     {
         app.actions.push(Action::MarkRead(chat.id.clone()));
     }
     if !chat.looks_unread()
-        && widgets::menu_item(ui, palette, Some(Icon::MessageCircle), "Mark as unread")
+        && widgets::menu_item(ui, palette, Some(Icon::MessageCircle), tr("Mark as unread"))
     {
         app.actions.push(Action::MarkUnread(chat.id.clone()));
     }
@@ -1366,7 +1374,11 @@ fn context_menu(app: &mut App, ui: &mut egui::Ui, chat: &Chat, palette: &Palette
         ui,
         palette,
         Some(if chat.pinned { Icon::PinOff } else { Icon::Pin }),
-        if chat.pinned { "Unpin" } else { "Pin to top" },
+        if chat.pinned {
+            tr("Unpin")
+        } else {
+            tr("Pin to top")
+        },
     ) {
         app.actions
             .push(Action::SetPinned(chat.id.clone(), !chat.pinned));
@@ -1389,9 +1401,9 @@ fn context_menu(app: &mut App, ui: &mut egui::Ui, chat: &Chat, palette: &Palette
         palette,
         Some(Icon::Archive),
         if chat.archived {
-            "Unarchive"
+            tr("Unarchive")
         } else {
-            "Archive"
+            tr("Archive")
         },
     ) {
         app.actions
@@ -1413,14 +1425,14 @@ fn context_menu(app: &mut App, ui: &mut egui::Ui, chat: &Chat, palette: &Palette
     }
     let now = crate::util::now();
     if chat.muted(now) {
-        if widgets::menu_item(ui, palette, Some(Icon::Bell), "Unmute") {
+        if widgets::menu_item(ui, palette, Some(Icon::Bell), tr("Unmute")) {
             app.actions.push(Action::SetMuted(chat.id.clone(), None));
         }
     } else {
         for (label, until) in [
-            ("Mute for 8 hours", Some(now + 8 * 3600)),
-            ("Mute for a week", Some(now + 7 * 86_400)),
-            ("Mute indefinitely", Some(0)),
+            (tr("Mute for 8 hours"), Some(now + 8 * 3600)),
+            (tr("Mute for a week"), Some(now + 7 * 86_400)),
+            (tr("Mute indefinitely"), Some(0)),
         ] {
             if widgets::menu_item(ui, palette, Some(Icon::BellOff), label) {
                 app.actions.push(Action::SetMuted(chat.id.clone(), until));
@@ -1438,9 +1450,9 @@ fn context_menu(app: &mut App, ui: &mut egui::Ui, chat: &Chat, palette: &Palette
             Icon::Lock
         }),
         if chat.locked {
-            "Unlock chat"
+            tr("Unlock chat")
         } else {
-            "Lock chat"
+            tr("Lock chat")
         },
     ) {
         app.actions.push(if chat.locked {
@@ -1451,17 +1463,17 @@ fn context_menu(app: &mut App, ui: &mut egui::Ui, chat: &Chat, palette: &Palette
     }
     widgets::menu_separator(ui, palette);
     if let Some(phone) = chat.phone()
-        && widgets::menu_item(ui, palette, Some(Icon::Copy), "Copy number")
+        && widgets::menu_item(ui, palette, Some(Icon::Copy), tr("Copy number"))
     {
         app.actions.push(Action::CopyText(format!("+{phone}")));
     }
-    if widgets::menu_item(ui, palette, Some(Icon::Info), "Info") {
+    if widgets::menu_item(ui, palette, Some(Icon::Info), tr("Info")) {
         app.actions
             .push(Action::ShowDialog(Dialog::ChatInfo(chat.id.clone())));
     }
     // Deleting reaches the phone, so it waits for a connection.
     let connected = matches!(app.link, LinkStatus::Connected);
-    if widgets::menu_item_enabled(ui, palette, Some(Icon::Trash), "Delete chat", connected) {
+    if widgets::menu_item_enabled(ui, palette, Some(Icon::Trash), tr("Delete chat"), connected) {
         app.actions
             .push(Action::ShowDialog(Dialog::ConfirmDeleteChat(
                 chat.id.clone(),
@@ -1473,23 +1485,25 @@ fn context_menu(app: &mut App, ui: &mut egui::Ui, chat: &Chat, palette: &Palette
 /// unread by hand has no count to read, so it must not announce zero.
 fn unread_announcement(title: &str, chat: &Chat) -> String {
     if chat.marked_unread && chat.unread == 0 {
-        format!("{title}, unread")
+        tr("{title}, unread").replace("{title}", title)
     } else {
-        format!("{title}, {} unread messages", chat.unread)
+        tr("{title}, {count} unread messages")
+            .replace("{title}", title)
+            .replace("{count}", &chat.unread.to_string())
     }
 }
 
 /// A chat's own notification sound, overriding Settings for this chat.
 fn sound_menu(app: &mut App, ui: &mut egui::Ui, palette: &Palette, chat: &Chat) {
     use crate::settings::NotificationSound;
-    widgets::submenu(ui, palette, Icon::Volume2, "Notification sound", |ui| {
+    widgets::submenu(ui, palette, Icon::Volume2, tr("Notification sound"), |ui| {
         let current = chat.notification_sound.clone();
         for (sound, label) in [
-            (None, "Default"),
+            (None, tr("Default")),
             (Some(NotificationSound::Receive), "Pidgin"),
-            (Some(NotificationSound::Alert), "Pidgin alert"),
-            (Some(NotificationSound::System), "System sound"),
-            (Some(NotificationSound::None), "No sound"),
+            (Some(NotificationSound::Alert), tr("Pidgin alert")),
+            (Some(NotificationSound::System), tr("System sound")),
+            (Some(NotificationSound::None), tr("No sound")),
         ] {
             let checked = current == sound;
             if widgets::menu_item(ui, palette, checked.then_some(Icon::Check), label) {
@@ -1502,12 +1516,12 @@ fn sound_menu(app: &mut App, ui: &mut egui::Ui, palette: &Palette, chat: &Chat) 
         }
         if let Some(NotificationSound::Custom(path)) = &current {
             let name = path.file_name().map_or_else(
-                || "Custom".to_owned(),
+                || tr("Custom").to_owned(),
                 |name| name.to_string_lossy().into_owned(),
             );
             widgets::menu_item(ui, palette, Some(Icon::Check), &name);
         }
-        if widgets::menu_item(ui, palette, None, "Choose a file…") {
+        if widgets::menu_item(ui, palette, None, tr("Choose a file…")) {
             app.actions.push(Action::PickChatSound(chat.id.clone()));
             ui.close();
         }

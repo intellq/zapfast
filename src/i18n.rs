@@ -121,6 +121,37 @@ pub fn resolve(interface_language: Option<Locale>) -> Locale {
     interface_language.unwrap_or_else(detect)
 }
 
+/// The interface language every thread translates into with [`tr`]: the
+/// window, the tray menu, and the messages the backend reports.
+static CURRENT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Makes `locale` the language [`tr`] translates into.
+pub fn set_current(locale: Locale) {
+    let index = Locale::ALL.iter().position(|l| *l == locale).unwrap_or(0);
+    CURRENT.store(index, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The language [`tr`] translates into.
+pub fn current() -> Locale {
+    Locale::ALL[CURRENT.load(std::sync::atomic::Ordering::Relaxed) % Locale::ALL.len()]
+}
+
+/// Translates `source` into the current interface language. Compiled
+/// catalogs borrow their translations, so the result lives as long as the
+/// source and can stand wherever the literal stood.
+pub fn tr(source: &'static str) -> &'static str {
+    match gettext(current(), source) {
+        std::borrow::Cow::Borrowed(text) => text,
+        std::borrow::Cow::Owned(_) => source,
+    }
+}
+
+/// Marks `source` for translation without translating it, for constants
+/// that [`tr`] translates where they are shown.
+pub const fn n_(source: &'static str) -> &'static str {
+    source
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

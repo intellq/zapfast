@@ -1,5 +1,6 @@
 //! The settings page.
 
+use crate::i18n::tr;
 use std::borrow::Cow;
 
 use egui::{Align, CornerRadius, Frame, Layout, Margin, Rect, Stroke, Vec2, pos2, vec2};
@@ -296,7 +297,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                             20.0,
                             palette.secondary,
                             palette.text,
-                            "Back (Esc)",
+                            tr("Back (Esc)"),
                         )
                         .clicked()
                         {
@@ -363,7 +364,7 @@ fn sections(app: &App) -> Vec<Section> {
         .custom_themes
         .status(app.settings.custom_theme.as_deref());
     let detail = if let Some(status) = status {
-        theme::theme_status(status).to_owned().into()
+        translated(locale, theme::theme_status(status))
     } else if app.custom_themes.follows_omarchy() {
         translated(locale, "Follow system uses your Omarchy colours.")
     } else {
@@ -907,7 +908,7 @@ fn theme_picker(ui: &mut egui::Ui, app: &mut App) {
             .custom_theme
             .as_deref()
             .map(fastframe_theme::display_name)
-            .unwrap_or_else(|| app.settings.theme.label());
+            .unwrap_or_else(|| tr(app.settings.theme.label()));
         let response = egui::ComboBox::from_id_salt("appearance_theme")
             .selected_text(" ")
             .width(200.0_f32.min(ui.available_width()))
@@ -917,7 +918,7 @@ fn theme_picker(ui: &mut egui::Ui, app: &mut App) {
                     if theme_option(
                         ui,
                         &palette,
-                        choice.label(),
+                        tr(choice.label()),
                         app.settings.custom_theme.is_none() && app.settings.theme == choice,
                     ) {
                         app.actions.push(Action::SetTheme(choice));
@@ -955,7 +956,7 @@ fn theme_picker(ui: &mut egui::Ui, app: &mut App) {
         );
         response.response.widget_info(|| {
             let mut info =
-                egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, ui.is_enabled(), "Theme");
+                egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, ui.is_enabled(), tr("Theme"));
             info.current_text_value = Some(selected.to_owned());
             info
         });
@@ -963,7 +964,7 @@ fn theme_picker(ui: &mut egui::Ui, app: &mut App) {
             ui,
             &palette,
             Some(Icon::ExternalLink),
-            "Open themes folder",
+            tr("Open themes folder"),
             false,
         )
         .clicked()
@@ -1000,7 +1001,9 @@ fn ffmpeg_row(chats: &mut Section, locale: Locale) {
         );
         match crate::ffmpeg::accel(&tools) {
             Some(accel) => {
-                const USES: &str = "Decodes videos with {method} when it can, and on the processor otherwise. Lighter on high-resolution HEVC and AV1.";
+                const USES: &str = crate::i18n::n_(
+                    "Decodes videos with {method} when it can, and on the processor otherwise. Lighter on high-resolution HEVC and AV1.",
+                );
                 chats.toggle_when(
                     gpu,
                     Text {
@@ -1017,7 +1020,7 @@ fn ffmpeg_row(chats: &mut Section, locale: Locale) {
                 gpu,
                 translated(
                     locale,
-                    "No graphics-card decoding (NVDEC, VA-API or Vulkan) was found for FFmpeg on this computer, so videos decode on the processor.",
+                    "No graphics-card decoding (NVDEC, VAAPI or Vulkan) was found for FFmpeg on this computer, so videos decode on the processor.",
                 ),
             ),
         }
@@ -1030,9 +1033,12 @@ fn ffmpeg_row(chats: &mut Section, locale: Locale) {
             "The Flatpak version cannot use the FFmpeg installed on the computer. Videos the built-in player cannot read open in the system player.",
         )
     } else {
-        const MISSING: &str = "FFmpeg was not found. With it, HEVC, AV1, VP9 and 10-bit H.264 videos, and HE-AAC, Opus or AC-3 sound, play inside the chat instead of in the system player. Install it and this option turns on:";
-        const FEDORA: &str = "Enable RPM Fusion first: Fedora's own ffmpeg-free leaves codecs out.";
-        const OTHER: &str = "install the ffmpeg package of your distribution.";
+        const MISSING: &str = crate::i18n::n_(
+            "FFmpeg was not found. With it, HEVC, AV1, VP9 and 10-bit H.264 videos, and HE-AAC, Opus or AC-3 sound, play inside the chat instead of in the system player. Install it and this option turns on:",
+        );
+        const FEDORA: &str =
+            crate::i18n::n_("Enable RPM Fusion first: Fedora's own ffmpeg-free leaves codecs out.");
+        const OTHER: &str = crate::i18n::n_("install the ffmpeg package of your distribution.");
         let install = crate::ffmpeg::install();
         let command = install.map_or_else(
             || crate::i18n::gettext(locale, OTHER).into_owned(),
@@ -1129,13 +1135,13 @@ pub fn wallpaper_show(app: &mut App, ui: &mut egui::Ui) {
                                 20.0,
                                 palette.secondary,
                                 palette.text,
-                                "Back to settings",
+                                tr("Back to settings"),
                             )
                             .clicked()
                             {
                                 app.actions.push(Action::Open(Page::Settings));
                             }
-                            theme::text(ui, "Set chat wallpaper", theme::bold(18.0), palette.text);
+                            theme::text(ui, tr("Set chat wallpaper"), theme::bold(18.0), palette.text);
                         },
                     );
 
@@ -1220,7 +1226,7 @@ pub fn wallpaper_show(app: &mut App, ui: &mut egui::Ui) {
                     ui.painter().text(
                         header.center(),
                         egui::Align2::CENTER_CENTER,
-                        "Wallpaper preview",
+                        tr("Wallpaper preview"),
                         theme::bold(18.0),
                         palette.text,
                     );
@@ -1278,7 +1284,7 @@ fn wallpaper_label(locale: Locale, color: WallpaperColor) -> String {
         WallpaperColor::Theme => {
             crate::i18n::pgettext(locale, "wallpaper colour", "Theme").into_owned()
         }
-        color => color.label().to_owned(),
+        color => tr(color.label()).to_owned(),
     }
 }
 
@@ -1662,7 +1668,7 @@ fn sound_control(ui: &mut egui::Ui, app: &mut App, mention: bool) {
     ];
     let selected = match &current {
         NotificationSound::Custom(path) => path.file_name().map_or_else(
-            || "Custom".to_owned(),
+            || tr("Custom").to_owned(),
             |name| name.to_string_lossy().into_owned(),
         ),
         sound => choices

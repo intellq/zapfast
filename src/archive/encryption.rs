@@ -1,5 +1,6 @@
 //! SQLCipher archive storage and automatic OS-keyring unlock.
 
+use crate::i18n::tr;
 use std::{fs, io::Read, path::Path};
 
 use anyhow::{Context, Result, ensure};
@@ -25,7 +26,9 @@ fn plaintext(path: &Path) -> Result<bool> {
 }
 
 pub(super) fn key_for(path: &Path) -> Result<Zeroizing<[u8; 32]>> {
-    let parent = path.parent().context("Archive has no parent directory")?;
+    let parent = path
+        .parent()
+        .context(tr("Archive has no parent directory"))?;
     fs::create_dir_all(parent)?;
     // Separate profiles must not overwrite each other's keys. The credential
     // label contains a digest, never a user path, phone number or message data.
@@ -43,10 +46,10 @@ pub(super) fn key_for(path: &Path) -> Result<Zeroizing<[u8; 32]>> {
     let store = apple_native_keyring_store::keychain::Store::new();
     #[cfg(windows)]
     let store = windows_native_keyring_store::Store::new();
-    let store = store.context("Unlock your OS keyring and restart ZapFast")?;
+    let store = store.context(tr("Unlock your OS keyring and restart ZapFast"))?;
     let entry = store
         .build("rocks.zapfast.ZapFast", &identity, None)
-        .context("The OS keyring could not open ZapFast's archive key")?;
+        .context(tr("The OS keyring could not open ZapFast's archive key"))?;
     key_from_entry(path, &entry)
 }
 
@@ -56,7 +59,7 @@ fn key_from_entry(path: &Path, entry: &keyring_core::Entry) -> Result<Zeroizing<
             let secret = Zeroizing::new(secret);
             ensure!(
                 secret.len() == 32,
-                "The archive key in the OS keyring is invalid"
+                tr("The archive key in the OS keyring is invalid")
             );
             let mut key = Zeroizing::new([0; 32]);
             key.copy_from_slice(&secret);
@@ -65,26 +68,28 @@ fn key_from_entry(path: &Path, entry: &keyring_core::Entry) -> Result<Zeroizing<
         Err(keyring_core::Error::NoEntry) => {
             ensure!(
                 plaintext(path)?,
-                "The archive is encrypted but its OS keyring key is missing. Restore the original keyring; the archive has not been changed"
+                tr(
+                    "The archive is encrypted but its OS keyring key is missing. Restore the original keyring; the archive has not been changed"
+                )
             );
             let mut key = Zeroizing::new([0; 32]);
-            getrandom::fill(key.as_mut()).context("Could not generate an archive key")?;
+            getrandom::fill(key.as_mut()).context(tr("Could not generate an archive key"))?;
             entry
                 .set_secret(key.as_ref())
-                .context("Could not save the archive key in the OS keyring")?;
+                .context(tr("Could not save the archive key in the OS keyring"))?;
             // Read back before touching the only copy of the message history.
             let saved = Zeroizing::new(
                 entry
                     .get_secret()
-                    .context("Could not verify the saved archive key")?,
+                    .context(tr("Could not verify the saved archive key"))?,
             );
             ensure!(
                 saved.as_slice() == key.as_ref(),
-                "The OS keyring did not retain the archive key"
+                tr("The OS keyring did not retain the archive key")
             );
             Ok(key)
         }
-        Err(error) => Err(error).context("Unlock your OS keyring and restart ZapFast"),
+        Err(error) => Err(error).context(tr("Unlock your OS keyring and restart ZapFast")),
     }
 }
 
@@ -104,17 +109,19 @@ fn keyed(path: &Path, key: &[u8; 32]) -> Result<Connection> {
     connection.pragma_update(None, "key", &*key_literal(key))?;
     let version: String = connection
         .query_row("PRAGMA cipher_version", [], |row| row.get(0))
-        .context("This build does not support encrypted archives")?;
+        .context(tr("This build does not support encrypted archives"))?;
     ensure!(
         !version.is_empty(),
-        "This build does not support encrypted archives"
+        tr("This build does not support encrypted archives")
     );
     // PRAGMA key alone does not verify a key. Read a page before any migration.
     connection
         .query_row("SELECT count(*) FROM sqlite_master", [], |row| {
             row.get::<_, i64>(0)
         })
-        .context("The archive could not be unlocked with its OS keyring key")?;
+        .context(tr(
+            "The archive could not be unlocked with its OS keyring key",
+        ))?;
     connection.pragma_update(None, "temp_store", "MEMORY")?;
     Ok(connection)
 }
@@ -148,19 +155,17 @@ pub(super) fn open(path: &Path, key: &[u8; 32]) -> Result<Connection> {
             source.query_row("PRAGMA journal_mode = DELETE", [], |row| row.get(0))?;
         ensure!(
             mode == "delete",
-            "Close other programs using the archive before migrating it"
+            tr("Close other programs using the archive before migrating it")
         );
         source.pragma_update(None, "temp_store", "MEMORY")?;
         if staging.try_exists()? {
             fs::remove_file(&staging)?;
         }
         private_file(&staging)?;
+        let not_utf8 = tr("Archive path is not UTF-8");
         source.execute(
             "ATTACH DATABASE ?1 AS encrypted KEY ?2",
-            rusqlite::params![
-                staging.to_str().context("Archive path is not UTF-8")?,
-                &*key_literal(key)
-            ],
+            rusqlite::params![staging.to_str().context(not_utf8)?, &*key_literal(key)],
         )?;
         source.query_row("SELECT sqlcipher_export('encrypted')", [], |_| Ok(()))?;
         // sqlcipher_export does not copy SQLite's application/user version.
@@ -174,7 +179,7 @@ pub(super) fn open(path: &Path, key: &[u8; 32]) -> Result<Connection> {
             verified.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
         ensure!(
             integrity == "ok",
-            "The encrypted archive failed its integrity check"
+            tr("The encrypted archive failed its integrity check")
         );
         drop(verified);
         drop(source);
@@ -184,7 +189,7 @@ pub(super) fn open(path: &Path, key: &[u8; 32]) -> Result<Connection> {
             .open(&staging)?
             .sync_all()?;
         fs::rename(&staging, path)
-            .context("Could not replace the archive with its encrypted copy")?;
+            .context(tr("Could not replace the archive with its encrypted copy"))?;
         #[cfg(unix)]
         if let Some(parent) = path.parent() {
             fs::File::open(parent)?.sync_all()?;

@@ -1,5 +1,6 @@
 //! Phone linking with a QR code or pairing code.
 
+use crate::i18n::tr;
 use egui::{Align, CornerRadius, Frame, Layout, Margin, Stroke, Vec2};
 
 use crate::app::App;
@@ -58,7 +59,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     theme::text(ui, "ZapFast", theme::bold(28.0), palette.text);
                     theme::text(
                         ui,
-                        "A native WhatsApp client.",
+                        tr("A native WhatsApp client."),
                         theme::regular(14.5),
                         palette.secondary,
                     );
@@ -78,21 +79,21 @@ fn body(app: &mut App, ui: &mut egui::Ui) {
     let palette = app.palette;
     match app.link.clone() {
         LinkStatus::Starting | LinkStatus::Connecting => {
-            busy(ui, palette.accent, "Connecting to WhatsApp…");
+            busy(ui, palette.accent, tr("Connecting to WhatsApp…"));
         }
         LinkStatus::Connected | LinkStatus::Disconnected { .. } => {
-            busy(ui, palette.accent, "Linked. Waiting for your chats…");
+            busy(ui, palette.accent, tr("Linked. Waiting for your chats…"));
         }
         LinkStatus::LoggedOut => {
             theme::icon(ui, Icon::Smartphone, 28.0, palette.warning);
             theme::paragraph(
                 ui,
-                "This computer was unlinked from your phone. Requesting a new code.",
+                tr("This computer was unlinked from your phone. Requesting a new code."),
                 theme::regular(14.0),
                 palette.text,
             );
             ui.add_space(8.0);
-            busy(ui, palette.accent, "Requesting a new code…");
+            busy(ui, palette.accent, tr("Requesting a new code…"));
         }
         LinkStatus::Failed(message) => {
             let key_lost = archive_key_lost(&message);
@@ -107,10 +108,11 @@ fn body(app: &mut App, ui: &mut egui::Ui) {
             );
             ui.add_space(12.0);
             ui.horizontal(|ui| {
-                if theme::pill_button(ui, &palette, "Try again", true).clicked() {
+                if theme::pill_button(ui, &palette, tr("Try again"), true).clicked() {
                     app.actions.push(Action::Reconnect);
                 }
-                if key_lost && theme::pill_button(ui, &palette, "Start over…", false).clicked() {
+                if key_lost && theme::pill_button(ui, &palette, tr("Start over…"), false).clicked()
+                {
                     app.actions
                         .push(Action::ShowDialog(crate::model::Dialog::ConfirmStartOver));
                 }
@@ -127,19 +129,19 @@ fn body(app: &mut App, ui: &mut egui::Ui) {
                 busy(
                     ui,
                     palette.accent,
-                    &format!("Requesting a code for +{phone}…"),
+                    &tr("Requesting a code for {phone}…").replace("{phone}", &format!("+{phone}")),
                 );
             } else if let Some(qr) = qr {
                 qr_view(app, ui, &qr);
             } else {
-                busy(ui, palette.accent, "Waiting for a code from WhatsApp…");
+                busy(ui, palette.accent, tr("Waiting for a code from WhatsApp…"));
             }
         }
     }
     ui.add_space(18.0);
     theme::paragraph(
         ui,
-        "Unofficial client. Using it may be against WhatsApp's terms of service.",
+        tr("Unofficial client. Using it may be against WhatsApp's terms of service."),
         theme::regular(11.5),
         palette.dim,
     );
@@ -163,7 +165,7 @@ fn qr_view(app: &mut App, ui: &mut egui::Ui, code: &str) {
     let palette = app.palette;
     theme::text(
         ui,
-        "Link this computer",
+        tr("Link this computer"),
         theme::semibold(16.0),
         palette.text,
     );
@@ -178,9 +180,9 @@ fn qr_view(app: &mut App, ui: &mut egui::Ui, code: &str) {
     }
     ui.add_space(4.0);
     let steps = [
-        "Open WhatsApp on your phone",
-        "Tap Menu or Settings, then Linked devices",
-        "Tap Link a device and point the phone at this code",
+        tr("Open WhatsApp on your phone"),
+        tr("Tap Menu or Settings, then Linked devices"),
+        tr("Tap Link a device and point the phone at this code"),
     ];
     for (index, step) in steps.iter().enumerate() {
         ui.horizontal(|ui| {
@@ -197,7 +199,7 @@ fn qr_view(app: &mut App, ui: &mut egui::Ui, code: &str) {
     ui.add_space(10.0);
     if theme::link(
         ui,
-        "Link with phone number instead",
+        tr("Link with phone number instead"),
         theme::medium(13.0),
         palette.link,
     )
@@ -211,14 +213,14 @@ fn pair_code_view(app: &mut App, ui: &mut egui::Ui, code: &str, phone: Option<&s
     let palette = app.palette;
     theme::text(
         ui,
-        "Enter this code on your phone",
+        tr("Enter this code on your phone"),
         theme::semibold(16.0),
         palette.text,
     );
     if let Some(phone) = phone {
         theme::text(
             ui,
-            format!("for +{phone}"),
+            tr("for {phone}").replace("{phone}", &format!("+{phone}")),
             theme::regular(13.0),
             palette.secondary,
         );
@@ -238,9 +240,9 @@ fn pair_code_view(app: &mut App, ui: &mut egui::Ui, code: &str, phone: Option<&s
         });
     ui.add_space(8.0);
     let steps = [
-        "Open WhatsApp on your phone",
-        "Tap Menu or Settings, then Linked devices",
-        "Tap Link a device, then Link with phone number instead",
+        tr("Open WhatsApp on your phone"),
+        tr("Tap Menu or Settings, then Linked devices"),
+        tr("Tap Link a device, then Link with phone number instead"),
     ];
     for (index, step) in steps.iter().enumerate() {
         ui.horizontal(|ui| {
@@ -257,7 +259,7 @@ fn pair_code_view(app: &mut App, ui: &mut egui::Ui, code: &str, phone: Option<&s
     ui.add_space(10.0);
     ui.horizontal(|ui| {
         ui.add_space((ui.available_width() - 200.0).max(0.0) / 2.0);
-        if theme::soft_button(ui, &palette, Some(Icon::Copy), "Copy code", false).clicked() {
+        if theme::soft_button(ui, &palette, Some(Icon::Copy), tr("Copy code"), false).clicked() {
             app.actions.push(Action::CopyText(code.to_owned()));
         }
     });
@@ -269,6 +271,14 @@ fn archive_key_lost(message: &str) -> bool {
     message.contains("OS keyring key is missing")
         || message.contains("archive key in the OS keyring is invalid")
         || message.contains("could not be unlocked with its OS keyring key")
+        // The same errors in the interface language.
+        || [
+            tr("The archive is encrypted but its OS keyring key is missing. Restore the original keyring; the archive has not been changed"),
+            tr("The archive key in the OS keyring is invalid"),
+            tr("The archive could not be unlocked with its OS keyring key"),
+        ]
+        .iter()
+        .any(|lost| message.contains(lost))
 }
 
 #[cfg(test)]

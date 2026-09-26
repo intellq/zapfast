@@ -4,6 +4,7 @@
 //! Its new migration drops an unused column that 0.14 still writes. Retain that
 //! column after migration, without reading or rewriting any stored secrets.
 
+use crate::i18n::tr;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -16,8 +17,8 @@ pub(super) async fn open(path: &Path) -> Result<SqliteStore> {
     // Also repair after a later migration fails, before returning its error.
     tokio::task::spawn_blocking(move || preserve_legacy_column(&path))
         .await
-        .context("Device store compatibility task failed")??;
-    store.context("Could not open the device store")
+        .context(tr("Device store compatibility task failed"))??;
+    store.context(tr("Could not open the device store"))
 }
 
 fn preserve_legacy_column(path: &Path) -> Result<()> {

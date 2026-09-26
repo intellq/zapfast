@@ -4,6 +4,7 @@
 //! its own thread because delivery and click handling can block. A click hands
 //! back the chat and the message it announced.
 
+use crate::i18n::tr;
 use crate::settings::NotificationSound;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -255,7 +256,7 @@ fn deliver(
         .summary(title)
         .body(body)
         .icon("zapfast")
-        .action("default", "Open");
+        .action("default", tr("Open"));
     if !system_sound {
         notification.hint(notify_rust::Hint::SuppressSound(true));
     }

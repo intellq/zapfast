@@ -324,39 +324,63 @@ fn find_action(app: &App) -> Action {
 
 /// Shortcuts shown in the help dialog.
 pub const SHORTCUTS: &[(&str, &str)] = &[
-    ("Ctrl+K / Ctrl+Shift+F", "Search chats"),
-    ("Ctrl+F", "Search the open chat or the settings"),
+    ("Ctrl+K / Ctrl+Shift+F", crate::i18n::n_("Search chats")),
+    (
+        "Ctrl+F",
+        crate::i18n::n_("Search the open chat or the settings"),
+    ),
     (
         "↑ / ↓, Enter",
-        "Walk the open chat's search results and jump to one",
+        crate::i18n::n_("Walk the open chat's search results and jump to one"),
     ),
-    ("Ctrl+L", "Focus the message input"),
-    ("Alt+↑ / Alt+↓", "Previous / next chat"),
-    ("Ctrl+Shift+[ / ]", "Previous / next chat, as in WhatsApp"),
-    ("↑", "Edit the previous message (when the input is empty)"),
-    ("Enter", "Send (Shift+Enter for a new line)"),
+    ("Ctrl+L", crate::i18n::n_("Focus the message input")),
+    ("Alt+↑ / Alt+↓", crate::i18n::n_("Previous / next chat")),
+    (
+        "Ctrl+Shift+[ / ]",
+        crate::i18n::n_("Previous / next chat, as in WhatsApp"),
+    ),
+    (
+        "↑",
+        crate::i18n::n_("Edit the previous message (when the input is empty)"),
+    ),
+    (
+        "Enter",
+        crate::i18n::n_("Send (Shift+Enter for a new line)"),
+    ),
     (
         "Escape",
-        "Dismiss the current action, return from search, or close the chat",
+        crate::i18n::n_("Dismiss the current action, return from search, or close the chat"),
     ),
-    ("Ctrl+N", "New chat or message yourself"),
+    ("Ctrl+N", crate::i18n::n_("New chat or message yourself")),
     (
         "Ctrl+V",
-        "Paste text, or stage a picture from the clipboard",
+        crate::i18n::n_("Paste text, or stage a picture from the clipboard"),
     ),
-    ("Ctrl+B", "Collapse or expand the chat list"),
-    ("Ctrl+End", "Jump to the newest message"),
-    ("PgUp / PgDn", "Scroll the open chat by a page"),
+    (
+        "Ctrl+B",
+        crate::i18n::n_("Collapse or expand the chat list"),
+    ),
+    ("Ctrl+End", crate::i18n::n_("Jump to the newest message")),
+    (
+        "PgUp / PgDn",
+        crate::i18n::n_("Scroll the open chat by a page"),
+    ),
     (
         "Home / End",
-        "Top / bottom of the open chat (when the input is empty)",
+        crate::i18n::n_("Top / bottom of the open chat (when the input is empty)"),
     ),
-    ("Ctrl+,", "Settings"),
-    ("Ctrl++ / Ctrl+-", "Zoom in / out"),
-    ("Ctrl+0", "Reset zoom"),
-    ("? / Ctrl+/", "Keyboard shortcuts (? when not typing)"),
-    ("Ctrl+W", "Close the window (ZapFast remains in the tray)"),
-    ("Ctrl+Q", "Quit"),
+    ("Ctrl+,", crate::i18n::n_("Settings")),
+    ("Ctrl++ / Ctrl+-", crate::i18n::n_("Zoom in / out")),
+    ("Ctrl+0", crate::i18n::n_("Reset zoom")),
+    (
+        "? / Ctrl+/",
+        crate::i18n::n_("Keyboard shortcuts (? when not typing)"),
+    ),
+    (
+        "Ctrl+W",
+        crate::i18n::n_("Close the window (ZapFast remains in the tray)"),
+    ),
+    ("Ctrl+Q", crate::i18n::n_("Quit")),
 ];
 
 /// Uses Command and Option labels on macOS.

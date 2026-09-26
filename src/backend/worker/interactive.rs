@@ -2,6 +2,7 @@
 //! Never expose flow JSON, internal ids, or template substitution parameters.
 
 use super::{Content, MessageExt, Worker, forwarded_of, mentioned_of, wa};
+use crate::i18n::tr;
 use crate::model::{InteractiveAction, InteractiveButton, InteractiveCard, InteractiveOption};
 use whatsapp_rust::waproto::buffa::Message as _;
 
@@ -218,7 +219,7 @@ impl Text {
         });
         Content::Interactive {
             text: if self.parts.is_empty() {
-                "Interactive message".into()
+                tr("Interactive message").into()
             } else {
                 self.parts.join("\n\n")
             },

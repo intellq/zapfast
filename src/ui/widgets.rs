@@ -1,5 +1,6 @@
 //! Shared avatars, fields, menus, and badges.
 
+use crate::i18n::tr;
 use std::path::Path;
 
 use egui::{
@@ -648,7 +649,7 @@ pub fn search_field(
             15.0,
             palette.secondary,
             palette.text,
-            "Clear",
+            tr("Clear"),
         )
         .clicked()
         {
@@ -1037,7 +1038,9 @@ pub fn dotted_chip(
     }
     response.widget_info(|| {
         let label = if count > 0 {
-            format!("{label}, {count} unread")
+            tr("{label}, {count} unread")
+                .replace("{label}", label)
+                .replace("{count}", &count.to_string())
         } else {
             label.to_owned()
         };

@@ -39,9 +39,9 @@ impl ThemeChoice {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Dark => "Dark",
-            Self::Light => "Light",
-            Self::System => "Follow system",
+            Self::Dark => crate::i18n::n_("Dark"),
+            Self::Light => crate::i18n::n_("Light"),
+            Self::System => crate::i18n::n_("Follow system"),
         }
     }
 }
@@ -167,59 +167,60 @@ impl WallpaperColor {
         if dark { &Self::DARK } else { &Self::LIGHT }
     }
 
-    /// The colour's English name. The interface translates [`Self::Theme`]'s.
+    /// The colour's English name, marked for translation. The interface
+    /// translates [`Self::Theme`]'s with its own context.
     pub fn label(self) -> &'static str {
         match self {
             Self::Theme => "Theme",
-            Self::Beige => "Beige",
-            Self::Cruise => "Cruise",
-            Self::Scandal => "Scandal",
-            Self::MonteCarlo => "Monte Carlo",
-            Self::HawkesBlue => "Hawkes Blue",
-            Self::Downy => "Downy",
-            Self::Seagull => "Seagull",
-            Self::Quartz => "Quartz",
-            Self::VeryLightGrey => "Very light grey",
-            Self::Orinoco => "Orinoco",
-            Self::Tusk => "Tusk",
-            Self::CapeHoney => "Cape honey",
-            Self::Caramel => "Caramel",
-            Self::RoseBud => "Rose bud",
-            Self::Bittersweet => "Bittersweet",
-            Self::RadicalRed => "Radical red",
-            Self::MandarinOrange => "Mandarin Orange",
-            Self::Flamingo => "Flamingo",
-            Self::Buccaneer => "Buccaneer",
-            Self::BreakerBay => "Breaker Bay",
-            Self::Pelorous => "Pelorous",
-            Self::ToryBlue => "Tory Blue",
-            Self::Fiord => "Fiord",
-            Self::Cinder => "Cinder",
-            Self::Tolopea => "Tolopea",
-            Self::Solitude => "Solitude",
-            Self::Canary => "Canary",
-            Self::WillowBrook => "Willow Brook",
-            Self::Black => "Black",
-            Self::Nordic => "Nordic",
-            Self::CardinGreen => "Cardin Green",
-            Self::Tangaroa => "Tangaroa",
-            Self::Tiber => "Tiber",
-            Self::BlackRussian => "Black Russian",
-            Self::Nero => "Nero",
-            Self::Marshland => "Marshland",
-            Self::Maire => "Maire",
-            Self::BlackMagic => "Black Magic",
-            Self::CocoaBrown => "Cocoa Brown",
-            Self::WoodBark => "Wood Bark",
-            Self::SealBrown => "Seal Brown",
-            Self::SealBrownDarker => "Seal Brown Darker",
-            Self::SealBrownLight => "Seal Brown Light",
-            Self::Cyprus => "Cyprus",
-            Self::BlueWhale => "Blue Whale",
-            Self::BlackPearl => "Black Pearl",
-            Self::DarkTolopea => "Tolopea",
-            Self::Woodsmoke => "Woodsmoke",
-            Self::MaireTwo => "Maire 2",
+            Self::Beige => crate::i18n::n_("Beige"),
+            Self::Cruise => crate::i18n::n_("Cruise"),
+            Self::Scandal => crate::i18n::n_("Scandal"),
+            Self::MonteCarlo => crate::i18n::n_("Monte Carlo"),
+            Self::HawkesBlue => crate::i18n::n_("Hawkes Blue"),
+            Self::Downy => crate::i18n::n_("Downy"),
+            Self::Seagull => crate::i18n::n_("Seagull"),
+            Self::Quartz => crate::i18n::n_("Quartz"),
+            Self::VeryLightGrey => crate::i18n::n_("Very light grey"),
+            Self::Orinoco => crate::i18n::n_("Orinoco"),
+            Self::Tusk => crate::i18n::n_("Tusk"),
+            Self::CapeHoney => crate::i18n::n_("Cape honey"),
+            Self::Caramel => crate::i18n::n_("Caramel"),
+            Self::RoseBud => crate::i18n::n_("Rose bud"),
+            Self::Bittersweet => crate::i18n::n_("Bittersweet"),
+            Self::RadicalRed => crate::i18n::n_("Radical red"),
+            Self::MandarinOrange => crate::i18n::n_("Mandarin Orange"),
+            Self::Flamingo => crate::i18n::n_("Flamingo"),
+            Self::Buccaneer => crate::i18n::n_("Buccaneer"),
+            Self::BreakerBay => crate::i18n::n_("Breaker Bay"),
+            Self::Pelorous => crate::i18n::n_("Pelorous"),
+            Self::ToryBlue => crate::i18n::n_("Tory Blue"),
+            Self::Fiord => crate::i18n::n_("Fiord"),
+            Self::Cinder => crate::i18n::n_("Cinder"),
+            Self::Tolopea => crate::i18n::n_("Tolopea"),
+            Self::Solitude => crate::i18n::n_("Solitude"),
+            Self::Canary => crate::i18n::n_("Canary"),
+            Self::WillowBrook => crate::i18n::n_("Willow Brook"),
+            Self::Black => crate::i18n::n_("Black"),
+            Self::Nordic => crate::i18n::n_("Nordic"),
+            Self::CardinGreen => crate::i18n::n_("Cardin Green"),
+            Self::Tangaroa => crate::i18n::n_("Tangaroa"),
+            Self::Tiber => crate::i18n::n_("Tiber"),
+            Self::BlackRussian => crate::i18n::n_("Black Russian"),
+            Self::Nero => crate::i18n::n_("Nero"),
+            Self::Marshland => crate::i18n::n_("Marshland"),
+            Self::Maire => crate::i18n::n_("Maire"),
+            Self::BlackMagic => crate::i18n::n_("Black Magic"),
+            Self::CocoaBrown => crate::i18n::n_("Cocoa Brown"),
+            Self::WoodBark => crate::i18n::n_("Wood Bark"),
+            Self::SealBrown => crate::i18n::n_("Seal Brown"),
+            Self::SealBrownDarker => crate::i18n::n_("Seal Brown Darker"),
+            Self::SealBrownLight => crate::i18n::n_("Seal Brown Light"),
+            Self::Cyprus => crate::i18n::n_("Cyprus"),
+            Self::BlueWhale => crate::i18n::n_("Blue Whale"),
+            Self::BlackPearl => crate::i18n::n_("Black Pearl"),
+            Self::DarkTolopea => crate::i18n::n_("Tolopea"),
+            Self::Woodsmoke => crate::i18n::n_("Woodsmoke"),
+            Self::MaireTwo => crate::i18n::n_("Maire 2"),
         }
     }
 
@@ -474,7 +475,7 @@ impl Default for Settings {
             group_sounds: true,
             download_folder: None,
             proxy: String::new(),
-            check_for_updates: true,
+            check_for_updates: false,
             download_updates_automatically: false,
             save_contacts_to_phone: true,
             voice_speed: 1.0,
@@ -730,7 +731,7 @@ mod tests {
             serde_json::from_str(r#"{"theme":"light","future_field":1}"#).expect("parses");
         assert_eq!(parsed.theme, ThemeChoice::Light);
         assert!(parsed.enter_sends);
-        assert!(parsed.check_for_updates);
+        assert!(!parsed.check_for_updates);
         assert!(!parsed.download_updates_automatically);
         assert!(parsed.show_wallpaper);
         assert_eq!(parsed.wallpaper_color, WallpaperColor::Theme);

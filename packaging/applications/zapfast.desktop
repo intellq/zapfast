@@ -2,10 +2,13 @@
 Type=Application
 Name=ZapFast
 GenericName=WhatsApp Client
+GenericName[pt_BR]=Cliente de WhatsApp
 Comment=A native WhatsApp client
+Comment[pt_BR]=Um cliente nativo de WhatsApp
 Exec=zapfast
 Icon=zapfast
 Terminal=false
 Categories=Network;InstantMessaging;Chat;
 Keywords=whatsapp;chat;messaging;
+Keywords[pt_BR]=whatsapp;conversa;mensagens;bate-papo;
 StartupWMClass=zapfast

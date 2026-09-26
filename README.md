@@ -26,6 +26,22 @@ Este fork acompanha o [projeto original](https://github.com/crmne/zapfast)
 até o commit [`1f2c4d3`](https://github.com/crmne/zapfast/commit/1f2c4d3).
 Além das novidades do upstream, esta branch inclui as seguintes mudanças:
 
+- **Interface inteiramente em português brasileiro.** Com o idioma pt-BR, todo
+  texto visível ao usuário aparece em português: menus e dicas, diálogos,
+  avisos, mensagens de erro vindas do backend (conexão, proxy, microfone,
+  chaveiro do sistema, figurinhas, enquetes), seletores de arquivo, nomes de
+  temas e cores de fundo, os itens da bandeja do sistema, o menu do macOS e o
+  botão **Abrir** das notificações. O atalho do menu de aplicativos e o item
+  de inicialização automática também têm nome e descrição em pt-BR. Ao trocar
+  o idioma em **Configurações**, os itens da bandeja acompanham na hora, sem
+  reiniciar. Termos técnicos (GIF, proxy, TLS, WebSocket, FFmpeg, VAAPI)
+  seguem em inglês. Ficam em inglês de propósito apenas o modo de demonstração,
+  a ajuda da linha de comando e os logs.
+- **Verificação de atualizações desligada por padrão.** O aviso de nova versão
+  e o download automático apontam para as versões do projeto original, não
+  para este fork. Por isso, **Verificar atualizações** e **Baixar atualizações
+  automaticamente** vêm desligadas em instalações novas; atualize o fork pelo
+  [`atualizar.sh`](atualizar.sh).
 - **Links clicáveis desde o primeiro clique.** Em conversas longas, a
   virtualização do histórico mudava o identificador dos elementos entre o
   pressionamento e a soltura do mouse. O ponteiro indicava um link, mas o
@@ -84,14 +100,14 @@ Além das novidades do upstream, esta branch inclui as seguintes mudanças:
   instalar o binário em `/usr/local/bin/zapfast`. A compilação usa todas as
   threads lógicas detectadas por `nproc`, tanto nos jobs do Cargo quanto nas
   unidades de geração de código do perfil release.
-- **Exclusão confirmada e sincronizada.** O submenu **Delete for me** abre uma
+- **Exclusão confirmada e sincronizada.** O submenu **Apagar para mim** abre uma
   confirmação com **OK** e **Cancelar** em português. A caixa **Apagar também
   no celular** vem marcada: nesse caso o ZapFast envia a exclusão "para mim"
   com a chave e o horário original da mensagem ao WhatsApp, e só apaga sua
   cópia local após a operação ser aceita. O envio com horário foi confirmado
   em teste manual no Android. Se a caixa for desmarcada,
   só o arquivo local é alterado; **Cancelar** não apaga nada. Isso não é
-  **Delete for everyone**: outras pessoas conservam suas cópias.
+  **Apagar para todos**: outras pessoas conservam suas cópias.
 - **Encaminhamento com escolha de destinatários.** A lista de conversas agora
   mostra caixas de seleção e só envia após o clique em **Enviar**; também há
   **Cancelar**. A janela usa cerca de 80% da altura disponível. Antes de
@@ -142,8 +158,8 @@ Além das novidades do upstream, esta branch inclui as seguintes mudanças:
   vídeo, ele volta ao player interno e, em último caso, ao player do sistema.
   No Flatpak a opção fica indisponível, porque o sandbox não enxerga os
   programas do sistema. Logo abaixo, recuada como subopção, **Decodificar na
-  placa de vídeo** (ligada por padrão) pede ao FFmpeg aceleração por GPU, na
-  ordem NVDEC (driver NVIDIA), VA-API (AMD e Intel) e Vulkan, conforme o que o
+  GPU** (ligada por padrão) pede ao FFmpeg aceleração por GPU, na
+  ordem NVDEC (driver NVIDIA), VAAPI (AMD e Intel) e Vulkan, conforme o que o
   `ffmpeg -hwaccels` e o hardware oferecem; se a GPU não decodificar um
   arquivo, o próprio FFmpeg segue no processador. Ela fica bloqueada quando o
   FFmpeg está desligado ou ausente, ou quando não há aceleração disponível.

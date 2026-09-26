@@ -13,6 +13,7 @@
 //! [`crate::proxy`] is the same factory shape for a configured proxy, which
 //! dials the proxy itself rather than the WhatsApp host.
 
+use crate::i18n::tr;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::{Arc, OnceLock};
@@ -175,11 +176,11 @@ where
 /// The error a dial that tried every address reports.
 fn no_address_answered(failures: &[String], kind: std::io::ErrorKind) -> std::io::Error {
     if failures.is_empty() {
-        return std::io::Error::new(kind, "the host resolved to no address");
+        return std::io::Error::new(kind, tr("the host resolved to no address"));
     }
     std::io::Error::new(
         kind,
-        format!("no address answered: {}", failures.join("; ")),
+        format!("{}: {}", tr("no address answered"), failures.join("; ")),
     )
 }
 
@@ -219,16 +220,28 @@ impl TransportFactory for HappyEyeballsTransportFactory {
         let addrs = interleave(
             tokio::net::lookup_host((host.as_str(), port))
                 .await
-                .map_err(|error| anyhow::anyhow!("Could not resolve {host}: {error}"))?
+                .map_err(|error| {
+                    let what = tr("Could not resolve {host}").replace("{host}", &host);
+                    anyhow::anyhow!("{what}: {error}")
+                })?
                 .collect(),
         );
         if addrs.is_empty() {
-            anyhow::bail!("{host} resolved to no address");
+            let what = tr("{host} resolved to no address").replace("{host}", &host);
+            anyhow::bail!("{what}");
         }
-        let (stream, addr) = dial(addrs)
-            .await
-            .map_err(|error| anyhow::anyhow!("Could not reach {host}: {error}"))?;
-        websocket(&self.connector, uri, &host, stream, &format!("to {addr}")).await
+        let (stream, addr) = dial(addrs).await.map_err(|error| {
+            let what = tr("Could not reach {host}").replace("{host}", &host);
+            anyhow::anyhow!("{what}: {error}")
+        })?;
+        websocket(
+            &self.connector,
+            uri,
+            &host,
+            stream,
+            &tr("to {address}").replace("{address}", &addr.to_string()),
+        )
+        .await
     }
 }
 
@@ -255,7 +268,10 @@ pub async fn websocket(
         .get_or_init(default_tls_connector)
         .wrap(host, stream)
         .await
-        .map_err(|error| anyhow::anyhow!("TLS {via} failed: {error}"))?;
+        .map_err(|error| {
+            let what = tr("TLS {via} failed").replace("{via}", via);
+            anyhow::anyhow!("{what}: {error}")
+        })?;
     let (ws, _) = tokio_websockets::ClientBuilder::from_uri(uri)
         .add_header(
             http::header::ORIGIN,
@@ -263,7 +279,10 @@ pub async fn websocket(
         )?
         .connect_on(stream)
         .await
-        .map_err(|error| anyhow::anyhow!("WebSocket connect {via} failed: {error}"))?;
+        .map_err(|error| {
+            let what = tr("WebSocket connection {via} failed").replace("{via}", via);
+            anyhow::anyhow!("{what}: {error}")
+        })?;
     Ok(from_websocket(ws))
 }
 

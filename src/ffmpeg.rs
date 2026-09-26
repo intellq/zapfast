@@ -30,7 +30,7 @@ pub struct Tools {
 pub enum Accel {
     /// NVIDIA's decoder, through CUDA.
     Nvdec,
-    /// VA-API, as AMD and Intel drivers offer it.
+    /// VAAPI, as AMD and Intel drivers offer it.
     Vaapi,
     /// Vulkan video decoding.
     Vulkan,
@@ -49,14 +49,14 @@ impl Accel {
     pub fn name(self) -> &'static str {
         match self {
             Accel::Nvdec => "NVIDIA NVDEC",
-            Accel::Vaapi => "VA-API",
+            Accel::Vaapi => "VAAPI",
             Accel::Vulkan => "Vulkan",
         }
     }
 }
 
 /// The graphics-card decoding this computer and `ffmpeg` both have:
-/// NVDEC with an NVIDIA driver, then VA-API, then Vulkan on a render node.
+/// NVDEC with an NVIDIA driver, then VAAPI, then Vulkan on a render node.
 /// Asked once per `ffmpeg` program.
 pub fn accel(tools: &Tools) -> Option<Accel> {
     static KNOWN: std::sync::Mutex<Option<(PathBuf, Option<Accel>)>> = std::sync::Mutex::new(None);

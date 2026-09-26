@@ -10,7 +10,7 @@ use egui::{
 };
 
 use crate::app::App;
-use crate::i18n::gettext;
+use crate::i18n::{gettext, n_};
 use crate::model::{Action, PickerTab, StickerPack, StickerShelf};
 use crate::theme::{self, Icon, Palette};
 
@@ -108,9 +108,9 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
 fn tabs(app: &mut App, ui: &mut egui::Ui, palette: &Palette, current: PickerTab) {
     ui.horizontal(|ui| {
         let entries = [
-            (PickerTab::Emoji, Icon::Smile, "Emoji"),
+            (PickerTab::Emoji, Icon::Smile, n_("Emoji")),
             (PickerTab::Gifs, Icon::Gif, "GIF"),
-            (PickerTab::Stickers, Icon::Sticker, "Stickers"),
+            (PickerTab::Stickers, Icon::Sticker, n_("Stickers")),
         ];
         let entries = entries.map(|(tab, icon, label)| (tab, icon, gettext(app.locale, label)));
         let spacing = ui.spacing().item_spacing.x;
@@ -145,15 +145,15 @@ fn search_box(
 
 fn group_name(group: emojis::Group) -> &'static str {
     match group {
-        emojis::Group::SmileysAndEmotion => "Smileys & Emotion",
-        emojis::Group::PeopleAndBody => "People & Body",
-        emojis::Group::AnimalsAndNature => "Animals & Nature",
-        emojis::Group::FoodAndDrink => "Food & Drink",
-        emojis::Group::TravelAndPlaces => "Travel & Places",
-        emojis::Group::Activities => "Activities",
-        emojis::Group::Objects => "Objects",
-        emojis::Group::Symbols => "Symbols",
-        emojis::Group::Flags => "Flags",
+        emojis::Group::SmileysAndEmotion => n_("Smileys & Emotion"),
+        emojis::Group::PeopleAndBody => n_("People & Body"),
+        emojis::Group::AnimalsAndNature => n_("Animals & Nature"),
+        emojis::Group::FoodAndDrink => n_("Food & Drink"),
+        emojis::Group::TravelAndPlaces => n_("Travel & Places"),
+        emojis::Group::Activities => n_("Activities"),
+        emojis::Group::Objects => n_("Objects"),
+        emojis::Group::Symbols => n_("Symbols"),
+        emojis::Group::Flags => n_("Flags"),
     }
 }
 
@@ -201,7 +201,7 @@ fn rows_for(
             .map(|emoji| emoji.as_str())
             .collect();
         if found.is_empty() {
-            rows.push(Row::Header("Nothing matches"));
+            rows.push(Row::Header(n_("Nothing matches")));
         } else {
             chunk(&mut rows, found, false);
         }
@@ -251,28 +251,32 @@ fn place_picker(screen: Rect, anchor: Option<Rect>, width: f32, height: f32) -> 
 /// Category tabs under an emoji grid, WhatsApp-style. The first entry stands
 /// for the grid's own recent section, whatever it is called there.
 const CATEGORIES: &[(Option<emojis::Group>, &str, &str)] = &[
-    (None, "🕒", "Frequently Used"),
+    (None, "🕒", n_("Frequently Used")),
     (
         Some(emojis::Group::SmileysAndEmotion),
         "😀",
-        "Smileys & Emotion",
+        n_("Smileys & Emotion"),
     ),
-    (Some(emojis::Group::PeopleAndBody), "👋", "People & Body"),
+    (
+        Some(emojis::Group::PeopleAndBody),
+        "👋",
+        n_("People & Body"),
+    ),
     (
         Some(emojis::Group::AnimalsAndNature),
         "🐻",
-        "Animals & Nature",
+        n_("Animals & Nature"),
     ),
-    (Some(emojis::Group::FoodAndDrink), "🍔", "Food & Drink"),
+    (Some(emojis::Group::FoodAndDrink), "🍔", n_("Food & Drink")),
     (
         Some(emojis::Group::TravelAndPlaces),
         "🚗",
-        "Travel & Places",
+        n_("Travel & Places"),
     ),
-    (Some(emojis::Group::Activities), "⚽", "Activities"),
-    (Some(emojis::Group::Objects), "💡", "Objects"),
-    (Some(emojis::Group::Symbols), "🔣", "Symbols"),
-    (Some(emojis::Group::Flags), "🏁", "Flags"),
+    (Some(emojis::Group::Activities), "⚽", n_("Activities")),
+    (Some(emojis::Group::Objects), "💡", n_("Objects")),
+    (Some(emojis::Group::Symbols), "🔣", n_("Symbols")),
+    (Some(emojis::Group::Flags), "🏁", n_("Flags")),
 ];
 
 fn category_entries(
@@ -361,14 +365,14 @@ fn emoji_tab(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
                 palette,
                 Some("emoji-search"),
                 "emoji-grid",
-                "Recent",
+                n_("Recent"),
             ) {
                 app.actions.push(Action::InsertEmoji(emoji));
             }
         },
     );
     let has_recent = shows_recent(app);
-    category_tabs(app, ui, palette, "emoji-grid", "Recent", has_recent);
+    category_tabs(app, ui, palette, "emoji-grid", n_("Recent"), has_recent);
 }
 
 /// Whether the open grid has a recent section, as it was drawn.
@@ -1086,9 +1090,13 @@ fn gif_tab(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
             gettext(
                 app.locale,
                 if bad_key {
-                    "This GIPHY API key was rejected. Create a free key at developers.giphy.com and paste it here. It is saved in your settings."
+                    n_(
+                        "This GIPHY API key was rejected. Create a free key at developers.giphy.com and paste it here. It is saved in your settings.",
+                    )
                 } else {
-                    "GIF search needs a GIPHY API key. Create a free key at developers.giphy.com and paste it here. It is saved in your settings."
+                    n_(
+                        "GIF search needs a GIPHY API key. Create a free key at developers.giphy.com and paste it here. It is saved in your settings.",
+                    )
                 },
             ),
             theme::regular(13.0),

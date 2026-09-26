@@ -8,6 +8,7 @@
 //! and moving the profile keeps every pack intact. Deleting a local pack
 //! removes its copies only.
 
+use crate::i18n::tr;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -129,7 +130,7 @@ pub fn packs(root: &Path) -> Vec<StickerPack> {
 pub fn create_local_pack(root: &Path, name: &str, now: i64) -> Result<PathBuf, String> {
     let name = name.trim();
     if name.is_empty() {
-        return Err("A pack needs a name".to_owned());
+        return Err(tr("A pack needs a name").to_owned());
     }
     let dir = super::sticker_import::unique_pack_dir(root, name)?;
     write_manifest(
@@ -149,7 +150,7 @@ pub fn create_local_pack(root: &Path, name: &str, now: i64) -> Result<PathBuf, S
 pub fn set_member(pack: &Path, sticker: &Path, member: bool) -> Result<(), String> {
     let mut manifest = read_manifest(pack)
         .filter(|manifest| manifest.local)
-        .ok_or("Only packs made in ZapFast can change")?;
+        .ok_or(tr("Only packs made in ZapFast can change"))?;
     let bytes = std::fs::read(sticker).map_err(|error| error.to_string())?;
     let file = format!("{}.webp", content_hash(&bytes));
     let target = pack.join(&file);

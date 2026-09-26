@@ -8,6 +8,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 use objc2_app_kit::{NSApplication, NSText};
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem as Native, Submenu};
 
+use crate::i18n::tr;
 use crate::model::{Action, Dialog, Page};
 
 thread_local! {
@@ -46,59 +47,59 @@ fn build_menu() -> tray_icon::menu::Result<Menu> {
     let menu = Menu::new();
     let app = Submenu::new("ZapFast", true);
     app.append_items(&[
-        &item("about", "About ZapFast", None),
+        &item("about", tr("About ZapFast"), None),
         &Native::separator(),
-        &item("settings", "Settings…", Some("Super+Comma")),
+        &item("settings", tr("Settings…"), Some("Super+Comma")),
         &Native::separator(),
         &Native::services(None),
         &Native::separator(),
-        &Native::hide(Some("Hide ZapFast")),
+        &Native::hide(Some(tr("Hide ZapFast"))),
         &Native::hide_others(None),
         &Native::show_all(None),
         &Native::separator(),
-        &item("quit", "Quit ZapFast", Some("Super+KeyQ")),
+        &item("quit", tr("Quit ZapFast"), Some("Super+KeyQ")),
     ])?;
-    let file = Submenu::new("File", true);
+    let file = Submenu::new(tr("File"), true);
     file.append_items(&[
-        &item("new", "New Chat…", Some("Super+KeyN")),
+        &item("new", tr("New Chat…"), Some("Super+KeyN")),
         &Native::separator(),
-        &item("close", "Close Window", Some("Super+KeyW")),
+        &item("close", tr("Close Window"), Some("Super+KeyW")),
     ])?;
-    let edit = Submenu::new("Edit", true);
+    let edit = Submenu::new(tr("Edit"), true);
     // Winit's view is not an NSTextView: AppKit's copy:/undo: selectors
     // cannot edit egui text. Send the same events as its keyboard shortcuts.
     edit.append_items(&[
-        &item("undo", "Undo", Some("Super+KeyZ")),
-        &item("redo", "Redo", Some("Super+Shift+KeyZ")),
+        &item("undo", tr("Undo"), Some("Super+KeyZ")),
+        &item("redo", tr("Redo"), Some("Super+Shift+KeyZ")),
         &Native::separator(),
-        &item("cut", "Cut", Some("Super+KeyX")),
-        &item("copy", "Copy", Some("Super+KeyC")),
-        &item("paste", "Paste", Some("Super+KeyV")),
-        &item("select-all", "Select All", Some("Super+KeyA")),
+        &item("cut", tr("Cut"), Some("Super+KeyX")),
+        &item("copy", tr("Copy"), Some("Super+KeyC")),
+        &item("paste", tr("Paste"), Some("Super+KeyV")),
+        &item("select-all", tr("Select All"), Some("Super+KeyA")),
         &Native::separator(),
-        &item("search", "Find…", Some("Super+KeyF")),
+        &item("search", tr("Find…"), Some("Super+KeyF")),
     ])?;
-    let view = Submenu::new("View", true);
+    let view = Submenu::new(tr("View"), true);
     view.append_items(&[
-        &item("sidebar", "Toggle Sidebar", Some("Super+KeyB")),
+        &item("sidebar", tr("Toggle Sidebar"), Some("Super+KeyB")),
         &Native::separator(),
-        &item("zoom-in", "Zoom In", Some("Super+Equal")),
-        &item("zoom-out", "Zoom Out", Some("Super+Minus")),
-        &item("zoom-reset", "Actual Size", Some("Super+Digit0")),
+        &item("zoom-in", tr("Zoom In"), Some("Super+Equal")),
+        &item("zoom-out", tr("Zoom Out"), Some("Super+Minus")),
+        &item("zoom-reset", tr("Actual Size"), Some("Super+Digit0")),
         &Native::separator(),
         &Native::fullscreen(None),
     ])?;
-    let window = Submenu::new("Window", true);
+    let window = Submenu::new(tr("Window"), true);
     window.append_items(&[
         &Native::minimize(None),
-        &Native::maximize(Some("Zoom")),
+        &Native::maximize(Some(tr("Zoom"))),
         &Native::separator(),
-        &item("show-window", "Show ZapFast", None),
+        &item("show-window", tr("Show ZapFast"), None),
     ])?;
-    let help = Submenu::new("Help", true);
+    let help = Submenu::new(tr("Help"), true);
     help.append_items(&[
-        &item("shortcuts", "Keyboard Shortcuts", Some("Super+Slash")),
-        &item("help", "ZapFast Help", None),
+        &item("shortcuts", tr("Keyboard Shortcuts"), Some("Super+Slash")),
+        &item("help", tr("ZapFast Help"), None),
     ])?;
     menu.append_items(&[&app, &file, &edit, &view, &window, &help])?;
     window.set_as_windows_menu_for_nsapp();

@@ -6,6 +6,7 @@
 //! on which sticker a change is about.
 
 use super::*;
+use crate::i18n::tr;
 use whatsapp_rust::schemas;
 
 /// The hex content hash for a WhatsApp `filehash`. WhatsApp writes standard
@@ -89,14 +90,14 @@ async fn prepare_sticker_pack(
     }
     let first = stickers
         .first()
-        .ok_or("This pack has no stickers")?
+        .ok_or(tr("This pack has no stickers"))?
         .0
         .clone();
     let (cover, thumbnail) =
         tokio::task::spawn_blocking(move || super::super::sticker_import::pack_art(&first))
             .await
             .map_err(|error| error.to_string())?
-            .ok_or("Could not draw the pack's cover")?;
+            .ok_or(tr("Could not draw the pack's cover"))?;
     let pack_id: String = rand::random::<[u8; 16]>()
         .iter()
         .map(|byte| format!("{byte:02x}"))
@@ -130,7 +131,7 @@ async fn prepare_sticker_pack(
         .sticker_pack_message
         .as_option()
         .map(sticker_pack_content)
-        .ok_or("Could not build the pack message")?;
+        .ok_or(tr("Could not build the pack message"))?;
     Ok(Prepared {
         message,
         content,
@@ -888,9 +889,10 @@ impl Worker {
                     .cloned()
             });
         let Some(pack) = pack else {
-            self.emit(Event::StickerPackPreview(Err(
-                "This sticker pack is no longer available".to_owned(),
-            )));
+            self.emit(Event::StickerPackPreview(Err(tr(
+                "This sticker pack is no longer available",
+            )
+            .to_owned())));
             return;
         };
         let name = pack.name.clone().unwrap_or_default();
@@ -917,9 +919,10 @@ impl Worker {
             return;
         }
         let Some(client) = self.client.clone() else {
-            self.emit(Event::StickerPackPreview(Err(
-                "Connect to WhatsApp to open this sticker pack".to_owned(),
-            )));
+            self.emit(Event::StickerPackPreview(Err(tr(
+                "Connect to WhatsApp to open this sticker pack",
+            )
+            .to_owned())));
             return;
         };
         if attachment_is_too_large(pack.file_length, self.attachment_limit) {
@@ -980,16 +983,21 @@ impl Worker {
         match super::super::sticker_import::copy_pack(dir, &self.packs_dir(), name) {
             Ok(name) => {
                 self.emit_stickers();
-                self.emit(Event::Info(format!("Added sticker pack \"{name}\"")));
+                self.emit(Event::Info(
+                    tr("Added sticker pack \"{name}\"").replace("{name}", &name),
+                ));
             }
-            Err(error) => self.emit(Event::Error(format!("Could not add sticker pack: {error}"))),
+            Err(error) => self.emit(Event::Error(format!(
+                "{}: {error}",
+                tr("Could not add sticker pack")
+            ))),
         }
     }
 
     /// Sends one of our packs to a chat as a WhatsApp sticker pack.
     pub(super) fn send_sticker_pack(&mut self, chat: ChatId, dir: PathBuf) {
         let Some(client) = self.client.clone() else {
-            self.emit(Event::Error("Not connected to WhatsApp".to_owned()));
+            self.emit(Event::Error(tr("Not connected to WhatsApp").to_owned()));
             return;
         };
         let Some(pack) = self

@@ -17,6 +17,7 @@ pub mod update;
 pub mod video_view;
 pub mod widgets;
 
+use crate::i18n::tr;
 use egui::{Align2, CornerRadius, Frame, Margin, Stroke, vec2};
 
 use crate::app::App;
@@ -220,7 +221,7 @@ fn drop_target(app: &mut App, ctx: &egui::Context) {
                         theme::icon(ui, Icon::Paperclip, 28.0, palette.accent);
                         theme::text(
                             ui,
-                            format!("Drop to send to {name}"),
+                            tr("Drop to send to {name}").replace("{name}", &name),
                             theme::semibold(15.0),
                             palette.text,
                         );
@@ -237,8 +238,9 @@ fn banner(app: &mut App, ui: &mut egui::Ui) {
         LinkStatus::Connected if app.syncing => (
             Icon::Refresh,
             match app.sync_percent {
-                Some(percent) => format!("Loading chat history… {percent}%"),
-                None => "Loading chat history…".to_owned(),
+                Some(percent) => tr("Loading chat history… {percent}%")
+                    .replace("{percent}", &percent.to_string()),
+                None => tr("Loading chat history…").to_owned(),
             },
             palette.accent,
             false,
@@ -248,7 +250,7 @@ fn banner(app: &mut App, ui: &mut egui::Ui) {
             let update = update.as_ref().expect("checked above");
             (
                 Icon::Info,
-                format!("ZapFast {} is available", update.version),
+                tr("ZapFast {version} is available").replace("{version}", &update.version),
                 palette.accent,
                 false,
                 Some(update.url.clone()),
@@ -257,14 +259,14 @@ fn banner(app: &mut App, ui: &mut egui::Ui) {
         LinkStatus::Connected => return,
         LinkStatus::Starting | LinkStatus::Connecting => (
             Icon::Refresh,
-            "Connecting to WhatsApp…".to_owned(),
+            tr("Connecting to WhatsApp…").to_owned(),
             palette.secondary,
             false,
             None,
         ),
         LinkStatus::Disconnected { reason } => (
             Icon::WifiOff,
-            format!("Offline ({reason}). Reconnecting…"),
+            tr("Offline ({reason}). Reconnecting…").replace("{reason}", reason),
             palette.warning,
             true,
             None,
@@ -278,7 +280,7 @@ fn banner(app: &mut App, ui: &mut egui::Ui) {
         ),
         LinkStatus::Unlinked { .. } | LinkStatus::LoggedOut => (
             Icon::Smartphone,
-            "Not linked to a phone".to_owned(),
+            tr("Not linked to a phone").to_owned(),
             palette.warning,
             false,
             None,
@@ -304,7 +306,7 @@ fn banner(app: &mut App, ui: &mut egui::Ui) {
                                 ui,
                                 &palette,
                                 Some(Icon::ExternalLink),
-                                "Update",
+                                tr("Update"),
                                 false,
                             )
                             .clicked()
@@ -315,7 +317,7 @@ fn banner(app: &mut App, ui: &mut egui::Ui) {
                             ui,
                             &palette,
                             Some(Icon::Refresh),
-                            "Retry",
+                            tr("Retry"),
                             false,
                         )
                         .clicked()
@@ -435,7 +437,7 @@ fn toasts(app: &mut App, ctx: &egui::Context) {
                                             14.0,
                                             palette.secondary,
                                             palette.text,
-                                            "Dismiss",
+                                            tr("Dismiss"),
                                         );
                                         // Store the rect for interaction tests.
                                         ui.ctx().data_mut(|data| {
@@ -450,7 +452,7 @@ fn toasts(app: &mut App, ctx: &egui::Context) {
                                             14.0,
                                             palette.secondary,
                                             palette.text,
-                                            "Copy this message",
+                                            tr("Copy this message"),
                                         )
                                         .clicked()
                                         {

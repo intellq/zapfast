@@ -2,6 +2,7 @@
 //!
 //! Imported packs become named directories of WebP files.
 
+use crate::i18n::tr;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -20,10 +21,10 @@ pub fn parse_signal_url(url: &str) -> Result<(String, [u8; 32]), String> {
     }
     let id = id
         .filter(|id| id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .ok_or("Missing pack_id. Copy the full signal.art link")?;
-    let key = key
-        .and_then(|key| hex_bytes(&key))
-        .ok_or("Missing or invalid pack_key. Copy the full signal.art link")?;
+        .ok_or(tr("Missing pack_id. Copy the full signal.art link"))?;
+    let key = key.and_then(|key| hex_bytes(&key)).ok_or(tr(
+        "Missing or invalid pack_key. Copy the full signal.art link",
+    ))?;
     Ok((id, key))
 }
 
@@ -49,26 +50,26 @@ pub fn decrypt_blob(payload: &[u8], pack_key: &[u8; 32]) -> Result<Vec<u8>, Stri
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
     if payload.len() < 16 + 16 + 32 {
-        return Err("The sticker data is incomplete".to_owned());
+        return Err(tr("The sticker data is incomplete").to_owned());
     }
     let mut keys = [0u8; 64];
     hkdf::Hkdf::<Sha256>::new(Some(&[0u8; 32]), pack_key)
         .expand(b"Sticker Pack", &mut keys)
-        .map_err(|_| "Could not derive the sticker key".to_owned())?;
+        .map_err(|_| tr("Could not derive the sticker key").to_owned())?;
     let (aes_key, mac_key) = keys.split_at(32);
     let (iv, rest) = payload.split_at(16);
     let (ciphertext, mac) = rest.split_at(rest.len() - 32);
     let mut hmac = <Hmac<Sha256> as KeyInit>::new_from_slice(mac_key)
-        .map_err(|_| "Could not derive the sticker key".to_owned())?;
+        .map_err(|_| tr("Could not derive the sticker key").to_owned())?;
     hmac.update(iv);
     hmac.update(ciphertext);
     hmac.verify_slice(mac)
-        .map_err(|_| "The key does not match this pack".to_owned())?;
+        .map_err(|_| tr("The key does not match this pack").to_owned())?;
     let iv: [u8; 16] = iv.try_into().expect("split at 16");
     let aes_key: [u8; 32] = aes_key.try_into().expect("split at 32");
     cbc::Decryptor::<aes::Aes256>::new(&aes_key.into(), &iv.into())
         .decrypt_padded_vec::<Pkcs7>(ciphertext)
-        .map_err(|_| "Could not decrypt the sticker pack".to_owned())
+        .map_err(|_| tr("Could not decrypt the sticker pack").to_owned())
 }
 
 /// One sticker in a Signal manifest: its id and the emoji it expresses.
@@ -121,14 +122,14 @@ fn read_varint(bytes: &[u8], pos: &mut usize) -> Result<u64, String> {
     for shift in 0..10 {
         let byte = *bytes
             .get(*pos)
-            .ok_or("The sticker manifest is incomplete".to_owned())?;
+            .ok_or(tr("The sticker manifest is incomplete").to_owned())?;
         *pos += 1;
         value |= u64::from(byte & 0x7f) << (shift * 7);
         if byte & 0x80 == 0 {
             return Ok(value);
         }
     }
-    Err("The sticker manifest contains an invalid number".to_owned())
+    Err(tr("The sticker manifest contains an invalid number").to_owned())
 }
 
 fn read_tag(bytes: &[u8], pos: &mut usize) -> Result<(u64, u64), String> {
@@ -141,7 +142,7 @@ fn read_chunk<'a>(bytes: &'a [u8], pos: &mut usize) -> Result<&'a [u8], String> 
     let end = pos
         .checked_add(length)
         .filter(|end| *end <= bytes.len())
-        .ok_or("The sticker manifest is incomplete".to_owned())?;
+        .ok_or(tr("The sticker manifest is incomplete").to_owned())?;
     let chunk = &bytes[*pos..end];
     *pos = end;
     Ok(chunk)
@@ -157,10 +158,10 @@ fn skip_field(bytes: &[u8], pos: &mut usize, wire: u64) -> Result<(), String> {
             read_chunk(bytes, pos)?;
         }
         5 => *pos += 4,
-        _ => return Err("The sticker manifest contains an unknown field".to_owned()),
+        _ => return Err(tr("The sticker manifest contains an unknown field").to_owned()),
     }
     if *pos > bytes.len() {
-        return Err("The sticker manifest is incomplete".to_owned());
+        return Err(tr("The sticker manifest is incomplete").to_owned());
     }
     Ok(())
 }
@@ -239,7 +240,7 @@ pub fn import_signal_pack(url: &str, packs: &Path) -> Result<String, String> {
     )?;
     let (title, stickers) = parse_manifest(&manifest)?;
     if stickers.is_empty() {
-        return Err("This pack contains no stickers".to_owned());
+        return Err(tr("This pack contains no stickers").to_owned());
     }
     let ids: Vec<u64> = stickers.iter().map(|sticker| sticker.id).collect();
     // Download several of the pack's files concurrently.
@@ -362,7 +363,7 @@ pub fn extract_whatsapp_pack(
     };
     files.sort_by_key(|(file, _)| rank(file));
     if files.is_empty() {
-        return Err("No stickers could be read from this pack".to_owned());
+        return Err(tr("No stickers could be read from this pack").to_owned());
     }
     std::fs::create_dir_all(dir).map_err(|error| error.to_string())?;
     let mut written = Vec::new();
@@ -442,7 +443,7 @@ pub fn pack_art(first: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
 /// Writes pack images to a new directory named after the title.
 fn write_pack(packs: &Path, title: &str, files: Vec<Vec<u8>>) -> Result<String, String> {
     if files.is_empty() {
-        return Err("No stickers could be read from this pack".to_owned());
+        return Err(tr("No stickers could be read from this pack").to_owned());
     }
     let dir = unique_pack_dir(packs, title)?;
     for (index, bytes) in files.iter().enumerate() {
@@ -552,7 +553,7 @@ pub(super) fn unique_pack_dir(root: &Path, title: &str) -> Result<PathBuf, Strin
         .take(60)
         .collect();
     let base = if clean.trim().is_empty() {
-        "Stickers".to_owned()
+        tr("Stickers").to_owned()
     } else {
         clean.trim().to_owned()
     };
@@ -569,7 +570,7 @@ pub(super) fn unique_pack_dir(root: &Path, title: &str) -> Result<PathBuf, Strin
             return Ok(dir);
         }
     }
-    Err("Too many sticker packs have this name".to_owned())
+    Err(tr("Too many sticker packs have this name").to_owned())
 }
 
 #[cfg(test)]

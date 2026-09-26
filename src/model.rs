@@ -3,6 +3,7 @@
 //! The backend translates protocol types into these models, keeping protobufs
 //! out of views and giving the archive a stable shape.
 
+use crate::i18n::tr;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -557,18 +558,18 @@ impl PollDraft {
             .map(|option| option.trim().to_owned())
             .collect();
         if question.is_empty() || question.chars().count() > 255 {
-            return Err("Enter a question of up to 255 characters.");
+            return Err(tr("Enter a question of up to 255 characters."));
         }
         if !(2..=12).contains(&options.len())
             || options
                 .iter()
                 .any(|option| option.is_empty() || option.chars().count() > 100)
         {
-            return Err("Add 2–12 answers, each with 1–100 characters.");
+            return Err(tr("Add 2–12 answers, each with 1–100 characters."));
         }
         let mut unique = std::collections::HashSet::new();
         if options.iter().any(|option| !unique.insert(option)) {
-            return Err("Each answer must be different.");
+            return Err(tr("Each answer must be different."));
         }
         Ok(Self {
             question,
@@ -652,7 +653,7 @@ impl Content {
         };
         match self {
             Self::Text { text, .. } | Self::Interactive { text, .. } => text.clone(),
-            Self::Image { caption, .. } => captioned("Photo", caption),
+            Self::Image { caption, .. } => captioned(tr("Photo"), caption),
             Self::Video {
                 caption, gif, note, ..
             } => captioned(video_label(*gif, *note), caption),
@@ -665,7 +666,7 @@ impl Content {
             Self::Text { text, .. } | Self::Interactive { text, .. } => {
                 text.lines().next().unwrap_or_default().to_owned()
             }
-            Self::Image { caption, .. } => with_caption("Photo", caption),
+            Self::Image { caption, .. } => with_caption(tr("Photo"), caption),
             Self::Video {
                 caption, gif, note, ..
             } => with_caption(video_label(*gif, *note), caption),
@@ -675,41 +676,45 @@ impl Content {
                 ..
             } => {
                 let label = if *voice_note {
-                    "Voice message"
+                    tr("Voice message")
                 } else {
-                    "Audio"
+                    tr("Audio")
                 };
                 match seconds {
                     Some(seconds) => format!("{label} ({})", crate::util::duration(*seconds)),
                     None => label.to_owned(),
                 }
             }
-            Self::Document { file_name, .. } => format!("Document: {file_name}"),
-            Self::Sticker { .. } => "Sticker".to_owned(),
-            Self::StickerPack { name, .. } => format!("Sticker pack: {name}"),
+            Self::Document { file_name, .. } => tr("Document: {name}").replace("{name}", file_name),
+            Self::Sticker { .. } => tr("Sticker").to_owned(),
+            Self::StickerPack { name, .. } => tr("Sticker pack: {name}").replace("{name}", name),
             Self::Location { name, .. } => match name {
-                Some(name) => format!("Location: {name}"),
-                None => "Location".to_owned(),
+                Some(name) => tr("Location: {name}").replace("{name}", name),
+                None => tr("Location").to_owned(),
             },
             Self::LiveLocation { ended, .. } => {
                 if *ended {
-                    "Live location ended".to_owned()
+                    tr("Live location ended").to_owned()
                 } else {
-                    "Live location".to_owned()
+                    tr("Live location").to_owned()
                 }
             }
-            Self::Contact { display_name, .. } => format!("Contact: {display_name}"),
-            Self::Poll { question, .. } => format!("Poll: {question}"),
-            Self::Revoked => "This message was deleted".to_owned(),
-            Self::Unsupported { what } => format!("Unsupported message ({what})"),
+            Self::Contact { display_name, .. } => {
+                tr("Contact: {name}").replace("{name}", display_name)
+            }
+            Self::Poll { question, .. } => tr("Poll: {question}").replace("{question}", question),
+            Self::Revoked => tr("This message was deleted").to_owned(),
+            Self::Unsupported { what } => {
+                tr("Unsupported message ({what})").replace("{what}", &unsupported_kind(what))
+            }
             Self::PhoneOnly {
                 live_location: true,
                 ..
-            } => "Live location".to_owned(),
+            } => tr("Live location").to_owned(),
             Self::PhoneOnly {
                 view_once: true, ..
-            } => "View once message".to_owned(),
-            Self::PhoneOnly { .. } => "Message on your phone".to_owned(),
+            } => tr("View once message").to_owned(),
+            Self::PhoneOnly { .. } => tr("Message on your phone").to_owned(),
         }
     }
 
@@ -782,14 +787,32 @@ impl Content {
     }
 }
 
+/// An unsupported message's kind in the interface language. The archive
+/// stores the English kind, so a later change of language still applies.
+pub fn unsupported_kind(what: &str) -> String {
+    match what {
+        "group invite" => tr("group invite"),
+        "event" => tr("event"),
+        "product" => tr("product"),
+        "payment" => tr("payment"),
+        "call" => tr("call"),
+        "animated sticker" => tr("animated sticker"),
+        "message" => tr("message"),
+        "unreadable" => tr("unreadable"),
+        "interactive message" => tr("interactive message"),
+        other => other,
+    }
+    .to_owned()
+}
+
 /// What a video is called in previews.
 fn video_label(gif: bool, note: bool) -> &'static str {
     if gif {
         "GIF"
     } else if note {
-        "Video message"
+        tr("Video message")
     } else {
-        "Video"
+        tr("Video")
     }
 }
 
