@@ -31,6 +31,8 @@ enum Row {
     Emoji {
         first: usize,
         values: Vec<&'static str>,
+        /// Recent emoji are used as they are, already in the chosen tone.
+        recent: bool,
     },
 }
 
@@ -174,13 +176,14 @@ fn rows_for(
     let query = query.trim().to_lowercase();
     let mut rows = Vec::new();
     let mut next = 0;
-    let mut chunk = |rows: &mut Vec<Row>, list: Vec<&'static str>| {
+    let mut chunk = |rows: &mut Vec<Row>, list: Vec<&'static str>, recent: bool| {
         for part in list.chunks(columns) {
             let first = next;
             next += part.len();
             rows.push(Row::Emoji {
                 first,
                 values: part.to_vec(),
+                recent,
             });
         }
     };
@@ -197,7 +200,7 @@ fn rows_for(
         if found.is_empty() {
             rows.push(Row::Header("Nothing matches"));
         } else {
-            chunk(&mut rows, found);
+            chunk(&mut rows, found, false);
         }
         return rows;
     }
@@ -208,7 +211,7 @@ fn rows_for(
     if !recent.is_empty() {
         rows.push(Row::Header(recent_label));
         let start = rows.len();
-        chunk(&mut rows, recent);
+        chunk(&mut rows, recent, true);
         for _ in rows.len() - start..3 {
             rows.push(Row::Spacer);
         }
@@ -218,6 +221,7 @@ fn rows_for(
         chunk(
             &mut rows,
             group.emojis().map(|emoji| emoji.as_str()).collect(),
+            false,
         );
     }
     rows
@@ -753,7 +757,7 @@ fn emoji_grid(
         && let Some(row) = rows.iter().position(|row| match row {
             Row::Header(_) => false,
             Row::Spacer => false,
-            Row::Emoji { first, values } => {
+            Row::Emoji { first, values, .. } => {
                 (*first..*first + values.len()).contains(&app.emoji_selected)
             }
         })
@@ -806,7 +810,12 @@ fn emoji_grid(
                         palette.secondary,
                     );
                 }
-                Row::Emoji { first, values } => {
+                Row::Emoji {
+                    first,
+                    values,
+                    recent,
+                } => {
+                    let tones = |emoji: &str| !*recent && tone_variants(emoji).is_some();
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing = Vec2::ZERO;
                         for (offset, emoji) in values.iter().enumerate() {
@@ -842,9 +851,7 @@ fn emoji_grid(
                                     1,
                                 );
                                 line.paint(ui, rect.center() - line.size() / 2.0, palette.text);
-                                if emojis::get(emoji)
-                                    .is_some_and(|entry| entry.skin_tones().is_some())
-                                {
+                                if tones(emoji) {
                                     ui.painter().line_segment(
                                         [
                                             pos2(rect.right() - 10.0, rect.bottom() - 8.0),
@@ -866,7 +873,7 @@ fn emoji_grid(
                                 .clicked()
                             {
                                 app.emoji_selected = *first + offset;
-                                if tone_variants(emoji).is_some() {
+                                if tones(emoji) {
                                     app.emoji_tone_target = Some((*emoji).to_owned());
                                 } else {
                                     app.emoji_tone_target = None;

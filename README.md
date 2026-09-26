@@ -61,7 +61,9 @@ Além das novidades do upstream, esta branch inclui as seguintes mudanças:
   para emojis compatíveis, como joinha, aperto de mãos e mãos juntas. No menu
   de reação, o seletor tem a mesma largura do seletor normal. A área de
   recentes mostra até três linhas e, ao escolher outro tom do mesmo emoji,
-  substitui a variante anterior em vez de duplicá-la.
+  substitui a variante anterior em vez de duplicá-la. Nos recentes, o emoji
+  já está no tom escolhido: ele aparece sem a seta de variantes e um clique o
+  insere (ou reage com ele) imediatamente.
 - **Atualização local assistida.** O script [`atualizar.sh`](atualizar.sh), na
   raiz do repositório, consulta a branch remota acompanhada pela branch
   atual. Se não houver atualização, apenas informa isso; se houver avanço
@@ -360,7 +362,8 @@ de sincronizar a exclusão "para mim" com o celular é uma extensão deste fork.
   and stickers, and choose a skin tone by clicking a compatible emoji, then its
   variant. The same choices are available when reacting to a message; the
   default yellow emoji remains an option. Recent emoji occupy up to three rows,
-  and choosing another skin tone replaces the older tone of that emoji there.
+  and choosing another skin tone replaces the older tone of that emoji there;
+  a recent emoji is used in its tone with one click.
   Add stickers to Favorites with a
   right-click. Favorites
   sync with your phone both ways, and Recent holds only stickers you sent. Emoji autocomplete and

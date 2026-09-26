@@ -1170,12 +1170,12 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                                     app.composer_menu_selection =
                                         selection_before.filter(|range| !range.is_empty());
                                 }
-                                if secondary_press || response.secondary_clicked() {
-                                    if app.composer_menu_selection.is_some() {
-                                        let mut state = output.state.clone();
-                                        state.cursor.set_char_range(app.composer_menu_selection);
-                                        state.store(ui.ctx(), id);
-                                    }
+                                if (secondary_press || response.secondary_clicked())
+                                    && app.composer_menu_selection.is_some()
+                                {
+                                    let mut state = output.state.clone();
+                                    state.cursor.set_char_range(app.composer_menu_selection);
+                                    state.store(ui.ctx(), id);
                                 }
                                 let selected = app.composer_menu_selection.is_some();
                                 let cut = crate::i18n::gettext(app.locale, "Cut");
@@ -2814,7 +2814,7 @@ impl egui::plugin::Plugin for SelectionLeash {
         "zapfast-selection-leash"
     }
 
-    fn input_hook(&mut self, _ctx: &egui::Context, input: &mut egui::RawInput) {
+    fn input_hook(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
         let Some(view) = *self.view.lock().unwrap_or_else(|p| p.into_inner()) else {
             self.holding = false;
             return;
@@ -2830,7 +2830,13 @@ impl egui::plugin::Plugin for SelectionLeash {
                     ..
                 } => {
                     if *pressed {
-                        self.holding = inside(pos);
+                        // The chat list's resize edge reaches a few points
+                        // into the view; a drag begun there resizes the list
+                        // and must be free to leave the view to the left.
+                        let on_list_edge = ctx
+                            .read_response(super::chats::resize_handle_id())
+                            .is_some_and(|edge| edge.rect.contains(*pos));
+                        self.holding = inside(pos) && !on_list_edge;
                     } else {
                         if self.holding && !view.contains(*pos) {
                             *pos = clamp_into(*pos, view);

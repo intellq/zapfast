@@ -11,9 +11,16 @@ use super::focus::{Stop, TabStop};
 use super::labels;
 use super::widgets;
 
+const PANEL: &str = "chats";
+
+/// The edge egui lets the reader drag to resize the list, as egui names it.
+pub fn resize_handle_id() -> egui::Id {
+    egui::Id::new(PANEL).with("__resize")
+}
+
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let palette = app.palette;
-    let panel = egui::Panel::left("chats")
+    let panel = egui::Panel::left(PANEL)
         .resizable(true)
         .default_size(app.settings.sidebar_width)
         .size_range(if theme::macos_chrome(ui.ctx()) {

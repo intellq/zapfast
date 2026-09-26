@@ -8092,6 +8092,53 @@ mod tests {
     }
 
     /// Runs one frame of the given height with these input events.
+    /// The list's resize edge reaches into the transcript, whose selection
+    /// leash once held a drag begun there inside it: the list only grew.
+    #[test]
+    fn dragging_the_chat_list_edge_left_narrows_it_in_the_full_window() {
+        for zoom in [1.0_f32, 1.3] {
+            let mut app = app();
+            app.settings.sidebar_width = 420.0;
+            app.settings.zoom = zoom;
+            let ctx = egui::Context::default();
+            app.attach(&ctx);
+            render(&mut app, &ctx);
+            for _ in 0..5 {
+                frame_sized(&mut app, &ctx, 780.0, Vec::new());
+            }
+            let handle = ctx
+                .read_response(crate::ui::chats::resize_handle_id())
+                .expect("the list has a resize handle");
+            let start = handle.rect.center();
+            let press = |pos, pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            let before = app.settings.sidebar_width;
+            frame_sized(
+                &mut app,
+                &ctx,
+                780.0,
+                vec![egui::Event::PointerMoved(start)],
+            );
+            frame_sized(&mut app, &ctx, 780.0, vec![press(start, true)]);
+            for step in 1..=8 {
+                let pos = start - egui::vec2(10.0 * step as f32, 0.0);
+                frame_sized(&mut app, &ctx, 780.0, vec![egui::Event::PointerMoved(pos)]);
+            }
+            let end = start - egui::vec2(80.0, 0.0);
+            frame_sized(&mut app, &ctx, 780.0, vec![press(end, false)]);
+            frame_sized(&mut app, &ctx, 780.0, Vec::new());
+            assert!(
+                app.settings.sidebar_width < before - 60.0,
+                "at zoom {zoom}, dragging 80 points left kept the list at {} (was {before})",
+                app.settings.sidebar_width
+            );
+        }
+    }
+
     fn frame_sized(
         app: &mut App,
         ctx: &egui::Context,
