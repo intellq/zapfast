@@ -23,7 +23,7 @@ See **[zapfast.rocks](https://zapfast.rocks)** for downloads and guides.
 ## Alterações deste fork (`intellq`)
 
 Este fork acompanha o [projeto original](https://github.com/crmne/zapfast)
-até o commit [`40b225f`](https://github.com/crmne/zapfast/commit/40b225f).
+até o commit [`8644ddb`](https://github.com/crmne/zapfast/commit/8644ddb).
 Além das novidades do upstream, esta branch inclui as seguintes mudanças:
 
 - **Links clicáveis desde o primeiro clique.** Em conversas longas, a
@@ -33,6 +33,12 @@ Além das novidades do upstream, esta branch inclui as seguintes mudanças:
   seleção de texto. Cada linha agora mantém um identificador estável, mesmo
   quando mensagens antigas entram na tela. Links em mensagens com prévia
   abrem no navegador padrão sem depender de clicar no cartão da prévia.
+- **Divisor da lista de conversas livre nos dois sentidos.** A área de
+  arrasto da borda entre a lista e a conversa invade alguns pontos do
+  histórico, e um clique ali era tratado como início de seleção de texto, que
+  prende o ponteiro dentro da conversa. A lista só alargava. Agora o clique na
+  borda redimensiona a lista para a esquerda ou para a direita, sem editar o
+  `sidebar_width` no `settings.json`.
 - **Vídeos com áudio incompatível.** Se a imagem do vídeo pode ser reproduzida
   internamente, mas a faixa sonora não pode ser decodificada (por exemplo,
   HE-AACv2), o vídeo é aberto no reprodutor padrão do sistema. Antes ele podia
@@ -98,7 +104,8 @@ antes de apagar mensagens, aba de figurinhas recebidas, recuperação de conexã
 via IPv4 quando IPv6 falha, melhorias de teclado e zoom de imagens, correção
 da preservação de mídias já baixadas, indicador de não lidas no Windows e
 chinês simplificado, papel de parede com imagem própria ou colorido pelo
-tema, transição de tema a partir do centro da janela (fastframe v0.1.3),
+tema, transição de tema a partir do centro da janela e nomes de tema sem `.json`
+(fastframe v0.1.4),
 edição de nome e foto de grupos, guia para criar temas e rótulos de
 acessibilidade nos botões. A confirmação de mensagens veio do upstream; a opção
 de sincronizar a exclusão "para mim" com o celular é uma extensão deste fork.
