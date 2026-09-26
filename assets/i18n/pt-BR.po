@@ -379,6 +379,14 @@ msgid "Cancel"
 msgstr "Cancelar"
 
 #: src/ui/dialogs.rs
+msgid "Forwarded many times: choose one chat"
+msgstr "Encaminhada muitas vezes: escolha uma conversa"
+
+#: src/ui/dialogs.rs
+msgid "Previously forwarded: choose at most one group"
+msgstr "Já encaminhada: escolha no máximo um grupo"
+
+#: src/ui/dialogs.rs
 msgid "Delete for everyone?"
 msgstr "Apagar para todos?"
 

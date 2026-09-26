@@ -436,6 +436,10 @@ pub struct App {
     pub dialog: Option<Dialog>,
     /// Chat filter in the forwarding destination dialog.
     pub forward_search: String,
+    pub forward_targets: Vec<ChatId>,
+    pub forward_max_chats: usize,
+    pub forward_max_groups: usize,
+    pending_forward: Option<(ChatId, Vec<String>)>,
     pub poll_draft: crate::model::PollDraft,
     pub poll_creating: bool,
     pub poll_voting: HashSet<(ChatId, String)>,
@@ -890,6 +894,10 @@ impl App {
             page: Page::Chats,
             dialog: None,
             forward_search: String::new(),
+            forward_targets: Vec::new(),
+            forward_max_chats: 5,
+            forward_max_groups: 5,
+            pending_forward: None,
             poll_draft: Default::default(),
             poll_creating: false,
             poll_voting: HashSet::new(),
@@ -1829,6 +1837,25 @@ impl App {
     fn handle_events(&mut self) {
         for event in self.backend.poll() {
             match event {
+                Event::ForwardInspected {
+                    from_chat,
+                    messages,
+                    limits,
+                } => {
+                    if self.pending_forward.as_ref() == Some(&(from_chat.clone(), messages.clone()))
+                    {
+                        self.pending_forward = None;
+                        if let Some((max_chats, max_groups)) = limits {
+                            self.forward_max_chats = max_chats;
+                            self.forward_max_groups = max_groups;
+                            self.forward_targets.clear();
+                            self.dialog = Some(Dialog::Forward {
+                                chat: from_chat,
+                                messages,
+                            });
+                        }
+                    }
+                }
                 Event::Link(status) => self.handle_link(status),
                 Event::Me {
                     id,
@@ -3679,16 +3706,44 @@ impl App {
             Action::Forward {
                 from_chat,
                 messages,
-                to_chat,
+                to_chats,
             } => {
+                if to_chats.is_empty() || to_chats != self.forward_targets {
+                    return;
+                }
                 self.backend.send(Command::Forward {
                     from_chat,
                     messages,
-                    to_chat,
+                    to_chats,
                 });
                 self.dialog = None;
                 self.forward_search.clear();
+                self.forward_targets.clear();
                 self.selection = None;
+            }
+            Action::ToggleForwardTarget(chat) => {
+                if !matches!(self.dialog, Some(Dialog::Forward { .. })) {
+                    return;
+                }
+                if let Some(index) = self.forward_targets.iter().position(|id| *id == chat) {
+                    self.forward_targets.remove(index);
+                } else if self.forward_targets.len() < self.forward_max_chats
+                    && self.chat(&chat).is_some_and(|row| row.can_send())
+                    && (self.forward_max_groups
+                        > self
+                            .forward_targets
+                            .iter()
+                            .filter(|id| {
+                                self.chat(id)
+                                    .is_some_and(|row| row.kind == crate::model::ChatKind::Group)
+                            })
+                            .count()
+                        || self
+                            .chat(&chat)
+                            .is_some_and(|row| row.kind != crate::model::ChatKind::Group))
+                {
+                    self.forward_targets.push(chat);
+                }
             }
             Action::SelectMessage(id) => {
                 if let Some(chat) = self.open_chat.clone() {
@@ -4270,6 +4325,16 @@ impl App {
                 }
                 if matches!(&dialog, Dialog::Forward { .. }) {
                     self.forward_search.clear();
+                    self.forward_targets.clear();
+                    if let Dialog::Forward { chat, messages } = dialog {
+                        self.pending_forward = Some((chat.clone(), messages.clone()));
+                        self.dialog = None;
+                        self.backend.send(Command::InspectForward {
+                            from_chat: chat,
+                            messages,
+                        });
+                        return;
+                    }
                 }
                 if dialog == Dialog::PairWithPhone {
                     self.pair_phone.clear();
@@ -4290,6 +4355,8 @@ impl App {
                 self.dialog = None;
                 self.invite = None;
                 self.forward_search.clear();
+                self.forward_targets.clear();
+                self.pending_forward = None;
                 self.contact_edit = None;
                 self.group_name_edit = None;
                 self.refocus_composer(ctx);
@@ -6887,11 +6954,12 @@ mod tests {
             app.selection,
             Some((chat.into(), vec!["first".into(), "third".into()]))
         );
+        app.forward_targets = vec!["2@s.whatsapp.net".into()];
         app.apply(
             Action::Forward {
                 from_chat: chat.into(),
                 messages: vec!["first".into(), "third".into()],
-                to_chat: "2@s.whatsapp.net".into(),
+                to_chats: vec!["2@s.whatsapp.net".into()],
             },
             &ctx,
         );

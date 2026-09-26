@@ -23,7 +23,7 @@ See **[zapfast.rocks](https://zapfast.rocks)** for downloads and guides.
 ## Alterações deste fork (`intellq`)
 
 Este fork acompanha o [projeto original](https://github.com/crmne/zapfast)
-até o commit [`aaab68e`](https://github.com/crmne/zapfast/commit/aaab68e).
+até o commit [`044cb6f`](https://github.com/crmne/zapfast/commit/044cb6f).
 Além das novidades do upstream, esta branch inclui as seguintes mudanças:
 
 - **Links clicáveis desde o primeiro clique.** Em conversas longas, a
@@ -75,6 +75,13 @@ Além das novidades do upstream, esta branch inclui as seguintes mudanças:
   em teste manual no Android. Se a caixa for desmarcada,
   só o arquivo local é alterado; **Cancelar** não apaga nada. Isso não é
   **Delete for everyone**: outras pessoas conservam suas cópias.
+- **Encaminhamento com escolha de destinatários.** A lista de conversas agora
+  mostra caixas de seleção e só envia após o clique em **Enviar**; também há
+  **Cancelar**. A janela usa cerca de 80% da altura disponível. Antes de
+  abri-la, o ZapFast consulta os metadados das mensagens: é possível escolher
+  até cinco conversas, no máximo um grupo para mensagem já encaminhada, ou
+  somente uma conversa quando alguma mensagem foi encaminhada muitas vezes.
+  O backend revalida os limites e envia o lote em ordem.
 
 Esta sincronização também incorpora mudanças recentes do upstream: confirmação
 antes de apagar mensagens, aba de figurinhas recebidas, recuperação de conexão

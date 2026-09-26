@@ -464,6 +464,21 @@ fn forward(app: &mut App, ui: &mut egui::Ui, from_chat: &str, messages: &[String
         format!("Forward {} messages", messages.len())
     };
     title(ui, app, &heading);
+    if app.forward_max_chats == 1 {
+        theme::text(
+            ui,
+            crate::i18n::gettext(app.locale, "Forwarded many times: choose one chat"),
+            theme::regular(13.0),
+            palette.secondary,
+        );
+    } else if app.forward_max_groups == 1 {
+        theme::text(
+            ui,
+            crate::i18n::gettext(app.locale, "Previously forwarded: choose at most one group"),
+            theme::regular(13.0),
+            palette.secondary,
+        );
+    }
     let width = ui.available_width();
     let search = super::widgets::search_field(
         ui,
@@ -493,20 +508,34 @@ fn forward(app: &mut App, ui: &mut egui::Ui, from_chat: &str, messages: &[String
     chats.sort_by_key(|chat| std::cmp::Reverse(chat.last_activity));
 
     let row_height = 52.0;
-    let max_height = (ui.ctx().content_rect().height() - 220.0).clamp(row_height * 3.0, 420.0);
-    let mut destination = None;
+    // The frame, heading, search and footer use about 160 points together.
+    let list_height = (ui.ctx().content_rect().height() * 0.8 - 160.0).max(row_height);
+    let selected_groups = app
+        .forward_targets
+        .iter()
+        .filter(|id| {
+            app.chat(id)
+                .is_some_and(|chat| chat.kind == crate::model::ChatKind::Group)
+        })
+        .count();
     egui::ScrollArea::vertical()
         .id_salt("forward-chats")
-        .max_height(max_height)
-        .auto_shrink([false, true])
+        .max_height(list_height)
+        .min_scrolled_height(list_height)
+        .auto_shrink([false, false])
         .show_rows(ui, row_height, chats.len(), |ui, range| {
             ui.spacing_mut().item_spacing.y = 0.0;
             for chat in &chats[range] {
                 let title = app.chat_title(chat);
+                let selected = app.forward_targets.contains(&chat.id);
+                let enabled = selected
+                    || (app.forward_targets.len() < app.forward_max_chats
+                        && (chat.kind != crate::model::ChatKind::Group
+                            || selected_groups < app.forward_max_groups));
                 let (rect, response) =
                     ui.allocate_exact_size(vec2(ui.available_width(), row_height), Sense::click());
                 if ui.is_rect_visible(rect) {
-                    if response.hovered() {
+                    if response.hovered() && enabled {
                         ui.painter().rect_filled(rect, 8.0, palette.surface_hover);
                     }
                     let avatar = egui::Rect::from_center_size(
@@ -527,7 +556,7 @@ fn forward(app: &mut App, ui: &mut egui::Ui, from_chat: &str, messages: &[String
                         &title,
                         theme::medium(14.5),
                         palette.text,
-                        rect.width() - 62.0,
+                        rect.width() - 92.0,
                         1,
                     );
                     line.paint(
@@ -541,11 +570,24 @@ fn forward(app: &mut App, ui: &mut egui::Ui, from_chat: &str, messages: &[String
                         Stroke::new(1.0, palette.outline),
                     );
                 }
-                if response
-                    .on_hover_cursor(egui::CursorIcon::PointingHand)
-                    .clicked()
+                let checkbox = egui::Rect::from_center_size(
+                    pos2(rect.right() - 19.0, rect.center().y),
+                    vec2(24.0, 24.0),
+                );
+                let mut checked = selected;
+                let checkbox_response = ui
+                    .add_enabled_ui(enabled, |ui| {
+                        ui.put(checkbox, egui::Checkbox::without_text(&mut checked))
+                    })
+                    .inner;
+                if enabled
+                    && (response
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .clicked()
+                        || checkbox_response.clicked())
                 {
-                    destination = Some(chat.id.clone());
+                    app.actions
+                        .push(Action::ToggleForwardTarget(chat.id.clone()));
                 }
             }
         });
@@ -562,13 +604,38 @@ fn forward(app: &mut App, ui: &mut egui::Ui, from_chat: &str, messages: &[String
         });
         ui.add_space(12.0);
     }
-    if let Some(to_chat) = destination {
-        app.actions.push(Action::Forward {
-            from_chat: from_chat.to_owned(),
-            messages: messages.to_vec(),
-            to_chat,
+    ui.add_space(8.0);
+    let count = app.forward_targets.len();
+    let limit = app.forward_max_chats;
+    ui.horizontal(|ui| {
+        theme::text(
+            ui,
+            format!("{count}/{limit}"),
+            theme::regular(13.0),
+            palette.secondary,
+        );
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if ui
+                .add_enabled(
+                    count > 0,
+                    egui::Button::new(crate::i18n::gettext(app.locale, "Send")),
+                )
+                .clicked()
+            {
+                app.actions.push(Action::Forward {
+                    from_chat: from_chat.to_owned(),
+                    messages: messages.to_vec(),
+                    to_chats: app.forward_targets.clone(),
+                });
+            }
+            if ui
+                .button(crate::i18n::gettext(app.locale, "Cancel"))
+                .clicked()
+            {
+                app.actions.push(Action::CloseDialog);
+            }
         });
-    }
+    });
 }
 
 fn forwardable(chat: &crate::model::Chat) -> bool {

@@ -166,11 +166,16 @@ pub enum Command {
         button: usize,
         choice: Option<usize>,
     },
-    /// Forwards archived messages to another chat, oldest first.
+    /// Reads forwarding limits from the original message metadata before the dialog opens.
+    InspectForward {
+        from_chat: ChatId,
+        messages: Vec<String>,
+    },
+    /// Forwards archived messages to selected chats, oldest first in each chat.
     Forward {
         from_chat: ChatId,
         messages: Vec<String>,
-        to_chat: ChatId,
+        to_chats: Vec<ChatId>,
     },
     /// Updates our typing state in a chat.
     Composing {
@@ -714,6 +719,11 @@ pub enum Command {
 
 #[derive(Debug)]
 pub enum Event {
+    ForwardInspected {
+        from_chat: ChatId,
+        messages: Vec<String>,
+        limits: Option<(usize, usize)>,
+    },
     InteractiveReplyState {
         chat: ChatId,
         message: String,

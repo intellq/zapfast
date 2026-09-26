@@ -1330,12 +1330,13 @@ pub enum Action {
     /// Starts a reply to a message in the open chat.
     Reply(String),
     CancelReply,
-    /// Forwards an archived message to another chat.
+    /// Forwards archived messages to the selected chats.
     Forward {
         from_chat: ChatId,
         messages: Vec<String>,
-        to_chat: ChatId,
+        to_chats: Vec<ChatId>,
     },
+    ToggleForwardTarget(ChatId),
     /// Starts selecting messages in the open chat, beginning with this one.
     SelectMessage(String),
     /// Adds a message to the selection or removes it.

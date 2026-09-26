@@ -4023,7 +4023,7 @@ impl Worker {
     // --- commands --------------------------------------------------------
 
     async fn handle_command(&mut self, command: Command) {
-        let destination = match &command {
+        let destinations: Vec<&ChatId> = match &command {
             Command::SendText { chat, .. }
             | Command::ReplyInteractive { chat, .. }
             | Command::SendVoice { chat, .. }
@@ -4031,11 +4031,11 @@ impl Worker {
             | Command::SendImage { chat, .. }
             | Command::SendSticker { chat, .. }
             | Command::SendGif { chat, .. }
-            | Command::CreatePoll { chat, .. } => Some(chat),
-            Command::Forward { to_chat, .. } => Some(to_chat),
-            _ => None,
+            | Command::CreatePoll { chat, .. } => vec![chat],
+            Command::Forward { to_chats, .. } => to_chats.iter().collect(),
+            _ => Vec::new(),
         };
-        if let Some(chat) = destination {
+        for chat in destinations {
             let writable = self.privacy_ready
                 && match self.archive.chat(chat) {
                     Ok(Some(chat)) => chat.can_send(),
@@ -4056,6 +4056,17 @@ impl Worker {
             }
         }
         match command {
+            Command::InspectForward {
+                from_chat,
+                messages,
+            } => {
+                let limits = self.forward_limits(&from_chat, &messages);
+                self.emit(Event::ForwardInspected {
+                    from_chat,
+                    messages,
+                    limits,
+                });
+            }
             Command::SetAttachmentLimit(limit) => {
                 self.attachment_limit = limit.clamp(1024 * 1024, ATTACHMENT_DOWNLOAD_LIMIT);
             }
@@ -4106,8 +4117,8 @@ impl Worker {
             Command::Forward {
                 from_chat,
                 messages,
-                to_chat,
-            } => self.forward_messages(from_chat, messages, to_chat),
+                to_chats,
+            } => self.forward_messages(from_chat, messages, to_chats),
             // Stores the open chat's unsent text, or clears it when empty.
             Command::SaveDraft { chat, text } => {
                 let at = std::time::SystemTime::now()
@@ -5758,24 +5769,86 @@ impl Worker {
         ));
     }
 
-    fn forward_messages(&mut self, from_chat: ChatId, messages: Vec<String>, to_chat: ChatId) {
+    fn forward_limits(&mut self, from_chat: &str, messages: &[String]) -> Option<(usize, usize)> {
+        if messages.is_empty() {
+            return None;
+        }
+        let mut max_chats = 5;
+        let mut max_groups = 5;
+        for id in messages {
+            let raw = match self.archive.raw(from_chat, id) {
+                Ok(Some(raw)) => raw,
+                _ => {
+                    self.emit(Event::Error(
+                        "The original message data is not available to forward".to_owned(),
+                    ));
+                    return None;
+                }
+            };
+            let original = match wa::Message::decode_from_slice(&raw) {
+                Ok(message) => message,
+                Err(_) => {
+                    self.emit(Event::Error(
+                        "The original message data could not be read".to_owned(),
+                    ));
+                    return None;
+                }
+            };
+            if let Some(context) = context_of(original.get_base_message()) {
+                if context.forwarding_score.unwrap_or(0) >= 5 {
+                    max_chats = 1;
+                    max_groups = 1;
+                } else if context.is_forwarded.unwrap_or(false)
+                    || context.forwarding_score.unwrap_or(0) > 0
+                {
+                    max_groups = 1;
+                }
+            }
+        }
+        Some((max_chats, max_groups))
+    }
+
+    fn forward_messages(
+        &mut self,
+        from_chat: ChatId,
+        messages: Vec<String>,
+        to_chats: Vec<ChatId>,
+    ) {
+        let Some((max_chats, max_groups)) = self.forward_limits(&from_chat, &messages) else {
+            return;
+        };
+        let group_count = to_chats
+            .iter()
+            .filter(|chat| ChatKind::from_id(chat) == ChatKind::Group)
+            .count();
+        if to_chats.is_empty()
+            || to_chats.len() > max_chats
+            || group_count > max_groups
+            || to_chats.iter().collect::<HashSet<_>>().len() != to_chats.len()
+        {
+            self.emit(Event::Error(
+                "Too many forwarding destinations for these messages".to_owned(),
+            ));
+            return;
+        }
         let Some(client) = self.client.clone() else {
             self.emit(Event::Error("Not connected to WhatsApp".to_owned()));
             return;
         };
-        let Some(jid) = Self::jid_of(&to_chat) else {
-            self.emit(Event::Error("Not connected to WhatsApp".to_owned()));
-            return;
-        };
-        let jobs: Vec<_> = messages
-            .iter()
-            .filter_map(|message| {
-                self.forward_job(&from_chat, message, &to_chat)
-                    .map(|(id, message, expiration)| {
-                        (id, (to_chat.clone(), jid.clone(), message, expiration))
-                    })
-            })
-            .collect();
+        let mut jobs = Vec::new();
+        for to_chat in &to_chats {
+            let Some(jid) = Self::jid_of(to_chat) else {
+                self.emit(Event::Error("Invalid forwarding destination".to_owned()));
+                return;
+            };
+            for message in &messages {
+                if let Some((id, message, expiration)) =
+                    self.forward_job(&from_chat, message, to_chat)
+                {
+                    jobs.push((id, (to_chat.clone(), jid.clone(), message, expiration)));
+                }
+            }
+        }
         if jobs.is_empty() {
             return;
         }
