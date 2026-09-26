@@ -384,6 +384,14 @@ fn sections(app: &App) -> Vec<Section> {
         |settings| &mut settings.enter_sends,
     );
     chats.toggle(
+        translated(locale, "Replace text with emoji"),
+        translated(
+            locale,
+            "Typing : and a name suggests emoji; Enter or Tab puts the emoji in place of the text.",
+        ),
+        |settings| &mut settings.emoji_shortcuts,
+    );
+    chats.toggle(
         translated(locale, "Download files automatically"),
         translated(locale, "Download all file types when they come into view."),
         |settings| &mut settings.auto_download,

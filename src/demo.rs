@@ -5006,6 +5006,7 @@ mod tests {
     #[test]
     fn colon_starts_emoji_autocomplete_in_the_composer() {
         let mut app = app();
+        app.settings.emoji_shortcuts = true;
         let ctx = egui::Context::default();
         app.attach(&ctx);
         render(&mut app, &ctx);
@@ -5022,6 +5023,7 @@ mod tests {
     #[test]
     fn emoji_autocomplete_selects_with_the_keyboard() {
         let mut app = app();
+        app.settings.emoji_shortcuts = true;
         let ctx = egui::Context::default();
         app.attach(&ctx);
         render(&mut app, &ctx);
@@ -5054,6 +5056,7 @@ mod tests {
     #[test]
     fn enter_keeps_its_normal_behavior_when_no_emoji_matches() {
         let mut app = app();
+        app.settings.emoji_shortcuts = true;
         let ctx = egui::Context::default();
         app.attach(&ctx);
         render(&mut app, &ctx);
@@ -5078,6 +5081,7 @@ mod tests {
     #[test]
     fn escape_dismisses_emoji_autocomplete_without_changing_text() {
         let mut app = app();
+        app.settings.emoji_shortcuts = true;
         let ctx = egui::Context::default();
         app.attach(&ctx);
         render(&mut app, &ctx);
@@ -5100,6 +5104,7 @@ mod tests {
     #[test]
     fn space_ends_emoji_autocomplete_as_literal_text() {
         let mut app = app();
+        app.settings.emoji_shortcuts = true;
         let ctx = egui::Context::default();
         app.attach(&ctx);
         render(&mut app, &ctx);
@@ -5115,6 +5120,7 @@ mod tests {
     #[test]
     fn configured_send_shortcut_bypasses_emoji_autocomplete() {
         let mut app = app();
+        app.settings.emoji_shortcuts = true;
         let ctx = egui::Context::default();
         app.settings.enter_sends = false;
         app.attach(&ctx);

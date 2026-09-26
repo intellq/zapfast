@@ -1221,6 +1221,7 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                                         .map(|range| range.primary.index.0)
                                         .unwrap_or_else(|| app.composer.chars().count());
                                     if typed_colon
+                                        && app.settings.emoji_shortcuts
                                         && let Some(at) = standalone_trigger(
                                             &app.composer,
                                             cursor,

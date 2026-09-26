@@ -565,6 +565,16 @@ msgstr "Enter envia"
 msgid "When off, Ctrl+Enter sends."
 msgstr "Quando desligado, Ctrl+Enter envia."
 
+msgid "Replace text with emoji"
+msgstr "Trocar textos por emojis"
+
+msgid ""
+"Typing : and a name suggests emoji; Enter or Tab puts the emoji in place of "
+"the text."
+msgstr ""
+"Ao digitar : seguido de um nome, sugere emojis; Enter ou Tab troca o texto "
+"pelo emoji."
+
 #: src/ui/settings.rs:352
 msgid "Download files automatically"
 msgstr "Baixar arquivos automaticamente"

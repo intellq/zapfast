@@ -562,6 +562,14 @@ msgstr ""
 msgid "When off, Ctrl+Enter sends."
 msgstr ""
 
+msgid "Replace text with emoji"
+msgstr ""
+
+msgid ""
+"Typing : and a name suggests emoji; Enter or Tab puts the emoji in place of "
+"the text."
+msgstr ""
+
 #: src/ui/settings.rs:352
 msgid "Download files automatically"
 msgstr ""

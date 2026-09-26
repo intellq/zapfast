@@ -92,6 +92,11 @@ Além das novidades do upstream, esta branch inclui as seguintes mudanças:
   até cinco conversas, no máximo um grupo para mensagem já encaminhada, ou
   somente uma conversa quando alguma mensagem foi encaminhada muitas vezes.
   O backend revalida os limites e envia o lote em ordem.
+- **Troca de texto por emoji opcional.** Em **Configurações › Conversas**, a
+  opção **Trocar textos por emojis** vem desmarcada: digitar `:` seguido de
+  letras (como `:P` ou `:D`) não abre sugestões, e Enter envia o texto como
+  foi digitado. Marcada, volta o comportamento anterior: `:nome` sugere
+  emojis e Enter ou Tab troca o texto pelo emoji escolhido.
 - **Menu de contexto na caixa de digitação.** O botão direito no compositor
   abre **Recortar**, **Copiar**, **Colar** e **Selecionar tudo**, em todas as
   plataformas (o `TextEdit` do egui não oferece menu próprio). A seleção feita
@@ -286,8 +291,9 @@ de sincronizar a exclusão "para mim" com o celular é uma extensão deste fork.
   Escape clears search and returns to the composer; another Escape closes the
   chat and saves your text draft. Drafts are kept in the encrypted archive, so
   unsent text survives closing ZapFast and restarting. Open menus, dialogs, and unfinished actions
-  are dismissed first. Type `:name` to autocomplete
-  an emoji without leaving the composer, or `@` in a group to mention a member.
+  are dismissed first. With **Replace text with emoji** on in Settings,
+  type `:name` to autocomplete an emoji without leaving the composer; it is
+  off by default, so text such as `:P` is sent as typed, or `@` in a group to mention a member.
   Reply, react with any emoji, edit, forward, delete, and check when a message was sent,
   delivered, or read. Replies can be text, attachments, voice messages,
   stickers, or GIFs. A reply never goes out without its quote: if the
