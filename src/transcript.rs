@@ -30,6 +30,75 @@ impl egui::plugin::Plugin for CopyAnnotator {
     }
 }
 
+/// Offers finished selections in the transcript as Linux's primary
+/// selection, which the middle button pastes. egui builds a selection's text
+/// only for a copy, so the frame after a selection ends asks for one, and
+/// its text, refined like a Ctrl+C, goes to the primary selection instead of
+/// the clipboard. Register it after [`CopyAnnotator`].
+#[derive(Default)]
+pub struct PrimaryTranscript {
+    /// A selection ended: ask for its text next frame.
+    pending: bool,
+    /// This frame's copy was asked for here.
+    diverting: bool,
+}
+
+/// Whether this platform has a primary selection.
+pub const HAS_PRIMARY_SELECTION: bool = cfg!(all(
+    unix,
+    not(any(
+        target_os = "macos",
+        target_os = "android",
+        target_os = "emscripten"
+    ))
+));
+
+impl egui::plugin::Plugin for PrimaryTranscript {
+    fn debug_name(&self) -> &'static str {
+        "zapfast-primary-transcript"
+    }
+
+    fn input_hook(&mut self, _ctx: &egui::Context, input: &mut egui::RawInput) {
+        if std::mem::take(&mut self.pending) {
+            input.events.push(egui::Event::Copy);
+            self.diverting = true;
+        }
+    }
+
+    fn on_end_pass(&mut self, ui: &mut egui::Ui) {
+        if self.diverting || !ui.input(|input| input.pointer.any_released()) {
+            return;
+        }
+        let selected = ui
+            .ctx()
+            .plugin_opt::<egui::text_selection::LabelSelectionState>()
+            .is_some_and(|plugin| plugin.lock().has_selection());
+        if selected {
+            self.pending = true;
+            ui.ctx().request_repaint();
+        }
+    }
+
+    fn output_hook(&mut self, _ctx: &egui::Context, output: &mut egui::FullOutput) {
+        if !std::mem::take(&mut self.diverting) {
+            return;
+        }
+        // The selection's own text comes last, after any field's.
+        let mut text = None;
+        output.platform_output.commands.retain(|command| {
+            if let egui::OutputCommand::CopyText(copied) = command {
+                text = Some(copied.clone());
+                false
+            } else {
+                true
+            }
+        });
+        if let Some(text) = text.filter(|text| !text.is_empty()) {
+            crate::app::offer_primary_selection(&text);
+        }
+    }
+}
+
 /// One drawn message body with its copy header and emoji placeholders.
 #[derive(Clone, Debug, Default)]
 pub struct Row {

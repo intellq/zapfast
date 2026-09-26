@@ -27,7 +27,6 @@ const CELL: f32 = 40.0;
 /// An emoji-grid heading or row.
 enum Row {
     Header(&'static str),
-    Spacer,
     Emoji {
         first: usize,
         values: Vec<&'static str>,
@@ -52,7 +51,10 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     let x = anchor
         .left()
         .clamp(screen.left() + 8.0, (screen.right() - WIDTH - 8.0).max(8.0));
-    let y = (anchor.top() - HEIGHT - 10.0).max(screen.top() + 8.0);
+    // The frame adds its margin and outline to HEIGHT; leave a small gap
+    // above the button that opened the picker instead of covering it.
+    let outer = HEIGHT + 2.0 * (f32::from(FRAME_MARGIN) + 1.0);
+    let y = (anchor.top() - outer - 6.0).max(screen.top() + 8.0);
     let area = egui::Area::new(egui::Id::new("picker"))
         .fixed_pos(pos2(x, y))
         .order(egui::Order::Foreground)
@@ -61,7 +63,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                 .fill(palette.overlay)
                 .stroke(Stroke::new(1.0, palette.outline))
                 .corner_radius(CornerRadius::same(theme::RADIUS + 4))
-                .inner_margin(Margin::same(10))
+                .inner_margin(Margin::same(FRAME_MARGIN))
                 .shadow(egui::epaint::Shadow {
                     offset: [0, 8],
                     blur: 28,
@@ -209,12 +211,9 @@ fn rows_for(
         .take(columns.saturating_mul(3))
         .collect();
     if !recent.is_empty() {
+        // Up to three rows, and only the rows the recent emoji fill.
         rows.push(Row::Header(recent_label));
-        let start = rows.len();
         chunk(&mut rows, recent, true);
-        for _ in rows.len() - start..3 {
-            rows.push(Row::Spacer);
-        }
     }
     for group in emojis::Group::iter() {
         rows.push(Row::Header(group_name(group)));
@@ -295,7 +294,6 @@ fn category_entries(
 fn header_row(rows: &[Row], label: &str) -> Option<usize> {
     rows.iter().position(|row| match row {
         Row::Header(found) => *found == label,
-        Row::Spacer => false,
         Row::Emoji { .. } => false,
     })
 }
@@ -356,19 +354,28 @@ fn emoji_tab(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
         vec2(width, grid_height),
         Layout::top_down(Align::Min),
         |ui| {
-            if let Some(emoji) =
-                emoji_grid(app, ui, palette, "emoji-search", "emoji-grid", "Recent")
-            {
+            if let Some(emoji) = emoji_grid(
+                app,
+                ui,
+                palette,
+                Some("emoji-search"),
+                "emoji-grid",
+                "Recent",
+            ) {
                 app.actions.push(Action::InsertEmoji(emoji));
             }
         },
     );
-    let has_recent = app
-        .settings
-        .recent_emoji
-        .iter()
-        .any(|emoji| emojis::get(emoji).is_some());
+    let has_recent = shows_recent(app);
     category_tabs(app, ui, palette, "emoji-grid", "Recent", has_recent);
+}
+
+/// Whether the open grid has a recent section, as it was drawn.
+fn shows_recent(app: &App) -> bool {
+    app.emoji_recent_shown
+        .iter()
+        .flatten()
+        .any(|emoji| emojis::get(emoji).is_some())
 }
 
 fn reaction_picker(app: &mut App, ctx: &egui::Context) {
@@ -478,7 +485,7 @@ fn reaction_picker(app: &mut App, ctx: &egui::Context) {
                                         app,
                                         ui,
                                         &palette,
-                                        "reaction-emoji-search",
+                                        None,
                                         "reaction-emoji-grid",
                                         "Frequently Used",
                                     ) {
@@ -496,11 +503,7 @@ fn reaction_picker(app: &mut App, ctx: &egui::Context) {
                                 },
                             );
                             ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
-                                let has_recent = app
-                                    .settings
-                                    .reaction_emoji
-                                    .iter()
-                                    .any(|(emoji, _)| emojis::get(emoji).is_some());
+                                let has_recent = shows_recent(app);
                                 category_tabs(
                                     app,
                                     ui,
@@ -604,13 +607,15 @@ fn emoji_grid(
     app: &mut App,
     ui: &mut egui::Ui,
     palette: &Palette,
-    search_id: &'static str,
+    search_id: Option<&'static str>,
     scroll_salt: &'static str,
     recent_label: &'static str,
 ) -> Option<String> {
     let newly_opened = app.picker_focus;
-    let search_active =
-        app.picker_focus || ui.memory(|memory| memory.has_focus(egui::Id::new(search_id)));
+    // Without a search field, the grid takes the arrows and Enter itself.
+    let search_active = search_id.is_none_or(|search_id| {
+        app.picker_focus || ui.memory(|memory| memory.has_focus(egui::Id::new(search_id)))
+    });
     let movement = search_active
         .then(|| {
             [
@@ -624,18 +629,21 @@ fn emoji_grid(
         })
         .flatten();
     let submit = search_active && take_plain_key(ui, Key::Enter);
-    let mut search = app.picker_search.clone();
-    let response = search_box(ui, palette, search_id, &mut search, "Search emoji");
-    let query_changed = search != app.picker_search;
-    if query_changed {
-        app.picker_search = search;
-        app.emoji_selected = 0;
-        app.emoji_tone_target = None;
+    let mut query_changed = false;
+    if let Some(search_id) = search_id {
+        let mut search = app.picker_search.clone();
+        let response = search_box(ui, palette, search_id, &mut search, "Search emoji");
+        query_changed = search != app.picker_search;
+        if query_changed {
+            app.picker_search = search;
+            app.emoji_selected = 0;
+            app.emoji_tone_target = None;
+        }
+        if app.picker_focus {
+            response.request_focus();
+        }
     }
-    if app.picker_focus {
-        app.picker_focus = false;
-        response.request_focus();
-    }
+    app.picker_focus = false;
     let mut picked = None;
     if let Some(variants) = app.emoji_tone_target.as_deref().and_then(tone_variants) {
         ui.horizontal(|ui| {
@@ -697,23 +705,23 @@ fn emoji_grid(
     let width = ui.available_width() - 6.0;
     let columns = ((width / CELL).floor() as usize).max(1);
     let cell = width / columns as f32;
-    let frequent: Vec<_> = app
-        .settings
-        .reaction_emoji
-        .iter()
-        .map(|(emoji, _)| emoji.clone())
-        .collect();
-    let recent = if app.reaction_target.is_some() {
-        &frequent
-    } else {
-        &app.settings.recent_emoji
-    };
+    if newly_opened || app.emoji_recent_shown.is_none() {
+        app.emoji_recent_shown = Some(if app.reaction_target.is_some() {
+            app.settings
+                .reaction_emoji
+                .iter()
+                .map(|(emoji, _)| emoji.clone())
+                .collect()
+        } else {
+            app.settings.recent_emoji.clone()
+        });
+    }
+    let recent = app.emoji_recent_shown.as_deref().unwrap_or_default();
     let rows = rows_for(&app.picker_search, recent, columns, recent_label);
     let emoji_count = rows
         .iter()
         .map(|row| match row {
             Row::Header(_) => 0,
-            Row::Spacer => 0,
             Row::Emoji { values, .. } => values.len(),
         })
         .sum();
@@ -730,7 +738,6 @@ fn emoji_grid(
             rows.iter()
                 .filter_map(|row| match row {
                     Row::Header(_) => None,
-                    Row::Spacer => None,
                     Row::Emoji { values, .. } => Some(values.as_slice()),
                 })
                 .flatten()
@@ -756,7 +763,6 @@ fn emoji_grid(
     } else if movement.is_some()
         && let Some(row) = rows.iter().position(|row| match row {
             Row::Header(_) => false,
-            Row::Spacer => false,
             Row::Emoji { first, values, .. } => {
                 (*first..*first + values.len()).contains(&app.emoji_selected)
             }
@@ -785,7 +791,6 @@ fn emoji_grid(
         .rev()
         .find_map(|row| match row {
             Row::Header(label) => Some(*label),
-            Row::Spacer => None,
             Row::Emoji { .. } => None,
         });
     ui.ctx().data_mut(|data| {
@@ -794,9 +799,6 @@ fn emoji_grid(
     grid.show_rows(ui, row_height, rows.len(), |ui, range| {
         for row in &rows[range] {
             match row {
-                Row::Spacer => {
-                    ui.allocate_exact_size(vec2(ui.available_width(), row_height), Sense::hover());
-                }
                 Row::Header(label) => {
                     let (rect, _) = ui.allocate_exact_size(
                         vec2(ui.available_width(), row_height),
@@ -922,7 +924,6 @@ mod emoji_tests {
             .iter()
             .filter_map(|row| match row {
                 Row::Emoji { values, .. } => Some(values.as_slice()),
-                Row::Spacer => None,
                 Row::Header(_) => None,
             })
             .flatten()
@@ -960,7 +961,7 @@ mod emoji_tests {
                 .iter()
                 .map(|row| match row {
                     Row::Emoji { values, .. } => values.len(),
-                    Row::Header(_) | Row::Spacer => unreachable!(),
+                    Row::Header(_) => unreachable!(),
                 })
                 .sum::<usize>(),
             24
@@ -971,10 +972,9 @@ mod emoji_tests {
             panic!("recent emoji row missing");
         };
         assert_eq!(values, &["👍🏽", "🔥"]);
-        assert!(matches!(rows.get(2), Some(Row::Spacer)));
-        assert!(matches!(rows.get(3), Some(Row::Spacer)));
+        // A short recent list takes only the rows it fills.
         assert!(matches!(
-            rows.get(4),
+            rows.get(2),
             Some(Row::Header("Smileys & Emotion"))
         ));
     }

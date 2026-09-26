@@ -392,6 +392,51 @@ fn subtitle(app: &App, chat: &Chat) -> (String, Color32) {
 /// Byte position of a freshly typed standalone trigger immediately before
 /// the text cursor. Colons inside times and URLs, and `@` inside addresses,
 /// remain ordinary text.
+/// Linux's primary selection in the composer: finished selections are
+/// offered to other applications, and a middle click pastes the selection
+/// from any of them where it was pressed.
+fn primary_selection(
+    app: &mut App,
+    ui: &egui::Ui,
+    output: &egui::text_edit::TextEditOutput,
+    response: &egui::Response,
+    id: egui::Id,
+) {
+    let frame = ui.ctx().cumulative_frame_nr();
+    if response.clicked_by(egui::PointerButton::Middle) && app.primary_paste_frame != frame {
+        app.primary_paste_frame = frame;
+        if let Some(text) = crate::app::primary_selection() {
+            app.primary_paste = Some(text);
+            ui.memory_mut(|memory| memory.request_focus(id));
+            ui.ctx().request_repaint();
+        }
+        return;
+    }
+    // Offer a selection once it is made, not at every step of a drag.
+    if ui.input(|input| input.pointer.any_down()) || !response.has_focus() {
+        return;
+    }
+    let selected = output
+        .cursor_range
+        .map(|range| {
+            let (start, end) = (range.primary.index.0, range.secondary.index.0);
+            let (start, end) = (start.min(end), start.max(end));
+            app.composer
+                .chars()
+                .skip(start)
+                .take(end - start)
+                .collect::<String>()
+        })
+        .unwrap_or_default();
+    if selected.is_empty() {
+        // Selecting the same text again takes the selection back.
+        app.primary_offered.clear();
+    } else if selected != app.primary_offered {
+        crate::app::offer_primary_selection(&selected);
+        app.primary_offered = selected;
+    }
+}
+
 fn standalone_trigger(text: &str, cursor: usize, trigger: char) -> Option<usize> {
     let cursor = text
         .char_indices()
@@ -1075,6 +1120,13 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                                 ui.ctx().data_mut(|data| data.insert_temp(wrap_id, wrap));
                                 let selection_before = egui::TextEdit::load_state(ui.ctx(), id)
                                     .and_then(|state| state.cursor.char_range());
+                                // A middle click last frame put the caret where it
+                                // was pressed; the field pastes as it does Ctrl+V.
+                                if let Some(text) = app.primary_paste.take() {
+                                    ui.input_mut(|input| {
+                                        input.events.push(egui::Event::Paste(text));
+                                    });
+                                }
                                 let output = egui::TextEdit::multiline(&mut app.composer)
                                     .id(id)
                                     .frame(Frame::NONE)
@@ -1151,6 +1203,7 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                                     ui.ctx().request_discard("composer height changed");
                                 }
                                 let response = output.response.response.clone().tab_stop(Stop::Composer);
+                                primary_selection(app, ui, &output, &response, id);
                                 ui.ctx().accesskit_node_builder(response.id, |node| node.set_label("Message"));
                                 // egui moves the caret on secondary *press*, before it
                                 // reports the completed click. Save the selection on press.

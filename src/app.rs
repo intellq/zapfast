@@ -255,6 +255,13 @@ pub struct App {
     pub composer: String,
     /// Text selection at the moment the composer's context menu opened.
     pub composer_menu_selection: Option<egui::text::CCursorRange>,
+    /// Primary-selection text a middle click is pasting into the composer.
+    pub primary_paste: Option<String>,
+    /// The frame whose middle click was taken, so a frame laid out again
+    /// does not paste twice.
+    pub primary_paste_frame: u64,
+    /// Composer text last offered as the primary selection.
+    pub primary_offered: String,
     composer_mentions: Vec<ComposerMention>,
     /// Byte offset of the `:` starting the active emoji query.
     pub emoji_start: Option<usize>,
@@ -339,6 +346,10 @@ pub struct App {
     pub emoji_tone_target: Option<String>,
     /// Whether the newly opened picker should focus search.
     pub picker_focus: bool,
+    /// The recent (or frequent) emoji as the open picker first showed them.
+    /// Choosing one reorders the saved list, but the grid keeps this order
+    /// until the picker opens again, so nothing moves under the pointer.
+    pub emoji_recent_shown: Option<Vec<String>>,
     /// Message the full emoji reaction picker is targeting.
     pub reaction_target: Option<(ChatId, String)>,
     /// Control that opened the reaction picker.
@@ -794,6 +805,9 @@ impl App {
             draft_mentions: HashMap::new(),
             composer: String::new(),
             composer_menu_selection: None,
+            primary_paste: None,
+            primary_paste_frame: u64::MAX,
+            primary_offered: String::new(),
             composer_mentions: Vec::new(),
             emoji_start: None,
             emoji_selected: 0,
@@ -844,6 +858,7 @@ impl App {
             picker_search: String::new(),
             emoji_tone_target: None,
             picker_focus: false,
+            emoji_recent_shown: None,
             reaction_target: None,
             reaction_anchor: None,
             pin_limit: crate::backend::PINNED_CHATS,
@@ -1142,6 +1157,9 @@ impl App {
         ctx.add_plugin(crate::ui::conversation::SelectionLeash::new(
             std::sync::Arc::clone(&self.selection_view),
         ));
+        if crate::transcript::HAS_PRIMARY_SELECTION {
+            ctx.add_plugin(crate::transcript::PrimaryTranscript::default());
+        }
         crate::theme::install(ctx);
         // Use a faster wheel speed for short chat rows.
         ctx.options_mut(|options| options.input_options.line_scroll_speed = 120.0);
@@ -5681,6 +5699,64 @@ pub fn wants_paste(input: &egui::InputState) -> bool {
                 } if modifiers.command
             )
     })
+}
+
+/// Offers text as the primary selection, which Linux pastes with the middle
+/// button. The handle stays open because, on X11, the offering process
+/// serves the text; on Wayland a background thread does.
+#[cfg(all(
+    unix,
+    not(any(target_os = "macos", target_os = "android", target_os = "emscripten"))
+))]
+pub fn offer_primary_selection(text: &str) {
+    use arboard::{LinuxClipboardKind, SetExtLinux};
+    thread_local! {
+        static CLIPBOARD: std::cell::RefCell<Option<arboard::Clipboard>> =
+            const { std::cell::RefCell::new(None) };
+    }
+    CLIPBOARD.with_borrow_mut(|slot| {
+        if slot.is_none() {
+            *slot = arboard::Clipboard::new().ok();
+        }
+        if let Some(clipboard) = slot
+            && let Err(error) = clipboard
+                .set()
+                .clipboard(LinuxClipboardKind::Primary)
+                .text(text.to_owned())
+        {
+            log::debug!("primary selection not set: {error}");
+        }
+    });
+}
+
+#[cfg(not(all(
+    unix,
+    not(any(target_os = "macos", target_os = "android", target_os = "emscripten"))
+)))]
+pub fn offer_primary_selection(_text: &str) {}
+
+/// The primary selection's text, from any application.
+#[cfg(all(
+    unix,
+    not(any(target_os = "macos", target_os = "android", target_os = "emscripten"))
+))]
+pub fn primary_selection() -> Option<String> {
+    use arboard::{GetExtLinux, LinuxClipboardKind};
+    arboard::Clipboard::new()
+        .ok()?
+        .get()
+        .clipboard(LinuxClipboardKind::Primary)
+        .text()
+        .ok()
+        .filter(|text| !text.is_empty())
+}
+
+#[cfg(not(all(
+    unix,
+    not(any(target_os = "macos", target_os = "android", target_os = "emscripten"))
+)))]
+pub fn primary_selection() -> Option<String> {
+    None
 }
 
 /// Clipboard image as width, height, and straight-alpha RGBA.

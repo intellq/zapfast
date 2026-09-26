@@ -65,11 +65,14 @@ Além das novidades do upstream, esta branch inclui as seguintes mudanças:
   foi preservada.
 - **Tons de pele nos emojis de mãos.** O seletor oferece as variantes de tom
   para emojis compatíveis, como joinha, aperto de mãos e mãos juntas. No menu
-  de reação, o seletor tem a mesma largura do seletor normal. A área de
-  recentes mostra até três linhas e, ao escolher outro tom do mesmo emoji,
+  de reação, o seletor tem a mesma largura do seletor normal e dispensa a
+  barra de pesquisa. A área de recentes mostra até três linhas, só as que
+  têm emojis, sem linhas em branco, e, ao escolher outro tom do mesmo emoji,
   substitui a variante anterior em vez de duplicá-la. Nos recentes, o emoji
   já está no tom escolhido: ele aparece sem a seta de variantes e um clique o
-  insere (ou reage com ele) imediatamente.
+  insere (ou reage com ele) imediatamente. Enquanto o seletor fica aberto, a
+  ordem dos recentes não muda ao escolher um deles; a nova ordem aparece na
+  próxima vez que ele for aberto.
 - **Atualização local assistida.** O script [`atualizar.sh`](atualizar.sh), na
   raiz do repositório, consulta a branch remota acompanhada pela branch
   atual. Se não houver atualização, apenas informa isso; se houver avanço
@@ -110,6 +113,16 @@ Além das novidades do upstream, esta branch inclui as seguintes mudanças:
   só o ZapFast use esses emojis. O pacote AUR `ttf-whatsapp-emoji` também é
   reconhecido, mas instala uma regra do fontconfig que pode trocar os emojis
   do desktop inteiro. Sem a fonte, a opção fica desabilitada.
+- **Seleção primária do Linux.** Texto selecionado no compositor (com o
+  mouse, pelo teclado ou com Selecionar tudo) ou no histórico da conversa
+  fica disponível como seleção primária assim que a seleção termina, para ser
+  colado com o botão do meio em outros aplicativos. No histórico, o texto é o
+  mesmo que o Ctrl+C copiaria, com o cabeçalho de cada mensagem quando a
+  seleção passa por várias; a área de transferência comum não é alterada. O clique do meio no
+  compositor cola, no ponto clicado, o texto selecionado em qualquer
+  aplicativo, com o mesmo tratamento de desfazer do Ctrl+V. Funciona em X11 e
+  em Wayland com compositores que oferecem seleção primária via data-control
+  (como o KWin); nos outros sistemas não há mudança.
 - **Menu de contexto na caixa de digitação.** O botão direito no compositor
   abre **Recortar**, **Copiar**, **Colar** e **Selecionar tudo**, em todas as
   plataformas (o `TextEdit` do egui não oferece menu próprio). A seleção feita
@@ -390,7 +403,7 @@ de sincronizar a exclusão "para mim" com o celular é uma extensão deste fork.
 - **Emoji, GIF, and sticker picker.** Search emoji and GIFs, use recent emoji
   and stickers, and choose a skin tone by clicking a compatible emoji, then its
   variant. The same choices are available when reacting to a message; the
-  default yellow emoji remains an option. Recent emoji occupy up to three rows,
+  default yellow emoji remains an option. Recent emoji occupy up to three rows, only as many as they fill,
   and choosing another skin tone replaces the older tone of that emoji there;
   a recent emoji is used in its tone with one click.
   Add stickers to Favorites with a
