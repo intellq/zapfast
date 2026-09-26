@@ -20,6 +20,69 @@ native Rust apps built with egui.
 
 See **[zapfast.rocks](https://zapfast.rocks)** for downloads and guides.
 
+## Alterações deste fork (`intellq`)
+
+Este fork acompanha o [projeto original](https://github.com/crmne/zapfast)
+até o commit [`aaab68e`](https://github.com/crmne/zapfast/commit/aaab68e).
+Além das novidades do upstream, esta branch inclui as seguintes mudanças:
+
+- **Links clicáveis desde o primeiro clique.** Em conversas longas, a
+  virtualização do histórico mudava o identificador dos elementos entre o
+  pressionamento e a soltura do mouse. O ponteiro indicava um link, mas o
+  clique não era reconhecido; alguns cliques também pareciam estender uma
+  seleção de texto. Cada linha agora mantém um identificador estável, mesmo
+  quando mensagens antigas entram na tela. Links em mensagens com prévia
+  abrem no navegador padrão sem depender de clicar no cartão da prévia.
+- **Vídeos com áudio incompatível.** Se a imagem do vídeo pode ser reproduzida
+  internamente, mas a faixa sonora não pode ser decodificada (por exemplo,
+  HE-AACv2), o vídeo é aberto no reprodutor padrão do sistema. Antes ele podia
+  tocar sem som e nem aparecia no mixer de áudio. Vídeos com áudio suportado
+  continuam tocando dentro da conversa; vídeos realmente sem faixa de áudio
+  continuam no player interno.
+- **Downloads configuráveis por tipo e tamanho.** A opção de baixar todos os
+  arquivos automaticamente continua disponível. Quando ela está desligada,
+  áudios (inclusive mensagens de voz), vídeos (inclusive GIFs e vídeos
+  redondos) e imagens (inclusive cartões interativos) podem ser ativados
+  separadamente; quando está ligada, os três controles ficam desabilitados.
+  Um slider define o limite de 1 a 64 MiB para downloads automáticos e
+  manuais. O limite é verificado antes e durante a transferência.
+- **Configurações legíveis em janelas estreitas.** Títulos e descrições podem
+  ocupar mais linhas, sem serem cortados com reticências. Cada controle
+  reserva apenas a largura necessária; Aparência e Arquivos mantêm as linhas
+  alinhadas sem grandes espaços verticais em zoom de 100% ou 130%.
+- **Mensagens recebidas usam mais largura.** O texto recebido quebra perto da
+  borda direita disponível na conversa, respeitando o alinhamento dos balões
+  próprios. A estimativa das linhas fora da tela usa a mesma largura, para
+  reduzir saltos de rolagem ao navegar pelo histórico.
+- **Reações mais limpas.** O emoji de uma reação anexada à mensagem aparece
+  sem o círculo ciano ao redor. A borda do menu usado para escolher a reação
+  foi preservada.
+- **Tons de pele nos emojis de mãos.** O seletor oferece as variantes de tom
+  para emojis compatíveis, como joinha, aperto de mãos e mãos juntas. No menu
+  de reação, o seletor tem a mesma largura do seletor normal. A área de
+  recentes mostra até três linhas e, ao escolher outro tom do mesmo emoji,
+  substitui a variante anterior em vez de duplicá-la.
+- **Atualização local assistida.** O script [`atualizar.sh`](atualizar.sh), na
+  raiz do repositório, consulta a branch remota acompanhada pela branch
+  atual. Se não houver atualização, apenas informa isso; se houver avanço
+  linear, executa `git pull --ff-only` e oferece compilar em modo release e
+  instalar o binário em `/usr/local/bin/zapfast`.
+- **Exclusão confirmada e sincronizada.** O submenu **Delete for me** abre uma
+  confirmação com **OK** e **Cancelar** em português. A caixa **Apagar também
+  no celular** vem marcada: nesse caso o ZapFast envia a exclusão "para mim"
+  com a chave e o horário original da mensagem ao WhatsApp, e só apaga sua
+  cópia local após a operação ser aceita. O envio com horário foi confirmado
+  em teste manual no Android. Se a caixa for desmarcada,
+  só o arquivo local é alterado; **Cancelar** não apaga nada. Isso não é
+  **Delete for everyone**: outras pessoas conservam suas cópias.
+
+Esta sincronização também incorpora mudanças recentes do upstream: confirmação
+antes de apagar mensagens, aba de figurinhas recebidas, recuperação de conexão
+via IPv4 quando IPv6 falha, melhorias de teclado e zoom de imagens, correção
+da preservação de mídias já baixadas, indicador de não lidas no Windows e
+chinês simplificado. A confirmação de mensagens veio do upstream; a opção
+de sincronizar a exclusão "para mim" com o celular é uma extensão deste fork.
+
 <picture>
   <source media="(prefers-color-scheme: light)" srcset="docs/screenshot-group-light.png">
   <img src="docs/screenshot-group.png" alt="A titled group chat with participant names, reactions, a quoted mention, and a poll">
@@ -35,7 +98,9 @@ See **[zapfast.rocks](https://zapfast.rocks)** for downloads and guides.
 - **Links to your phone.** Scan a QR code or link with your phone number.
   Recent history is copied to this computer after linking and stored here.
 - **Chats.** See pinned, unread, muted, and archived chats, typing indicators,
-  and message status. Search chats, saved messages, and contacts. The
+  and message status. Incoming text uses the available conversation width
+  before wrapping, while outgoing bubbles stay compact. Search chats, saved
+  messages, and contacts. The
   **Search** icon in a chat's header (or **Ctrl+F**) opens a pane beside the
   chat, as in WhatsApp Desktop, listing its matches newest first with the time
   and the line that matched. The calendar narrows them to one day, or lists
@@ -215,16 +280,23 @@ See **[zapfast.rocks](https://zapfast.rocks)** for downloads and guides.
   opens the full reaction picker for that message, so right-click is never required.
   Deleting a message asks first and says which copies go:
   deleting for everyone leaves "This message was deleted" in the chat, while
-  deleting for yourself removes the message from this computer only. Neither
-  can be undone, because the archive here is the only copy.
+  deleting for yourself removes the message from this computer and, by default,
+  sends the deletion to your phone and linked devices. Uncheck **Also delete
+  on phone** to delete only the local copy. Neither can be undone, because
+  the archive here is the only local copy.
 - **Disappearing-message timers.** Outgoing messages use the chat's known
   timer, including replies, attachments, edits, and forwards. Forwarded copies
   use the destination chat's timer. Received messages remain in the local archive
   after they expire on the phone.
   A clock badge on chat avatars shows enabled timers and follows changes from
   the phone. Changing the default timer for new chats leaves existing chats alone.
-- **View attachments.** ZapFast downloads files up to 64 MiB automatically or
-  on click. Photos, stickers, GIFs, voice messages, audio, locations, contacts,
+- **View attachments.** ZapFast can download all files automatically or only
+  selected images, videos, and audio. The individual switches are available
+  when the all-files switch is off. Set the download size limit from 1 to
+  64 MiB; it applies to automatic downloads and clicks. Stickers continue to
+  download automatically within the chosen limit, while documents need the
+  all-files switch or a click. Photos, stickers, GIFs, voice messages, audio,
+  locations, contacts,
   polls, and link previews appear in the chat. Click a downloaded JPEG, PNG,
   WebP, or GIF photo to preview it in ZapFast with fit and zoom controls, or
   choose **Open externally**. In the preview, the mouse wheel and Ctrl+wheel
