@@ -138,7 +138,10 @@ Além das novidades do upstream, esta branch inclui as seguintes mudanças:
   o botão **Abrir pasta** aparece enquanto a fonte não é encontrada) para que
   só o ZapFast use esses emojis. O pacote AUR `ttf-whatsapp-emoji` também é
   reconhecido, mas instala uma regra do fontconfig que pode trocar os emojis
-  do desktop inteiro. Sem a fonte, a opção fica desabilitada.
+  do desktop inteiro. No Windows, vale também uma pasta `fonts` ao lado do
+  `zapfast.exe`. Se a fonte já estiver num desses lugares no primeiro uso do
+  ZapFast (ainda sem `settings.json`), a opção vem ligada. Sem a fonte, a
+  opção fica desabilitada.
 - **Seleção primária do Linux.** Texto selecionado no compositor (com o
   mouse, pelo teclado ou com Selecionar tudo) ou no histórico da conversa
   fica disponível como seleção primária assim que a seleção termina, para ser

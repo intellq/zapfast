@@ -207,7 +207,13 @@ fn main() -> eframe::Result<()> {
     logging
         .init()
         .map_err(|error| eframe::Error::AppCreation(error.into()))?;
-    let settings = settings::Settings::load(&dirs.settings_file());
+    let first_run = !dirs.settings_file().exists();
+    let mut settings = settings::Settings::load(&dirs.settings_file());
+    // On the first run, a WhatsApp emoji font already in place turns its
+    // option on.
+    if first_run && !demo && zapfast::emoji::whatsapp_font_file(&dirs.emoji_font_dir()).is_some() {
+        settings.whatsapp_emoji = true;
+    }
     let demo_persistence = demo.then(|| dirs.state.join("window.ron"));
 
     #[allow(unused_mut)]
