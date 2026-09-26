@@ -180,25 +180,30 @@ struct Sound {
 
 impl Sound {
     /// Opens the file's sound, paused at `from`. A video without a sound
-    /// track, or a computer without an output device, plays silently.
-    fn open(path: &Path, from: Duration, muted: bool) -> Option<Self> {
-        let decoder = sound_decoder(path, from)?;
+    /// track, or a computer without an output device, plays silently. A
+    /// present but undecodable track goes to the system player instead.
+    fn open(path: &Path, from: Duration, muted: bool) -> Result<Option<Self>, String> {
+        let decoder = match sound_decoder(path, from) {
+            Ok(decoder) => decoder,
+            Err(_) if has_audio_track(path) == Some(false) => return Ok(None),
+            Err(error) => return Err(error),
+        };
         let device = match rodio::DeviceSinkBuilder::open_default_sink() {
             Ok(device) => device,
             Err(error) => {
                 log::warn!("video plays without sound: {error}");
-                return None;
+                return Ok(None);
             }
         };
         let sink = rodio::Player::connect_new(device.mixer());
         sink.pause();
         sink.set_volume(if muted { 0.0 } else { 1.0 });
         sink.append(decoder);
-        Some(Self {
+        Ok(Some(Self {
             device,
             sink,
             base: from,
-        })
+        }))
     }
 
     /// Queues the sound again from `from`, paused. A fresh player keeps the
@@ -207,7 +212,7 @@ impl Sound {
         let sink = rodio::Player::connect_new(self.device.mixer());
         sink.pause();
         sink.set_volume(if muted { 0.0 } else { 1.0 });
-        if let Some(decoder) = sound_decoder(path, from) {
+        if let Ok(decoder) = sound_decoder(path, from) {
             sink.append(decoder);
         }
         self.sink = sink;
@@ -223,15 +228,28 @@ impl Sound {
 fn sound_decoder(
     path: &Path,
     from: Duration,
-) -> Option<rodio::Decoder<std::io::BufReader<std::fs::File>>> {
-    let file = std::fs::File::open(path).ok()?;
+) -> Result<rodio::Decoder<std::io::BufReader<std::fs::File>>, String> {
+    let file = std::fs::File::open(path).map_err(|error| error.to_string())?;
     // Fails for a video without a sound track: the MP4's H.264 track has no
     // codec symphonia knows, so there is nothing to pick.
-    let mut decoder = rodio::Decoder::try_from(file).ok()?;
+    let mut decoder = rodio::Decoder::try_from(file).map_err(|error| error.to_string())?;
     if !from.is_zero() {
-        decoder.try_seek(from).ok()?;
+        decoder.try_seek(from).map_err(|error| error.to_string())?;
     }
-    Some(decoder)
+    Ok(decoder)
+}
+
+/// Distinguishes a genuinely silent MP4 from audio that the decoder rejected.
+fn has_audio_track(path: &Path) -> Option<bool> {
+    let file = std::fs::File::open(path).ok()?;
+    let size = file.metadata().ok()?.len();
+    let movie = mp4::Mp4Reader::read_header(std::io::BufReader::new(file), size).ok()?;
+    Some(
+        movie
+            .tracks()
+            .values()
+            .any(|track| track.track_type().ok() == Some(mp4::TrackType::Audio)),
+    )
 }
 
 struct Session {
@@ -247,6 +265,7 @@ struct Session {
     texture: Option<TextureHandle>,
     clock: Clock,
     sound: Option<Sound>,
+    unsupported_audio: bool,
     total: Duration,
 }
 
@@ -434,6 +453,17 @@ impl Player {
         self.seen.set(now);
         let mut clock = Clock::default();
         clock.seek(from, now);
+        let (sound, unsupported_audio) = if self.audible {
+            match Sound::open(path, from, self.muted) {
+                Ok(sound) => (sound, false),
+                Err(error) => {
+                    log::warn!("video audio could not be decoded: {error}");
+                    (None, true)
+                }
+            }
+        } else {
+            (None, false)
+        };
         self.session = Some(Session {
             message: message.to_owned(),
             path: path.to_owned(),
@@ -444,10 +474,8 @@ impl Player {
             decoded: false,
             texture: None,
             clock,
-            sound: self
-                .audible
-                .then(|| Sound::open(path, from, self.muted))
-                .flatten(),
+            sound,
+            unsupported_audio,
             total: Duration::ZERO,
         });
     }
@@ -456,6 +484,11 @@ impl Player {
     /// next repaint while the video plays.
     pub fn poll(&mut self, ctx: &egui::Context) -> Option<Notice> {
         let session = self.session.as_mut()?;
+        if session.unsupported_audio && !self.muted {
+            let path = session.path.clone();
+            self.session = None;
+            return Some(Notice::Unsupported(path));
+        }
         let now = Instant::now();
         if now.saturating_duration_since(self.seen.get()) > UNSEEN {
             session.pause(now);
@@ -904,6 +937,14 @@ mod tests {
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/video/sample.mp4"
     );
+    const SILENT: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/video/silent.mp4"
+    );
+    const UNSUPPORTED_AUDIO: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/video/unsupported-audio.mp4"
+    );
 
     fn collect(path: &Path, from: Duration) -> Vec<Delivery> {
         let (sender, receiver) = std::sync::mpsc::sync_channel(1024);
@@ -1020,6 +1061,33 @@ mod tests {
         };
         assert_eq!(notice, Notice::Unsupported(path));
         assert!(player.message().is_none());
+    }
+
+    #[test]
+    fn an_unsupported_audio_track_goes_to_the_system_player() {
+        let ctx = egui::Context::default();
+        let mut player = Player::new(Waker::default());
+        let path = Path::new(UNSUPPORTED_AUDIO);
+        assert_eq!(has_audio_track(path), Some(true));
+        assert!(sound_decoder(path, Duration::ZERO).is_err());
+        player.toggle("clip", path);
+        assert_eq!(
+            player.poll(&ctx),
+            Some(Notice::Unsupported(path.to_owned()))
+        );
+        assert!(player.message().is_none());
+    }
+
+    #[test]
+    fn a_video_without_an_audio_track_stays_in_the_chat() {
+        let ctx = egui::Context::default();
+        let mut player = Player::new(Waker::default());
+        let path = Path::new(SILENT);
+        assert_eq!(has_audio_track(path), Some(false));
+        player.toggle("clip", path);
+        assert_eq!(player.poll(&ctx), None);
+        assert_eq!(player.message(), Some("clip"));
+        assert!(!player.session.as_ref().unwrap().unsupported_audio);
     }
 
     #[test]

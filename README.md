@@ -238,9 +238,10 @@ See **[zapfast.rocks](https://zapfast.rocks)** for downloads and guides.
   sound, a seek bar, and a mute switch; round video messages play inside their
   circle with a progress ring, like on the phone. A video that is not
   downloaded yet downloads first and then plays. Videos in codecs other than
-  H.264, such as HEVC, open in your system player, and so does **Open in system
-  player** in a video's right-click menu. Unsupported pictures and documents
-  keep opening in their default desktop apps. **Save as…** in a downloaded
+  H.264, such as HEVC, or with an audio track ZapFast cannot decode open in
+  your system player. **Open in system player** in a video's right-click menu
+  does the same. Unsupported pictures and documents keep opening in their
+  default desktop apps. **Save as…** in a downloaded
   attachment's right-click menu keeps a copy wherever you choose, starting in
   your Downloads folder. Profile pictures and downloaded images support
   Windows drive paths and filenames with spaces or non-ASCII characters.
