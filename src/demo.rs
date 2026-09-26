@@ -465,7 +465,11 @@ fn sample_files(app: &App) -> (std::path::PathBuf, std::path::PathBuf) {
 pub fn populate(app: &mut App) {
     app.backend.set_offline(true);
     // Demo mode has no backend to handle downloads.
-    app.settings.auto_download = false;
+    app.settings.auto_download_audio = false;
+    app.settings.auto_download_video = false;
+    app.settings.auto_download_image = false;
+    app.settings.auto_download_animated_sticker = false;
+    app.settings.auto_download_document = false;
     app.link = LinkStatus::Connected;
     app.me = Some(ME.to_owned());
     app.me_name = Some("Carmine".to_owned());
@@ -4480,8 +4484,8 @@ mod tests {
             frame_with(app, &ctx, Vec::new());
         };
         let chip = crate::ui::conversation::speed_chip_id(&chat, "voice-speed");
-        // The chip cycles 1x, 1.5x, and 2x, as on the phone.
-        for expected in [1.5, 2.0, 1.0] {
+        // The chip cycles 1x, 1.5x, and 2x, as on the phone, then 2.5x and 3x.
+        for expected in [1.5, 2.0, 2.5, 3.0, 1.0] {
             click(&mut app, chip, egui::PointerButton::Primary);
             assert_eq!(app.player.speed(), expected);
             assert_eq!(app.settings.voice_speed, expected);

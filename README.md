@@ -23,7 +23,7 @@ See **[zapfast.rocks](https://zapfast.rocks)** for downloads and guides.
 ## Alterações deste fork (`intellq`)
 
 Este fork acompanha o [projeto original](https://github.com/crmne/zapfast)
-até o commit [`9aedc8d`](https://github.com/crmne/zapfast/commit/9aedc8d).
+até o commit [`1f2c4d3`](https://github.com/crmne/zapfast/commit/1f2c4d3).
 Além das novidades do upstream, esta branch inclui as seguintes mudanças:
 
 - **Links clicáveis desde o primeiro clique.** Em conversas longas, a
@@ -45,11 +45,12 @@ Além das novidades do upstream, esta branch inclui as seguintes mudanças:
   tocar sem som e nem aparecia no mixer de áudio. Vídeos com áudio suportado
   continuam tocando dentro da conversa; vídeos realmente sem faixa de áudio
   continuam no player interno.
-- **Downloads configuráveis por tipo e tamanho.** A opção de baixar todos os
-  arquivos automaticamente continua disponível. Quando ela está desligada,
-  áudios (inclusive mensagens de voz), vídeos (inclusive GIFs e vídeos
-  redondos) e imagens (inclusive cartões interativos) podem ser ativados
-  separadamente; quando está ligada, os três controles ficam desabilitados.
+- **Downloads configuráveis por tipo e tamanho.** Cinco opções independentes
+  cobrem todos os arquivos das mensagens: áudios (inclusive mensagens de voz),
+  vídeos (inclusive GIFs e vídeos redondos), imagens (inclusive figurinhas
+  estáticas e cartões interativos), figurinhas animadas e documentos
+  (qualquer arquivo enviado como documento). A antiga opção de baixar todos
+  os arquivos foi retirada; quem a tinha ligada fica com as cinco ligadas.
   Um slider define o limite de 1 a 64 MiB para downloads automáticos e
   manuais. O limite é verificado antes e durante a transferência.
 - **Configurações legíveis em janelas estreitas.** Títulos e descrições podem
@@ -169,6 +170,10 @@ Além das novidades do upstream, esta branch inclui as seguintes mudanças:
   Ctrl fosse solto um instante antes do V, a imagem não era colada. Agora uma
   soltura do V até 0,8 s depois do Ctrl, sem texto digitado nesse meio-tempo,
   também cola a imagem. Um "v" digitado continua sendo só um "v".
+- **Áudios em 2,5x e 3x.** O botão de velocidade das mensagens de voz passa
+  por 1x, 1,5x, 2x, 2,5x e 3x. O menu do botão direito da mensagem mostra
+  todas as velocidades em duas fileiras: 1x, 1,25x, 1,5x, 1,75x e 2x na
+  primeira, e 2,5x e 3x na segunda. A voz mantém o tom em todas elas.
 - **Menu de contexto na caixa de digitação.** O botão direito no compositor
   abre **Recortar**, **Copiar**, **Colar** e **Selecionar tudo**, em todas as
   plataformas (o `TextEdit` do egui não oferece menu próprio). A seleção feita
@@ -187,8 +192,9 @@ conversa, balões e painéis (fastframe v0.1.6), limite de 32 notificações
 do Linux aguardando clique (evita esgotar recursos no KDE Plasma), faixas de
 resposta, edição e voz mais próximas do compositor,
 balões com cauda e sombra suave (com relevo ajustado a temas claros e
-escuros), etiquetas de data em relevo, lista de conversas com cartões
-arredondados,
+escuros, com sombra mais leve nos escuros), etiquetas de data em relevo,
+lista de conversas com cartões arredondados, relevo também na conversa
+destacada, no compositor e nas faixas acima dele,
 edição de nome e foto de grupos, guia para criar temas e rótulos de
 acessibilidade nos botões. A confirmação de mensagens veio do upstream; a opção
 de sincronizar a exclusão "para mim" com o celular é uma extensão deste fork.
@@ -354,8 +360,9 @@ de sincronizar a exclusão "para mim" com o celular é uma extensão deste fork.
   media go with them, and history that was already on its way does not bring
   them back.
 - **Voice messages.** Play, seek, record, reply with, and send voice messages
-  in the chat. The speed chip cycles between 1x, 1.5x, and 2x, and the
-  message menu offers 1x, 1.25x, 1.5x, 1.75x, and 2x, keeping the speaker's
+  in the chat. The speed chip cycles between 1x, 1.5x, 2x, 2.5x, and 3x,
+  and the message menu offers 1x, 1.25x, 1.5x, 1.75x, and 2x, with 2.5x
+  and 3x on a second row, keeping the speaker's
   pitch; the last choice applies to later messages. When one ends, playback
   carries on through the voice messages right after it that you have not
   heard yet, as on the phone; any other message ends the run. The app
@@ -404,12 +411,11 @@ de sincronizar a exclusão "para mim" com o celular é uma extensão deste fork.
   after they expire on the phone.
   A clock badge on chat avatars shows enabled timers and follows changes from
   the phone. Changing the default timer for new chats leaves existing chats alone.
-- **View attachments.** ZapFast can download all files automatically or only
-  selected images, videos, and audio. The individual switches are available
-  when the all-files switch is off. Set the download size limit from 1 to
-  64 MiB; it applies to automatic downloads and clicks. Stickers continue to
-  download automatically within the chosen limit, while documents need the
-  all-files switch or a click. Photos, stickers, GIFs, voice messages, audio,
+- **View attachments.** ZapFast downloads audio, videos, images (including
+  static stickers), animated stickers, and documents automatically, each with
+  its own switch. Set the download size limit from 1 to 64 MiB; it applies to
+  automatic downloads and clicks. Anything left off downloads with a click.
+  Photos, stickers, GIFs, voice messages, audio,
   locations, contacts,
   polls, and link previews appear in the chat. Click a downloaded JPEG, PNG,
   WebP, or GIF photo to preview it in ZapFast with fit and zoom controls, or

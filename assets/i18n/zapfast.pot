@@ -694,8 +694,19 @@ msgstr ""
 msgid "Download files automatically"
 msgstr ""
 
-#: src/ui/settings.rs:358
-msgid "Download all file types when they come into view."
+msgid "Includes static stickers and images in interactive cards."
+msgstr ""
+
+msgid "Download animated stickers automatically"
+msgstr ""
+
+msgid "Static stickers follow the images option."
+msgstr ""
+
+msgid "Download documents automatically"
+msgstr ""
+
+msgid "PDFs, spreadsheets, archives, and any file sent as a document, including photos and videos."
 msgstr ""
 
 msgid "Download audio automatically"

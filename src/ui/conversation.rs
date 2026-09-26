@@ -3121,35 +3121,39 @@ fn speed_menu_row(
     let speed = view.player.speed();
     let preparing = view.player.preparing_speed(&message.id);
     widgets::menu_separator(ui, &view.palette);
-    ui.allocate_ui_with_layout(
-        vec2(ui.available_width(), 28.0),
-        Layout::left_to_right(Align::Center),
-        |ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
-            ui.add_space(6.0);
-            for option in crate::audio::SPEEDS {
-                let selected = option == speed;
-                let response = speed_pill(
-                    ui,
-                    view,
-                    vec2(44.0, 24.0),
-                    option,
-                    selected,
-                    preparing && selected,
-                );
-                ui.ctx().data_mut(|data| {
-                    data.insert_temp(
-                        speed_button_id(&view.chat.id, &message.id, option),
-                        response.rect,
+    // The phone's speeds on the first row, 2.5x and 3x on the second.
+    let (phone, faster) = crate::audio::SPEEDS.split_at(5);
+    for row in [phone, faster] {
+        ui.allocate_ui_with_layout(
+            vec2(ui.available_width(), 28.0),
+            Layout::left_to_right(Align::Center),
+            |ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                ui.add_space(6.0);
+                for &option in row {
+                    let selected = option == speed;
+                    let response = speed_pill(
+                        ui,
+                        view,
+                        vec2(44.0, 24.0),
+                        option,
+                        selected,
+                        preparing && selected,
                     );
-                });
-                if response.clicked() {
-                    actions.push(Action::SetVoiceSpeed(option));
-                    ui.close();
+                    ui.ctx().data_mut(|data| {
+                        data.insert_temp(
+                            speed_button_id(&view.chat.id, &message.id, option),
+                            response.rect,
+                        );
+                    });
+                    if response.clicked() {
+                        actions.push(Action::SetVoiceSpeed(option));
+                        ui.close();
+                    }
                 }
-            }
-        },
-    );
+            },
+        );
+    }
 }
 
 /// Draws a message bubble and its menu.
@@ -5731,8 +5735,8 @@ fn picture(
         && matches!(media.state, MediaState::Idle)
         && auto_download_allowed(
             media,
-            if sticker.is_some() {
-                crate::settings::AutoDownloadKind::Sticker
+            if sticker == Some(true) {
+                crate::settings::AutoDownloadKind::AnimatedSticker
             } else {
                 crate::settings::AutoDownloadKind::Image
             },
@@ -5748,8 +5752,8 @@ fn picture(
     size.x
 }
 
-/// Stickers always download when visible, while other media follows the setting.
-/// Every automatic download still respects the shared size limit.
+/// Media downloads when visible as its kind's setting says, within the
+/// shared size limit.
 fn auto_download_allowed(
     media: &Media,
     kind: crate::settings::AutoDownloadKind,
@@ -7128,18 +7132,20 @@ mod tests {
     }
 
     #[test]
-    fn visible_stickers_download_automatically_with_the_attachment_setting_off() {
+    fn stickers_follow_their_own_switches_within_the_size_limit() {
         use crate::settings::AutoDownloadKind;
         let settings = crate::settings::Settings {
-            auto_download: false,
+            auto_download_image: false,
+            auto_download_animated_sticker: true,
             ..Default::default()
         };
         let mut sticker = media(Some(180), Some(180));
         assert!(auto_download_allowed(
             &sticker,
-            AutoDownloadKind::Sticker,
+            AutoDownloadKind::AnimatedSticker,
             &settings
         ));
+        // Static stickers download as images do.
         assert!(!auto_download_allowed(
             &sticker,
             AutoDownloadKind::Image,
@@ -7148,7 +7154,7 @@ mod tests {
         sticker.size = crate::model::ATTACHMENT_DOWNLOAD_LIMIT + 1;
         assert!(!auto_download_allowed(
             &sticker,
-            AutoDownloadKind::Sticker,
+            AutoDownloadKind::AnimatedSticker,
             &settings
         ));
     }

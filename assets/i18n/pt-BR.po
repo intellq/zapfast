@@ -703,9 +703,20 @@ msgstr "Pasta de fontes de emoji"
 msgid "Download files automatically"
 msgstr "Baixar arquivos automaticamente"
 
-#: src/ui/settings.rs:358
-msgid "Download all file types when they come into view."
-msgstr "Baixa todos os tipos de arquivo quando aparecem na tela."
+msgid "Includes static stickers and images in interactive cards."
+msgstr "Inclui figurinhas estáticas e imagens em cartões interativos."
+
+msgid "Download animated stickers automatically"
+msgstr "Baixar figurinhas animadas automaticamente"
+
+msgid "Static stickers follow the images option."
+msgstr "As figurinhas estáticas seguem a opção de imagens."
+
+msgid "Download documents automatically"
+msgstr "Baixar documentos automaticamente"
+
+msgid "PDFs, spreadsheets, archives, and any file sent as a document, including photos and videos."
+msgstr "PDFs, planilhas, arquivos compactados e qualquer arquivo enviado como documento, inclusive fotos e vídeos."
 
 msgid "Download audio automatically"
 msgstr "Baixar áudios automaticamente"

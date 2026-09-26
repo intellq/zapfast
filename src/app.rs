@@ -9530,7 +9530,7 @@ mod tests {
         }
 
         app.apply(Action::SetVoiceSpeed(4.0), &ctx);
-        assert_eq!(app.settings.voice_speed, crate::audio::SPEEDS[4]);
+        assert_eq!(app.settings.voice_speed, crate::audio::SPEEDS[6]);
     }
 
     #[test]

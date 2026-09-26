@@ -480,27 +480,35 @@ fn sections(app: &App) -> Vec<Section> {
         ffmpeg_row(&mut chats, locale);
     }
     chats.toggle(
-        translated(locale, "Download files automatically"),
-        translated(locale, "Download all file types when they come into view."),
-        |settings| &mut settings.auto_download,
-    );
-    chats.toggle_when(
         translated(locale, "Download audio automatically"),
         translated(locale, "Includes voice messages."),
         |settings| &mut settings.auto_download_audio,
-        |settings| !settings.auto_download,
     );
-    chats.toggle_when(
+    chats.toggle(
         translated(locale, "Download videos automatically"),
         translated(locale, "Includes GIFs and round videos."),
         |settings| &mut settings.auto_download_video,
-        |settings| !settings.auto_download,
     );
-    chats.toggle_when(
+    chats.toggle(
         translated(locale, "Download images automatically"),
-        translated(locale, "Includes images in interactive cards."),
+        translated(
+            locale,
+            "Includes static stickers and images in interactive cards.",
+        ),
         |settings| &mut settings.auto_download_image,
-        |settings| !settings.auto_download,
+    );
+    chats.toggle(
+        translated(locale, "Download animated stickers automatically"),
+        translated(locale, "Static stickers follow the images option."),
+        |settings| &mut settings.auto_download_animated_sticker,
+    );
+    chats.toggle(
+        translated(locale, "Download documents automatically"),
+        translated(
+            locale,
+            "PDFs, spreadsheets, archives, and any file sent as a document, including photos and videos.",
+        ),
+        |settings| &mut settings.auto_download_document,
     );
     chats.row(
         translated(locale, "Download size limit"),

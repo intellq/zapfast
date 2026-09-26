@@ -354,13 +354,17 @@ pub struct Settings {
     pub send_read_receipts: bool,
     /// Send typing state while composing.
     pub send_typing: bool,
-    /// Download attachments when they enter view instead of on click.
-    #[serde(alias = "auto_download_images")]
-    pub auto_download: bool,
-    /// Per-kind downloads when the general switch is off.
+    /// The former switch that downloaded every kind of file, read once and
+    /// folded into the per-kind switches by [`Settings::load`].
+    #[serde(alias = "auto_download_images", skip_serializing)]
+    pub auto_download: Option<bool>,
+    /// Download these kinds of attachment when they enter view instead of on
+    /// click. Static stickers follow images.
     pub auto_download_audio: bool,
     pub auto_download_video: bool,
     pub auto_download_image: bool,
+    pub auto_download_animated_sticker: bool,
+    pub auto_download_document: bool,
     /// Maximum attachment size, in MiB (the application supports 1..=64).
     pub attachment_limit_mib: u32,
     /// Show the default doodle wallpaper behind conversations.
@@ -447,10 +451,12 @@ impl Default for Settings {
             ffmpeg_gpu: true,
             send_read_receipts: true,
             send_typing: true,
-            auto_download: true,
-            auto_download_audio: false,
-            auto_download_video: false,
-            auto_download_image: false,
+            auto_download: None,
+            auto_download_audio: true,
+            auto_download_video: true,
+            auto_download_image: true,
+            auto_download_animated_sticker: true,
+            auto_download_document: true,
             attachment_limit_mib: 64,
             show_wallpaper: true,
             wallpaper_color: WallpaperColor::Theme,
@@ -498,11 +504,12 @@ pub const BUILT_IN_GIPHY_KEY: Option<&str> = match option_env!("ZAPFAST_GIPHY_KE
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AutoDownloadKind {
+    /// Pictures, including static stickers and interactive cards' images.
     Image,
     Video,
     Audio,
     Document,
-    Sticker,
+    AnimatedSticker,
 }
 
 impl Settings {
@@ -512,11 +519,11 @@ impl Settings {
 
     pub fn auto_downloads(&self, kind: AutoDownloadKind) -> bool {
         match kind {
-            AutoDownloadKind::Sticker => true,
-            AutoDownloadKind::Image => self.auto_download || self.auto_download_image,
-            AutoDownloadKind::Video => self.auto_download || self.auto_download_video,
-            AutoDownloadKind::Audio => self.auto_download || self.auto_download_audio,
-            AutoDownloadKind::Document => self.auto_download,
+            AutoDownloadKind::Image => self.auto_download_image,
+            AutoDownloadKind::Video => self.auto_download_video,
+            AutoDownloadKind::Audio => self.auto_download_audio,
+            AutoDownloadKind::Document => self.auto_download_document,
+            AutoDownloadKind::AnimatedSticker => self.auto_download_animated_sticker,
         }
     }
 
@@ -562,6 +569,7 @@ impl Settings {
                 Ok(mut settings) => {
                     settings.migrate();
                     settings.fold_legacy_media_pause();
+                    settings.fold_legacy_auto_download();
                     if let Some(code) = settings.chat_lock_code.take() {
                         settings.set_chat_lock_code(Some(&code));
                         if let Err(error) = settings.save(path) {
@@ -621,6 +629,27 @@ impl Settings {
         let playing = self.pause_media_while_playing.take();
         if recording.is_some() || playing.is_some() {
             self.pause_other_media = recording.unwrap_or(true) && playing.unwrap_or(true);
+        }
+    }
+
+    /// Folds the former download-everything switch into the per-kind ones.
+    /// On, every kind downloads. Off, documents, which only it covered, stay
+    /// off, and animated stickers keep downloading as stickers always did;
+    /// the kinds already chosen stay as they were. The next save drops it.
+    fn fold_legacy_auto_download(&mut self) {
+        match self.auto_download.take() {
+            Some(true) => {
+                self.auto_download_audio = true;
+                self.auto_download_video = true;
+                self.auto_download_image = true;
+                self.auto_download_animated_sticker = true;
+                self.auto_download_document = true;
+            }
+            Some(false) => {
+                self.auto_download_animated_sticker = true;
+                self.auto_download_document = false;
+            }
+            None => {}
         }
     }
 
@@ -710,30 +739,36 @@ mod tests {
 
     #[test]
     fn automatic_download_filters_and_limit_preserve_old_settings() {
-        use AutoDownloadKind::{Audio, Document, Image, Sticker, Video};
+        use AutoDownloadKind::{AnimatedSticker, Audio, Document, Image, Video};
+        let every = [Audio, Video, Image, Document, AnimatedSticker];
 
-        let mut settings: Settings = serde_json::from_str(r#"{"auto_download":false}"#).unwrap();
-        assert_eq!(settings.attachment_limit_bytes(), 64 * 1024 * 1024);
+        // A file from before the filters, with everything off, keeps it off
+        // except animated stickers, which always downloaded.
+        let mut settings: Settings = serde_json::from_str(
+            r#"{"auto_download":false,"auto_download_audio":false,"auto_download_video":false,"auto_download_image":false}"#,
+        )
+        .unwrap();
+        settings.fold_legacy_auto_download();
         for kind in [Audio, Video, Image, Document] {
             assert!(!settings.auto_downloads(kind));
         }
-        assert!(settings.auto_downloads(Sticker));
+        assert!(settings.auto_downloads(AnimatedSticker));
+        assert_eq!(settings.attachment_limit_bytes(), 64 * 1024 * 1024);
 
-        settings.auto_download_audio = true;
-        settings.auto_download_image = true;
-        settings.attachment_limit_mib = 7;
-        assert_eq!(settings.attachment_limit_bytes(), 7 * 1024 * 1024);
-        assert!(settings.auto_downloads(Audio));
-        assert!(settings.auto_downloads(Image));
-        assert!(!settings.auto_downloads(Video));
-        assert!(!settings.auto_downloads(Document));
-
-        settings.auto_download = true;
-        for kind in [Audio, Video, Image, Document, Sticker] {
+        // The former switch on turns every kind on, and is not saved again.
+        let mut settings: Settings = serde_json::from_str(r#"{"auto_download":true}"#).unwrap();
+        settings.fold_legacy_auto_download();
+        for kind in every {
             assert!(settings.auto_downloads(kind));
         }
-        settings.auto_download = false;
-        assert!(settings.auto_download_audio && settings.auto_download_image);
+        let saved = serde_json::to_value(&settings).unwrap();
+        assert!(saved.get("auto_download").is_none());
+
+        // Each switch covers its own kind.
+        settings.auto_download_video = false;
+        settings.auto_download_document = false;
+        assert!(settings.auto_downloads(Audio) && settings.auto_downloads(Image));
+        assert!(!settings.auto_downloads(Video) && !settings.auto_downloads(Document));
         settings.attachment_limit_mib = 0;
         assert_eq!(settings.attachment_limit_bytes(), 1024 * 1024);
         settings.attachment_limit_mib = 100;
