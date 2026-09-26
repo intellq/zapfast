@@ -386,6 +386,22 @@ msgstr "Encaminhada muitas vezes: escolha uma conversa"
 msgid "Previously forwarded: choose at most one group"
 msgstr "Já encaminhada: escolha no máximo um grupo"
 
+#: src/ui/conversation.rs
+msgid "Cut"
+msgstr "Recortar"
+
+#: src/ui/conversation.rs
+msgid "Copy"
+msgstr "Copiar"
+
+#: src/ui/conversation.rs
+msgid "Paste"
+msgstr "Colar"
+
+#: src/ui/conversation.rs
+msgid "Select all"
+msgstr "Selecionar tudo"
+
 #: src/ui/dialogs.rs
 msgid "Delete for everyone?"
 msgstr "Apagar para todos?"

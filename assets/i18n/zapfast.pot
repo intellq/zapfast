@@ -385,6 +385,22 @@ msgstr ""
 msgid "Previously forwarded: choose at most one group"
 msgstr ""
 
+#: src/ui/conversation.rs
+msgid "Cut"
+msgstr ""
+
+#: src/ui/conversation.rs
+msgid "Copy"
+msgstr ""
+
+#: src/ui/conversation.rs
+msgid "Paste"
+msgstr ""
+
+#: src/ui/conversation.rs
+msgid "Select all"
+msgstr ""
+
 #: src/ui/dialogs.rs
 msgid "Delete for everyone?"
 msgstr ""

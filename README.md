@@ -23,7 +23,7 @@ See **[zapfast.rocks](https://zapfast.rocks)** for downloads and guides.
 ## Alterações deste fork (`intellq`)
 
 Este fork acompanha o [projeto original](https://github.com/crmne/zapfast)
-até o commit [`044cb6f`](https://github.com/crmne/zapfast/commit/044cb6f).
+até o commit [`40b225f`](https://github.com/crmne/zapfast/commit/40b225f).
 Além das novidades do upstream, esta branch inclui as seguintes mudanças:
 
 - **Links clicáveis desde o primeiro clique.** Em conversas longas, a
@@ -66,7 +66,9 @@ Além das novidades do upstream, esta branch inclui as seguintes mudanças:
   raiz do repositório, consulta a branch remota acompanhada pela branch
   atual. Se não houver atualização, apenas informa isso; se houver avanço
   linear, executa `git pull --ff-only` e oferece compilar em modo release e
-  instalar o binário em `/usr/local/bin/zapfast`.
+  instalar o binário em `/usr/local/bin/zapfast`. A compilação usa todas as
+  threads lógicas detectadas por `nproc`, tanto nos jobs do Cargo quanto nas
+  unidades de geração de código do perfil release.
 - **Exclusão confirmada e sincronizada.** O submenu **Delete for me** abre uma
   confirmação com **OK** e **Cancelar** em português. A caixa **Apagar também
   no celular** vem marcada: nesse caso o ZapFast envia a exclusão "para mim"
@@ -82,12 +84,21 @@ Além das novidades do upstream, esta branch inclui as seguintes mudanças:
   até cinco conversas, no máximo um grupo para mensagem já encaminhada, ou
   somente uma conversa quando alguma mensagem foi encaminhada muitas vezes.
   O backend revalida os limites e envia o lote em ordem.
+- **Menu de contexto na caixa de digitação.** O botão direito no compositor
+  abre **Recortar**, **Copiar**, **Colar** e **Selecionar tudo**, em todas as
+  plataformas (o `TextEdit` do egui não oferece menu próprio). A seleção feita
+  antes do clique direito é preservada, então Recortar e Copiar atuam sobre
+  ela e Colar substitui o trecho selecionado. As ações passam pelo tratamento
+  normal de texto, área de transferência e desfazer do editor.
 
 Esta sincronização também incorpora mudanças recentes do upstream: confirmação
 antes de apagar mensagens, aba de figurinhas recebidas, recuperação de conexão
 via IPv4 quando IPv6 falha, melhorias de teclado e zoom de imagens, correção
 da preservação de mídias já baixadas, indicador de não lidas no Windows e
-chinês simplificado. A confirmação de mensagens veio do upstream; a opção
+chinês simplificado, papel de parede com imagem própria ou colorido pelo
+tema, transição de tema a partir do centro da janela (fastframe v0.1.3),
+edição de nome e foto de grupos, guia para criar temas e rótulos de
+acessibilidade nos botões. A confirmação de mensagens veio do upstream; a opção
 de sincronizar a exclusão "para mim" com o celular é uma extensão deste fork.
 
 <picture>

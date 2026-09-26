@@ -1324,6 +1324,7 @@ pub enum Action {
     },
     OpenUrl(String),
     CopyText(String),
+    ComposerTextCommand(ComposerTextCommand),
     CopyImage(PathBuf),
     /// Closes the toast at this index. Only errors wait to be dismissed.
     DismissToast(usize),
@@ -1624,6 +1625,14 @@ pub enum Action {
     RemovePending(usize),
     /// Removes all pending attachments.
     ClearPending,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ComposerTextCommand {
+    Cut,
+    Copy,
+    Paste,
+    SelectAll,
 }
 
 #[cfg(test)]

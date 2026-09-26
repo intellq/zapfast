@@ -12,9 +12,9 @@ use crate::backend::{Backend, Command, Event, LinkStatus, Refusal, Unsent, Waker
 use crate::i18n::Locale;
 use crate::image_preview::PreviewState;
 use crate::model::{
-    Action, Chat, ChatFilter, ChatId, Contact, Content, Delivery, Dialog, Gif, GifError, Label,
-    Media, MediaState, Message, Page, PickerTab, Scroll, SidebarDisplayMode, StickerPack,
-    StickerShelf, Toast, ToastKind,
+    Action, Chat, ChatFilter, ChatId, ComposerTextCommand, Contact, Content, Delivery, Dialog, Gif,
+    GifError, Label, Media, MediaState, Message, Page, PickerTab, Scroll, SidebarDisplayMode,
+    StickerPack, StickerShelf, Toast, ToastKind,
 };
 use crate::paths::AppDirs;
 use crate::settings::{NotificationSound, Settings, ThemeChoice};
@@ -253,6 +253,8 @@ pub struct App {
     pub drafts: HashMap<ChatId, String>,
     draft_mentions: HashMap<ChatId, Vec<ComposerMention>>,
     pub composer: String,
+    /// Text selection at the moment the composer's context menu opened.
+    pub composer_menu_selection: Option<egui::text::CCursorRange>,
     composer_mentions: Vec<ComposerMention>,
     /// Byte offset of the `:` starting the active emoji query.
     pub emoji_start: Option<usize>,
@@ -791,6 +793,7 @@ impl App {
             drafts: HashMap::new(),
             draft_mentions: HashMap::new(),
             composer: String::new(),
+            composer_menu_selection: None,
             composer_mentions: Vec::new(),
             emoji_start: None,
             emoji_selected: 0,
@@ -3681,6 +3684,51 @@ impl App {
             Action::CopyText(text) => {
                 ctx.copy_text(text);
                 self.toast("Copied");
+            }
+            Action::ComposerTextCommand(command) => {
+                if self.page != Page::Chats || self.dialog.is_some() || self.open_chat.is_none() {
+                    return;
+                }
+                let id = egui::Id::new("composer-text");
+                let Some(mut state) = egui::TextEdit::load_state(ctx, id) else {
+                    return;
+                };
+                if let Some(range) = self.composer_menu_selection.take() {
+                    state.cursor.set_char_range(Some(range));
+                    egui::TextEdit::store_state(ctx, id, state.clone());
+                }
+                let selected = state
+                    .cursor
+                    .char_range()
+                    .is_some_and(|range| !range.is_empty());
+                if matches!(
+                    command,
+                    ComposerTextCommand::Cut | ComposerTextCommand::Copy
+                ) && !selected
+                {
+                    return;
+                }
+                ctx.memory_mut(|memory| memory.request_focus(id));
+                match command {
+                    ComposerTextCommand::Cut => {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::RequestCut)
+                    }
+                    ComposerTextCommand::Copy => {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::RequestCopy)
+                    }
+                    ComposerTextCommand::Paste => {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaste)
+                    }
+                    ComposerTextCommand::SelectAll => {
+                        state
+                            .cursor
+                            .set_char_range(Some(egui::text::CCursorRange::two(
+                                egui::text::CCursor::new(0),
+                                egui::text::CCursor::new(self.composer.chars().count()),
+                            )));
+                        egui::TextEdit::store_state(ctx, id, state);
+                    }
+                }
             }
             Action::CopyImage(path) => {
                 self.backend.send(Command::PrepareClipboardImage(path));

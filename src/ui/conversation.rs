@@ -13,8 +13,8 @@ use crate::animation;
 use crate::app::{App, Conversation, JumpHighlight, KeyScroll, RowHeight};
 use crate::markup;
 use crate::model::{
-    Action, Chat, ChatId, Content, Delivery, Dialog, LinkPreview, Media, MediaState, Message,
-    PickerTab, Scroll,
+    Action, Chat, ChatId, ComposerTextCommand, Content, Delivery, Dialog, LinkPreview, Media,
+    MediaState, Message, PickerTab, Scroll,
 };
 use crate::theme::{self, Icon, Palette};
 use crate::wallpaper;
@@ -1073,6 +1073,8 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                                 };
                                 let wrap = ui.available_width();
                                 ui.ctx().data_mut(|data| data.insert_temp(wrap_id, wrap));
+                                let selection_before = egui::TextEdit::load_state(ui.ctx(), id)
+                                    .and_then(|state| state.cursor.char_range());
                                 let output = egui::TextEdit::multiline(&mut app.composer)
                                     .id(id)
                                     .frame(Frame::NONE)
@@ -1150,6 +1152,65 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                                 }
                                 let response = output.response.response.clone().tab_stop(Stop::Composer);
                                 ui.ctx().accesskit_node_builder(response.id, |node| node.set_label("Message"));
+                                // egui moves the caret on secondary *press*, before it
+                                // reports the completed click. Save the selection on press.
+                                let secondary_press = ui.input(|input| {
+                                    input.pointer.button_pressed(egui::PointerButton::Secondary)
+                                        && input.pointer.latest_pos().is_some_and(|pointer| {
+                                            response.rect.contains(pointer)
+                                        })
+                                });
+                                if secondary_press {
+                                    app.composer_menu_selection =
+                                        selection_before.filter(|range| !range.is_empty());
+                                } else if response.secondary_clicked()
+                                    && app.composer_menu_selection.is_none()
+                                {
+                                    // Some platforms deliver press and release together.
+                                    app.composer_menu_selection =
+                                        selection_before.filter(|range| !range.is_empty());
+                                }
+                                if secondary_press || response.secondary_clicked() {
+                                    if app.composer_menu_selection.is_some() {
+                                        let mut state = output.state.clone();
+                                        state.cursor.set_char_range(app.composer_menu_selection);
+                                        state.store(ui.ctx(), id);
+                                    }
+                                }
+                                let selected = app.composer_menu_selection.is_some();
+                                let cut = crate::i18n::gettext(app.locale, "Cut");
+                                let copy = crate::i18n::gettext(app.locale, "Copy");
+                                let paste = crate::i18n::gettext(app.locale, "Paste");
+                                let select_all = crate::i18n::gettext(app.locale, "Select all");
+                                let menu_width = widgets::menu_width(
+                                    ui,
+                                    &[&cut, &copy, &paste, &select_all],
+                                    false,
+                                );
+                                egui::Popup::context_menu(&response)
+                                    .width(menu_width)
+                                    .frame(widgets::menu_frame(&palette))
+                                    .show(|ui| {
+                                        for (label, command, enabled) in [
+                                            (&cut, ComposerTextCommand::Cut, selected),
+                                            (&copy, ComposerTextCommand::Copy, selected),
+                                            (&paste, ComposerTextCommand::Paste, true),
+                                        ] {
+                                            if widgets::menu_item_enabled(
+                                                ui, &palette, None, label, enabled,
+                                            ) {
+                                                app.actions.push(Action::ComposerTextCommand(command));
+                                            }
+                                        }
+                                        widgets::menu_separator(ui, &palette);
+                                        if widgets::menu_item_enabled(
+                                            ui, &palette, None, &select_all, !app.composer.is_empty(),
+                                        ) {
+                                            app.actions.push(Action::ComposerTextCommand(
+                                                ComposerTextCommand::SelectAll,
+                                            ));
+                                        }
+                                    });
                                 if response.changed() {
                                     app.actions.push(Action::Composing {
                                         chat: chat.id.clone(),

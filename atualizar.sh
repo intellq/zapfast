@@ -58,6 +58,8 @@ case ${answer,,} in
     *) printf 'Compilação e instalação ignoradas.\n'; exit 0 ;;
 esac
 
-cargo build --release --locked --bin zapfast
+jobs=$(nproc)
+printf 'Compilando com %s threads lógicas.\n' "$jobs"
+CARGO_PROFILE_RELEASE_CODEGEN_UNITS="$jobs" cargo build --release --locked --bin zapfast -j "$jobs"
 sudo install -Dm755 "$repo_dir/target/release/zapfast" /usr/local/bin/zapfast
 printf 'ZapFast compilado e instalado em /usr/local/bin/zapfast.\n'
