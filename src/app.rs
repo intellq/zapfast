@@ -56,6 +56,13 @@ const TYPING_TIMEOUT: Duration = Duration::from_secs(12);
 /// run downloads. A stalled download must not keep music paused for good.
 const VOICE_FETCH_HOLD: Duration = Duration::from_secs(10);
 
+/// Skin-tone variants share the first (unmodified) emoji in their variant set.
+pub(crate) fn emoji_family(value: &str) -> &str {
+    emojis::get(value)
+        .and_then(|emoji| emoji.skin_tones()?.next())
+        .map_or(value, emojis::Emoji::as_str)
+}
+
 /// Loaded chat history and paging state.
 #[derive(Default)]
 pub struct Conversation {
@@ -326,6 +333,8 @@ pub struct App {
     /// Picker anchor at the composer button.
     pub picker_anchor: Option<egui::Rect>,
     pub picker_search: String,
+    /// Emoji whose skin-tone variants are open in the shared picker.
+    pub emoji_tone_target: Option<String>,
     /// Whether the newly opened picker should focus search.
     pub picker_focus: bool,
     /// Message the full emoji reaction picker is targeting.
@@ -822,6 +831,7 @@ impl App {
             picker: None,
             picker_anchor: None,
             picker_search: String::new(),
+            emoji_tone_target: None,
             picker_focus: false,
             reaction_target: None,
             reaction_anchor: None,
@@ -3878,6 +3888,7 @@ impl App {
                 self.backend.send(Command::SetLocked(chat, locked));
             }
             Action::TogglePicker(tab) => {
+                self.emoji_tone_target = None;
                 self.composer_tools_open = false;
                 self.emoji_start = None;
                 self.mention_start = None;
@@ -3904,6 +3915,7 @@ impl App {
                 }
             }
             Action::ClosePicker => {
+                self.emoji_tone_target = None;
                 let was_reaction = self.reaction_target.is_some();
                 if let Some((chat, message)) = &self.reaction_target {
                     egui::Popup::close_id(
@@ -3924,6 +3936,7 @@ impl App {
                 message,
                 beside_menu,
             } => {
+                self.emoji_tone_target = None;
                 self.focus_composer = false;
                 self.emoji_start = None;
                 self.mention_start = None;
@@ -3946,6 +3959,7 @@ impl App {
                 self.emoji_jump = None;
             }
             Action::InsertEmoji(emoji) => {
+                self.emoji_tone_target = None;
                 self.insert_in_composer(ctx, &emoji);
                 self.remember_emoji(&emoji);
                 self.focus_composer = true;
@@ -4149,16 +4163,18 @@ impl App {
                 message,
                 emoji,
             } => {
+                self.emoji_tone_target = None;
                 if !emoji.is_empty() {
+                    let family = emoji_family(&emoji);
                     let count = self
                         .settings
                         .reaction_emoji
                         .iter()
-                        .find(|(known, _)| known == &emoji)
-                        .map_or(1, |(_, count)| count.saturating_add(1));
+                        .filter(|(known, _)| emoji_family(known) == family)
+                        .fold(1u32, |total, (_, count)| total.saturating_add(*count));
                     self.settings
                         .reaction_emoji
-                        .retain(|(known, _)| known != &emoji);
+                        .retain(|(known, _)| emoji_family(known) != family);
                     self.settings
                         .reaction_emoji
                         .insert(0, (emoji.clone(), count));
@@ -5190,7 +5206,10 @@ impl App {
     }
 
     fn remember_emoji(&mut self, emoji: &str) {
-        self.settings.recent_emoji.retain(|known| known != emoji);
+        let family = emoji_family(emoji);
+        self.settings
+            .recent_emoji
+            .retain(|known| emoji_family(known) != family);
         self.settings.recent_emoji.insert(0, emoji.to_owned());
         self.settings.recent_emoji.truncate(36);
         self.mark_settings_dirty();
@@ -8935,6 +8954,31 @@ mod tests {
         let saved = serde_json::to_string(&app.settings).unwrap();
         let loaded: Settings = serde_json::from_str(&saved).unwrap();
         assert_eq!(loaded.reaction_emoji, app.settings.reaction_emoji);
+    }
+
+    #[test]
+    fn choosing_another_skin_tone_replaces_the_same_emoji_family() {
+        let mut app = app();
+        app.settings.recent_emoji = vec!["👍".into(), "🔥".into(), "👍🏼".into()];
+        app.remember_emoji("👍🏿");
+        assert_eq!(app.settings.recent_emoji, ["👍🏿", "🔥"]);
+
+        let ctx = egui::Context::default();
+        for emoji in ["👍🏻", "👍🏿", "🙌🏼"] {
+            app.apply(
+                Action::React {
+                    chat: "fixture".into(),
+                    message: "message".into(),
+                    emoji: emoji.into(),
+                },
+                &ctx,
+            );
+        }
+        assert_eq!(
+            app.settings.reaction_emoji,
+            [("👍🏿".into(), 2), ("🙌🏼".into(), 1)]
+        );
+        assert_eq!(app.settings.recent_emoji, ["🙌🏼", "👍🏿", "🔥"]);
     }
 
     #[test]

@@ -267,7 +267,12 @@ See **[zapfast.rocks](https://zapfast.rocks)** for downloads and guides.
   phone. Creating polls in disappearing-message chats is not yet supported by
   the protocol library's poll API, so ZapFast blocks it instead of ignoring the timer.
 - **Emoji, GIF, and sticker picker.** Search emoji and GIFs, use recent emoji
-  and stickers, and add stickers to Favorites with a right-click. Favorites
+  and stickers, and choose a skin tone by clicking a compatible emoji, then its
+  variant. The same choices are available when reacting to a message; the
+  default yellow emoji remains an option. Recent emoji occupy up to three rows,
+  and choosing another skin tone replaces the older tone of that emoji there.
+  Add stickers to Favorites with a
+  right-click. Favorites
   sync with your phone both ways, and Recent holds only stickers you sent. Emoji autocomplete and
   picker search select their first match; use the arrow keys and Enter to
   choose it. GIF search needs a free GIPHY API key unless the build includes

@@ -1,7 +1,7 @@
 //! The picker above the composer: emoji, GIFs, and stickers.
 //! Also the full emoji picker used to react to a message.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use egui::{
@@ -27,6 +27,7 @@ const CELL: f32 = 40.0;
 /// An emoji-grid heading or row.
 enum Row {
     Header(&'static str),
+    Spacer,
     Emoji {
         first: usize,
         values: Vec<&'static str>,
@@ -152,10 +153,16 @@ fn group_name(group: emojis::Group) -> &'static str {
 }
 
 fn usable_recent(recent: &[String]) -> Vec<&'static str> {
+    let mut seen = HashSet::new();
     recent
         .iter()
         .filter_map(|emoji| emojis::get(emoji).map(|emoji| emoji.as_str()))
+        .filter(|emoji| seen.insert(crate::app::emoji_family(emoji)))
         .collect()
+}
+
+fn tone_variants(value: &str) -> Option<Vec<&'static emojis::Emoji>> {
+    emojis::get(value)?.skin_tones().map(Iterator::collect)
 }
 
 fn rows_for(
@@ -194,10 +201,17 @@ fn rows_for(
         }
         return rows;
     }
-    let recent = usable_recent(recent);
+    let recent: Vec<_> = usable_recent(recent)
+        .into_iter()
+        .take(columns.saturating_mul(3))
+        .collect();
     if !recent.is_empty() {
         rows.push(Row::Header(recent_label));
+        let start = rows.len();
         chunk(&mut rows, recent);
+        for _ in rows.len() - start..3 {
+            rows.push(Row::Spacer);
+        }
     }
     for group in emojis::Group::iter() {
         rows.push(Row::Header(group_name(group)));
@@ -277,6 +291,7 @@ fn category_entries(
 fn header_row(rows: &[Row], label: &str) -> Option<usize> {
     rows.iter().position(|row| match row {
         Row::Header(found) => *found == label,
+        Row::Spacer => false,
         Row::Emoji { .. } => false,
     })
 }
@@ -366,22 +381,24 @@ fn reaction_picker(app: &mut App, ctx: &egui::Context) {
     } else {
         app.reaction_anchor
     };
-    let width = menu.map_or(WIDTH, |menu| {
-        (screen.right() - menu.right() - 32.0).clamp(260.0, WIDTH)
-    });
+    let width = WIDTH;
     let outer_width = width + f32::from(FRAME_MARGIN) * 2.0;
     let outer_height = HEIGHT + f32::from(FRAME_MARGIN) * 2.0;
-    let pos = if let Some(menu) = menu
-        && menu.right() + outer_width + 16.0 <= screen.right()
-    {
-        pos2(
-            menu.right() + 8.0,
+    let beside_menu = menu.and_then(|menu| {
+        let x = if menu.right() + outer_width + 16.0 <= screen.right() {
+            Some(menu.right() + 8.0)
+        } else if menu.left() - outer_width - 16.0 >= screen.left() {
+            Some(menu.left() - outer_width - 8.0)
+        } else {
+            None
+        }?;
+        Some(pos2(
+            x,
             menu.top()
                 .min((screen.bottom() - outer_height - 8.0).max(screen.top() + 8.0)),
-        )
-    } else {
-        place_picker(screen, menu, outer_width, outer_height)
-    };
+        ))
+    });
+    let pos = beside_menu.unwrap_or_else(|| place_picker(screen, menu, outer_width, outer_height));
     let preview = app
         .conversations
         .get(&chat)
@@ -609,10 +626,68 @@ fn emoji_grid(
     if query_changed {
         app.picker_search = search;
         app.emoji_selected = 0;
+        app.emoji_tone_target = None;
     }
     if app.picker_focus {
         app.picker_focus = false;
         response.request_focus();
+    }
+    let mut picked = None;
+    if let Some(variants) = app.emoji_tone_target.as_deref().and_then(tone_variants) {
+        ui.horizontal(|ui| {
+            theme::text(
+                ui,
+                "Choose skin tone",
+                theme::semibold(12.5),
+                palette.secondary,
+            );
+            if theme::icon_button(
+                ui,
+                Icon::X,
+                12.0,
+                palette.secondary,
+                palette.text,
+                "Close skin tones",
+            )
+            .clicked()
+            {
+                app.emoji_tone_target = None;
+            }
+        });
+        egui::ScrollArea::vertical()
+            .max_height(3.0 * CELL)
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::ZERO;
+                    let columns = ((ui.available_width() / CELL).floor() as usize).max(1);
+                    let cell = ui.available_width() / columns as f32;
+                    for variant in variants {
+                        let (rect, response) =
+                            ui.allocate_exact_size(vec2(cell, CELL), Sense::click());
+                        if response.hovered() {
+                            ui.painter()
+                                .rect_filled(rect.shrink(2.0), 6.0, palette.surface_hover);
+                        }
+                        let line = widgets::line(
+                            ui,
+                            variant.as_str(),
+                            theme::regular(24.0),
+                            palette.text,
+                            cell,
+                            1,
+                        );
+                        line.paint(ui, rect.center() - line.size() / 2.0, palette.text);
+                        if response
+                            .on_hover_text(variant.name())
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .clicked()
+                        {
+                            picked = Some(variant.as_str().to_owned());
+                            app.emoji_tone_target = None;
+                        }
+                    }
+                });
+            });
     }
     // Reserve scrollbar space and fill the remaining width with whole columns.
     let width = ui.available_width() - 6.0;
@@ -634,6 +709,7 @@ fn emoji_grid(
         .iter()
         .map(|row| match row {
             Row::Header(_) => 0,
+            Row::Spacer => 0,
             Row::Emoji { values, .. } => values.len(),
         })
         .sum();
@@ -645,18 +721,21 @@ fn emoji_grid(
         app.emoji_selected = app.emoji_selected.min(emoji_count - 1);
     }
     let row_height = CELL;
-    let mut picked = (submit && emoji_count > 0).then(|| {
-        rows.iter()
-            .filter_map(|row| match row {
-                Row::Header(_) => None,
-                Row::Emoji { values, .. } => Some(values.as_slice()),
-            })
-            .flatten()
-            .nth(app.emoji_selected)
-            .copied()
-            .expect("emoji selection is in range")
-            .to_owned()
-    });
+    if submit && emoji_count > 0 {
+        picked = Some({
+            rows.iter()
+                .filter_map(|row| match row {
+                    Row::Header(_) => None,
+                    Row::Spacer => None,
+                    Row::Emoji { values, .. } => Some(values.as_slice()),
+                })
+                .flatten()
+                .nth(app.emoji_selected)
+                .copied()
+                .expect("emoji selection is in range")
+                .to_owned()
+        });
+    }
     // `show_rows` must use the same zero spacing as the grid.
     ui.spacing_mut().item_spacing = Vec2::ZERO;
     let scroll_id = ui.make_persistent_id(scroll_salt);
@@ -673,6 +752,7 @@ fn emoji_grid(
     } else if movement.is_some()
         && let Some(row) = rows.iter().position(|row| match row {
             Row::Header(_) => false,
+            Row::Spacer => false,
             Row::Emoji { first, values } => {
                 (*first..*first + values.len()).contains(&app.emoji_selected)
             }
@@ -701,6 +781,7 @@ fn emoji_grid(
         .rev()
         .find_map(|row| match row {
             Row::Header(label) => Some(*label),
+            Row::Spacer => None,
             Row::Emoji { .. } => None,
         });
     ui.ctx().data_mut(|data| {
@@ -709,6 +790,9 @@ fn emoji_grid(
     grid.show_rows(ui, row_height, rows.len(), |ui, range| {
         for row in &rows[range] {
             match row {
+                Row::Spacer => {
+                    ui.allocate_exact_size(vec2(ui.available_width(), row_height), Sense::hover());
+                }
                 Row::Header(label) => {
                     let (rect, _) = ui.allocate_exact_size(
                         vec2(ui.available_width(), row_height),
@@ -758,13 +842,36 @@ fn emoji_grid(
                                     1,
                                 );
                                 line.paint(ui, rect.center() - line.size() / 2.0, palette.text);
+                                if emojis::get(emoji)
+                                    .is_some_and(|entry| entry.skin_tones().is_some())
+                                {
+                                    ui.painter().line_segment(
+                                        [
+                                            pos2(rect.right() - 10.0, rect.bottom() - 8.0),
+                                            pos2(rect.right() - 6.0, rect.bottom() - 4.0),
+                                        ],
+                                        Stroke::new(1.0, palette.secondary),
+                                    );
+                                    ui.painter().line_segment(
+                                        [
+                                            pos2(rect.right() - 6.0, rect.bottom() - 4.0),
+                                            pos2(rect.right() - 2.0, rect.bottom() - 8.0),
+                                        ],
+                                        Stroke::new(1.0, palette.secondary),
+                                    );
+                                }
                             }
                             if response
                                 .on_hover_cursor(egui::CursorIcon::PointingHand)
                                 .clicked()
                             {
                                 app.emoji_selected = *first + offset;
-                                picked = Some((*emoji).to_owned());
+                                if tone_variants(emoji).is_some() {
+                                    app.emoji_tone_target = Some((*emoji).to_owned());
+                                } else {
+                                    app.emoji_tone_target = None;
+                                    picked = Some((*emoji).to_owned());
+                                }
                             }
                         }
                     });
@@ -778,6 +885,18 @@ fn emoji_grid(
 #[cfg(test)]
 mod emoji_tests {
     use super::*;
+
+    #[test]
+    fn skin_tones_include_default_and_five_hand_colours() {
+        let variants = tone_variants("👍").unwrap();
+        let values: Vec<_> = variants.iter().map(|emoji| emoji.as_str()).collect();
+        assert_eq!(values, ["👍", "👍🏻", "👍🏼", "👍🏽", "👍🏾", "👍🏿"]);
+        assert_eq!(tone_variants("👍🏽").unwrap().len(), 6);
+        assert_eq!(tone_variants("🙌").unwrap().len(), 6);
+        assert_eq!(tone_variants("🙏").unwrap().len(), 6);
+        assert_eq!(tone_variants("🤝").unwrap().len(), 26);
+        assert!(tone_variants("😀").is_none());
+    }
 
     #[test]
     fn arrows_move_through_the_emoji_grid() {
@@ -796,6 +915,7 @@ mod emoji_tests {
             .iter()
             .filter_map(|row| match row {
                 Row::Emoji { values, .. } => Some(values.as_slice()),
+                Row::Spacer => None,
                 Row::Header(_) => None,
             })
             .flatten()
@@ -813,6 +933,43 @@ mod emoji_tests {
                 .any(|row| matches!(row, Row::Header("Smileys & Emotion")))
         );
         assert!(rows.iter().any(|row| matches!(row, Row::Header("Flags"))));
+    }
+
+    #[test]
+    fn recent_emoji_uses_three_rows_and_one_skin_tone_per_family() {
+        let recent: Vec<String> = emojis::iter()
+            .take(36)
+            .map(|emoji| emoji.as_str().into())
+            .collect();
+        let rows = rows_for("", &recent, 8, "Recent");
+        let recent_rows: Vec<_> = rows
+            .iter()
+            .skip(1)
+            .take_while(|row| matches!(row, Row::Emoji { .. }))
+            .collect();
+        assert_eq!(recent_rows.len(), 3);
+        assert_eq!(
+            recent_rows
+                .iter()
+                .map(|row| match row {
+                    Row::Emoji { values, .. } => values.len(),
+                    Row::Header(_) | Row::Spacer => unreachable!(),
+                })
+                .sum::<usize>(),
+            24
+        );
+
+        let rows = rows_for("", &["👍🏽".into(), "👍".into(), "🔥".into()], 8, "Recent");
+        let Some(Row::Emoji { values, .. }) = rows.get(1) else {
+            panic!("recent emoji row missing");
+        };
+        assert_eq!(values, &["👍🏽", "🔥"]);
+        assert!(matches!(rows.get(2), Some(Row::Spacer)));
+        assert!(matches!(rows.get(3), Some(Row::Spacer)));
+        assert!(matches!(
+            rows.get(4),
+            Some(Row::Header("Smileys & Emotion"))
+        ));
     }
 
     #[test]

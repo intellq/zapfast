@@ -2422,6 +2422,19 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
             "favorites" => app.chat_filter = crate::model::ChatFilter::Favorites,
             "groups" => app.chat_filter = crate::model::ChatFilter::Groups,
             "picker" => app.picker = Some(crate::model::PickerTab::Emoji),
+            "picker-tone" | "picker-tone-mixed" => {
+                app.picker = Some(crate::model::PickerTab::Emoji);
+                app.emoji_tone_target = Some(
+                    if part == "picker-tone-mixed" {
+                        "🤝"
+                    } else {
+                        "👍"
+                    }
+                    .into(),
+                );
+                app.settings.recent_emoji =
+                    vec!["👍".into(), "🙌".into(), "🙏".into(), "🤝".into()];
+            }
             "stickers" => sticker_sample(app, crate::model::StickerShelf::Recent, ""),
             "sticker-favorites" => sticker_sample(app, crate::model::StickerShelf::Favorites, ""),
             "sticker-received" => sticker_sample(app, crate::model::StickerShelf::Received, ""),
@@ -4048,6 +4061,8 @@ mod tests {
             "offline",
             "syncing",
             "picker",
+            "picker-tone",
+            "picker-tone-mixed",
             "stickers",
             "sticker-favorites",
             "sticker-received",
