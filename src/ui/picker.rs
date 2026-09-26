@@ -112,6 +112,7 @@ fn tabs(app: &mut App, ui: &mut egui::Ui, palette: &Palette, current: PickerTab)
             (PickerTab::Gifs, Icon::Gif, "GIF"),
             (PickerTab::Stickers, Icon::Sticker, "Stickers"),
         ];
+        let entries = entries.map(|(tab, icon, label)| (tab, icon, gettext(app.locale, label)));
         let spacing = ui.spacing().item_spacing.x;
         let total = entries
             .iter()
@@ -120,7 +121,7 @@ fn tabs(app: &mut App, ui: &mut egui::Ui, palette: &Palette, current: PickerTab)
             + spacing * (entries.len() as f32 - 1.0);
         ui.add_space((ui.available_width() - total).max(0.0) / 2.0);
         for (tab, icon, label) in entries {
-            if theme::soft_button(ui, palette, Some(icon), label, tab == current).clicked()
+            if theme::soft_button(ui, palette, Some(icon), &label, tab == current).clicked()
                 && tab != current
             {
                 app.actions.push(Action::TogglePicker(tab));
@@ -442,7 +443,7 @@ fn reaction_picker(app: &mut App, ctx: &egui::Context) {
                             ui.horizontal(|ui| {
                                 theme::text(
                                     ui,
-                                    "React to message",
+                                    gettext(app.locale, "React to message"),
                                     theme::semibold(13.0),
                                     palette.text,
                                 );
@@ -453,7 +454,7 @@ fn reaction_picker(app: &mut App, ctx: &egui::Context) {
                                         14.0,
                                         palette.secondary,
                                         palette.text,
-                                        "Close reactions",
+                                        &gettext(app.locale, "Close reactions"),
                                     )
                                     .clicked()
                                     {
@@ -580,7 +581,7 @@ fn category_tabs(
                 }
                 if response
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
-                    .on_hover_text(label)
+                    .on_hover_text(gettext(app.locale, label).as_ref())
                     .clicked()
                 {
                     app.picker_search.clear();
@@ -612,6 +613,7 @@ fn emoji_grid(
     recent_label: &'static str,
 ) -> Option<String> {
     let newly_opened = app.picker_focus;
+    let locale = app.locale;
     // Without a search field, the grid takes the arrows and Enter itself.
     let search_active = search_id.is_none_or(|search_id| {
         app.picker_focus || ui.memory(|memory| memory.has_focus(egui::Id::new(search_id)))
@@ -632,7 +634,13 @@ fn emoji_grid(
     let mut query_changed = false;
     if let Some(search_id) = search_id {
         let mut search = app.picker_search.clone();
-        let response = search_box(ui, palette, search_id, &mut search, "Search emoji");
+        let response = search_box(
+            ui,
+            palette,
+            search_id,
+            &mut search,
+            &gettext(app.locale, "Search emoji"),
+        );
         query_changed = search != app.picker_search;
         if query_changed {
             app.picker_search = search;
@@ -649,7 +657,7 @@ fn emoji_grid(
         ui.horizontal(|ui| {
             theme::text(
                 ui,
-                "Choose skin tone",
+                gettext(app.locale, "Choose skin tone"),
                 theme::semibold(12.5),
                 palette.secondary,
             );
@@ -659,7 +667,7 @@ fn emoji_grid(
                 12.0,
                 palette.secondary,
                 palette.text,
-                "Close skin tones",
+                &gettext(app.locale, "Close skin tones"),
             )
             .clicked()
             {
@@ -807,7 +815,7 @@ fn emoji_grid(
                     ui.painter().text(
                         pos2(rect.left() + 4.0, rect.bottom() - 8.0),
                         Align2::LEFT_BOTTOM,
-                        *label,
+                        gettext(locale, label),
                         theme::semibold(12.5),
                         palette.secondary,
                     );
@@ -1075,11 +1083,14 @@ fn gif_tab(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
         }
         theme::paragraph(
             ui,
-            if bad_key {
-                "This GIPHY API key was rejected. Create a free key at developers.giphy.com and paste it here. It is saved in your settings."
-            } else {
-                "GIF search needs a GIPHY API key. Create a free key at developers.giphy.com and paste it here. It is saved in your settings."
-            },
+            gettext(
+                app.locale,
+                if bad_key {
+                    "This GIPHY API key was rejected. Create a free key at developers.giphy.com and paste it here. It is saved in your settings."
+                } else {
+                    "GIF search needs a GIPHY API key. Create a free key at developers.giphy.com and paste it here. It is saved in your settings."
+                },
+            ),
             theme::regular(13.0),
             palette.text,
         );
@@ -1104,7 +1115,7 @@ fn gif_tab(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
                 let response = ui.add(
                     egui::TextEdit::singleline(&mut app.settings.giphy_key)
                         .hint_text(
-                            egui::RichText::new("GIPHY API key")
+                            egui::RichText::new(gettext(app.locale, "GIPHY API key"))
                                 .color(palette.dim)
                                 .font(theme::regular(13.5)),
                         )
@@ -1137,7 +1148,7 @@ fn gif_tab(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
         palette,
         "gif-search",
         &mut query,
-        "Search GIFs via GIPHY",
+        &gettext(app.locale, "Search GIFs via GIPHY"),
     );
     if query != app.picker_search {
         app.picker_search = query.clone();
@@ -1148,7 +1159,12 @@ fn gif_tab(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
     if app.gif_pending {
         ui.horizontal(|ui| {
             theme::spinner(ui, 16.0, palette.accent);
-            theme::text(ui, "Searching…", theme::regular(12.5), palette.secondary);
+            theme::text(
+                ui,
+                gettext(app.locale, "Searching…"),
+                theme::regular(12.5),
+                palette.secondary,
+            );
         });
     } else if let Some(error) = &app.gif_error {
         theme::paragraph(ui, &error.message, theme::regular(13.0), palette.danger);
@@ -1201,7 +1217,7 @@ fn gif_tab(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
                 ui.vertical_centered(|ui| {
                     theme::text(
                         ui,
-                        "Search for a GIF or browse trending results.",
+                        gettext(app.locale, "Search for a GIF or browse trending results."),
                         theme::regular(13.0),
                         palette.secondary,
                     );

@@ -565,6 +565,75 @@ msgstr "Enter envia"
 msgid "When off, Ctrl+Enter sends."
 msgstr "Quando desligado, Ctrl+Enter envia."
 
+msgid "Emoji"
+msgstr "Emoji"
+
+msgid "Stickers"
+msgstr "Figurinhas"
+
+msgid "Frequently Used"
+msgstr "Mais usados"
+
+msgid "Smileys & Emotion"
+msgstr "Carinhas e emoções"
+
+msgid "People & Body"
+msgstr "Pessoas e corpo"
+
+msgid "Animals & Nature"
+msgstr "Animais e natureza"
+
+msgid "Food & Drink"
+msgstr "Comidas e bebidas"
+
+msgid "Travel & Places"
+msgstr "Viagens e lugares"
+
+msgid "Activities"
+msgstr "Atividades"
+
+msgid "Objects"
+msgstr "Objetos"
+
+msgid "Symbols"
+msgstr "Símbolos"
+
+msgid "Flags"
+msgstr "Bandeiras"
+
+msgid "Nothing matches"
+msgstr "Nenhum resultado"
+
+msgid "React to message"
+msgstr "Reagir à mensagem"
+
+msgid "Close reactions"
+msgstr "Fechar reações"
+
+msgid "Search emoji"
+msgstr "Pesquisar emoji"
+
+msgid "Choose skin tone"
+msgstr "Escolha o tom de pele"
+
+msgid "Close skin tones"
+msgstr "Fechar tons de pele"
+
+msgid "This GIPHY API key was rejected. Create a free key at developers.giphy.com and paste it here. It is saved in your settings."
+msgstr "Esta chave de API do GIPHY foi recusada. Crie uma chave gratuita em developers.giphy.com e cole-a aqui. Ela fica salva nas suas configurações."
+
+msgid "GIF search needs a GIPHY API key. Create a free key at developers.giphy.com and paste it here. It is saved in your settings."
+msgstr "A pesquisa de GIFs precisa de uma chave de API do GIPHY. Crie uma chave gratuita em developers.giphy.com e cole-a aqui. Ela fica salva nas suas configurações."
+
+msgid "Search GIFs via GIPHY"
+msgstr "Pesquisar GIFs no GIPHY"
+
+msgid "Searching…"
+msgstr "Pesquisando…"
+
+msgid "Search for a GIF or browse trending results."
+msgstr "Pesquise um GIF ou veja os mais populares."
+
 msgid "Replace text with emoji"
 msgstr "Trocar textos por emojis"
 
@@ -583,6 +652,18 @@ msgstr "Voltar à mensagem (Esc)"
 
 msgid "Play videos with FFmpeg"
 msgstr "Reproduzir vídeos com o FFmpeg"
+
+msgid "Decode on the graphics card"
+msgstr "Decodificar na placa de vídeo"
+
+msgid "Decodes videos with {method} when it can, and on the processor otherwise. Lighter on high-resolution HEVC and AV1."
+msgstr "Decodifica os vídeos com {method} quando possível, e no processador nos demais casos. Mais leve em HEVC e AV1 de alta resolução."
+
+msgid "No graphics-card decoding (NVDEC, VA-API or Vulkan) was found for FFmpeg on this computer, so videos decode on the processor."
+msgstr "Nenhuma decodificação pela placa de vídeo (NVDEC, VA-API ou Vulkan) foi encontrada para o FFmpeg neste computador; os vídeos são decodificados no processador."
+
+msgid "Needs FFmpeg."
+msgstr "Requer o FFmpeg."
 
 msgid "Plays HEVC, AV1, VP9 and 10-bit H.264 videos, and HE-AAC, Opus or AC-3 sound, inside the chat with the FFmpeg installed on this computer. Videos it cannot read use the built-in player."
 msgstr "Reproduz na conversa vídeos HEVC, AV1, VP9 e H.264 de 10 bits, e áudio HE-AAC, Opus ou AC-3, com o FFmpeg instalado neste computador. Vídeos que ele não conseguir ler usam o player interno."

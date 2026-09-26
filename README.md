@@ -73,6 +73,9 @@ Além das novidades do upstream, esta branch inclui as seguintes mudanças:
   insere (ou reage com ele) imediatamente. Enquanto o seletor fica aberto, a
   ordem dos recentes não muda ao escolher um deles; a nova ordem aparece na
   próxima vez que ele for aberto.
+  Cada caixa tem a sua lista: reagir atualiza só os mais usados do seletor
+  de reações (em ordem de frequência), e inserir no texto só os recentes do
+  seletor normal (do mais novo para o mais antigo).
 - **Atualização local assistida.** O script [`atualizar.sh`](atualizar.sh), na
   raiz do repositório, consulta a branch remota acompanhada pela branch
   atual. Se não houver atualização, apenas informa isso; se houver avanço
@@ -137,7 +140,12 @@ Além das novidades do upstream, esta branch inclui as seguintes mudanças:
   instalado o FFmpeg, a opção libera sem reiniciar. Se o FFmpeg falhar com um
   vídeo, ele volta ao player interno e, em último caso, ao player do sistema.
   No Flatpak a opção fica indisponível, porque o sandbox não enxerga os
-  programas do sistema.
+  programas do sistema. Logo abaixo, recuada como subopção, **Decodificar na
+  placa de vídeo** (ligada por padrão) pede ao FFmpeg aceleração por GPU, na
+  ordem NVDEC (driver NVIDIA), VA-API (AMD e Intel) e Vulkan, conforme o que o
+  `ffmpeg -hwaccels` e o hardware oferecem; se a GPU não decodificar um
+  arquivo, o próprio FFmpeg segue no processador. Ela fica bloqueada quando o
+  FFmpeg está desligado ou ausente, ou quando não há aceleração disponível.
 - **Vídeo ampliado na janela.** Um botão no canto superior direito do vídeo,
   que aparece junto com os controles (vídeo pausado ou mouse sobre ele),
   mostra o vídeo em quase toda a altura da janela do ZapFast, sobre a conversa
@@ -155,6 +163,12 @@ Além das novidades do upstream, esta branch inclui as seguintes mudanças:
   `AAAA-MM-DD` na Suécia), e o dia da semana usa as três primeiras letras do
   nome no idioma da interface. A data some cerca de 1 s depois que a rolagem
   para, esmaecendo, e não aparece no fim da conversa.
+- **Ctrl+V de imagens mais confiável.** Com só uma imagem na área de
+  transferência (como uma captura do Spectacle), o egui não informa nada
+  quando Ctrl+V é pressionado, e a colagem era decidida na soltura do V; se o
+  Ctrl fosse solto um instante antes do V, a imagem não era colada. Agora uma
+  soltura do V até 0,8 s depois do Ctrl, sem texto digitado nesse meio-tempo,
+  também cola a imagem. Um "v" digitado continua sendo só um "v".
 - **Menu de contexto na caixa de digitação.** O botão direito no compositor
   abre **Recortar**, **Copiar**, **Colar** e **Selecionar tudo**, em todas as
   plataformas (o `TextEdit` do egui não oferece menu próprio). A seleção feita

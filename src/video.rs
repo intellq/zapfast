@@ -347,6 +347,8 @@ pub struct Player {
     seen: Cell<Instant>,
     /// Whether videos play through the system's FFmpeg when installed.
     ffmpeg: bool,
+    /// Whether FFmpeg decodes on the graphics card when it can.
+    gpu: bool,
     /// Frames are decoded large enough for the expanded view.
     detail: bool,
 }
@@ -360,6 +362,7 @@ impl Player {
             audible: true,
             seen: Cell::new(Instant::now()),
             ffmpeg: false,
+            gpu: false,
             detail: false,
         }
     }
@@ -406,10 +409,11 @@ impl Player {
             .map(|session| (session.message.as_str(), session.path.as_path()))
     }
 
-    /// Follows the Settings switch for playing videos through FFmpeg. It
-    /// applies from the next video.
-    pub fn use_ffmpeg(&mut self, on: bool) {
+    /// Follows the Settings switches for playing videos through FFmpeg and
+    /// decoding them on the graphics card. They apply from the next video.
+    pub fn use_ffmpeg(&mut self, on: bool, gpu: bool) {
         self.ffmpeg = on;
+        self.gpu = gpu;
     }
 
     /// Plays videos without opening the sound device.
@@ -541,7 +545,17 @@ impl Player {
         self.seen.set(now);
         let mut clock = Clock::default();
         clock.seek(from, now);
-        let ffmpeg = self.ffmpeg.then(crate::ffmpeg::tools).flatten();
+        let gpu = self.gpu;
+        let ffmpeg = self
+            .ffmpeg
+            .then(crate::ffmpeg::tools)
+            .flatten()
+            .map(|mut tools| {
+                if gpu {
+                    tools.accel = crate::ffmpeg::accel(&tools);
+                }
+                tools
+            });
         let (sound, unsupported_audio) = if self.audible {
             match Sound::open(path, from, self.muted, ffmpeg.clone()) {
                 Ok(sound) => (sound, false),

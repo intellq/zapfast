@@ -348,6 +348,8 @@ pub struct Settings {
     pub whatsapp_emoji: bool,
     /// Play videos through the system's FFmpeg when it is installed (Linux).
     pub ffmpeg_video: bool,
+    /// Let FFmpeg decode videos on the graphics card when it can.
+    pub ffmpeg_gpu: bool,
     /// Send read receipts, subject to the account privacy setting.
     pub send_read_receipts: bool,
     /// Send typing state while composing.
@@ -442,6 +444,7 @@ impl Default for Settings {
             emoji_shortcuts: false,
             whatsapp_emoji: false,
             ffmpeg_video: true,
+            ffmpeg_gpu: true,
             send_read_receipts: true,
             send_typing: true,
             auto_download: true,

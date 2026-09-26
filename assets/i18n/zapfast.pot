@@ -562,6 +562,75 @@ msgstr ""
 msgid "When off, Ctrl+Enter sends."
 msgstr ""
 
+msgid "Emoji"
+msgstr ""
+
+msgid "Stickers"
+msgstr ""
+
+msgid "Frequently Used"
+msgstr ""
+
+msgid "Smileys & Emotion"
+msgstr ""
+
+msgid "People & Body"
+msgstr ""
+
+msgid "Animals & Nature"
+msgstr ""
+
+msgid "Food & Drink"
+msgstr ""
+
+msgid "Travel & Places"
+msgstr ""
+
+msgid "Activities"
+msgstr ""
+
+msgid "Objects"
+msgstr ""
+
+msgid "Symbols"
+msgstr ""
+
+msgid "Flags"
+msgstr ""
+
+msgid "Nothing matches"
+msgstr ""
+
+msgid "React to message"
+msgstr ""
+
+msgid "Close reactions"
+msgstr ""
+
+msgid "Search emoji"
+msgstr ""
+
+msgid "Choose skin tone"
+msgstr ""
+
+msgid "Close skin tones"
+msgstr ""
+
+msgid "This GIPHY API key was rejected. Create a free key at developers.giphy.com and paste it here. It is saved in your settings."
+msgstr ""
+
+msgid "GIF search needs a GIPHY API key. Create a free key at developers.giphy.com and paste it here. It is saved in your settings."
+msgstr ""
+
+msgid "Search GIFs via GIPHY"
+msgstr ""
+
+msgid "Searching…"
+msgstr ""
+
+msgid "Search for a GIF or browse trending results."
+msgstr ""
+
 msgid "Replace text with emoji"
 msgstr ""
 
@@ -577,6 +646,18 @@ msgid "Back to the message (Esc)"
 msgstr ""
 
 msgid "Play videos with FFmpeg"
+msgstr ""
+
+msgid "Decode on the graphics card"
+msgstr ""
+
+msgid "Decodes videos with {method} when it can, and on the processor otherwise. Lighter on high-resolution HEVC and AV1."
+msgstr ""
+
+msgid "No graphics-card decoding (NVDEC, VA-API or Vulkan) was found for FFmpeg on this computer, so videos decode on the processor."
+msgstr ""
+
+msgid "Needs FFmpeg."
 msgstr ""
 
 msgid "Plays HEVC, AV1, VP9 and 10-bit H.264 videos, and HE-AAC, Opus or AC-3 sound, inside the chat with the FFmpeg installed on this computer. Videos it cannot read use the built-in player."

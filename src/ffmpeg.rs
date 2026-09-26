@@ -21,6 +21,76 @@ use egui::ColorImage;
 pub struct Tools {
     pub ffmpeg: PathBuf,
     pub ffprobe: PathBuf,
+    /// Graphics-card decoding to ask for, if any.
+    pub accel: Option<Accel>,
+}
+
+/// Graphics-card video decoding FFmpeg can use, in the order it is preferred.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Accel {
+    /// NVIDIA's decoder, through CUDA.
+    Nvdec,
+    /// VA-API, as AMD and Intel drivers offer it.
+    Vaapi,
+    /// Vulkan video decoding.
+    Vulkan,
+}
+
+impl Accel {
+    /// FFmpeg's name for it, after `-hwaccel`.
+    fn flag(self) -> &'static str {
+        match self {
+            Accel::Nvdec => "cuda",
+            Accel::Vaapi => "vaapi",
+            Accel::Vulkan => "vulkan",
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Accel::Nvdec => "NVIDIA NVDEC",
+            Accel::Vaapi => "VA-API",
+            Accel::Vulkan => "Vulkan",
+        }
+    }
+}
+
+/// The graphics-card decoding this computer and `ffmpeg` both have:
+/// NVDEC with an NVIDIA driver, then VA-API, then Vulkan on a render node.
+/// Asked once per `ffmpeg` program.
+pub fn accel(tools: &Tools) -> Option<Accel> {
+    static KNOWN: std::sync::Mutex<Option<(PathBuf, Option<Accel>)>> = std::sync::Mutex::new(None);
+    let mut known = KNOWN.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some((path, accel)) = known.as_ref()
+        && *path == tools.ffmpeg
+    {
+        return *accel;
+    }
+    let listed = Command::new(&tools.ffmpeg)
+        .args(["-hide_banner", "-hwaccels"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+        .unwrap_or_default();
+    let offered = |name: &str| listed.split_whitespace().any(|word| word == name);
+    let nvidia = Path::new("/proc/driver/nvidia/version").exists();
+    let render_node = std::fs::read_dir("/dev/dri").is_ok_and(|entries| {
+        entries
+            .flatten()
+            .any(|entry| entry.file_name().to_string_lossy().starts_with("renderD"))
+    });
+    let accel = if nvidia && offered("cuda") {
+        Some(Accel::Nvdec)
+    } else if render_node && offered("vaapi") {
+        Some(Accel::Vaapi)
+    } else if render_node && offered("vulkan") {
+        Some(Accel::Vulkan)
+    } else {
+        None
+    };
+    *known = Some((tools.ffmpeg.clone(), accel));
+    accel
 }
 
 /// `ffmpeg` and `ffprobe` from the search path, on Linux outside a Flatpak
@@ -32,6 +102,7 @@ pub fn tools() -> Option<Tools> {
     Some(Tools {
         ffmpeg: find("ffmpeg")?,
         ffprobe: find("ffprobe")?,
+        accel: None,
     })
 }
 
@@ -225,8 +296,14 @@ pub fn frames(
     height: u32,
     rate: f64,
 ) -> Result<Frames, String> {
-    let mut child = Command::new(&tools.ffmpeg)
-        .args(["-nostdin", "-hide_banner", "-v", "error"])
+    let mut command = Command::new(&tools.ffmpeg);
+    command.args(["-nostdin", "-hide_banner", "-v", "error"]);
+    // Frames the graphics card decodes come back to memory for the pipe;
+    // where it cannot decode a file, FFmpeg decodes it on the processor.
+    if let Some(accel) = tools.accel {
+        command.args(["-hwaccel", accel.flag()]);
+    }
+    let mut child = command
         .args(["-ss", &seconds(from)])
         .arg("-i")
         .arg(path)

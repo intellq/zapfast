@@ -337,6 +337,10 @@ pub struct App {
     pub dropping: bool,
     /// A text paste already handled the clipboard before the shortcut release.
     paste_before_release: bool,
+    /// When the command key (Ctrl) was last seen held, and when text was last
+    /// typed, to tell a Ctrl+V whose Ctrl came up before V from a typed V.
+    command_seen_at: f64,
+    text_typed_at: f64,
     /// Open emoji, GIF, or sticker picker tab.
     pub picker: Option<PickerTab>,
     /// Picker anchor at the composer button.
@@ -855,6 +859,8 @@ impl App {
             avatar_full_requests: HashSet::new(),
             dropping: false,
             paste_before_release: false,
+            command_seen_at: f64::NEG_INFINITY,
+            text_typed_at: f64::NEG_INFINITY,
             picker: None,
             picker_anchor: None,
             picker_search: String::new(),
@@ -977,7 +983,8 @@ impl App {
         // A hand-edited speed snaps to a supported one, so a speed control
         // always shows the speed that plays.
         app.settings.voice_speed = app.player.set_speed(app.settings.voice_speed);
-        app.video.use_ffmpeg(app.settings.ffmpeg_video);
+        app.video
+            .use_ffmpeg(app.settings.ffmpeg_video, app.settings.ffmpeg_gpu);
         app
     }
 
@@ -4328,6 +4335,7 @@ impl App {
                     self.settings
                         .reaction_emoji
                         .retain(|(known, _)| emoji_family(known) != family);
+                    // The composer's own recent emoji stay as they are.
                     self.settings
                         .reaction_emoji
                         .insert(0, (emoji.clone(), count));
@@ -4335,7 +4343,7 @@ impl App {
                         .reaction_emoji
                         .sort_by_key(|(_, count)| std::cmp::Reverse(*count));
                     self.settings.reaction_emoji.truncate(36);
-                    self.remember_emoji(&emoji);
+                    self.mark_settings_dirty();
                 }
                 egui::Popup::close_id(
                     ctx,
@@ -4808,7 +4816,8 @@ impl App {
             }
             Action::SettingsChanged => {
                 self.mark_settings_dirty();
-                self.video.use_ffmpeg(self.settings.ffmpeg_video);
+                self.video
+                    .use_ffmpeg(self.settings.ffmpeg_video, self.settings.ffmpeg_gpu);
                 crate::emoji::use_whatsapp(
                     ctx,
                     self.settings.whatsapp_emoji,
@@ -5444,6 +5453,30 @@ impl App {
                 input.modifiers.command,
             )
         });
+        // With only a picture on the clipboard egui reports nothing when
+        // Ctrl+V goes down, so the paste is taken when V comes up. A Ctrl let
+        // go a moment before V still asked for one: a typed V always brings
+        // text with it, and Ctrl+V never does.
+        let (now, typed) = ctx.input(|input| {
+            (
+                input.time,
+                input
+                    .events
+                    .iter()
+                    .any(|event| matches!(event, egui::Event::Text(_))),
+            )
+        });
+        if command {
+            self.command_seen_at = now;
+        }
+        if typed {
+            self.text_typed_at = now;
+        }
+        let late_release = released
+            && !command
+            && now - self.command_seen_at < CTRL_V_GRACE
+            && self.text_typed_at < self.command_seen_at;
+        let paste = paste || late_release;
         let requested = paste && (text || !self.paste_before_release);
         if released || !focused {
             self.paste_before_release = false;
@@ -5773,6 +5806,10 @@ pub fn primary_selection() -> Option<String> {
 pub fn primary_selection() -> Option<String> {
     None
 }
+
+/// How long after Ctrl comes up a V release still counts as Ctrl+V, in
+/// seconds.
+const CTRL_V_GRACE: f64 = 0.8;
 
 /// Clipboard image as width, height, and straight-alpha RGBA.
 fn clipboard_image() -> Option<(usize, usize, Vec<u8>)> {
@@ -9222,7 +9259,8 @@ mod tests {
             app.settings.reaction_emoji,
             [("👍🏿".into(), 2), ("🙌🏼".into(), 1)]
         );
-        assert_eq!(app.settings.recent_emoji, ["🙌🏼", "👍🏿", "🔥"]);
+        // Reactions keep their own recent emoji.
+        assert_eq!(app.settings.recent_emoji, ["👍🏿", "🔥"]);
     }
 
     #[test]

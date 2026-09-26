@@ -58,6 +58,8 @@ struct Row {
     title: Text,
     description: Text,
     keywords: Vec<Text>,
+    /// Drawn a little to the right, under the row it depends on.
+    indent: bool,
 }
 
 /// The settings search, folded like chat search so case and accents do not
@@ -144,6 +146,7 @@ impl Section {
             title: title.into(),
             description: description.into(),
             keywords: Vec::new(),
+            indent: false,
         };
         self.entries
             .push((row, Control::Row(Box::new(control), control_width)));
@@ -159,6 +162,7 @@ impl Section {
             title: title.into(),
             description: description.into(),
             keywords: Vec::new(),
+            indent: false,
         };
         self.entries.push((row, Control::Toggle(field, None)));
     }
@@ -174,6 +178,7 @@ impl Section {
             title: title.into(),
             description: description.into(),
             keywords: Vec::new(),
+            indent: false,
         };
         self.entries
             .push((row, Control::Toggle(field, Some(enabled))));
@@ -184,8 +189,16 @@ impl Section {
             title: title.into(),
             description: description.into(),
             keywords: Vec::new(),
+            indent: false,
         };
         self.entries.push((row, Control::Unavailable));
+    }
+
+    /// Moves the row just added under the one before it, as its sub-option.
+    fn indent_last(&mut self) {
+        if let Some((row, _)) = self.entries.last_mut() {
+            row.indent = true;
+        }
     }
 
     fn block(&mut self, keywords: Vec<Text>, draw: impl FnOnce(&mut egui::Ui, &mut App) + 'static) {
@@ -215,36 +228,50 @@ impl Section {
         let palette = app.palette;
         section(ui, &palette, &title.shown, |ui| {
             for (row, control) in entries {
-                match control {
-                    Control::Row(control, control_width) => widgets::setting_row(
-                        ui,
-                        &palette,
-                        &row.title.shown,
-                        &row.description.shown,
-                        control_width,
-                        |ui| control(ui, app),
-                    ),
-                    Control::Toggle(field, enabled) => {
-                        ui.add_enabled_ui(enabled.is_none_or(|test| test(&app.settings)), |ui| {
-                            toggle(ui, app, &row.title.shown, &row.description.shown, field);
-                        });
-                    }
-                    Control::Block(draw) => draw(ui, app),
-                    Control::Unavailable => {
-                        ui.add_enabled_ui(false, |ui| {
-                            switch_row(
-                                ui,
-                                app,
-                                &row.title.shown,
-                                &row.description.shown,
-                                &mut false,
-                            );
-                        });
-                    }
+                if row.indent {
+                    ui.horizontal(|ui| {
+                        ui.add_space(SUB_OPTION_INDENT);
+                        ui.vertical(|ui| draw_entry(ui, app, &palette, &row, control));
+                    });
+                } else {
+                    draw_entry(ui, app, &palette, &row, control);
                 }
             }
         });
         true
+    }
+}
+
+/// How far a sub-option's row starts to the right of its parent's.
+const SUB_OPTION_INDENT: f32 = 28.0;
+
+fn draw_entry(ui: &mut egui::Ui, app: &mut App, palette: &Palette, row: &Row, control: Control) {
+    match control {
+        Control::Row(control, control_width) => widgets::setting_row(
+            ui,
+            palette,
+            &row.title.shown,
+            &row.description.shown,
+            control_width,
+            |ui| control(ui, app),
+        ),
+        Control::Toggle(field, enabled) => {
+            ui.add_enabled_ui(enabled.is_none_or(|test| test(&app.settings)), |ui| {
+                toggle(ui, app, &row.title.shown, &row.description.shown, field);
+            });
+        }
+        Control::Block(draw) => draw(ui, app),
+        Control::Unavailable => {
+            ui.add_enabled_ui(false, |ui| {
+                switch_row(
+                    ui,
+                    app,
+                    &row.title.shown,
+                    &row.description.shown,
+                    &mut false,
+                );
+            });
+        }
     }
 }
 
@@ -953,7 +980,8 @@ fn theme_picker(ui: &mut egui::Ui, app: &mut App) {
 /// installed, and otherwise disabled with how to install it here.
 fn ffmpeg_row(chats: &mut Section, locale: Locale) {
     let title = translated(locale, "Play videos with FFmpeg");
-    if crate::ffmpeg::tools().is_some() {
+    let gpu = translated(locale, "Decode on the graphics card");
+    if let Some(tools) = crate::ffmpeg::tools() {
         chats.toggle(
             title,
             translated(
@@ -962,6 +990,30 @@ fn ffmpeg_row(chats: &mut Section, locale: Locale) {
             ),
             |settings| &mut settings.ffmpeg_video,
         );
+        match crate::ffmpeg::accel(&tools) {
+            Some(accel) => {
+                const USES: &str = "Decodes videos with {method} when it can, and on the processor otherwise. Lighter on high-resolution HEVC and AV1.";
+                chats.toggle_when(
+                    gpu,
+                    Text {
+                        shown: crate::i18n::gettext(locale, USES)
+                            .replace("{method}", accel.name())
+                            .into(),
+                        source: USES.replace("{method}", accel.name()).into(),
+                    },
+                    |settings| &mut settings.ffmpeg_gpu,
+                    |settings| settings.ffmpeg_video,
+                );
+            }
+            None => chats.unavailable(
+                gpu,
+                translated(
+                    locale,
+                    "No graphics-card decoding (NVDEC, VA-API or Vulkan) was found for FFmpeg on this computer, so videos decode on the processor.",
+                ),
+            ),
+        }
+        chats.indent_last();
         return;
     }
     let description = if crate::ffmpeg::sandboxed() {
@@ -990,6 +1042,8 @@ fn ffmpeg_row(chats: &mut Section, locale: Locale) {
         }
     };
     chats.unavailable(title, description);
+    chats.unavailable(gpu, translated(locale, "Needs FFmpeg."));
+    chats.indent_last();
 }
 
 /// The website's page on writing a theme.
