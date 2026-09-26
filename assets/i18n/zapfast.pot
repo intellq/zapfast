@@ -570,6 +570,21 @@ msgid ""
 "the text."
 msgstr ""
 
+msgid "WhatsApp emoji"
+msgstr ""
+
+msgid ""
+"Draw emoji with the WhatsApp emoji font installed on this computer."
+msgstr ""
+
+msgid ""
+"Needs WhatsAppEmoji.ttf, which ZapFast cannot include. Put it in the emoji "
+"fonts folder, or install the ttf-whatsapp-emoji package."
+msgstr ""
+
+msgid "Emoji fonts folder"
+msgstr ""
+
 #: src/ui/settings.rs:352
 msgid "Download files automatically"
 msgstr ""

@@ -3,10 +3,13 @@
 //! Layout replaces each emoji sequence with a transparent placeholder, then
 //! paints the bitmap over it. The font's ligature table resolves flags, skin
 //! tones, and joined sequences.
+//!
+//! A WhatsApp emoji font the user installs can replace it. Its artwork is
+//! WhatsApp's, so ZapFast neither bundles nor downloads it.
 
 use std::collections::HashMap;
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use egui::text::LayoutJob;
@@ -54,7 +57,67 @@ pub fn warm_up() {
 }
 
 fn font() -> Option<&'static Font> {
+    if USE_WHATSAPP.load(Ordering::Relaxed)
+        && let Some(font) = *WHATSAPP.lock().unwrap_or_else(|p| p.into_inner())
+    {
+        return Some(font);
+    }
     FONT.get_or_init(load).as_ref()
+}
+
+/// File name of the WhatsApp emoji font in ZapFast's fonts folder.
+pub const WHATSAPP_FILE: &str = "WhatsAppEmoji.ttf";
+
+static USE_WHATSAPP: AtomicBool = AtomicBool::new(false);
+
+/// The WhatsApp font once read; kept for the life of the process, like the
+/// desktop font.
+static WHATSAPP: Mutex<Option<&'static Font>> = Mutex::new(None);
+
+/// Where a WhatsApp emoji font is installed: ZapFast's own fonts folder
+/// first, then where a desktop package or the user puts fonts. Only CBDT
+/// builds, such as github.com/dmlls/whatsapp-emoji-linux, can be drawn.
+pub fn whatsapp_font_file(own: &Path) -> Option<PathBuf> {
+    #[allow(unused_mut)]
+    let mut candidates = vec![own.join(WHATSAPP_FILE)];
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        // The AUR package ttf-whatsapp-emoji renames its file.
+        candidates.push(PathBuf::from(
+            "/usr/share/fonts/whatsapp-emoji/whatsapp-emoji.ttf",
+        ));
+        for dir in ["/usr/share/fonts/TTF", "/usr/local/share/fonts"] {
+            candidates.push(PathBuf::from(dir).join(WHATSAPP_FILE));
+        }
+        if let Some(home) = std::env::var_os("HOME") {
+            let home = PathBuf::from(home);
+            candidates.push(home.join(".local/share/fonts").join(WHATSAPP_FILE));
+            candidates.push(home.join(".fonts").join(WHATSAPP_FILE));
+        }
+    }
+    candidates.into_iter().find(|path| path.is_file())
+}
+
+/// Draws emoji with the WhatsApp font when `wanted` and one is installed,
+/// and with the desktop or bundled font otherwise. Returns whether the
+/// WhatsApp font is in use. A change drops the pictures already drawn.
+pub fn use_whatsapp(ctx: &egui::Context, wanted: bool, own: &Path) -> bool {
+    let active = wanted && {
+        let mut slot = WHATSAPP.lock().unwrap_or_else(|p| p.into_inner());
+        if slot.is_none()
+            && let Some(path) = whatsapp_font_file(own)
+            && let Ok(bytes) = std::fs::read(&path)
+        {
+            *slot = load_bytes(bytes, 0, &path.display().to_string())
+                .map(|font| &*Box::leak(Box::new(font)));
+        }
+        slot.is_some()
+    };
+    if USE_WHATSAPP.swap(active, Ordering::Relaxed) != active {
+        ctx.data_mut(|data| data.remove::<Cache>(egui::Id::new("emoji-cache")));
+        ctx.request_repaint();
+    }
+    active
 }
 
 fn load() -> Option<Font> {

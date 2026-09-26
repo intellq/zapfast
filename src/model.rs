@@ -1542,6 +1542,8 @@ pub enum Action {
     RemoveWallpaperImage,
     ReloadThemes,
     OpenThemesFolder,
+    /// Opens the folder ZapFast reads a WhatsApp emoji font from.
+    OpenEmojiFontFolder,
     SettingsChanged,
     /// Writes one WhatsApp account privacy category on the phone.
     SetAccountPrivacy {

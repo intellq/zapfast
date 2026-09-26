@@ -1150,9 +1150,17 @@ impl App {
         // the next: three passes keep it from showing a frame out of place.
         ctx.options_mut(|options| options.max_passes = std::num::NonZeroUsize::new(3).unwrap());
         // Load and index the color emoji font outside the frame loop.
+        let (emoji_ctx, whatsapp, fonts) = (
+            ctx.clone(),
+            self.settings.whatsapp_emoji,
+            self.dirs.emoji_font_dir(),
+        );
         std::thread::Builder::new()
             .name("emoji-font".into())
-            .spawn(crate::emoji::warm_up)
+            .spawn(move || {
+                crate::emoji::use_whatsapp(&emoji_ctx, whatsapp, &fonts);
+                crate::emoji::warm_up();
+            })
             .ok();
         self.applied_dark = None;
         self.theme_transition = fastframe_theme::Transition::default();
@@ -4707,6 +4715,14 @@ impl App {
                 self.backend.send(Command::RemoveWallpaperImage);
             }
             Action::ReloadThemes => self.load_custom_themes(),
+            Action::OpenEmojiFontFolder => {
+                let directory = self.dirs.emoji_font_dir();
+                std::thread::spawn(move || {
+                    if std::fs::create_dir_all(&directory).is_ok() {
+                        let _ = open::that(directory);
+                    }
+                });
+            }
             Action::OpenThemesFolder => {
                 let directory = self.dirs.config.join("themes");
                 std::thread::spawn(move || {
@@ -4760,6 +4776,11 @@ impl App {
             }
             Action::SettingsChanged => {
                 self.mark_settings_dirty();
+                crate::emoji::use_whatsapp(
+                    ctx,
+                    self.settings.whatsapp_emoji,
+                    &self.dirs.emoji_font_dir(),
+                );
                 self.backend.send(Command::SetAttachmentLimit(
                     self.settings.attachment_limit_bytes(),
                 ));

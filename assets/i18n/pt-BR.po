@@ -575,6 +575,25 @@ msgstr ""
 "Ao digitar : seguido de um nome, sugere emojis; Enter ou Tab troca o texto "
 "pelo emoji."
 
+msgid "WhatsApp emoji"
+msgstr "Emojis do WhatsApp"
+
+msgid ""
+"Draw emoji with the WhatsApp emoji font installed on this computer."
+msgstr ""
+"Desenha os emojis com a fonte de emojis do WhatsApp instalada neste "
+"computador."
+
+msgid ""
+"Needs WhatsAppEmoji.ttf, which ZapFast cannot include. Put it in the emoji "
+"fonts folder, or install the ttf-whatsapp-emoji package."
+msgstr ""
+"Requer o arquivo WhatsAppEmoji.ttf, que o ZapFast não pode incluir. "
+"Coloque-o na pasta de fontes de emoji ou instale o pacote ttf-whatsapp-emoji."
+
+msgid "Emoji fonts folder"
+msgstr "Pasta de fontes de emoji"
+
 #: src/ui/settings.rs:352
 msgid "Download files automatically"
 msgstr "Baixar arquivos automaticamente"

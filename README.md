@@ -97,6 +97,19 @@ Além das novidades do upstream, esta branch inclui as seguintes mudanças:
   letras (como `:P` ou `:D`) não abre sugestões, e Enter envia o texto como
   foi digitado. Marcada, volta o comportamento anterior: `:nome` sugere
   emojis e Enter ou Tab troca o texto pelo emoji escolhido.
+- **Emojis no estilo do WhatsApp (opcional).** Em **Configurações ›
+  Aparência**, a opção **Emojis do WhatsApp** troca o Noto Color Emoji pela
+  fonte de emojis do WhatsApp, sem reiniciar. A arte é propriedade da
+  WhatsApp/Meta e não tem licença de redistribuição, então este fork não
+  inclui nem baixa a fonte: você instala o arquivo. Uma versão compatível
+  (bitmaps CBDT, com tons de pele, bandeiras e sequências ZWJ) é a do projeto
+  [whatsapp-emoji-linux](https://github.com/dmlls/whatsapp-emoji-linux), que
+  declara uso apenas não comercial e educacional. Coloque `WhatsAppEmoji.ttf`
+  na pasta de fontes de emoji do ZapFast (`~/.config/zapfast/fonts` no Linux;
+  o botão **Abrir pasta** aparece enquanto a fonte não é encontrada) para que
+  só o ZapFast use esses emojis. O pacote AUR `ttf-whatsapp-emoji` também é
+  reconhecido, mas instala uma regra do fontconfig que pode trocar os emojis
+  do desktop inteiro. Sem a fonte, a opção fica desabilitada.
 - **Menu de contexto na caixa de digitação.** O botão direito no compositor
   abre **Recortar**, **Copiar**, **Colar** e **Selecionar tudo**, em todas as
   plataformas (o `TextEdit` do egui não oferece menu próprio). A seleção feita
@@ -206,8 +219,11 @@ de sincronizar a exclusão "para mim" com o celular é uma extensão deste fork.
   the text has more than one. Carets and copied text stay on the logical message.
   Emoji use the bundled Noto
   Color Emoji on macOS and Windows. On Linux, ZapFast prefers an installed
-  Noto Color Emoji and falls back to the bundled copy. Emoji-only messages
-  are larger.
+  Noto Color Emoji and falls back to the bundled copy. **WhatsApp emoji** in
+  Appearance draws them with a WhatsApp emoji font you install yourself
+  (`WhatsAppEmoji.ttf` in the emoji fonts folder, or the Linux package
+  `ttf-whatsapp-emoji`); WhatsApp's artwork is not ZapFast's to ship, so it is
+  neither bundled nor downloaded. Emoji-only messages are larger.
 - **Readable text.** Secondary text in the built-in light and dark themes
   reaches WCAG AA contrast. Inside message bubbles, times, ticks, and other
   grey text adjust to the bubble's colour, in custom themes as well.

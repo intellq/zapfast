@@ -343,6 +343,9 @@ pub struct Settings {
     /// Whether typing `:` and a name suggests emoji that Enter or Tab puts in
     /// place of the text. Off, what is typed stays as typed.
     pub emoji_shortcuts: bool,
+    /// Draw emoji with an installed WhatsApp emoji font instead of the
+    /// desktop's (or the bundled) Noto Color Emoji.
+    pub whatsapp_emoji: bool,
     /// Send read receipts, subject to the account privacy setting.
     pub send_read_receipts: bool,
     /// Send typing state while composing.
@@ -435,6 +438,7 @@ impl Default for Settings {
             search_pane_width: 380.0,
             enter_sends: true,
             emoji_shortcuts: false,
+            whatsapp_emoji: false,
             send_read_receipts: true,
             send_typing: true,
             auto_download: true,

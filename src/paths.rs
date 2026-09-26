@@ -84,6 +84,12 @@ impl AppDirs {
         }
     }
 
+    /// Where the user puts a WhatsApp emoji font for ZapFast alone, so the
+    /// rest of the desktop keeps its emoji.
+    pub fn emoji_font_dir(&self) -> PathBuf {
+        self.config.join("fonts")
+    }
+
     pub fn settings_file(&self) -> PathBuf {
         self.config.join("settings.json")
     }

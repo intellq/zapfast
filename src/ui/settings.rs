@@ -376,6 +376,41 @@ fn sections(app: &App) -> Vec<Section> {
         },
     );
     appearance.row_with_width(translated(locale, "Language"), "", 220.0, language_picker);
+    if crate::emoji::whatsapp_font_file(&app.dirs.emoji_font_dir()).is_some() {
+        appearance.toggle(
+            translated(locale, "WhatsApp emoji"),
+            translated(
+                locale,
+                "Draw emoji with the WhatsApp emoji font installed on this computer.",
+            ),
+            |settings| &mut settings.whatsapp_emoji,
+        );
+    } else {
+        // WhatsApp's artwork is not ZapFast's to ship: the switch waits for
+        // a font the user installs.
+        appearance.toggle_when(
+            translated(locale, "WhatsApp emoji"),
+            translated(
+                locale,
+                "Needs WhatsAppEmoji.ttf, which ZapFast cannot include. Put it in the emoji fonts folder, or install the ttf-whatsapp-emoji package.",
+            ),
+            |settings| &mut settings.whatsapp_emoji,
+            |_| false,
+        );
+        appearance.row_with_width(
+            translated(locale, "Emoji fonts folder"),
+            Text::default(),
+            160.0,
+            move |ui, app| {
+                let label = crate::i18n::gettext(app.locale, "Open folder");
+                if theme::soft_button(ui, &palette, Some(Icon::ExternalLink), &label, false)
+                    .clicked()
+                {
+                    app.actions.push(Action::OpenEmojiFontFolder);
+                }
+            },
+        );
+    }
 
     let mut chats = Section::new(translated(locale, "Chats"));
     chats.toggle(
