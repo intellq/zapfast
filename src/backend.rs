@@ -67,7 +67,11 @@ mod tests {
     fn backend_waits_for_window_acknowledgement_before_touching_storage() {
         let directory = tempfile::tempdir().unwrap();
         let dirs = crate::paths::AppDirs::under(directory.path());
-        let mut backend = super::Backend::spawn(dirs.clone(), super::Waker::default());
+        let mut backend = super::Backend::spawn(
+            dirs.clone(),
+            super::Waker::default(),
+            crate::model::ATTACHMENT_DOWNLOAD_LIMIT,
+        );
         assert!(!dirs.session_db().exists());
         assert!(!dirs.archive_db().exists());
         // Closing before a first frame must cancel startup without connecting
@@ -115,6 +119,7 @@ pub struct CreatedPoll {
 
 #[derive(Debug)]
 pub enum Command {
+    SetAttachmentLimit(u64),
     RefreshPoll {
         chat: ChatId,
         message: String,
@@ -260,9 +265,16 @@ pub enum Command {
         chat: ChatId,
         id: String,
     },
-    DeleteLocal {
+    DeleteForMe {
         chat: ChatId,
         id: String,
+        on_phone: bool,
+    },
+    /// Finishes a synchronized message deletion on the worker thread.
+    DeleteForMeSynced {
+        chat: ChatId,
+        id: String,
+        result: Result<(), String>,
     },
     /// Selects and sends files with the desktop picker.
     PickFiles(ChatId),
@@ -977,7 +989,7 @@ pub struct Backend {
 }
 
 impl Backend {
-    pub fn spawn(dirs: AppDirs, waker: Waker) -> Self {
+    pub fn spawn(dirs: AppDirs, waker: Waker, attachment_limit: u64) -> Self {
         let (command_tx, command_rx) = mpsc::unbounded_channel();
         let (event_tx, event_rx) = std::sync::mpsc::channel();
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -993,7 +1005,15 @@ impl Backend {
             .spawn(move || {
                 runtime.block_on(async move {
                     if started.await.is_ok() {
-                        worker::run(dirs, event_tx, worker_commands, command_rx, waker).await;
+                        worker::run(
+                            dirs,
+                            event_tx,
+                            worker_commands,
+                            command_rx,
+                            waker,
+                            attachment_limit,
+                        )
+                        .await;
                     }
                 });
                 runtime.shutdown_timeout(Duration::from_secs(3));

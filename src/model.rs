@@ -827,8 +827,8 @@ impl Media {
     ///
     /// A missing size is represented as zero and is allowed here. The worker
     /// still enforces the limit while streaming it from WhatsApp.
-    pub fn is_within_download_limit(&self) -> bool {
-        self.size <= ATTACHMENT_DOWNLOAD_LIMIT
+    pub fn is_within_download_limit(&self, limit: u64) -> bool {
+        self.size <= limit.min(ATTACHMENT_DOWNLOAD_LIMIT)
     }
 }
 
@@ -1042,6 +1042,8 @@ pub enum Dialog {
         message: String,
         /// Revokes for everyone instead of deleting only this copy.
         for_everyone: bool,
+        /// Whether a "for me" deletion is also sent to the phone.
+        on_phone: bool,
     },
     /// Chooses a destination for an archived message.
     Forward {
@@ -1347,8 +1349,13 @@ pub enum Action {
     CancelEdit,
     /// Revokes an outgoing message for everyone.
     DeleteForEveryone(String),
-    /// Deletes a message locally.
-    DeleteForMe(String),
+    /// Deletes a message locally and optionally on the phone.
+    DeleteForMe {
+        chat: ChatId,
+        message: String,
+        on_phone: bool,
+    },
+    SetDeleteOnPhone(bool),
     /// Opens the attachment picker for the current chat.
     Attach,
     /// Opens or closes the composer tools menu.
@@ -1860,9 +1867,11 @@ mod tests {
     fn attachment_download_limit_includes_the_boundary() {
         let mut item = media();
         item.size = ATTACHMENT_DOWNLOAD_LIMIT;
-        assert!(item.is_within_download_limit());
+        assert!(item.is_within_download_limit(ATTACHMENT_DOWNLOAD_LIMIT));
         item.size += 1;
-        assert!(!item.is_within_download_limit());
+        assert!(!item.is_within_download_limit(ATTACHMENT_DOWNLOAD_LIMIT));
+        item.size = 2 * 1024 * 1024;
+        assert!(!item.is_within_download_limit(1024 * 1024));
     }
 
     #[test]

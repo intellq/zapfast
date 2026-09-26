@@ -97,9 +97,12 @@ type Draw = Box<dyn FnOnce(&mut egui::Ui, &mut App)>;
 
 enum Control {
     /// The control beside a titled row.
-    Row(Draw),
+    Row(Draw, f32),
     /// A switch bound to a setting.
-    Toggle(fn(&mut Settings) -> &mut bool),
+    Toggle(
+        fn(&mut Settings) -> &mut bool,
+        Option<fn(&Settings) -> bool>,
+    ),
     /// Something that lays itself out, like the account card.
     Block(Draw),
 }
@@ -124,12 +127,23 @@ impl Section {
         description: impl Into<Text>,
         control: impl FnOnce(&mut egui::Ui, &mut App) + 'static,
     ) {
+        self.row_with_width(title, description, 260.0, control);
+    }
+
+    fn row_with_width(
+        &mut self,
+        title: impl Into<Text>,
+        description: impl Into<Text>,
+        control_width: f32,
+        control: impl FnOnce(&mut egui::Ui, &mut App) + 'static,
+    ) {
         let row = Row {
             title: title.into(),
             description: description.into(),
             keywords: Vec::new(),
         };
-        self.entries.push((row, Control::Row(Box::new(control))));
+        self.entries
+            .push((row, Control::Row(Box::new(control), control_width)));
     }
 
     fn toggle(
@@ -143,7 +157,23 @@ impl Section {
             description: description.into(),
             keywords: Vec::new(),
         };
-        self.entries.push((row, Control::Toggle(field)));
+        self.entries.push((row, Control::Toggle(field, None)));
+    }
+
+    fn toggle_when(
+        &mut self,
+        title: impl Into<Text>,
+        description: impl Into<Text>,
+        field: fn(&mut Settings) -> &mut bool,
+        enabled: fn(&Settings) -> bool,
+    ) {
+        let row = Row {
+            title: title.into(),
+            description: description.into(),
+            keywords: Vec::new(),
+        };
+        self.entries
+            .push((row, Control::Toggle(field, Some(enabled))));
     }
 
     fn block(&mut self, keywords: Vec<Text>, draw: impl FnOnce(&mut egui::Ui, &mut App) + 'static) {
@@ -174,15 +204,18 @@ impl Section {
         section(ui, &palette, &title.shown, |ui| {
             for (row, control) in entries {
                 match control {
-                    Control::Row(control) => widgets::setting_row(
+                    Control::Row(control, control_width) => widgets::setting_row(
                         ui,
                         &palette,
                         &row.title.shown,
                         &row.description.shown,
+                        control_width,
                         |ui| control(ui, app),
                     ),
-                    Control::Toggle(field) => {
-                        toggle(ui, app, &row.title.shown, &row.description.shown, field);
+                    Control::Toggle(field, enabled) => {
+                        ui.add_enabled_ui(enabled.is_none_or(|test| test(&app.settings)), |ui| {
+                            toggle(ui, app, &row.title.shown, &row.description.shown, field);
+                        });
                     }
                     Control::Block(draw) => draw(ui, app),
                 }
@@ -205,7 +238,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             Frame::new()
                 .inner_margin(Margin::symmetric(32, 24))
                 .show(ui, |ui| {
-                    ui.set_max_width(ui.available_width().min(640.0));
+                    ui.set_width(ui.available_width());
                     ui.horizontal(|ui| {
                         if theme::icon_button(
                             ui,
@@ -286,10 +319,11 @@ fn sections(app: &App) -> Vec<Section> {
     } else {
         Text::default()
     };
-    appearance.row(translated(locale, "Theme"), detail, theme_picker);
-    appearance.row(
+    appearance.row_with_width(translated(locale, "Theme"), detail, 220.0, theme_picker);
+    appearance.row_with_width(
         translated(locale, "Wallpaper"),
         Text::default(),
+        180.0,
         move |ui, app| {
             let label = if app.settings.wallpaper_image.is_some() {
                 crate::i18n::gettext(app.locale, "Image").into_owned()
@@ -301,12 +335,13 @@ fn sections(app: &App) -> Vec<Section> {
             }
         },
     );
-    appearance.row(
+    appearance.row_with_width(
         translated(locale, "Zoom"),
         keyed(translated(
             locale,
             "Ctrl+Plus and Ctrl+Minus work anywhere, and Ctrl+0 resets it.",
         )),
+        110.0,
         move |ui, app| {
             if theme::icon_button(
                 ui,
@@ -340,7 +375,7 @@ fn sections(app: &App) -> Vec<Section> {
             }
         },
     );
-    appearance.row(translated(locale, "Language"), "", language_picker);
+    appearance.row_with_width(translated(locale, "Language"), "", 220.0, language_picker);
 
     let mut chats = Section::new(translated(locale, "Chats"));
     chats.toggle(
@@ -350,11 +385,43 @@ fn sections(app: &App) -> Vec<Section> {
     );
     chats.toggle(
         translated(locale, "Download files automatically"),
-        translated(
-            locale,
-            "Files up to 64 MiB download as they come into view.",
-        ),
+        translated(locale, "Download all file types when they come into view."),
         |settings| &mut settings.auto_download,
+    );
+    chats.toggle_when(
+        translated(locale, "Download audio automatically"),
+        translated(locale, "Includes voice messages."),
+        |settings| &mut settings.auto_download_audio,
+        |settings| !settings.auto_download,
+    );
+    chats.toggle_when(
+        translated(locale, "Download videos automatically"),
+        translated(locale, "Includes GIFs and round videos."),
+        |settings| &mut settings.auto_download_video,
+        |settings| !settings.auto_download,
+    );
+    chats.toggle_when(
+        translated(locale, "Download images automatically"),
+        translated(locale, "Includes images in interactive cards."),
+        |settings| &mut settings.auto_download_image,
+        |settings| !settings.auto_download,
+    );
+    chats.row(
+        translated(locale, "Download size limit"),
+        translated(locale, "Maximum size for automatic and manual downloads."),
+        |ui, app| {
+            let mut value = app.settings.attachment_limit_mib.clamp(1, 64);
+            if ui
+                .add_sized(
+                    [200.0, 24.0],
+                    egui::Slider::new(&mut value, 1..=64).suffix(" MiB"),
+                )
+                .changed()
+            {
+                app.settings.attachment_limit_mib = value;
+                app.actions.push(Action::SettingsChanged);
+            }
+        },
     );
     // macOS has no public API to pause other apps' media.
     if crate::media_pause::SUPPORTED {
@@ -624,9 +691,10 @@ fn sections(app: &App) -> Vec<Section> {
     let mut files = Section::new(translated(locale, "Files"));
     let state = app.dirs.state.clone();
     let open_folder = crate::i18n::gettext(locale, "Open folder");
-    files.row(
+    files.row_with_width(
         translated(locale, "Message archive"),
         app.dirs.archive_db().display().to_string(),
+        160.0,
         {
             let open_folder = open_folder.clone();
             move |ui, app| {
@@ -676,9 +744,10 @@ fn sections(app: &App) -> Vec<Section> {
         },
     );
     let log = app.dirs.log_file();
-    files.row(
+    files.row_with_width(
         translated(locale, "Log"),
         log.display().to_string(),
+        100.0,
         move |ui, app| {
             if theme::soft_button(
                 ui,
@@ -1350,10 +1419,16 @@ fn toggle(
     description: &str,
     field: impl Fn(&mut crate::settings::Settings) -> &mut bool,
 ) {
-    let palette = app.palette;
+    let mut palette = app.palette;
+    if !ui.is_enabled() {
+        palette.text = palette.dim;
+        palette.secondary = palette.dim;
+        palette.accent = palette.dim;
+        palette.surface_active = palette.surface;
+    }
     let mut value = *field(&mut app.settings);
     let mut changed = false;
-    widgets::setting_row(ui, &palette, label, description, |ui| {
+    widgets::setting_row(ui, &palette, label, description, 56.0, |ui| {
         let response = widgets::switch(ui, &palette, &mut value);
         theme::reveal_focus(&response);
         response.widget_info(|| {

@@ -737,26 +737,42 @@ pub fn setting_row(
     palette: &Palette,
     label: &str,
     description: &str,
+    control_width: f32,
     control: impl FnOnce(&mut Ui),
 ) {
+    let draw_text = |ui: &mut Ui| {
+        let title = line(
+            ui,
+            label,
+            theme::medium(14.0),
+            palette.text,
+            ui.available_width(),
+            usize::MAX,
+        );
+        let (rect, _) = ui.allocate_exact_size(title.size(), Sense::hover());
+        if ui.is_rect_visible(rect) {
+            title.paint(ui, rect.min, palette.text);
+        }
+        if !description.is_empty() {
+            let description = line(
+                ui,
+                description,
+                theme::regular(12.5),
+                palette.secondary,
+                ui.available_width(),
+                usize::MAX,
+            );
+            let (rect, _) = ui.allocate_exact_size(description.size(), Sense::hover());
+            if ui.is_rect_visible(rect) {
+                description.paint(ui, rect.min, palette.secondary);
+            }
+        }
+    };
+    let width = ui.available_width();
     ui.horizontal(|ui| {
         ui.vertical(|ui| {
-            ui.set_width((ui.available_width() - 260.0).max(120.0));
-            rich_text(ui, label, theme::medium(14.0), palette.text);
-            if !description.is_empty() {
-                let description = line(
-                    ui,
-                    description,
-                    theme::regular(12.5),
-                    palette.secondary,
-                    ui.available_width(),
-                    usize::MAX,
-                );
-                let (rect, _) = ui.allocate_exact_size(description.size(), Sense::hover());
-                if ui.is_rect_visible(rect) {
-                    description.paint(ui, rect.min, palette.secondary);
-                }
-            }
+            ui.set_width((width - control_width - ui.spacing().item_spacing.x).max(1.0));
+            draw_text(ui);
         });
         ui.with_layout(Layout::right_to_left(Align::Center), control);
     });

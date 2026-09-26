@@ -686,7 +686,11 @@ impl Default for AppOptions {
 impl App {
     pub fn new(waker: &Waker, dirs: AppDirs, settings: Settings, options: AppOptions) -> Self {
         crate::proxy::configure(&settings.proxy);
-        let backend = Backend::spawn(dirs.clone(), waker.clone());
+        let backend = Backend::spawn(
+            dirs.clone(),
+            waker.clone(),
+            settings.attachment_limit_bytes(),
+        );
         let mut app = Self::with_backend(dirs, settings, backend, waker.clone());
         app.pauses_media = true;
         app.badge = Some(Default::default());
@@ -3546,9 +3550,9 @@ impl App {
                 else {
                     return;
                 };
-                if !media.is_within_download_limit() {
+                if !media.is_within_download_limit(self.settings.attachment_limit_bytes()) {
                     media.state = MediaState::Failed(
-                        "This attachment is larger than the 64 MiB download limit".into(),
+                        "This attachment exceeds the configured download size limit".into(),
                     );
                     return;
                 }
@@ -3790,12 +3794,18 @@ impl App {
                     self.backend.send(Command::Revoke { chat, id });
                 }
             }
-            Action::DeleteForMe(id) => {
-                if let Some(chat) = self.open_chat.clone() {
-                    if let Some(conversation) = self.conversations.get_mut(&chat) {
-                        conversation.messages.retain(|message| message.id != id);
-                    }
-                    self.backend.send(Command::DeleteLocal { chat, id });
+            Action::DeleteForMe {
+                chat,
+                message,
+                on_phone,
+            } => self.backend.send(Command::DeleteForMe {
+                chat,
+                id: message,
+                on_phone,
+            }),
+            Action::SetDeleteOnPhone(value) => {
+                if let Some(Dialog::ConfirmDeleteMessage { on_phone, .. }) = &mut self.dialog {
+                    *on_phone = value;
                 }
             }
             Action::Attach => {
@@ -4633,7 +4643,12 @@ impl App {
                 self.search_hits.clear();
                 self.mark_settings_dirty();
             }
-            Action::SettingsChanged => self.mark_settings_dirty(),
+            Action::SettingsChanged => {
+                self.mark_settings_dirty();
+                self.backend.send(Command::SetAttachmentLimit(
+                    self.settings.attachment_limit_bytes(),
+                ));
+            }
             Action::SetAccountPrivacy { kind, choice } => {
                 // The value lives on the phone: nothing is written without a
                 // connection and a snapshot to write against.
@@ -7213,6 +7228,7 @@ mod tests {
             chat: other.into(),
             message: "m1".into(),
             for_everyone: true,
+            on_phone: false,
         });
 
         events

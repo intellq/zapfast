@@ -1604,7 +1604,7 @@ struct View<'a> {
     locale: crate::i18n::Locale,
     chat: &'a Chat,
     me: Option<&'a str>,
-    auto_download: bool,
+    download_settings: &'a crate::settings::Settings,
     connected: bool,
     poll_voting: &'a HashSet<(ChatId, String)>,
     interactive_pending: &'a HashSet<(ChatId, String)>,
@@ -1630,13 +1630,39 @@ struct View<'a> {
     copy_rows: &'a std::sync::Mutex<Vec<crate::transcript::Row>>,
 }
 
+/// How far a message bubble may extend across the transcript.
+fn bubble_width_limit(available: f32, own: bool, carousel: bool, with_avatar: bool) -> f32 {
+    let width = if carousel {
+        (available * 0.95).min(920.0)
+    } else if own {
+        (available * 0.72).min(560.0)
+    } else {
+        // Leave room for the frame's 20-point horizontal padding and an
+        // eight-point gap from the outgoing bubbles' right edge.
+        available - 28.0
+    };
+    (width
+        - if with_avatar {
+            SENDER_AVATAR + 8.0
+        } else {
+            0.0
+        })
+    .max(0.0)
+}
+
 /// A row height to assume for a message that has not been laid out yet. Rows
 /// near the viewport are always measured, and a change in the height of a row
 /// above the viewport moves the scroll offset with it, so this only shapes the
 /// scrollbar until the reader scrolls near the row.
-fn estimated_height(message: &Message, width: f32, new_day: bool) -> f32 {
-    // Bubbles take at most 72% of the transcript, and 560 points.
-    let bubble = ((width * 0.72).min(560.0) - 20.0).max(40.0);
+fn estimated_height(message: &Message, width: f32, new_day: bool, sender_pictures: bool) -> f32 {
+    let carousel = matches!(&message.content, Content::Interactive { card: Some(card), .. } if !card.carousel.is_empty());
+    let bubble = (bubble_width_limit(
+        width,
+        message.from_me,
+        carousel,
+        !message.from_me && sender_pictures,
+    ) - 20.0)
+        .max(40.0);
     let text_rows = |text: &str| {
         let per_row = bubble / 7.5;
         (text.chars().count() as f32 / per_row).ceil().max(1.0)
@@ -1704,7 +1730,7 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
         locale: app.locale,
         chat,
         me: app.me.as_deref(),
-        auto_download: app.settings.auto_download,
+        download_settings: &app.settings,
         connected: app.link.is_connected(),
         poll_voting: &app.poll_voting,
         interactive_pending: &app.interactive_sending,
@@ -1891,7 +1917,14 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                         });
                         let known = rows.get(&message.id).copied();
                         let height = known.map_or_else(
-                            || estimated_height(message, layout_width, new_day),
+                            || {
+                                estimated_height(
+                                    message,
+                                    layout_width,
+                                    new_day,
+                                    shows_sender_pictures(view.chat),
+                                )
+                            },
                             |row| row.height,
                         );
                         // A pass redone after the offset followed rows that
@@ -2613,14 +2646,7 @@ fn bubble(
     };
     let with_avatar = !own && shows_sender_pictures(view.chat);
     let carousel = matches!(&message.content, Content::Interactive { card: Some(card), .. } if !card.carousel.is_empty());
-    let max_width = ((ui.available_width() * if carousel { 0.95 } else { 0.72 })
-        .min(if carousel { 920.0 } else { 560.0 })
-        - if with_avatar {
-            SENDER_AVATAR + 8.0
-        } else {
-            0.0
-        })
-    .max(0.0);
+    let max_width = bubble_width_limit(ui.available_width(), own, carousel, with_avatar);
     // Register the empty strip beside the bubble from its previous rect, before
     // the row, so the avatar, the bubble, and the reactions win clicks.
     let id = bubble_id(&view.chat.id, &message.id);
@@ -3783,6 +3809,7 @@ fn context_menu(ui: &mut egui::Ui, view: &View<'_>, message: &Message, actions: 
             chat: view.chat.id.clone(),
             message: message.id.clone(),
             for_everyone: true,
+            on_phone: false,
         }));
     }
     if widgets::menu_item(ui, &palette, Some(Icon::EyeOff), "Delete for me") {
@@ -3790,6 +3817,7 @@ fn context_menu(ui: &mut egui::Ui, view: &View<'_>, message: &Message, actions: 
             chat: view.chat.id.clone(),
             message: message.id.clone(),
             for_everyone: false,
+            on_phone: true,
         }));
     }
     if let Content::Sticker { media, .. } = &message.content
@@ -4820,7 +4848,11 @@ fn carousel_picture(
     } else if !matches!(media.state, MediaState::Downloading)
         && (clicked
             || (visible
-                && auto_download_allowed(media, false, view.auto_download)
+                && auto_download_allowed(
+                    media,
+                    crate::settings::AutoDownloadKind::Image,
+                    view.download_settings,
+                )
                 && matches!(media.state, MediaState::Idle)))
     {
         actions.push(Action::Download {
@@ -5563,7 +5595,15 @@ fn picture(
         && !matches!(media.state, MediaState::Downloading);
     let auto = ui.is_rect_visible(rect)
         && matches!(media.state, MediaState::Idle)
-        && auto_download_allowed(media, sticker.is_some(), view.auto_download);
+        && auto_download_allowed(
+            media,
+            if sticker.is_some() {
+                crate::settings::AutoDownloadKind::Sticker
+            } else {
+                crate::settings::AutoDownloadKind::Image
+            },
+            view.download_settings,
+        );
     if wants || auto {
         actions.push(Action::Download {
             card: None,
@@ -5576,8 +5616,13 @@ fn picture(
 
 /// Stickers always download when visible, while other media follows the setting.
 /// Every automatic download still respects the shared size limit.
-fn auto_download_allowed(media: &Media, sticker: bool, auto_download: bool) -> bool {
-    media.is_within_download_limit() && (sticker || auto_download)
+fn auto_download_allowed(
+    media: &Media,
+    kind: crate::settings::AutoDownloadKind,
+    settings: &crate::settings::Settings,
+) -> bool {
+    media.is_within_download_limit(settings.attachment_limit_bytes())
+        && settings.auto_downloads(kind)
 }
 
 /// Draws a video. GIFs play in place; other videos play in the bubble once
@@ -5747,8 +5792,11 @@ fn video(
     let auto = ui.is_rect_visible(rect)
         && media.path.is_none()
         && matches!(media.state, MediaState::Idle)
-        && view.auto_download
-        && media.is_within_download_limit();
+        && auto_download_allowed(
+            media,
+            crate::settings::AutoDownloadKind::Video,
+            view.download_settings,
+        );
     if auto {
         actions.push(Action::Download {
             card: None,
@@ -6039,8 +6087,11 @@ fn video_note(
     let auto = ui.is_rect_visible(rect)
         && media.path.is_none()
         && matches!(media.state, MediaState::Idle)
-        && view.auto_download
-        && media.is_within_download_limit();
+        && auto_download_allowed(
+            media,
+            crate::settings::AutoDownloadKind::Video,
+            view.download_settings,
+        );
     if auto {
         actions.push(Action::Download {
             card: None,
@@ -6149,8 +6200,11 @@ fn attachment(
     let auto = ui.is_rect_visible(response.rect)
         && media.path.is_none()
         && matches!(media.state, MediaState::Idle)
-        && view.auto_download
-        && media.is_within_download_limit();
+        && auto_download_allowed(
+            media,
+            crate::settings::AutoDownloadKind::Document,
+            view.download_settings,
+        );
     if auto {
         actions.push(Action::Download {
             card: None,
@@ -6397,8 +6451,11 @@ fn voice_player(
     );
     let auto = media.path.is_none()
         && matches!(media.state, MediaState::Idle)
-        && view.auto_download
-        && media.is_within_download_limit();
+        && auto_download_allowed(
+            media,
+            crate::settings::AutoDownloadKind::Audio,
+            view.download_settings,
+        );
     if auto {
         actions.push(Action::Download {
             card: None,
@@ -6829,11 +6886,28 @@ mod tests {
 
     #[test]
     fn visible_stickers_download_automatically_with_the_attachment_setting_off() {
+        use crate::settings::AutoDownloadKind;
+        let settings = crate::settings::Settings {
+            auto_download: false,
+            ..Default::default()
+        };
         let mut sticker = media(Some(180), Some(180));
-        assert!(auto_download_allowed(&sticker, true, false));
-        assert!(!auto_download_allowed(&sticker, false, false));
+        assert!(auto_download_allowed(
+            &sticker,
+            AutoDownloadKind::Sticker,
+            &settings
+        ));
+        assert!(!auto_download_allowed(
+            &sticker,
+            AutoDownloadKind::Image,
+            &settings
+        ));
         sticker.size = crate::model::ATTACHMENT_DOWNLOAD_LIMIT + 1;
-        assert!(!auto_download_allowed(&sticker, true, false));
+        assert!(!auto_download_allowed(
+            &sticker,
+            AutoDownloadKind::Sticker,
+            &settings
+        ));
     }
 
     /// The typing dots animate at the display's rate, not a fixed timer.

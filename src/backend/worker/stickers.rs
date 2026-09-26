@@ -722,10 +722,12 @@ impl Worker {
         };
         self.favorite_fetches.insert(hash.clone());
         let commands = self.commands.clone();
+        let attachment_limit = self.attachment_limit;
         tokio::spawn(async move {
             let mut result = Err("no download references".to_owned());
             for download in &candidates {
-                result = download_attachment(&client, download, &dir, &path).await;
+                result =
+                    download_attachment(&client, download, &dir, &path, attachment_limit).await;
                 if result.is_ok() {
                     break;
                 }
@@ -920,7 +922,7 @@ impl Worker {
             )));
             return;
         };
-        if attachment_is_too_large(pack.file_length) {
+        if attachment_is_too_large(pack.file_length, self.attachment_limit) {
             self.emit(Event::StickerPackPreview(Err(
                 ATTACHMENT_LIMIT_ERROR.to_owned()
             )));

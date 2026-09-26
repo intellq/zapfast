@@ -77,10 +77,11 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                 Dialog::ConfirmDeleteChat(id) => confirm_delete_chat(app, ui, &id),
                 Dialog::ConfirmClearChat(id) => confirm_clear_chat(app, ui, &id),
                 Dialog::ConfirmDeleteMessage {
+                    chat,
                     message,
                     for_everyone,
-                    ..
-                } => confirm_delete_message(app, ui, &message, for_everyone),
+                    on_phone,
+                } => confirm_delete_message(app, ui, &chat, &message, for_everyone, on_phone),
                 Dialog::Forward { chat, messages } => forward(app, ui, &chat, &messages),
                 Dialog::JoinGroup => join_group(app, ui),
                 Dialog::ConfirmStartOver => confirm_start_over(app, ui),
@@ -1056,7 +1057,14 @@ fn confirm_start_over(app: &mut App, ui: &mut egui::Ui) {
 
 /// Confirms deleting one message. Enter is deliberately not bound here: a
 /// stray keypress must not destroy a message.
-fn confirm_delete_message(app: &mut App, ui: &mut egui::Ui, id: &str, for_everyone: bool) {
+fn confirm_delete_message(
+    app: &mut App,
+    ui: &mut egui::Ui,
+    chat: &str,
+    id: &str,
+    for_everyone: bool,
+    on_phone: bool,
+) {
     let palette = app.palette;
     let (heading, body) = if for_everyone {
         (
@@ -1066,24 +1074,57 @@ fn confirm_delete_message(app: &mut App, ui: &mut egui::Ui, id: &str, for_everyo
     } else {
         (
             "Delete for me?",
-            "This removes the message from this computer. Other people keep their copy. Your phone will not send it again, so it cannot be undone.",
+            "This removes the message from this computer. Check the option below to remove it from your phone and linked devices too. Other people keep their copy.",
         )
     };
-    title(ui, app, heading);
-    theme::paragraph(ui, body, theme::regular(13.5), palette.text);
+    title(ui, app, crate::i18n::gettext(app.locale, heading).as_ref());
+    theme::paragraph(
+        ui,
+        crate::i18n::gettext(app.locale, body).to_string(),
+        theme::regular(13.5),
+        palette.text,
+    );
+    let mut selected = on_phone;
+    if !for_everyone {
+        ui.add_space(6.0);
+        if ui
+            .checkbox(
+                &mut selected,
+                crate::i18n::gettext(app.locale, "Also delete on phone"),
+            )
+            .changed()
+        {
+            app.actions.push(Action::SetDeleteOnPhone(selected));
+        }
+    }
     ui.add_space(10.0);
     ui.horizontal(|ui| {
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if danger_button(ui, app, "Delete") {
-                let action = if for_everyone {
+            let confirm_label = if for_everyone {
+                crate::i18n::gettext(app.locale, "Delete")
+            } else {
+                crate::i18n::gettext(app.locale, "OK")
+            };
+            if danger_button(ui, app, confirm_label.as_ref()) {
+                app.actions.push(if for_everyone {
                     Action::DeleteForEveryone(id.to_owned())
                 } else {
-                    Action::DeleteForMe(id.to_owned())
-                };
-                app.actions.push(action);
+                    Action::DeleteForMe {
+                        chat: chat.to_owned(),
+                        message: id.to_owned(),
+                        on_phone: selected,
+                    }
+                });
                 app.actions.push(Action::CloseDialog);
             }
-            if theme::pill_button(ui, &palette, "Cancel", false).clicked() {
+            if theme::pill_button(
+                ui,
+                &palette,
+                crate::i18n::gettext(app.locale, "Cancel").as_ref(),
+                false,
+            )
+            .clicked()
+            {
                 app.actions.push(Action::CloseDialog);
             }
         });

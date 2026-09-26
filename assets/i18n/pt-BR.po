@@ -378,6 +378,30 @@ msgstr "Enviar"
 msgid "Cancel"
 msgstr "Cancelar"
 
+#: src/ui/dialogs.rs
+msgid "Delete for everyone?"
+msgstr "Apagar para todos?"
+
+#: src/ui/dialogs.rs
+msgid "Everyone in this chat will see \"This message was deleted\" instead. It cannot be undone."
+msgstr "Todos nesta conversa verão \"Esta mensagem foi apagada\" no lugar dela. Não é possível desfazer."
+
+#: src/ui/dialogs.rs
+msgid "Delete for me?"
+msgstr "Apagar para mim?"
+
+#: src/ui/dialogs.rs
+msgid "This removes the message from this computer. Check the option below to remove it from your phone and linked devices too. Other people keep their copy."
+msgstr "Isso apaga a mensagem deste computador. Marque a opção abaixo para apagá-la também do celular e dos dispositivos vinculados. As outras pessoas mantêm a cópia delas."
+
+#: src/ui/dialogs.rs
+msgid "Also delete on phone"
+msgstr "Apagar também no celular"
+
+#: src/ui/dialogs.rs
+msgid "OK"
+msgstr "OK"
+
 #: src/ui/dialogs.rs:1122
 msgid "Leave this channel?"
 msgstr "Sair deste canal?"
@@ -521,9 +545,33 @@ msgstr "Quando desligado, Ctrl+Enter envia."
 msgid "Download files automatically"
 msgstr "Baixar arquivos automaticamente"
 
-#: src/ui/settings.rs:355
-msgid "Files up to 64 MiB download as they come into view."
-msgstr "Arquivos de até 64 MiB são baixados quando aparecem na tela."
+#: src/ui/settings.rs:358
+msgid "Download all file types when they come into view."
+msgstr "Baixa todos os tipos de arquivo quando aparecem na tela."
+
+msgid "Download audio automatically"
+msgstr "Baixar áudios automaticamente"
+
+msgid "Includes voice messages."
+msgstr "Inclui mensagens de voz."
+
+msgid "Download videos automatically"
+msgstr "Baixar vídeos automaticamente"
+
+msgid "Includes GIFs and round videos."
+msgstr "Inclui GIFs e vídeos redondos."
+
+msgid "Download images automatically"
+msgstr "Baixar imagens automaticamente"
+
+msgid "Includes images in interactive cards."
+msgstr "Inclui imagens em cartões interativos."
+
+msgid "Download size limit"
+msgstr "Limite de tamanho dos downloads"
+
+msgid "Maximum size for automatic and manual downloads."
+msgstr "Tamanho máximo para downloads automáticos e manuais."
 
 #: src/ui/settings.rs:362
 msgid "Pause other media while recording or playing"

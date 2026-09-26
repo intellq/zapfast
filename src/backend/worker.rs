@@ -69,7 +69,7 @@ const THUMBNAIL_SIDE: u32 = 96;
 const PROFILE_PICTURE_SIDE: u32 = 640;
 /// Sticker download batch size for the picker.
 const STICKER_FETCH_LIMIT: usize = 40;
-const ATTACHMENT_LIMIT_ERROR: &str = "This attachment is larger than the 64 MiB download limit";
+const ATTACHMENT_LIMIT_ERROR: &str = "This attachment exceeds the configured download size limit";
 const ATTACHMENT_TIMEOUT: Duration = Duration::from_secs(120);
 
 async fn with_attachment_deadline<T>(
@@ -126,18 +126,20 @@ impl<W: DownloadWriter> DownloadWriter for LimitedWriter<W> {
     }
 }
 
-fn attachment_is_too_large(size: Option<u64>) -> bool {
-    size.is_some_and(|size| size > ATTACHMENT_DOWNLOAD_LIMIT)
+fn attachment_is_too_large(size: Option<u64>, limit: u64) -> bool {
+    size.is_some_and(|size| size > limit.min(ATTACHMENT_DOWNLOAD_LIMIT))
 }
 
-/// Streams a verified attachment to disk without accepting more than 64 MiB.
+/// Streams a verified attachment to disk without accepting more than the configured limit.
 async fn download_attachment(
     client: &Client,
     downloadable: &dyn Downloadable,
     dir: &Path,
     path: &Path,
+    limit: u64,
 ) -> Result<PathBuf, String> {
-    if attachment_is_too_large(downloadable.file_length()) {
+    let limit = limit.min(ATTACHMENT_DOWNLOAD_LIMIT);
+    if attachment_is_too_large(downloadable.file_length(), limit) {
         return Err(ATTACHMENT_LIMIT_ERROR.to_owned());
     }
     tokio::fs::create_dir_all(dir)
@@ -145,10 +147,7 @@ async fn download_attachment(
         .map_err(|error| error.to_string())?;
     let (temporary, file) = temporary_attachment_file(path)?;
     let result = client
-        .download_to_writer(
-            downloadable,
-            LimitedWriter::new(file, ATTACHMENT_DOWNLOAD_LIMIT),
-        )
+        .download_to_writer(downloadable, LimitedWriter::new(file, limit))
         .await;
     match result {
         Ok(writer) => {
@@ -391,6 +390,7 @@ pub async fn run(
     commands: mpsc::UnboundedSender<Command>,
     mut inbox: mpsc::UnboundedReceiver<Command>,
     waker: Waker,
+    attachment_limit: u64,
 ) {
     let archive = loop {
         let path = dirs.archive_db();
@@ -458,6 +458,7 @@ pub async fn run(
                 .set_meta(stickers::FAVORITES_RECOVERED, "complete")
                 .is_ok());
     let mut worker = Worker {
+        attachment_limit,
         privacy_ready: privacy_confirmed,
         privacy_confirmed,
         privacy_snapshot,
@@ -683,6 +684,7 @@ enum WithheldPage {
 }
 
 struct Worker {
+    attachment_limit: u64,
     /// Private content may reach the UI.
     privacy_ready: bool,
     /// Phone lock state is known to be mirrored in the archive.
@@ -1791,6 +1793,20 @@ impl Worker {
 
     fn jid_of(id: &str) -> Option<Jid> {
         id.parse().ok()
+    }
+
+    fn delete_for_me_local(&mut self, chat: ChatId, id: String) {
+        match self.archive.delete_message(&chat, &id) {
+            Ok(true) => {
+                self.emit(Event::MessageDeleted {
+                    chat: chat.clone(),
+                    id,
+                });
+                self.emit_chat(&chat);
+            }
+            Ok(false) => self.emit(Event::Error("Message is no longer available".to_owned())),
+            Err(_) => self.emit(Event::Error("Could not delete this message".to_owned())),
+        }
     }
 
     fn set_account_privacy(&self, kind: PrivacyKind, choice: PrivacyChoice) {
@@ -4040,6 +4056,9 @@ impl Worker {
             }
         }
         match command {
+            Command::SetAttachmentLimit(limit) => {
+                self.attachment_limit = limit.clamp(1024 * 1024, ATTACHMENT_DOWNLOAD_LIMIT);
+            }
             Command::RefreshPoll { chat, message } => self.refresh_poll(chat, message),
             Command::PollHistoryFailed {
                 chat,
@@ -4201,15 +4220,63 @@ impl Worker {
                 mentions,
             } => self.edit_text(chat, id, text, mentions),
             Command::Revoke { chat, id } => self.revoke(chat, id),
-            Command::DeleteLocal { chat, id } => {
-                if let Ok(true) = self.archive.delete_message(&chat, &id) {
-                    self.emit(Event::MessageDeleted {
-                        chat: chat.clone(),
-                        id,
-                    });
-                    self.emit_chat(&chat);
+            Command::DeleteForMe { chat, id, on_phone } => {
+                if !on_phone {
+                    self.delete_for_me_local(chat, id);
+                    return;
                 }
+                let (Some(client), Some(jid)) = (self.client.clone(), Self::jid_of(&chat)) else {
+                    self.emit(Event::Error(
+                        "Connect to WhatsApp to delete this message on your phone".to_owned(),
+                    ));
+                    return;
+                };
+                let row = match self.archive.message(&chat, &id) {
+                    Ok(Some(row)) => row,
+                    Ok(None) => {
+                        self.emit(Event::Error("Message is no longer available".to_owned()));
+                        return;
+                    }
+                    Err(_) => {
+                        self.emit(Event::Error("Could not read this message".to_owned()));
+                        return;
+                    }
+                };
+                let participant = if jid.is_group() && !row.from_me {
+                    let Some(participant) = Self::jid_of(&row.sender) else {
+                        self.emit(Event::Error(
+                            "Could not identify the message sender".to_owned(),
+                        ));
+                        return;
+                    };
+                    Some(participant)
+                } else {
+                    None
+                };
+                let commands = self.commands.clone();
+                tokio::spawn(async move {
+                    let result = client
+                        .chat_actions()
+                        .delete_message_for_me(
+                            &jid,
+                            participant.as_ref(),
+                            &id,
+                            row.from_me,
+                            true,
+                            Some(row.timestamp),
+                        )
+                        .await
+                        .map_err(|_| {
+                            "WhatsApp could not delete this message. Try again when connected"
+                                .to_owned()
+                        });
+                    let _ = commands.send(Command::DeleteForMeSynced { chat, id, result });
+                });
             }
+            Command::DeleteForMeSynced { chat, id, result } => match result {
+                Ok(()) => self.delete_for_me_local(chat, id),
+                Err(error) => self.emit(Event::Error(error)),
+            },
             Command::PickFiles(chat) => {
                 let commands = self.commands.clone();
                 tokio::task::spawn_blocking(move || {
@@ -6124,7 +6191,8 @@ impl Worker {
                 );
                 return;
             };
-        if attachment_is_too_large(downloadable.file_length()) {
+        let attachment_limit = self.attachment_limit;
+        if attachment_is_too_large(downloadable.file_length(), attachment_limit) {
             self.downloaded(chat, id, card, Err(ATTACHMENT_LIMIT_ERROR.to_owned()));
             return;
         }
@@ -6201,7 +6269,9 @@ impl Worker {
             let cache_id = card.map_or_else(|| id.clone(), |index| format!("{id}-card-{index}"));
             let path = media_path(&dir, &chat, &cache_id, &mime, file_name.as_deref());
             let result = with_attachment_deadline(ATTACHMENT_TIMEOUT, async {
-                match download_attachment(&client, &*downloadable, &dir, &path).await {
+                match download_attachment(&client, &*downloadable, &dir, &path, attachment_limit)
+                    .await
+                {
                     Ok(path) => Ok(path),
                     Err(error) => {
                         let text = error.to_string();
@@ -6220,8 +6290,14 @@ impl Worker {
                                     Ok(MediaRetryResult::Success { direct_path }) => {
                                         match refreshed(direct_path) {
                                             Some(again) => {
-                                                download_attachment(&client, &*again, &dir, &path)
-                                                    .await
+                                                download_attachment(
+                                                    &client,
+                                                    &*again,
+                                                    &dir,
+                                                    &path,
+                                                    attachment_limit,
+                                                )
+                                                .await
                                             }
                                             None => Err(text),
                                         }
@@ -6297,7 +6373,8 @@ impl Worker {
                 self.sticker_fetches.remove(&sticker.hash);
                 continue;
             };
-            if attachment_is_too_large(meta.file_length) {
+            let attachment_limit = self.attachment_limit;
+            if attachment_is_too_large(meta.file_length, attachment_limit) {
                 self.sticker_fetches.remove(&sticker.hash);
                 log::info!("recent sticker exceeds the attachment download limit");
                 continue;
@@ -6311,7 +6388,7 @@ impl Worker {
                 let result = with_attachment_deadline(ATTACHMENT_TIMEOUT, async {
                     let path = dir.join(format!("{hash}.webp"));
                     let sticker = PhoneSticker(meta);
-                    download_attachment(&client, &sticker, &dir, &path).await
+                    download_attachment(&client, &sticker, &dir, &path, attachment_limit).await
                 })
                 .await;
                 let _ = commands.send(Command::StickerFetched { hash, result });
@@ -8672,9 +8749,17 @@ mod tests {
 
     #[test]
     fn attachment_limit_rejects_only_oversized_metadata() {
-        assert!(!attachment_is_too_large(None));
-        assert!(!attachment_is_too_large(Some(ATTACHMENT_DOWNLOAD_LIMIT)));
-        assert!(attachment_is_too_large(Some(ATTACHMENT_DOWNLOAD_LIMIT + 1)));
+        assert!(!attachment_is_too_large(None, 1024 * 1024));
+        assert!(!attachment_is_too_large(Some(1024 * 1024), 1024 * 1024));
+        assert!(attachment_is_too_large(Some(1024 * 1024 + 1), 1024 * 1024));
+        assert!(!attachment_is_too_large(
+            Some(ATTACHMENT_DOWNLOAD_LIMIT),
+            ATTACHMENT_DOWNLOAD_LIMIT,
+        ));
+        assert!(attachment_is_too_large(
+            Some(ATTACHMENT_DOWNLOAD_LIMIT + 1),
+            ATTACHMENT_DOWNLOAD_LIMIT,
+        ));
     }
 
     #[test]
@@ -10690,6 +10775,7 @@ mod receipt_tests {
         let (wa_sender, wa_events) = mpsc::unbounded_channel();
         let root = std::env::temp_dir().join(format!("zapfast-worker-test-{}", std::process::id()));
         let worker = Worker {
+            attachment_limit: ATTACHMENT_DOWNLOAD_LIMIT,
             privacy_ready: true,
             privacy_confirmed: true,
             privacy_snapshot: false,

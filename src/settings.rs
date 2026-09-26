@@ -347,6 +347,12 @@ pub struct Settings {
     /// Download attachments when they enter view instead of on click.
     #[serde(alias = "auto_download_images")]
     pub auto_download: bool,
+    /// Per-kind downloads when the general switch is off.
+    pub auto_download_audio: bool,
+    pub auto_download_video: bool,
+    pub auto_download_image: bool,
+    /// Maximum attachment size, in MiB (the application supports 1..=64).
+    pub attachment_limit_mib: u32,
     /// Show the default doodle wallpaper behind conversations.
     pub show_wallpaper: bool,
     /// Colour selected in the wallpaper picker.
@@ -428,6 +434,10 @@ impl Default for Settings {
             send_read_receipts: true,
             send_typing: true,
             auto_download: true,
+            auto_download_audio: false,
+            auto_download_video: false,
+            auto_download_image: false,
+            attachment_limit_mib: 64,
             show_wallpaper: true,
             wallpaper_color: WallpaperColor::Theme,
             dark_wallpaper_color: WallpaperColor::Theme,
@@ -472,7 +482,30 @@ pub const BUILT_IN_GIPHY_KEY: Option<&str> = match option_env!("ZAPFAST_GIPHY_KE
     _ => option_env!("FASTSAPP_GIPHY_KEY"),
 };
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AutoDownloadKind {
+    Image,
+    Video,
+    Audio,
+    Document,
+    Sticker,
+}
+
 impl Settings {
+    pub fn attachment_limit_bytes(&self) -> u64 {
+        u64::from(self.attachment_limit_mib.clamp(1, 64)) * 1024 * 1024
+    }
+
+    pub fn auto_downloads(&self, kind: AutoDownloadKind) -> bool {
+        match kind {
+            AutoDownloadKind::Sticker => true,
+            AutoDownloadKind::Image => self.auto_download || self.auto_download_image,
+            AutoDownloadKind::Video => self.auto_download || self.auto_download_video,
+            AutoDownloadKind::Audio => self.auto_download || self.auto_download_audio,
+            AutoDownloadKind::Document => self.auto_download,
+        }
+    }
+
     pub fn wallpaper_color_for(&self, dark: bool) -> WallpaperColor {
         if dark {
             self.dark_wallpaper_color
@@ -659,6 +692,38 @@ mod tests {
         assert!(parsed.show_wallpaper);
         assert_eq!(parsed.wallpaper_color, WallpaperColor::Theme);
         assert!(parsed.pause_other_media);
+    }
+
+    #[test]
+    fn automatic_download_filters_and_limit_preserve_old_settings() {
+        use AutoDownloadKind::{Audio, Document, Image, Sticker, Video};
+
+        let mut settings: Settings = serde_json::from_str(r#"{"auto_download":false}"#).unwrap();
+        assert_eq!(settings.attachment_limit_bytes(), 64 * 1024 * 1024);
+        for kind in [Audio, Video, Image, Document] {
+            assert!(!settings.auto_downloads(kind));
+        }
+        assert!(settings.auto_downloads(Sticker));
+
+        settings.auto_download_audio = true;
+        settings.auto_download_image = true;
+        settings.attachment_limit_mib = 7;
+        assert_eq!(settings.attachment_limit_bytes(), 7 * 1024 * 1024);
+        assert!(settings.auto_downloads(Audio));
+        assert!(settings.auto_downloads(Image));
+        assert!(!settings.auto_downloads(Video));
+        assert!(!settings.auto_downloads(Document));
+
+        settings.auto_download = true;
+        for kind in [Audio, Video, Image, Document, Sticker] {
+            assert!(settings.auto_downloads(kind));
+        }
+        settings.auto_download = false;
+        assert!(settings.auto_download_audio && settings.auto_download_image);
+        settings.attachment_limit_mib = 0;
+        assert_eq!(settings.attachment_limit_bytes(), 1024 * 1024);
+        settings.attachment_limit_mib = 100;
+        assert_eq!(settings.attachment_limit_bytes(), 64 * 1024 * 1024);
     }
 
     fn load_from(contents: &str) -> (Settings, serde_json::Value) {

@@ -377,6 +377,30 @@ msgstr ""
 msgid "Cancel"
 msgstr ""
 
+#: src/ui/dialogs.rs
+msgid "Delete for everyone?"
+msgstr ""
+
+#: src/ui/dialogs.rs
+msgid "Everyone in this chat will see \"This message was deleted\" instead. It cannot be undone."
+msgstr ""
+
+#: src/ui/dialogs.rs
+msgid "Delete for me?"
+msgstr ""
+
+#: src/ui/dialogs.rs
+msgid "This removes the message from this computer. Check the option below to remove it from your phone and linked devices too. Other people keep their copy."
+msgstr ""
+
+#: src/ui/dialogs.rs
+msgid "Also delete on phone"
+msgstr ""
+
+#: src/ui/dialogs.rs
+msgid "OK"
+msgstr ""
+
 #: src/ui/dialogs.rs:1122
 msgid "Leave this channel?"
 msgstr ""
@@ -518,8 +542,32 @@ msgstr ""
 msgid "Download files automatically"
 msgstr ""
 
-#: src/ui/settings.rs:355
-msgid "Files up to 64 MiB download as they come into view."
+#: src/ui/settings.rs:358
+msgid "Download all file types when they come into view."
+msgstr ""
+
+msgid "Download audio automatically"
+msgstr ""
+
+msgid "Includes voice messages."
+msgstr ""
+
+msgid "Download videos automatically"
+msgstr ""
+
+msgid "Includes GIFs and round videos."
+msgstr ""
+
+msgid "Download images automatically"
+msgstr ""
+
+msgid "Includes images in interactive cards."
+msgstr ""
+
+msgid "Download size limit"
+msgstr ""
+
+msgid "Maximum size for automatic and manual downloads."
 msgstr ""
 
 #: src/ui/settings.rs:362

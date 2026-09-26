@@ -2121,6 +2121,7 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
                         chat,
                         message: "ada-emoji".to_owned(),
                         for_everyone: true,
+                        on_phone: false,
                     });
             }
             "delete-message-mine" => {
@@ -2131,6 +2132,7 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
                         chat,
                         message: "ada-format".to_owned(),
                         for_everyone: false,
+                        on_phone: true,
                     });
             }
             "new-contact" => app.dialog = Some(Dialog::NewContact),
@@ -6237,8 +6239,8 @@ mod tests {
         assert_eq!(after, listed, "every opened chat is still listed");
     }
 
-    /// Opening the dialog must not delete anything on its own, and confirming
-    /// must delete with the scope the menu asked for.
+    /// Opening the dialog must not delete anything on its own. A synchronized
+    /// deletion waits for the phone before removing the local message.
     #[test]
     fn confirming_a_message_deletion_uses_the_chosen_scope() {
         for (page, message, expected_everyone) in [
@@ -6253,6 +6255,7 @@ mod tests {
                     chat: SAMPLES[0].id.to_owned(),
                     message: message.to_owned(),
                     for_everyone: expected_everyone,
+                    on_phone: !expected_everyone,
                 })
             );
             let ctx = egui::Context::default();
@@ -6270,7 +6273,8 @@ mod tests {
             let pos = accessible_nodes(&mut app, &ctx, Vec::new())
                 .into_iter()
                 .find(|(label, role, _)| {
-                    label == "Delete" && *role == egui::accesskit::Role::Button
+                    label == if expected_everyone { "Delete" } else { "OK" }
+                        && *role == egui::accesskit::Role::Button
                 })
                 .map(|(_, _, centre)| centre)
                 .expect("the confirm button is on screen");
@@ -6301,7 +6305,10 @@ mod tests {
                     "{page}: a revoked message stays as a tombstone"
                 );
             } else {
-                assert!(row.is_none(), "{page}: a local delete removes the row");
+                assert!(
+                    row.is_some(),
+                    "{page}: deletion awaits the phone before removing the row"
+                );
             }
         }
     }
