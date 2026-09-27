@@ -457,10 +457,10 @@ impl Default for Settings {
             send_typing: true,
             auto_download: None,
             auto_download_audio: true,
-            auto_download_video: true,
+            auto_download_video: false,
             auto_download_image: true,
             auto_download_animated_sticker: true,
-            auto_download_document: true,
+            auto_download_document: false,
             attachment_limit_mib: 64,
             show_wallpaper: true,
             wallpaper_color: WallpaperColor::Theme,
@@ -739,6 +739,11 @@ mod tests {
         assert!(parsed.show_wallpaper);
         assert_eq!(parsed.wallpaper_color, WallpaperColor::Theme);
         assert!(parsed.pause_other_media);
+        use AutoDownloadKind::{AnimatedSticker, Audio, Document, Image, Video};
+        for kind in [Audio, Image, AnimatedSticker] {
+            assert!(parsed.auto_downloads(kind));
+        }
+        assert!(!parsed.auto_downloads(Video) && !parsed.auto_downloads(Document));
     }
 
     #[test]

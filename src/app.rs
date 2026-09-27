@@ -4022,6 +4022,11 @@ impl App {
                 self.video_expanded = None;
                 self.video.set_detail(false);
             }
+            Action::CloseVideo => {
+                self.video_expanded = None;
+                self.video.set_detail(false);
+                self.video.stop();
+            }
             Action::SeekVoice {
                 message,
                 path,

@@ -15,6 +15,10 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
         return;
     }
     let editing_text = ctx.text_edit_focused();
+    let composer_focused = ctx.memory(|memory| memory.has_focus(egui::Id::new("composer-text")));
+    // Home/End (and Ctrl+End) keep moving the text cursor in a non-empty
+    // field, as ↑ keeps its normal meaning outside an empty composer.
+    let home_end_allowed = !editing_text || (composer_focused && app.composer.is_empty());
     let find = find_action(app);
     let mut actions = Vec::new();
     ctx.input_mut(|input| {
@@ -68,16 +72,15 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
         key(Modifiers::COMMAND, Key::Equals, Action::ZoomBy(0.1));
         key(Modifiers::COMMAND, Key::Minus, Action::ZoomBy(-0.1));
         key(Modifiers::COMMAND, Key::Num0, Action::ResetZoom);
-        key(Modifiers::COMMAND, Key::End, Action::ScrollToBottom);
+        if home_end_allowed {
+            key(Modifiers::COMMAND, Key::End, Action::ScrollToBottom);
+        }
     });
     // Escape cancels the topmost state. Menus handle Escape themselves.
     let menu_open = egui::Popup::is_any_open(ctx);
     let search_focused = ctx.memory(|memory| memory.has_focus(egui::Id::new("chat-search")));
-    let composer_focused = ctx.memory(|memory| memory.has_focus(egui::Id::new("composer-text")));
     // PgUp/PgDn/Home/End scroll the open chat. PgUp/PgDn also work while the
-    // composer has focus, since egui's TextEdit does not handle them itself;
-    // Home/End keep moving the text cursor in a non-empty field, as ↑ keeps
-    // its normal meaning outside an empty composer.
+    // composer has focus, since egui's TextEdit does not handle them itself.
     if app.page == Page::Chats
         && app.open_chat.is_some()
         && app.dialog.is_none()
@@ -86,7 +89,6 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
         && app.reaction_target.is_none()
         && !menu_open
     {
-        let home_end_allowed = !editing_text || (composer_focused && app.composer.is_empty());
         ctx.input_mut(|input| {
             if take_plain(input, Key::PageUp) {
                 actions.push(Action::ScrollPage(Scroll::PageUp));
@@ -306,8 +308,10 @@ fn video_keys(app: &mut App, ctx: &egui::Context) {
             input.consume_key(Modifiers::NONE, Key::Space),
         )
     });
+    // Escape leaves the video; the corner button returns it, still
+    // playing, to its message.
     if escape {
-        app.actions.push(Action::CollapseVideo);
+        app.actions.push(Action::CloseVideo);
     }
     if space && let Some((message, path)) = app.video.loaded() {
         app.actions.push(Action::PlayVideo {
@@ -365,7 +369,6 @@ pub const SHORTCUTS: &[(&str, &str)] = &[
         "Ctrl+B",
         crate::i18n::n_("Collapse or expand the chat list"),
     ),
-    ("Ctrl+End", crate::i18n::n_("Jump to the newest message")),
     (
         "PgUp / PgDn",
         crate::i18n::n_("Scroll the open chat by a page"),

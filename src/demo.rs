@@ -6562,6 +6562,26 @@ mod tests {
         settle_key_scroll(&mut app, &ctx);
         assert!(app.at_bottom, "Home in a non-empty composer did not scroll");
         assert_eq!(app.composer, "draft", "the composer text is unchanged");
+        // Ctrl+End there moves the text cursor to the end of the last line,
+        // as Ctrl+Home moves it to the start, instead of jumping to the
+        // newest message.
+        frame_with(
+            &mut app,
+            &ctx,
+            vec![key(egui::Key::PageUp, egui::Modifiers::NONE)],
+        );
+        settle_key_scroll(&mut app, &ctx);
+        assert!(!app.at_bottom, "PgUp leaves the end from the composer");
+        frame_with(
+            &mut app,
+            &ctx,
+            vec![key(egui::Key::End, egui::Modifiers::COMMAND)],
+        );
+        settle_key_scroll(&mut app, &ctx);
+        assert!(
+            !app.at_bottom,
+            "Ctrl+End in a non-empty composer did not scroll"
+        );
     }
 
     /// Pushes `count` short synthetic messages onto the open sample chat so

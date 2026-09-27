@@ -1334,6 +1334,9 @@ pub enum Action {
     ExpandVideo(String),
     /// Returns the expanded video to its message.
     CollapseVideo,
+    /// Closes the expanded video and stops it, leaving its message as it
+    /// was before playing.
+    CloseVideo,
     /// Starts, cancels, or sends a voice recording.
     StartRecording,
     CancelRecording,

@@ -1760,6 +1760,9 @@ struct View<'a> {
     animate: bool,
     player: &'a crate::audio::Player,
     video: &'a crate::video::Player,
+    /// The video shown expanded over the window, whose message keeps its
+    /// poster meanwhile.
+    video_expanded: Option<&'a str>,
     copy_rows: &'a std::sync::Mutex<Vec<crate::transcript::Row>>,
 }
 
@@ -1889,6 +1892,7 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
         animate: app.window_focused,
         player: &app.player,
         video: &app.video,
+        video_expanded: app.video_expanded.as_deref(),
         copy_rows: app.copy_rows.as_ref(),
     };
     let mut actions = Vec::new();
@@ -3475,9 +3479,6 @@ fn settled_width(ui: &egui::Ui, view: &View<'_>, message: &Message, cap: f32) ->
             Content::Text { preview, .. } => preview.is_some(),
             Content::Document { .. } | Content::Audio { .. } | Content::Poll { .. } => true,
             Content::Interactive { card, .. } => card.is_some(),
-            // Videos without a poster use the file-row layout, except the
-            // round ones, which always draw as a circle.
-            Content::Video { note, .. } => !note && message.thumbnail.is_none(),
             _ => false,
         };
     card.then(|| {
@@ -3771,7 +3772,10 @@ fn reactions(ui: &mut egui::Ui, view: &View<'_>, message: &Message, actions: &mu
             None => counts.push((reaction.emoji.clone(), 1, reaction.from_me, vec![who])),
         }
     }
-    ui.spacing_mut().item_spacing.x = 3.0;
+    // The chips draw no background, so their padding is the gap between
+    // reactions: kept narrow, with the first one still where it was.
+    ui.spacing_mut().item_spacing.x = 2.0;
+    ui.add_space(4.0);
     for (emoji, count, mine, names) in counts {
         let label = if count > 1 {
             format!("{emoji} {count}")
@@ -3779,7 +3783,7 @@ fn reactions(ui: &mut egui::Ui, view: &View<'_>, message: &Message, actions: &mu
             emoji.clone()
         };
         let line = widgets::line(ui, &label, theme::regular(13.0), palette.text, 200.0, 1);
-        let size = line.size() + vec2(12.0, 6.0);
+        let size = line.size() + vec2(4.0, 6.0);
         let (rect, response) = ui.allocate_exact_size(size, Sense::click());
         if ui.is_rect_visible(rect) {
             line.paint(ui, rect.center() - line.size() / 2.0, palette.text);
@@ -5813,26 +5817,9 @@ fn video(
 ) -> f32 {
     use crate::video::State;
     let palette = view.palette;
-    let Some(thumbnail) = message.thumbnail.as_deref() else {
-        let title = if gif { "GIF" } else { tr("Video") };
-        let mut detail = Vec::new();
-        if let Some(seconds) = seconds {
-            detail.push(crate::util::duration(seconds));
-        }
-        detail.push(crate::util::bytes(media.size));
-        attachment(
-            ui,
-            view,
-            message,
-            media,
-            Icon::Video,
-            title,
-            &detail.join(" · "),
-            width,
-            actions,
-        );
-        return width;
-    };
+    // Messages can arrive without a poster (history from the phone often
+    // leaves it out); the frame still draws as a video, on a dark fill.
+    let thumbnail = message.thumbnail.as_deref();
     let limit = width.min(PICTURE_WIDTH);
     let size = frame_size(media, Some((16, 9)), limit, PICTURE_HEIGHT.min(limit * 1.3));
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
@@ -5863,10 +5850,12 @@ fn video(
         }
         return size.x;
     }
+    // While expanded, the video plays only over the window; its message
+    // shows the poster, as a video that is not playing.
     let status = media
         .path
         .as_ref()
-        .filter(|_| !gif)
+        .filter(|_| !gif && view.video_expanded != Some(message.id.as_str()))
         .and_then(|_| view.video.status(&message.id));
     if ui.is_rect_visible(rect) {
         if status.is_some() {
@@ -5883,14 +5872,19 @@ fn video(
                     6.0,
                 );
             }
-            None => {
-                // Registering the poster decodes it, so it waits for the row to show.
-                let uri = thumbnail_uri(ui.ctx(), &message.chat, &message.id, thumbnail);
-                egui::Image::new(uri)
-                    .fit_to_exact_size(size)
-                    .corner_radius(6.0)
-                    .paint_at(ui, rect);
-            }
+            None => match thumbnail {
+                Some(thumbnail) => {
+                    // Registering the poster decodes it, so it waits for the row to show.
+                    let uri = thumbnail_uri(ui.ctx(), &message.chat, &message.id, thumbnail);
+                    egui::Image::new(uri)
+                        .fit_to_exact_size(size)
+                        .corner_radius(6.0)
+                        .paint_at(ui, rect);
+                }
+                None => {
+                    ui.painter().rect_filled(rect, 6.0, Color32::from_gray(28));
+                }
+            },
         }
         let state = status.as_ref().map(|status| status.state);
         if state != Some(State::Playing) {

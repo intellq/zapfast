@@ -62,12 +62,25 @@ Além das novidades do upstream, esta branch inclui as seguintes mudanças:
   tocar sem som e nem aparecia no mixer de áudio. Vídeos com áudio suportado
   continuam tocando dentro da conversa; vídeos realmente sem faixa de áudio
   continuam no player interno.
+- **Vídeos sem miniatura continuam como vídeo.** Mensagens de vídeo que chegam
+  sem imagem de prévia (comum no histórico trazido do celular numa conta
+  recém-vinculada) apareciam como um arquivo para baixar e abrir fora do
+  programa. Agora aparecem no quadro de vídeo, sobre fundo escuro, com o botão
+  de reproduzir; o clique baixa e toca na própria conversa.
+- **Vídeo expandido sem cópia no histórico.** Ao expandir um vídeo, a
+  mensagem no histórico volta a mostrar a miniatura e o botão de reproduzir,
+  em vez de exibir a mesma reprodução por trás da tela escurecida. Ao
+  recolher pelo botão do canto, o vídeo continua de onde estava, dentro da
+  mensagem; ao fechar com Esc, a reprodução para e a mensagem volta ao
+  estado inicial.
 - **Downloads configuráveis por tipo e tamanho.** Cinco opções independentes
   cobrem todos os arquivos das mensagens: áudios (inclusive mensagens de voz),
   vídeos (inclusive GIFs e vídeos redondos), imagens (inclusive figurinhas
   estáticas e cartões interativos), figurinhas animadas e documentos
   (qualquer arquivo enviado como documento). A antiga opção de baixar todos
   os arquivos foi retirada; quem a tinha ligada fica com as cinco ligadas.
+  Numa instalação nova, áudios, imagens e figurinhas animadas vêm ligados, e
+  vídeos e documentos, desligados.
   Um slider define o limite de 1 a 64 MiB para downloads automáticos e
   manuais. O limite é verificado antes e durante a transferência.
 - **Configurações legíveis em janelas estreitas.** Títulos e descrições podem
@@ -85,7 +98,14 @@ Além das novidades do upstream, esta branch inclui as seguintes mudanças:
   em um emoji ou de mover a seleção pelas setas, em vez de já vir marcado no
   primeiro item dos recentes. Enquanto você ainda não reagiu a nada, a linha
   **Mais usados** da janela de reação traz os seis emojis padrão do WhatsApp:
-  👍 ❤️ 😂 😮 😢 🙏.
+  👍 ❤️ 😂 😮 😢 🙏. As reações exibidas embaixo da mensagem ficam mais
+  próximas umas das outras.
+- **Ctrl+End na caixa de digitação.** Com texto na caixa, Ctrl+End leva o
+  cursor ao fim da última linha, como Ctrl+Home leva ao início da primeira
+  (e Ctrl+Shift+End seleciona até o fim). Antes o atalho de ir para as
+  mensagens mais recentes tomava a tecla e nada acontecia no texto; com a
+  caixa vazia ou fora dela, Ctrl+End continua indo para as mensagens mais
+  recentes, mas deixou de aparecer na lista de atalhos de **Configurações**.
 - **Tons de pele nos emojis de mãos.** O seletor oferece as variantes de tom
   para emojis compatíveis, como joinha, aperto de mãos e mãos juntas. No menu
   de reação, o seletor tem a mesma largura do seletor normal e dispensa a
@@ -466,9 +486,10 @@ de sincronizar a exclusão "para mim" com o celular é uma extensão deste fork.
   after they expire on the phone.
   A clock badge on chat avatars shows enabled timers and follows changes from
   the phone. Changing the default timer for new chats leaves existing chats alone.
-- **View attachments.** ZapFast downloads audio, videos, images (including
+- **View attachments.** ZapFast can download audio, videos, images (including
   static stickers), animated stickers, and documents automatically, each with
-  its own switch. Set the download size limit from 1 to 64 MiB; it applies to
+  its own switch: audio, images, and animated stickers are on by default,
+  videos and documents off. Set the download size limit from 1 to 64 MiB; it applies to
   automatic downloads and clicks. Anything left off downloads with a click.
   Photos, stickers, GIFs, voice messages, audio,
   locations, contacts,

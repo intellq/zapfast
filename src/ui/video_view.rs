@@ -96,9 +96,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                 if ui
                     .interact(button, ui.id().with("video-collapse"), Sense::click())
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
-                    .on_hover_text(
-                        crate::i18n::gettext(app.locale, "Back to the message (Esc)").as_ref(),
-                    )
+                    .on_hover_text(crate::i18n::gettext(app.locale, "Back to the message").as_ref())
                     .clicked()
                 {
                     app.actions.push(Action::CollapseVideo);
