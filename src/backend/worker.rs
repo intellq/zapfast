@@ -2468,6 +2468,22 @@ impl Worker {
                         .message_range
                         .as_option()
                         .and_then(|range| range.last_message_timestamp);
+                    // The last read message may arrive after this, in the
+                    // offline backlog, and share the read position's second.
+                    let named = update
+                        .action
+                        .message_range
+                        .as_option()
+                        .into_iter()
+                        .flat_map(|range| range.messages.iter())
+                        .filter_map(|message| message.key.as_option())
+                        .filter(|key| !key.from_me.unwrap_or(false))
+                        .filter_map(|key| key.id.as_deref());
+                    for id in named {
+                        if matches!(self.archive.message(&chat, id), Ok(None)) {
+                            let _ = self.archive.file_self_read(&chat, id);
+                        }
+                    }
                     if let Some(through) = through {
                         let _ = self.archive.mark_read_through(&chat, seconds(through));
                     } else {
@@ -2701,14 +2717,16 @@ impl Worker {
                 // The receipt time is when the phone read, not the position
                 // it read through. A delayed receipt must leave newer messages.
                 for id in &receipt.message_ids {
-                    if self
-                        .archive
-                        .message(&chat, id)
-                        .ok()
-                        .flatten()
-                        .is_some_and(|message| !message.from_me)
-                    {
-                        let _ = self.archive.mark_read_to(&chat, id);
+                    match self.archive.message(&chat, id) {
+                        Ok(Some(message)) if !message.from_me => {
+                            let _ = self.archive.mark_read_to(&chat, id);
+                        }
+                        // Read while ZapFast was closed: the message is still
+                        // in the offline backlog, decrypted after this receipt.
+                        Ok(None) if !receipt.source.chat.is_status_broadcast() => {
+                            let _ = self.archive.file_self_read(&chat, id);
+                        }
+                        _ => {}
                     }
                 }
                 self.emit_chat(&chat);
@@ -3509,8 +3527,16 @@ impl Worker {
         if poll_baseline && let Err(error) = self.archive.mark_poll_history(&chat, &message.id) {
             log::warn!("could not store a live poll baseline: {error}");
         }
+        // Read on the phone before it was decrypted here; see `on_receipt`.
+        let read_elsewhere = is_new
+            && self
+                .archive
+                .take_self_read(&chat, &message.id)
+                .unwrap_or(false)
+            && !message.from_me;
         let unread = is_new
             && !message.from_me
+            && !read_elsewhere
             && self
                 .archive
                 .read_through(&chat)
@@ -3521,6 +3547,8 @@ impl Worker {
                 .is_none_or(|through| message.timestamp >= through);
         if unread {
             let _ = self.archive.bump_unread(&chat);
+        } else if read_elsewhere {
+            let _ = self.archive.mark_read_to(&chat, &message.id);
         } else if message.from_me
             && matches!(
                 message.status,

@@ -1,0 +1,19 @@
+ZapFast para Windows: complemento de OpenGL por software para MÁQUINA
+VIRTUAL (fork intellq)
+
+Use este complemento só quando o ZapFast avisar, ao abrir, que "Este sistema
+operacional não oferece OpenGL 2.0" e não for possível ativar a aceleração 3D
+da VM. Num PC com placa de vídeo, não use: basta atualizar o driver.
+
+Ele traz o OpenGL por software do Mesa 26.2.1 (opengl32.dll,
+libgallium_wgl.dll e dxil.dll, de github.com/pal1000/mesa-dist-win, licença
+MIT; ver mesa\readme.txt). O desenho passa a ser feito pela CPU: funciona,
+mas é mais lento.
+
+1. Extraia o conteúdo deste zip DENTRO da pasta do ZapFast, a mesma do
+   zapfast.exe (por exemplo, C:\ZapFast), para que as DLLs fiquem ao lado
+   dele.
+2. Abra o zapfast.exe normalmente.
+
+Para desfazer, apague da pasta do ZapFast os arquivos opengl32.dll,
+libgallium_wgl.dll e dxil.dll, a pasta "mesa" e este LEIA-ME-VM.txt.

@@ -48,7 +48,14 @@ fi
 git pull --ff-only
 printf 'Repositório atualizado.\n'
 
-if ! read -r -p 'Compilar e instalar o novo binário em /usr/local/bin? [s/N] ' answer; then
+# A mesma pasta que o install.sh da release e o atualizador embutido usam.
+if [[ ${XDG_BIN_HOME:-} == /* ]]; then
+    bin_dir=$XDG_BIN_HOME
+else
+    bin_dir=$HOME/.local/bin
+fi
+
+if ! read -r -p "Compilar e instalar o novo binário em $bin_dir? [s/N] " answer; then
     printf '\nCompilação e instalação ignoradas.\n'
     exit 0
 fi
@@ -61,5 +68,9 @@ esac
 jobs=$(nproc)
 printf 'Compilando com %s threads lógicas.\n' "$jobs"
 CARGO_PROFILE_RELEASE_CODEGEN_UNITS="$jobs" cargo build --release --locked --bin zapfast -j "$jobs"
-sudo install -Dm755 "$repo_dir/target/release/zapfast" /usr/local/bin/zapfast
-printf 'ZapFast compilado e instalado em /usr/local/bin/zapfast.\n'
+# Troca por renomeação: um ZapFast aberto continua rodando e a próxima
+# abertura já usa o novo binário.
+mkdir -p "$bin_dir"
+install -m 755 "$repo_dir/target/release/zapfast" "$bin_dir/.zapfast.new"
+mv -f "$bin_dir/.zapfast.new" "$bin_dir/zapfast"
+printf 'ZapFast compilado e instalado em %s/zapfast.\n' "$bin_dir"

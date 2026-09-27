@@ -8,6 +8,10 @@
 use super::{Archive, Result, params, status_from_rank, status_rank};
 use crate::model::{Delivery, Recipient};
 
+/// The recipient under which an early read from our own devices waits. No
+/// WhatsApp address looks like it.
+const SELF_READ: &str = "self-read";
+
 impl Archive {
     /// Called once for a newly filed outgoing message, before sending it.
     /// An empty/unknown audience cannot establish that everyone has read.
@@ -198,6 +202,26 @@ impl Archive {
         statement
             .query_map(params![chat], |row| row.get(0))?
             .collect()
+    }
+
+    /// A read on the phone or another of our devices that names an incoming
+    /// message not archived yet. On reconnecting, the offline backlog brings
+    /// these receipts ahead of the messages, which are still being decrypted;
+    /// the row waits for [`Self::take_self_read`]. It is dated when filed,
+    /// not when read, so pruning (of rows older than a day) keeps it while
+    /// the backlog drains.
+    pub fn file_self_read(&self, chat: &str, id: &str) -> Result<()> {
+        self.file_receipt(chat, id, SELF_READ, Delivery::Read, crate::util::now())
+            .map(|_| ())
+    }
+
+    /// Whether another of our devices already read `id`, which has just
+    /// arrived, forgetting the waiting read.
+    pub fn take_self_read(&self, chat: &str, id: &str) -> Result<bool> {
+        Ok(self.connection.execute(
+            "DELETE FROM group_receipts WHERE chat = ?1 AND id = ?2 AND recipient = ?3",
+            params![chat, id, SELF_READ],
+        )? > 0)
     }
 
     /// Every receipt kept for one message, saved audience included.

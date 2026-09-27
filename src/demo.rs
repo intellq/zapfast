@@ -1930,7 +1930,7 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
                 use crate::updates::{DownloadState, Installation, Kind, Prepared};
                 app.update = Some(crate::updates::Release {
                     version: "99.0.0".to_owned(),
-                    url: "https://github.com/crmne/zapfast/releases/latest".to_owned(),
+                    url: "https://github.com/intellq/zapfast/releases/latest".to_owned(),
                 });
                 app.show_update = true;
                 let installation = Installation {

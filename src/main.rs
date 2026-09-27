@@ -257,7 +257,7 @@ fn main() -> eframe::Result<()> {
     // window when the tray, a notification, or another launch requests one;
     // without a tray a hidden start shows the window (App::start_hidden).
     let start_hidden = cli.start_hidden && start_minimized && !demo && update_receipt.is_none();
-    fastframe_shell::Shell::new(app, &waker)
+    let result = fastframe_shell::Shell::new(app, &waker)
         .start_hidden(start_hidden)
         .idle(fastframe_tray::idle)
         .run(|lease| {
@@ -303,9 +303,55 @@ fn main() -> eframe::Result<()> {
                     }))
                 }),
             )
-        })?;
+        });
+    if let Err(error) = &result
+        && graphics_unavailable(error)
+    {
+        report_missing_opengl();
+    }
+    result?;
     drop(instance);
     Ok(())
+}
+
+/// Whether the window failed for want of OpenGL 2.0, as on a missing graphics
+/// driver or in a virtual machine without 3D acceleration.
+fn graphics_unavailable(error: &eframe::Error) -> bool {
+    matches!(
+        error,
+        eframe::Error::OpenGL(_) | eframe::Error::Glutin(_) | eframe::Error::NoGlutinConfigs(..)
+    )
+}
+
+/// Says why ZapFast cannot open, which would otherwise end it with no window
+/// and only a line in the log.
+fn report_missing_opengl() {
+    let text = zapfast::i18n::tr(
+        "This operating system does not offer OpenGL 2.0. Update your graphics card driver. If you are running in a virtual machine, turn on 3D acceleration.",
+    );
+    #[cfg(windows)]
+    {
+        use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
+        use windows::core::HSTRING;
+        // SAFETY: both strings outlive the call, and no owner window is needed.
+        unsafe {
+            MessageBoxW(
+                None,
+                &HSTRING::from(text),
+                &HSTRING::from("ZapFast"),
+                MB_OK | MB_ICONERROR,
+            );
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        eprintln!("{text}");
+        let _ = notify_rust::Notification::new()
+            .appname("ZapFast")
+            .summary("ZapFast")
+            .body(text)
+            .show();
+    }
 }
 
 /// Summarises the WhatsApp library's lines, which can quote protocol

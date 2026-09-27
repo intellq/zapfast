@@ -37,10 +37,10 @@ AppId={{F2512314-384A-4002-9933-AB840FD01639}
 AppName={#AppName}
 AppVersion={#Version}
 AppVerName={#AppName} {#Version}
-AppPublisher=Carmine Paolino
-AppPublisherURL=https://zapfast.rocks
-AppSupportURL=https://github.com/crmne/zapfast/issues
-AppUpdatesURL=https://github.com/crmne/zapfast/releases
+AppPublisher=ZapFast (fork intellq)
+AppPublisherURL=https://github.com/intellq/zapfast
+AppSupportURL=https://github.com/intellq/zapfast/issues
+AppUpdatesURL=https://github.com/intellq/zapfast/releases
 DefaultDirName={localappdata}\Programs\{#AppName}
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
@@ -61,7 +61,7 @@ UninstallDisplayIcon={app}\{#AppExeName}
 VersionInfoVersion={#NumericVersion}.0
 
 [Tasks]
-Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: unchecked
+Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"
 
 [Files]
 Source: "{#Binary}"; DestDir: "{app}"; Flags: ignoreversion

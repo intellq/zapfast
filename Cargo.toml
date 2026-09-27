@@ -1,6 +1,6 @@
 [package]
 name = "zapfast"
-version = "0.17.0"
+version = "0.17.1"
 edition = "2024"
 rust-version = "1.98"
 license = "MIT"
@@ -140,7 +140,9 @@ fastframe-shell = { git = "https://github.com/crmne/fastframe", tag = "v0.1.7" }
 # Centres the macOS traffic lights on ZapFast's own header.
 fastframe-macos = { git = "https://github.com/crmne/fastframe", tag = "v0.1.7" }
 # Self-update from GitHub releases with signed checksums, a helper and rollback.
-fastframe-update = { git = "https://github.com/crmne/fastframe", tag = "v0.1.7", features = ["reqwest"] }
+# intellq fork: a copy that also updates a Linux copy in ~/.local/bin
+# without a marker file (vendor/fastframe-update/VENDORED.md).
+fastframe-update = { path = "vendor/fastframe-update", features = ["reqwest"] }
 
 [patch.crates-io]
 # crmne/egui apps-0.36, shared with Spotifast, RekordFlash and TonePush: egui

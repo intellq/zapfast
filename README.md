@@ -27,6 +27,29 @@ até o commit [`f0a7706`](https://github.com/crmne/zapfast/commit/f0a7706)
 (versão 0.17.0 e ajustes seguintes).
 Além das novidades do upstream, esta branch inclui as seguintes mudanças:
 
+### Instalar este fork
+
+As versões do fork ficam em
+[Releases](https://github.com/intellq/zapfast/releases/latest), para Linux e
+Windows x86_64. Os números seguem o upstream: a versão 0.17.1 é o fork sobre o
+upstream 0.17.0, e depois do upstream 0.17.1 vem a 0.17.101. Os pacotes são
+assinados com a chave do fork, e o ZapFast instalado por eles se atualiza
+sozinho a partir das Releases do fork (não das do upstream).
+
+- **Linux:** baixe `zapfast-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz`, extraia e
+  rode `./install.sh`, sem `sudo`. O programa vai para `~/.local/bin/zapfast`,
+  com atalho no menu e na área de trabalho, e `~/.local/bin` entra no `PATH`
+  se ainda não estiver. `./uninstall.sh` remove (com `--purge`, também a
+  sessão, o histórico e as configurações).
+- **Windows:** o instalador `…-x86_64-pc-windows-msvc-setup.exe` (sem
+  administrador; atalho na área de trabalho marcado por padrão) ou o `.zip`
+  portátil, que se atualiza na própria pasta.
+- **Máquina virtual Windows sem aceleração 3D:** extraia
+  `zapfast-vX.Y.Z-windows-opengl-vm.zip` dentro da pasta do ZapFast (OpenGL
+  por software do Mesa).
+
+### Mudanças
+
 - **Interface inteiramente em português brasileiro.** Com o idioma pt-BR, todo
   texto visível ao usuário aparece em português: menus e dicas, diálogos,
   avisos, mensagens de erro vindas do backend (conexão, proxy, microfone,
@@ -38,11 +61,16 @@ Além das novidades do upstream, esta branch inclui as seguintes mudanças:
   reiniciar. Termos técnicos (GIF, proxy, TLS, WebSocket, FFmpeg, VAAPI)
   seguem em inglês. Ficam em inglês de propósito apenas o modo de demonstração,
   a ajuda da linha de comando e os logs.
-- **Verificação de atualizações desligada por padrão.** O aviso de nova versão
-  e o download automático apontam para as versões do projeto original, não
-  para este fork. Por isso, **Verificar atualizações** e **Baixar atualizações
-  automaticamente** vêm desligadas em instalações novas; atualize o fork pelo
-  [`atualizar.sh`](atualizar.sh).
+- **Atualizações pelas Releases do fork.** O aviso de nova versão e o
+  download automático consultam as
+  [Releases deste fork](https://github.com/intellq/zapfast/releases), com
+  pacotes assinados pela chave do fork, e não as do projeto original.
+  **Verificar atualizações** e **Baixar atualizações automaticamente** vêm
+  ligadas em instalações novas; reiniciar para aplicar continua sendo um
+  clique seu. Instalações antigas mantêm o que já estava salvo nas
+  configurações. No Linux, a atualização sozinha vale para o binário em
+  `~/.local/bin` (o do `install.sh`); o código-fonte continua podendo ser
+  atualizado pelo [`atualizar.sh`](atualizar.sh).
 - **Links clicáveis desde o primeiro clique.** Em conversas longas, a
   virtualização do histórico mudava o identificador dos elementos entre o
   pressionamento e a soltura do mouse. O ponteiro indicava um link, mas o
@@ -125,7 +153,8 @@ Além das novidades do upstream, esta branch inclui as seguintes mudanças:
   raiz do repositório, consulta a branch remota acompanhada pela branch
   atual. Se não houver atualização, apenas informa isso; se houver avanço
   linear, executa `git pull --ff-only` e oferece compilar em modo release e
-  instalar o binário em `/usr/local/bin/zapfast`. A compilação usa todas as
+  instalar o binário em `~/.local/bin/zapfast` (sem `sudo`; troca atômica,
+  como o instalador da release). A compilação usa todas as
   threads lógicas detectadas por `nproc`, tanto nos jobs do Cargo quanto nas
   unidades de geração de código do perfil release.
 - **Exclusão confirmada e sincronizada.** O submenu **Apagar para mim** abre uma
@@ -203,10 +232,20 @@ Além das novidades do upstream, esta branch inclui as seguintes mudanças:
   como faz o WhatsApp oficial com as confirmações desligadas. Nos grupos o
   recibo vai sempre, como no oficial. Os tiques azuis que os contatos mandam
   continuam aparecendo no ZapFast em qualquer combinação.
+- **Leituras feitas no celular com o ZapFast fechado.** Ao reabrir, o
+  servidor entrega de uma vez as mensagens acumuladas e os avisos de leitura
+  do celular. Os avisos chegavam antes das mensagens, que ainda estavam sendo
+  decifradas, e eram descartados, e as mensagens já lidas no celular apareciam
+  como não lidas. Agora o aviso fica guardado e é aplicado quando a mensagem
+  chega: ela entra como lida e sem notificação.
 - **Iniciar minimizado.** Em Configurações › Sistema, **Iniciar ao entrar**
   ganhou a subopção **Iniciar minimizado**, recuada para mostrar que depende
   dela e desligada por padrão: o ZapFast abre com a janela ao entrar no
   computador, e só com o ícone na bandeja quando a subopção está ligada.
+- **Aviso quando falta OpenGL 2.0.** Sem OpenGL 2.0 (driver de vídeo ausente
+  ou máquina virtual sem aceleração 3D), o ZapFast fechava sem mostrar nada.
+  Agora mostra uma mensagem explicando a causa: uma caixa de diálogo no
+  Windows e uma notificação nos outros sistemas.
 - **Borda discreta na barra de chat.** Ao digitar, o contorno da caixa de texto
   é um tom um pouco mais escuro que o fundo dela, em vez do verde-água; quem
   navega com Tab continua vendo o anel na cor de destaque.

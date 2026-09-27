@@ -1,0 +1,191 @@
+# Releases of the intellq fork: Linux x86_64 (.tar.gz with install.sh) and
+# Windows x86_64 (installer, portable .zip and the OpenGL add-on for virtual
+# machines). The upstream release.yml also builds macOS, arm64, Flatpak and
+# the package-manager recipes; it is disabled in the fork's Actions settings.
+#
+# To release: bump the version in Cargo.toml (upstream patch × 100 + N), write
+# packaging/release-notes/vX.Y.Z.md, commit both to main, push, then push the
+# tag vX.Y.Z. See ~/codex/zapfast-releases-plano.md.
+name: Release (fork)
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Baked into the binary by settings.rs; without the secret the build ships
+  # keyless and the GIF picker asks for one.
+  ZAPFAST_GIPHY_KEY: ${{ secrets.ZAPFAST_GIPHY_KEY }}
+  # Software OpenGL for virtual machines without 3D, from mesa-dist-win (MIT).
+  MESA_VERSION: 26.2.1
+  MESA_SHA256: 78a0305844074535e73dfb6dcb5eb2a65f1d9dc445102e1f4c3c3e97dace19bf
+
+jobs:
+  release-source:
+    name: tag is on main
+    if: github.repository == 'intellq/zapfast'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Require the release commit on main
+        run: |
+          git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main; then
+            echo "Release tags must point to a commit already on origin/main." >&2
+            exit 1
+          fi
+      - name: Check release version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          test "$GITHUB_REF_NAME" = "v$version"
+          # The updater takes plain X.Y.Z only.
+          [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          test -f "packaging/release-notes/${GITHUB_REF_NAME}.md"
+
+  # Ubuntu 22.04 (glibc 2.35), so the binary runs on older distributions too.
+  linux:
+    name: Linux x86_64
+    needs: release-source
+    runs-on: ubuntu-latest
+    container: ubuntu:22.04
+    steps:
+      - name: Build dependencies
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential pkg-config cmake perl curl ca-certificates git \
+            libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+      # The repository pins its toolchain; this installs the pinned one.
+      - run: rustup target add x86_64-unknown-linux-gnu
+      # No compiler cache: published binaries never build from outputs
+      # restored from an Actions cache.
+      - run: cargo build --locked --release --target x86_64-unknown-linux-gnu
+      # The updater unpacks <stem>/zapfast from this archive; the rest is for
+      # install.sh.
+      - name: Package
+        run: |
+          name="zapfast-${GITHUB_REF_NAME}-x86_64-unknown-linux-gnu"
+          mkdir -p "dist/$name"
+          install -m 755 target/x86_64-unknown-linux-gnu/release/zapfast "dist/$name/"
+          install -m 755 packaging/linux/install.sh packaging/linux/uninstall.sh "dist/$name/"
+          install -m 644 packaging/applications/zapfast.desktop packaging/icons/zapfast.svg \
+            packaging/linux/LEIA-ME.txt README.md LICENSE THIRD-PARTY-NOTICES.md "dist/$name/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          rm -r "dist/$name"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  windows:
+    name: Windows x86_64
+    needs: release-source
+    runs-on: windows-latest
+    env:
+      # The C runtime inside the executable, so it needs no Visual C++
+      # Redistributable.
+      RUSTFLAGS: -C target-feature=+crt-static
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - run: rustup target add x86_64-pc-windows-msvc
+      - run: cargo build --locked --release --target x86_64-pc-windows-msvc
+
+      # The updater unpacks <stem>/zapfast.exe from this archive; the marker
+      # lets a portable copy update itself where it was unpacked.
+      - name: Portable package
+        shell: bash
+        run: |
+          name="zapfast-${GITHUB_REF_NAME}-x86_64-pc-windows-msvc"
+          mkdir -p "dist/$name"
+          cp target/x86_64-pc-windows-msvc/release/zapfast.exe "dist/$name/"
+          cp README.md LICENSE THIRD-PARTY-NOTICES.md packaging/zapfast-portable.txt "dist/$name/"
+          cd dist
+          7z a "$name.zip" "$name"
+          rm -r "$name"
+
+      # Inno Setup ships with the runner image. PowerShell, because bash on
+      # Windows rewrites /D... arguments as paths.
+      - name: Installer
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart("v")
+          $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
+          if (-not $iscc) { $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
+          & $iscc "/DVersion=$version" "/DNumericVersion=$version" "/DArch=x86_64" `
+            "/DBinary=$PWD\target\x86_64-pc-windows-msvc\release\zapfast.exe" `
+            "/DOutputDir=$PWD\dist" packaging\windows\zapfast.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # Unpacked inside the ZapFast folder, beside zapfast.exe. Its name does
+      # not match any package the updater looks for.
+      - name: OpenGL add-on for virtual machines
+        shell: bash
+        run: |
+          curl -fsSLo mesa.7z "https://github.com/pal1000/mesa-dist-win/releases/download/${MESA_VERSION}/mesa3d-${MESA_VERSION}-release-msvc.7z"
+          echo "${MESA_SHA256}  mesa.7z" | sha256sum -c -
+          mkdir -p vm/mesa
+          7z e -ovm mesa.7z x64/opengl32.dll x64/libgallium_wgl.dll x64/dxil.dll
+          7z e -ovm/mesa mesa.7z readme.txt
+          cp packaging/windows/LEIA-ME-VM.txt vm/
+          cd vm
+          7z a "../dist/zapfast-${GITHUB_REF_NAME}-windows-opengl-vm.zip" .
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows
+          path: |
+            dist/*.zip
+            dist/*-setup.exe
+          if-no-files-found: error
+
+  publish:
+    name: GitHub release
+    needs: [linux, windows]
+    runs-on: ubuntu-latest
+    environment: release-signing
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: ruby/setup-ruby@a0102e0972be65f351c307e2d64b9314a57c8073 # v1
+        with:
+          ruby-version: '4.0'
+      # checksums.txt and its signature, which the updater checks against
+      # assets/update-public-key.hex before installing anything.
+      - name: Sign update manifest
+        uses: crmne/native-packages/.github/actions/sign-release@dc0cb1586894ca0239c53fd02d4da8064712671c # v0.7.0
+        with:
+          directory: dist
+          public-key: assets/update-public-key.hex
+          key-env: ZAPFAST_UPDATE_SIGNING_KEY
+        env:
+          ZAPFAST_UPDATE_SIGNING_KEY: ${{ secrets.ZAPFAST_UPDATE_SIGNING_KEY }}
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          files: dist/*
+          name: ZapFast ${{ github.ref_name }}
+          body_path: packaging/release-notes/${{ github.ref_name }}.md
+          generate_release_notes: false
+          draft: false
+          prerelease: false
+          make_latest: true

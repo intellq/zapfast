@@ -6,7 +6,7 @@ msgstr ""
 "Project-Id-Version: ZapFast\n"
 "Report-Msgid-Bugs-To: https://github.com/crmne/zapfast/issues/new?"
 "template=translation.yml\n"
-"POT-Creation-Date: 2026-09-27 11:14-0300\n"
+"POT-Creation-Date: 2026-09-27 11:35-0300\n"
 "PO-Revision-Date: 2026-09-22 00:00-0300\n"
 "Last-Translator: ZapFast contributors\n"
 "Language-Team: German\n"
@@ -4415,6 +4415,12 @@ msgstr "Bild kopieren"
 
 #: src/wallpaper.rs:353
 msgid "unsupported image format"
+msgstr ""
+
+#: src/main.rs:330
+msgid ""
+"This operating system does not offer OpenGL 2.0. Update your graphics card "
+"driver. If you are running in a virtual machine, turn on 3D acceleration."
 msgstr ""
 
 #~ msgid "Starts in the tray, without a window."

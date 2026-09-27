@@ -1945,7 +1945,6 @@ dependencies = [
 [[package]]
 name = "fastframe-update"
 version = "0.1.7"
-source = "git+https://github.com/crmne/fastframe?tag=v0.1.7#9cb28309097ef313ca38570e4d9d53faed92bdd1"
 dependencies = [
  "anyhow",
  "reqwest",
@@ -7554,7 +7553,7 @@ dependencies = [
 
 [[package]]
 name = "zapfast"
-version = "0.17.0"
+version = "0.17.1"
 dependencies = [
  "aes",
  "anyhow",

@@ -1,0 +1,22 @@
+ZapFast para Linux x86_64 (fork intellq)
+
+Instalar, sem sudo, só para o seu usuário:
+
+    ./install.sh
+
+O programa vai para ~/.local/bin/zapfast, com atalho no menu de aplicativos
+e na área de trabalho (use --no-desktop-shortcut para não criar este). Se
+~/.local/bin não estiver no PATH, o instalador o acrescenta ao ~/.profile (e
+ao ~/.bashrc, ~/.zshrc ou fish, se existirem).
+
+Instalado assim, o ZapFast avisa quando há versão nova e se atualiza sozinho.
+Rodar o install.sh de uma versão mais nova também atualiza.
+
+Desinstalar:
+
+    ./uninstall.sh            remove o programa e os atalhos
+    ./uninstall.sh --purge    remove também a sessão do WhatsApp, o histórico
+                              e as configurações
+
+Precisa de OpenGL 2.0 (qualquer placa de vídeo com driver; numa máquina
+virtual, ative a aceleração 3D).

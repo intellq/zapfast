@@ -6,7 +6,7 @@ msgstr ""
 "Project-Id-Version: ZapFast\n"
 "Report-Msgid-Bugs-To: https://github.com/crmne/zapfast/issues/new?"
 "template=translation.yml\n"
-"POT-Creation-Date: 2026-09-27 11:14-0300\n"
+"POT-Creation-Date: 2026-09-27 11:35-0300\n"
 "PO-Revision-Date: 2026-09-22 00:00-0300\n"
 "Last-Translator: ZapFast contributors\n"
 "Language-Team: Brazilian Portuguese\n"
@@ -4317,6 +4317,14 @@ msgstr "não é uma imagem"
 #: src/wallpaper.rs:353
 msgid "unsupported image format"
 msgstr "formato de imagem não suportado"
+
+#: src/main.rs:330
+msgid ""
+"This operating system does not offer OpenGL 2.0. Update your graphics card "
+"driver. If you are running in a virtual machine, turn on 3D acceleration."
+msgstr ""
+"Este sistema operacional não oferece OpenGL 2.0. Atualize o driver de sua "
+"placa de vídeo. Se estiver executando em uma VM, ative aceleração 3D."
 
 #~ msgid "Starts in the tray, without a window."
 #~ msgstr "Inicia na bandeja do sistema, sem janela."
