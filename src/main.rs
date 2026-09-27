@@ -549,6 +549,7 @@ impl eframe::App for Shell {
                 if let Some(startup) = startup {
                     let _ = startup.send(());
                 }
+                receipt.clean_up();
             });
         } else if let Some(startup) = startup {
             let _ = startup.send(());

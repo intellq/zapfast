@@ -4,6 +4,7 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
@@ -61,6 +62,36 @@ impl Receipt {
     pub fn acknowledge(&self) -> Result<()> {
         crate::helper::acknowledge(&self.config, self.host.as_ref(), &self.job)
     }
+
+    /// Removes the update's staging folder once the helper reports the
+    /// update installed. Call it after [`Receipt::acknowledge`] succeeds,
+    /// off the interface thread: it waits for the helper to finish, up to
+    /// two minutes. What it cannot remove by then (a helper that still holds
+    /// its files on Windows) goes at the next start.
+    pub fn clean_up(&self) {
+        const WAIT: Duration = Duration::from_secs(120);
+        const POLL: Duration = Duration::from_millis(500);
+        let Some(directory) = self.job.parent() else {
+            return;
+        };
+        if !directory
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| crate::stage::is_staging_name(&self.config, name))
+        {
+            return;
+        }
+        let start = Instant::now();
+        // Once seen, the result may be among the files already removed.
+        let mut installed = false;
+        while start.elapsed() < WAIT && directory.exists() {
+            installed = installed || crate::stage::succeeded(directory);
+            if installed && crate::stage::discard(directory) {
+                return;
+            }
+            std::thread::sleep(POLL);
+        }
+    }
 }
 
 /// Handles this process's command line for the updater.
@@ -89,6 +120,9 @@ pub fn intercept(config: &UpdateConfig) -> Launch {
         }
         Parsed::Launch(launch) => {
             crate::rename::tidy(config, &OsHost, crate::detect::Platform::current());
+            if let Ok(executable) = OsHost.current_exe() {
+                crate::stage::sweep(config, &executable);
+            }
             *launch
         }
     }

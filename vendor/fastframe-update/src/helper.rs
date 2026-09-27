@@ -195,7 +195,7 @@ pub(crate) fn run(config: &UpdateConfig, host: &dyn Host, job: &Path) -> Result<
     }
     fs::write(
         original.file(RESULT),
-        format!("Updated to {}", original.version),
+        format!("{}{}", stage::UPDATED, original.version),
     )?;
     Ok(())
 }

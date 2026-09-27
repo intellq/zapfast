@@ -19,10 +19,15 @@
 //! | `failed.app` | helper | a rolled-back macOS bundle |
 //! | `started` | relaunched app | it opened its window |
 //! | `result.txt` | helper | `Updated to <version>`, or why it failed |
+//!
+//! Folders that are done with are removed (see [`sweep`]): at once after a
+//! successful update, and a week after their last change otherwise, which
+//! keeps a failure's log for a while.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, ensure};
 use ring::rand::SecureRandom;
@@ -44,6 +49,14 @@ pub(crate) const HELPER_LOG: &str = "helper.log";
 pub(crate) const HELPER_APP: &str = "helper.app";
 pub(crate) const FAILED_APP: &str = "failed.app";
 pub(crate) const INSTALLER_LOG: &str = "installer.log";
+
+/// How `result.txt` starts when the helper installed the update.
+pub(crate) const UPDATED: &str = "Updated to ";
+
+/// How long a staging folder that did not end in a successful update is
+/// kept after its last change: its log explains a failure, and a running app
+/// may still hold a download there.
+const KEEP_UNFINISHED: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 /// Files whose presence means a staging folder was already used for an
 /// attempt. A handoff refuses such a folder: a stale `ready` would report a
@@ -190,6 +203,55 @@ pub(crate) fn discard(directory: &Path) -> bool {
         }
     }
     fs::remove_dir_all(directory).is_ok()
+}
+
+/// Whether the helper reported installing the update staged in `directory`.
+pub(crate) fn succeeded(directory: &Path) -> bool {
+    fs::read_to_string(directory.join(RESULT)).is_ok_and(|result| result.starts_with(UPDATED))
+}
+
+/// At startup: removes the staging folders beside `executable` that are
+/// done with. A successful update's goes at once (its helper wrote the
+/// result last, and a relaunched app has acknowledged it by then); any
+/// other goes after [`KEEP_UNFINISHED`], so an update in progress or a
+/// download a running app still holds is left alone.
+pub(crate) fn sweep(config: &UpdateConfig, executable: &Path) {
+    let root = crate::macos::bundle_root(config, executable).unwrap_or(executable);
+    let Some(Ok(entries)) = root.parent().map(fs::read_dir) else {
+        return;
+    };
+    let now = SystemTime::now();
+    for entry in entries.flatten() {
+        if !entry.file_type().is_ok_and(|kind| kind.is_dir())
+            || !entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| is_staging_name(config, name))
+        {
+            continue;
+        }
+        let folder = entry.path();
+        let stale = last_change(&folder).is_some_and(|changed| {
+            now.duration_since(changed)
+                .is_ok_and(|age| age >= KEEP_UNFINISHED)
+        });
+        if succeeded(&folder) || stale {
+            discard(&folder);
+        }
+    }
+}
+
+/// The latest modification time of a folder and of the entries in it.
+fn last_change(folder: &Path) -> Option<SystemTime> {
+    let mut latest = fs::metadata(folder)
+        .and_then(|folder| folder.modified())
+        .ok()?;
+    for entry in fs::read_dir(folder).ok()?.flatten() {
+        if let Ok(modified) = entry.metadata().and_then(|entry| entry.modified()) {
+            latest = latest.max(modified);
+        }
+    }
+    Some(latest)
 }
 
 pub(crate) fn hash(path: &Path) -> Result<String> {

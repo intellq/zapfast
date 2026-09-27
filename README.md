@@ -70,7 +70,10 @@ sozinho a partir das Releases do fork (não das do upstream).
   clique seu. Instalações antigas mantêm o que já estava salvo nas
   configurações. No Linux, a atualização sozinha vale para o binário em
   `~/.local/bin` (o do `install.sh`); o código-fonte continua podendo ser
-  atualizado pelo [`atualizar.sh`](atualizar.sh).
+  atualizado pelo [`atualizar.sh`](atualizar.sh). A pasta temporária que a
+  atualização cria ao lado do programa (`.zapfast-update-…`, com cerca de
+  160 MB) é apagada sozinha logo depois de uma atualização bem-sucedida; a de
+  uma atualização que falhou fica uma semana, para consulta do registro.
 - **Links clicáveis desde o primeiro clique.** Em conversas longas, a
   virtualização do histórico mudava o identificador dos elementos entre o
   pressionamento e a soltura do mouse. O ponteiro indicava um link, mas o
