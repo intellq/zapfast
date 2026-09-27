@@ -86,7 +86,9 @@ Além das novidades do upstream, esta branch inclui as seguintes mudanças:
 - **Configurações legíveis em janelas estreitas.** Títulos e descrições podem
   ocupar mais linhas, sem serem cortados com reticências. Cada controle
   reserva apenas a largura necessária; Aparência e Arquivos mantêm as linhas
-  alinhadas sem grandes espaços verticais em zoom de 100% ou 130%.
+  alinhadas sem grandes espaços verticais em zoom de 100% ou 130%. Os botões
+  **Abrir pasta de temas** e **Como criar um tema** ficam lado a lado, abaixo
+  do menu de temas.
 - **Mensagens recebidas usam mais largura.** O texto recebido quebra perto da
   borda direita disponível na conversa, respeitando o alinhamento dos balões
   próprios. A estimativa das linhas fora da tela usa a mesma largura, para
@@ -162,6 +164,19 @@ Além das novidades do upstream, esta branch inclui as seguintes mudanças:
   `zapfast.exe`. Se a fonte já estiver num desses lugares no primeiro uso do
   ZapFast (ainda sem `settings.json`), a opção vem ligada. Sem a fonte, a
   opção fica desabilitada.
+- **Prévia de links no envio.** Ao digitar ou colar um link, o ZapFast busca
+  na página o título, a descrição e a imagem (as tags Open Graph, ou o título
+  e a descrição comuns) e mostra a prévia acima da caixa de digitação, como o
+  celular e o cliente oficial. Ela vai junto com a mensagem: a miniatura
+  dentro da mensagem e, para imagens largas, uma versão maior enviada aos
+  servidores do WhatsApp, que os celulares mostram ocupando a largura do
+  balão. O **X** do cartão envia o texto sem a prévia; se a mensagem sair
+  antes de a prévia carregar, ela vai sem prévia. Vale para o primeiro link
+  do texto, não para legendas de anexos nem para edições. A página é lida
+  deste computador, pelo proxy das configurações; por isso o site do link fica
+  sabendo do seu endereço IP, como acontece quando o celular gera a prévia.
+  A opção **Prévias de links**, em **Configurações › Privacidade**, vem ligada
+  e desliga a busca.
 - **Seleção primária do Linux.** Texto selecionado no compositor (com o
   mouse, pelo teclado ou com Selecionar tudo) ou no histórico da conversa
   fica disponível como seleção primária assim que a seleção termina, para ser
@@ -357,7 +372,10 @@ de sincronizar a exclusão "para mim" com o celular é uma extensão deste fork.
   a time, each starting once the one before it reached WhatsApp, so a picture
   cannot overtake the text that came before it.
 - **WhatsApp formatting.** Bold, italic, strikethrough, code, lists, quotes,
-  mentions, and link previews are supported. Links are clickable. Hebrew,
+  mentions, and link previews are supported. Links are clickable. A link you
+  type gets a preview above the composer, fetched from its page, and the
+  message carries it as the phone's would; Settings, Privacy can turn this
+  off, since the linked site sees the request. Hebrew,
   Arabic, and mixed lines follow the Unicode Bidirectional Algorithm, so
   numbers, punctuation, and embedded words stay in reading order and brackets
   face the right way. As in WhatsApp, a message whose first strong character is

@@ -277,6 +277,8 @@ pub struct App {
     pub mention_selected: usize,
     /// Reply target in the open chat.
     pub reply_to: Option<String>,
+    /// The preview of the first link in the composer.
+    pub composer_link: Option<crate::model::ComposerLink>,
     /// Outgoing message being edited.
     pub editing: Option<String>,
     composing: bool,
@@ -830,6 +832,7 @@ impl App {
             mention_start: None,
             mention_selected: 0,
             reply_to: None,
+            composer_link: None,
             editing: None,
             unsent_voice: None,
             composing: false,
@@ -2139,6 +2142,13 @@ impl App {
                         self.avatars.insert(id, path);
                     }
                 }
+                Event::LinkPreview { link, card } => {
+                    if let Some(current) = &mut self.composer_link
+                        && current.link == link
+                    {
+                        current.card = Some(card);
+                    }
+                }
                 Event::Gifs { query, results } => {
                     if query == self.gif_query {
                         self.gif_pending = false;
@@ -3117,11 +3127,19 @@ impl App {
         }
         // The text is on its way, so there is nothing left to restore.
         self.store_draft(&chat, "");
+        // A preview still loading, or closed, stays behind, as on the phone.
+        let preview = self
+            .composer_link
+            .take()
+            .filter(|link| link.chat == chat && !link.dismissed && self.settings.link_previews)
+            .and_then(|link| link.card.flatten())
+            .filter(|card| text.contains(&card.link));
         self.backend.send(Command::SendText {
             chat,
             text,
             quoting,
             mentions,
+            preview,
         });
         self.scroll_to_bottom = true;
         self.at_bottom = true;
@@ -3819,6 +3837,23 @@ impl App {
                 self.focus_composer = true;
             }
             Action::CancelReply => self.reply_to = None,
+            Action::ComposerLink { chat, link } => {
+                self.composer_link = link.map(|link| {
+                    self.backend
+                        .send(Command::FetchLinkPreview { link: link.clone() });
+                    crate::model::ComposerLink {
+                        chat,
+                        link,
+                        card: None,
+                        dismissed: false,
+                    }
+                });
+            }
+            Action::DismissLinkPreview => {
+                if let Some(link) = &mut self.composer_link {
+                    link.dismissed = true;
+                }
+            }
             Action::Forward {
                 from_chat,
                 messages,

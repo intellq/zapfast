@@ -357,6 +357,8 @@ pub struct Settings {
     pub keep_deleted_messages: bool,
     /// Send typing state while composing.
     pub send_typing: bool,
+    /// Fetch the page of a link typed in the composer and send its preview.
+    pub link_previews: bool,
     /// The former switch that downloaded every kind of file, read once and
     /// folded into the per-kind switches by [`Settings::load`].
     #[serde(alias = "auto_download_images", skip_serializing)]
@@ -455,6 +457,7 @@ impl Default for Settings {
             send_read_receipts: true,
             keep_deleted_messages: false,
             send_typing: true,
+            link_previews: true,
             auto_download: None,
             auto_download_audio: true,
             auto_download_video: false,

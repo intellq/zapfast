@@ -39,6 +39,7 @@ use whatsapp_rust::{MediaRetryResult, MediaReuploadRequest};
 mod device_store;
 mod favorite_chats;
 mod interactive;
+mod link_preview;
 mod link_watch;
 mod poll_history;
 mod polls;
@@ -49,7 +50,7 @@ use crate::app::PAGE;
 use crate::archive::Archive;
 use crate::model::{
     ATTACHMENT_DOWNLOAD_LIMIT, Chat, ChatId, ChatKind, Contact, Content, Delivery, Gif, GifError,
-    LIVE_LOCATION_LIMIT, LinkPreview, Media, MentionRef, Message, Quoted, Reaction,
+    LIVE_LOCATION_LIMIT, LinkCard, LinkPreview, Media, MentionRef, Message, Quoted, Reaction,
 };
 use crate::paths::AppDirs;
 use crate::privacy::{self, PrivacyChoice, PrivacyKind};
@@ -4112,7 +4113,14 @@ impl Worker {
                 text,
                 quoting,
                 mentions,
-            } => self.send_text(chat, text, quoting, mentions),
+                preview,
+            } => self.send_text(chat, text, quoting, mentions, preview),
+            Command::FetchLinkPreview { link } => {
+                link_preview::request(link, self.commands.clone());
+            }
+            Command::LinkPreviewFetched { link, card } => {
+                self.emit(Event::LinkPreview { link, card });
+            }
             Command::ReplyInteractive {
                 chat,
                 message,
@@ -5746,6 +5754,7 @@ impl Worker {
         text: String,
         quoting: Option<String>,
         mentions: Vec<String>,
+        preview: Option<LinkCard>,
     ) {
         let (context, shown) = match self.quote(&chat, quoting.as_deref()) {
             Ok(Some((context, shown))) => (Some(context), Some(shown)),
@@ -5760,9 +5769,16 @@ impl Worker {
             return;
         };
         let mut message = outgoing_text(text.clone(), context, &mentions);
+        if let Some(card) = &preview {
+            link_preview::attach(&mut message, card);
+        }
         let expiration = self.apply_ephemeral(&chat, &mut message);
         let mentions = self.mentions_of(&mentions);
         let id = client.generate_message_id();
+        let (shown_preview, thumbnail, image) = match preview {
+            Some(card) => (link_preview::shown(&card), card.thumbnail, card.image),
+            None => (None, None, None),
+        };
         let row = Message {
             id: id.clone(),
             chat: chat.clone(),
@@ -5770,7 +5786,10 @@ impl Worker {
             sender_name: None,
             from_me: true,
             timestamp: crate::util::now(),
-            content: Content::text(text),
+            content: Content::Text {
+                text,
+                preview: shown_preview,
+            },
             status: Delivery::Pending,
             delivered_at: None,
             read_at: None,
@@ -5779,18 +5798,17 @@ impl Worker {
             edited: false,
             mentions,
             forwarded: false,
-            thumbnail: None,
+            thumbnail,
         };
         self.store_message(row, Some(message.encode_to_vec()), None);
-        tokio::spawn(send_outgoing(
-            client,
-            self.commands.clone(),
-            chat,
-            jid,
-            id,
-            message,
-            expiration,
-        ));
+        let commands = self.commands.clone();
+        tokio::spawn(async move {
+            let mut message = message;
+            if let Some(image) = image {
+                link_preview::upload_image(&client, &mut message, image).await;
+            }
+            send_outgoing(client, commands, chat, jid, id, message, expiration).await;
+        });
     }
 
     fn forward_limits(&mut self, from_chat: &str, messages: &[String]) -> Option<(usize, usize)> {
@@ -9690,6 +9708,7 @@ mod tests {
                 text: "Fixture".into(),
                 quoting: None,
                 mentions: Vec::new(),
+                preview: None,
             })
             .await;
         assert!(matches!(events.try_recv().unwrap(), Event::Error(_)));
@@ -12622,6 +12641,7 @@ mod receipt_tests {
                     text: "Reply fixture".into(),
                     quoting: quoting.clone(),
                     mentions: Vec::new(),
+                    preview: None,
                 },
                 Unsent::Text("Reply fixture".into()),
             ),

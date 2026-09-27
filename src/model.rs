@@ -320,6 +320,41 @@ pub struct LinkPreview {
     pub description: Option<String>,
 }
 
+/// What a web page says about itself, fetched for a link typed in the
+/// composer and sent with the text, as the phone does.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LinkCard {
+    /// The link as it is written in the text, WhatsApp's matched text.
+    pub link: String,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    /// The small JPEG carried inside the message.
+    pub thumbnail: Option<Vec<u8>>,
+    /// A larger picture, uploaded for the preview across the message.
+    pub image: Option<LinkImage>,
+}
+
+/// A link preview's larger picture as JPEG, with its size in pixels.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LinkImage {
+    pub jpeg: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// The preview of the first link in the composer, for the chat it was typed in.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ComposerLink {
+    pub chat: ChatId,
+    /// The link as written, as [`LinkCard::link`].
+    pub link: String,
+    /// `None` while the page is fetched; then the card, or `Some(None)` when
+    /// the page gave nothing to show.
+    pub card: Option<Option<LinkCard>>,
+    /// Closed with its button: the text goes without it.
+    pub dismissed: bool,
+}
+
 impl Message {
     /// One-line summary used in chat rows and quotes.
     pub fn summary(&self) -> String {
@@ -1267,6 +1302,13 @@ pub enum Action {
         /// Quoted message id.
         quoting: Option<String>,
     },
+    /// The composer's first link changed: fetch its preview, or drop it.
+    ComposerLink {
+        chat: ChatId,
+        link: Option<String>,
+    },
+    /// Sends the composer's text without its link preview.
+    DismissLinkPreview,
     ReplyInteractive {
         chat: ChatId,
         message: String,

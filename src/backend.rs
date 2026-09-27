@@ -8,7 +8,9 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 
-use crate::model::{Chat, ChatId, Contact, Gif, GifError, Message, PollDraft, StickerPack};
+use crate::model::{
+    Chat, ChatId, Contact, Gif, GifError, LinkCard, Message, PollDraft, StickerPack,
+};
 use crate::paths::AppDirs;
 
 // Re-exported so the picker can detect pasted Signal pack links.
@@ -159,6 +161,12 @@ pub enum Command {
         text: String,
         quoting: Option<String>,
         mentions: Vec<String>,
+        /// The preview of a link in the text, sent with it.
+        preview: Option<LinkCard>,
+    },
+    /// Fetches the preview of a link typed in the composer.
+    FetchLinkPreview {
+        link: String,
     },
     ReplyInteractive {
         chat: ChatId,
@@ -623,6 +631,11 @@ pub enum Command {
     MeInfo {
         about: Option<String>,
     },
+    /// Internal link preview result.
+    LinkPreviewFetched {
+        link: String,
+        card: Option<LinkCard>,
+    },
     /// Internal GIPHY result.
     GifResults {
         query: String,
@@ -819,6 +832,12 @@ pub enum Event {
     ChatCleared {
         chat: ChatId,
         through: i64,
+    },
+    /// The preview of a link typed in the composer, or `None` when its page
+    /// gave nothing to show or could not be read.
+    LinkPreview {
+        link: String,
+        card: Option<LinkCard>,
     },
     /// GIF search results or failure.
     Gifs {

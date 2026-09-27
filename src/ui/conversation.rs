@@ -939,6 +939,19 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                     None => app.reply_to = None,
                 }
             }
+            // The first link in the text gets a preview, as on the phone, but
+            // not in an edit or a caption.
+            let link_previews =
+                app.settings.link_previews && app.editing.is_none() && app.pending.is_empty();
+            if link_previews
+                && app.recording.is_none()
+                && let Some(link) = app
+                    .composer_link
+                    .as_ref()
+                    .filter(|link| link.chat == chat.id && !link.dismissed)
+            {
+                link_strip(ui, &palette, link, &mut app.actions);
+            }
             let id = egui::Id::new("composer-text");
             let has_focus = ui.memory(|memory| memory.has_focus(id));
             let enter_sends = app.settings.enter_sends;
@@ -1382,6 +1395,21 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
             theme::focus_outline(ui, id, pill.response.rect, f32::from(COMPOSER_RADIUS));
             ui.ctx()
                 .data_mut(|data| data.insert_temp(composer_pill_id(), pill.response.rect));
+            // Read after the field took this frame's keys.
+            let link = link_previews
+                .then(|| markup::first_web_link(&app.composer))
+                .flatten();
+            let asked = app
+                .composer_link
+                .as_ref()
+                .filter(|asked| asked.chat == chat.id)
+                .map(|asked| asked.link.as_str());
+            if link.as_deref() != asked {
+                app.actions.push(Action::ComposerLink {
+                    chat: chat.id.clone(),
+                    link,
+                });
+            }
             if (send_key || send_click)
                 && (!app.composer.trim().is_empty() || !app.pending.is_empty())
             {
@@ -1729,6 +1757,109 @@ fn reply_strip(app: &mut App, ui: &mut egui::Ui, quoted: &Message) {
 /// Where the reply strip was drawn, for layout tests.
 pub(crate) fn reply_strip_id() -> egui::Id {
     egui::Id::new("reply-strip")
+}
+
+/// The preview of the composer's first link, with a button that sends the
+/// text without it. Nothing shows once the page turned out to say nothing.
+fn link_strip(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    link: &crate::model::ComposerLink,
+    actions: &mut Vec<Action>,
+) {
+    let card = match &link.card {
+        Some(None) => return,
+        Some(Some(card)) => Some(card),
+        None => None,
+    };
+    widgets::raised(
+        ui,
+        palette,
+        Frame::new()
+            .fill(palette.surface)
+            .corner_radius(CornerRadius::same(theme::RADIUS))
+            .inner_margin(Margin::symmetric(10, 6)),
+        |ui| {
+            ui.set_width(ui.available_width().max(0.0));
+            ui.horizontal(|ui| {
+                match card {
+                    None => {
+                        theme::spinner(ui, 16.0, palette.accent);
+                        theme::text(
+                            ui,
+                            tr("Loading link preview…"),
+                            theme::regular(12.5),
+                            palette.secondary,
+                        );
+                    }
+                    Some(card) => {
+                        if let Some(bytes) = card.thumbnail.as_deref() {
+                            let (rect, _) =
+                                ui.allocate_exact_size(Vec2::splat(48.0), Sense::hover());
+                            let mut hasher = std::hash::DefaultHasher::new();
+                            std::hash::Hash::hash(&card.link, &mut hasher);
+                            let key = format!("link-{:x}", std::hash::Hasher::finish(&hasher));
+                            let uri = thumbnail_uri(ui.ctx(), &link.chat, &key, bytes);
+                            egui::Image::new(uri)
+                                .fit_to_exact_size(rect.size())
+                                .corner_radius(4.0)
+                                .paint_at(ui, rect);
+                        }
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 1.0;
+                            ui.set_max_width((ui.available_width() - 40.0).max(0.0));
+                            let rows = [
+                                (
+                                    card.title.as_deref(),
+                                    theme::semibold(12.5),
+                                    palette.text,
+                                    1,
+                                ),
+                                (
+                                    card.description.as_deref(),
+                                    theme::regular(12.5),
+                                    palette.secondary,
+                                    2,
+                                ),
+                            ];
+                            for (text, font, color, lines) in rows {
+                                if let Some(text) = text {
+                                    let line = widgets::line(
+                                        ui,
+                                        text,
+                                        font,
+                                        color,
+                                        ui.available_width(),
+                                        lines,
+                                    );
+                                    let (rect, _) =
+                                        ui.allocate_exact_size(line.size(), Sense::hover());
+                                    line.paint(ui, rect.min, color);
+                                }
+                            }
+                            let url = crate::safety::preview_url(&card.link).unwrap_or_default();
+                            theme::text(ui, domain_of(&url), theme::regular(12.0), palette.dim);
+                        });
+                    }
+                }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if theme::icon_button(
+                        ui,
+                        Icon::X,
+                        16.0,
+                        palette.secondary,
+                        palette.text,
+                        tr("Remove link preview"),
+                    )
+                    .clicked()
+                    {
+                        actions.push(Action::DismissLinkPreview);
+                    }
+                });
+            });
+        },
+    );
+    strip_gap(ui);
 }
 
 /// App data needed while drawing a checked-out conversation.
@@ -5358,15 +5489,7 @@ fn preview_card(
 ) {
     let palette = view.palette;
     let thumbnail = message.thumbnail.as_deref();
-    let domain = preview
-        .url
-        .split("://")
-        .nth(1)
-        .unwrap_or(&preview.url)
-        .split('/')
-        .next()
-        .unwrap_or_default()
-        .to_owned();
+    let domain = domain_of(&preview.url);
     let response = Frame::new()
         .fill(palette.window.gamma_multiply(0.35))
         .corner_radius(CornerRadius::same(6))
@@ -5433,6 +5556,17 @@ fn preview_card(
     if response.clicked() {
         actions.push(Action::OpenUrl(preview.url.clone()));
     }
+}
+
+/// The host a link preview names under its title.
+fn domain_of(url: &str) -> String {
+    url.split("://")
+        .nth(1)
+        .unwrap_or(url)
+        .split('/')
+        .next()
+        .unwrap_or_default()
+        .to_owned()
 }
 
 /// A location as a card: the map preview WhatsApp sent across the top, then

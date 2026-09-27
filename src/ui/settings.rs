@@ -370,7 +370,15 @@ fn sections(app: &App) -> Vec<Section> {
     } else {
         Text::default()
     };
-    appearance.row_with_width(translated(locale, "Theme"), detail, 220.0, theme_picker);
+    // The menu's two buttons sit side by side, so the control is as wide as
+    // they are in this language.
+    let title = translated(locale, "Theme");
+    appearance.block(vec![title.clone(), detail.clone()], move |ui, app| {
+        let width = theme_buttons_width(ui, &theme_button_labels(app.locale)).max(220.0);
+        widgets::setting_row(ui, &palette, &title.shown, &detail.shown, width, |ui| {
+            theme_picker(ui, app);
+        });
+    });
     appearance.row_with_width(
         translated(locale, "Wallpaper"),
         Text::default(),
@@ -612,6 +620,14 @@ fn sections(app: &App) -> Vec<Section> {
         translated(locale, "Show when you are typing"),
         "",
         |settings| &mut settings.send_typing,
+    );
+    privacy.toggle(
+        translated(locale, "Link previews"),
+        translated(
+            locale,
+            "Fetches the title and picture of a link you type, to send them with the message as the phone does. The linked site sees your IP address.",
+        ),
+        |settings| &mut settings.link_previews,
     );
     // The account values live on the phone: they are shown once fetched and
     // edited only while connected with a fresh snapshot.
@@ -908,7 +924,8 @@ fn keyed(text: Text) -> Text {
     }
 }
 
-/// The theme menu and the button that opens the themes folder.
+/// The theme menu, with the buttons that open the themes folder and the
+/// theme guide side by side under it.
 fn theme_picker(ui: &mut egui::Ui, app: &mut App) {
     let palette = app.palette;
     ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
@@ -969,29 +986,43 @@ fn theme_picker(ui: &mut egui::Ui, app: &mut App) {
             info.current_text_value = Some(selected.to_owned());
             info
         });
-        if theme::soft_button(
-            ui,
-            &palette,
-            Some(Icon::ExternalLink),
-            tr("Open themes folder"),
-            false,
-        )
-        .clicked()
-        {
-            app.actions.push(Action::OpenThemesFolder);
-        }
-        if theme::soft_button(
-            ui,
-            &palette,
-            Some(Icon::ExternalLink),
-            &crate::i18n::gettext(app.locale, "How to make a theme"),
-            false,
-        )
-        .clicked()
-        {
-            app.actions.push(Action::OpenUrl(THEMES_GUIDE.to_owned()));
-        }
+        let labels = theme_button_labels(app.locale);
+        let width = theme_buttons_width(ui, &labels);
+        let [folder, guide] = labels;
+        ui.allocate_ui_with_layout(
+            vec2(width, 32.0),
+            Layout::left_to_right(Align::Center),
+            |ui| {
+                if theme::soft_button(ui, &palette, Some(Icon::ExternalLink), &folder, false)
+                    .clicked()
+                {
+                    app.actions.push(Action::OpenThemesFolder);
+                }
+                if theme::soft_button(ui, &palette, Some(Icon::ExternalLink), &guide, false)
+                    .clicked()
+                {
+                    app.actions.push(Action::OpenUrl(THEMES_GUIDE.to_owned()));
+                }
+            },
+        );
     });
+}
+
+/// "Open themes folder" and "How to make a theme", in the interface language.
+fn theme_button_labels(locale: Locale) -> [String; 2] {
+    [
+        tr("Open themes folder").to_owned(),
+        crate::i18n::gettext(locale, "How to make a theme").into_owned(),
+    ]
+}
+
+/// The width of the theme buttons on one line.
+fn theme_buttons_width(ui: &egui::Ui, labels: &[String; 2]) -> f32 {
+    labels
+        .iter()
+        .map(|label| theme::soft_button_width(ui, label, true))
+        .sum::<f32>()
+        + ui.spacing().item_spacing.x
 }
 
 /// Playing videos through the system's FFmpeg: on by default when it is

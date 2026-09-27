@@ -205,6 +205,25 @@ pub fn plain(text: &str, mentions: &[Mention]) -> String {
         .collect()
 }
 
+/// The first web address in `text`, as written, which gets a link preview.
+/// It is found as message bodies find links, so the preview is for the link
+/// the message will show.
+pub fn first_web_link(text: &str) -> Option<String> {
+    let span = Span {
+        text: text.to_owned(),
+        ..Default::default()
+    };
+    link_and_mention(span, &[])
+        .into_iter()
+        .find(|span| {
+            span.link.as_deref().is_some_and(|url| {
+                let url = url.to_ascii_lowercase();
+                url.starts_with("http://") || url.starts_with("https://")
+            })
+        })
+        .map(|span| span.text)
+}
+
 /// Replaces mention ids with names without parsing other markup.
 pub fn name_mentions(text: &str, mentions: &[Mention]) -> String {
     if mentions.is_empty() {
@@ -685,6 +704,19 @@ mod tests {
                 ("code".into(), false, false, false, true),
             ]
         );
+    }
+
+    #[test]
+    fn the_first_web_link_gets_the_preview() {
+        assert_eq!(
+            first_web_link("mail me@example.com or see www.example.com/a."),
+            Some("www.example.com/a".into())
+        );
+        assert_eq!(
+            first_web_link("*https://zapfast.rocks* and https://example.org"),
+            Some("https://zapfast.rocks".into())
+        );
+        assert_eq!(first_web_link("no link here, main.rs"), None);
     }
 
     #[test]
