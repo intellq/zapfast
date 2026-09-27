@@ -394,6 +394,8 @@ pub struct Settings {
     pub giphy_key: String,
     /// Keep the app linked in the tray when the window closes.
     pub keep_running_in_background: bool,
+    /// Start at login with only the tray icon, without a window.
+    pub start_minimized: bool,
     /// Desktop notifications while away from the chat.
     pub notifications: bool,
     /// Sound for new messages, in one-to-one chats and groups alike.
@@ -475,6 +477,7 @@ impl Default for Settings {
             reaction_emoji: Vec::new(),
             giphy_key: String::new(),
             keep_running_in_background: true,
+            start_minimized: false,
             notifications: true,
             message_sound: NotificationSound::Receive,
             mention_sound: NotificationSound::Alert,

@@ -1392,7 +1392,15 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
             },
                     );
                 });
-            theme::focus_outline(ui, id, pill.response.rect, f32::from(COMPOSER_RADIUS));
+            // While typing, a border a little darker than the field keeps it
+            // discreet; Tab still rings it in the accent.
+            theme::quiet_focus_outline(
+                ui,
+                id,
+                pill.response.rect,
+                f32::from(COMPOSER_RADIUS),
+                palette.surface.lerp_to_gamma(Color32::BLACK, 0.3),
+            );
             ui.ctx()
                 .data_mut(|data| data.insert_temp(composer_pill_id(), pill.response.rect));
             // Read after the field took this frame's keys.
@@ -6690,7 +6698,13 @@ fn attachment(
 
 /// The voice player's play or pause button: a solid shape nearly as large
 /// as the button, without a disc behind it, as on the phone.
-fn play_button(ui: &mut egui::Ui, palette: Palette, size: f32, playing: bool) -> egui::Response {
+fn play_button(
+    ui: &mut egui::Ui,
+    palette: Palette,
+    size: f32,
+    playing: bool,
+    own: bool,
+) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
     theme::reveal_focus(&response);
     theme::focus_outline(ui, response.id, rect, size / 2.0);
@@ -6700,11 +6714,18 @@ fn play_button(ui: &mut egui::Ui, palette: Palette, size: f32, playing: bool) ->
     });
     if ui.is_rect_visible(rect) {
         let hovered = response.hovered();
-        let colour = if hovered {
-            palette.accent_hover
+        // A little darker than the accent, to stand out in the bubble; on the
+        // built-in dark theme's green own bubble, a lighter leaf green does.
+        let (rest, hover) = if own && palette.dark && palette.accent == Palette::dark().accent {
+            let leaf = Color32::from_rgb(0x1f, 0xaa, 0x59);
+            (leaf, leaf.lerp_to_gamma(Color32::WHITE, 0.15))
         } else {
-            palette.accent
+            (
+                palette.accent.lerp_to_gamma(Color32::BLACK, 0.18),
+                palette.accent,
+            )
         };
+        let colour = if hovered { hover } else { rest };
         let scale = if hovered { 1.05 } else { 1.0 };
         let centre = rect.center();
         if playing {
@@ -6878,8 +6899,14 @@ fn voice_player(
                 (Some(path), _) => match status.state {
                     State::Loading => waiting(ui),
                     State::Playing | State::Paused | State::Idle => {
-                        if play_button(ui, palette, button, status.state == State::Playing)
-                            .clicked()
+                        if play_button(
+                            ui,
+                            palette,
+                            button,
+                            status.state == State::Playing,
+                            message.from_me,
+                        )
+                        .clicked()
                         {
                             actions.push(Action::PlayVoice {
                                 message: message.id.clone(),

@@ -755,6 +755,13 @@ impl App {
             app.settings.keep_deleted_messages,
         ));
         if crate::autostart::supported() {
+            // Rewrites the login entry so its argument follows "Start
+            // minimized", including entries saved before that option.
+            if crate::autostart::enabled()
+                && let Err(error) = crate::autostart::set(true, app.settings.start_minimized)
+            {
+                log::warn!("could not update the login item: {error}");
+            }
             app.start_with_system = Some(crate::autostart::enabled());
         }
         app
@@ -4999,13 +5006,27 @@ impl App {
                 crate::proxy::configure(&value);
                 self.backend.send(Command::SetProxy(value));
             }
-            Action::SetStartWithSystem(enabled) => match crate::autostart::set(enabled) {
-                Ok(()) => self.start_with_system = Some(crate::autostart::enabled()),
-                Err(error) => self.toast_error(format!(
-                    "{}: {error}",
-                    tr("Could not change the login item")
-                )),
-            },
+            Action::SetStartMinimized(minimized) => {
+                self.settings.start_minimized = minimized;
+                self.mark_settings_dirty();
+                if self.start_with_system == Some(true)
+                    && let Err(error) = crate::autostart::set(true, minimized)
+                {
+                    self.toast_error(format!(
+                        "{}: {error}",
+                        tr("Could not change the login item")
+                    ));
+                }
+            }
+            Action::SetStartWithSystem(enabled) => {
+                match crate::autostart::set(enabled, self.settings.start_minimized) {
+                    Ok(()) => self.start_with_system = Some(crate::autostart::enabled()),
+                    Err(error) => self.toast_error(format!(
+                        "{}: {error}",
+                        tr("Could not change the login item")
+                    )),
+                }
+            }
             Action::ZoomBy(delta) => {
                 self.settings.zoom = (self.settings.zoom + delta).clamp(0.6, 2.0);
                 self.zoom_applied = false;

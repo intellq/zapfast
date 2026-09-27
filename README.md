@@ -186,7 +186,9 @@ Além das novidades do upstream, esta branch inclui as seguintes mudanças:
   por fechar o ZapFast no meio do envio aparece como não enviado na próxima
   abertura.
 - **Play sólido e velocidade colorida no player de áudio.** O play e o pause
-  são formas sólidas na cor de destaque, quase do tamanho do antigo disco, sem
+  são formas sólidas num verde um pouco mais escuro que o de destaque (nos seus
+  áudios, no tema escuro, um verde-folha mais claro, que se destaca do balão
+  verde), quase do tamanho do antigo disco, sem
   o disco em volta (o círculo de carregando e os botões de reenviar e baixar
   continuam com ele). O texto do botão de velocidade muda de cor: a cor normal
   em 1x, verde-claro em 1,25x e 1,5x, passando a amarelo em 2x e a vermelho em
@@ -201,6 +203,13 @@ Além das novidades do upstream, esta branch inclui as seguintes mudanças:
   como faz o WhatsApp oficial com as confirmações desligadas. Nos grupos o
   recibo vai sempre, como no oficial. Os tiques azuis que os contatos mandam
   continuam aparecendo no ZapFast em qualquer combinação.
+- **Iniciar minimizado.** Em Configurações › Sistema, **Iniciar ao entrar**
+  ganhou a subopção **Iniciar minimizado**, recuada para mostrar que depende
+  dela e desligada por padrão: o ZapFast abre com a janela ao entrar no
+  computador, e só com o ícone na bandeja quando a subopção está ligada.
+- **Borda discreta na barra de chat.** Ao digitar, o contorno da caixa de texto
+  é um tom um pouco mais escuro que o fundo dela, em vez do verde-água; quem
+  navega com Tab continua vendo o anel na cor de destaque.
 - **Seleção primária do Linux.** Texto selecionado no compositor (com o
   mouse, pelo teclado ou com Selecionar tudo) ou no histórico da conversa
   fica disponível como seleção primária assim que a seleção termina, para ser
@@ -659,13 +668,15 @@ de sincronizar a exclusão "para mim" com o celular é uma extensão deste fork.
   reopens where you left it; on Windows and X11, one that would open on no
   connected monitor (for example on a display that is now unplugged) moves to
   the middle of the primary monitor.
-- **Start at login.** Turn on **Start at login** in Settings to start ZapFast in
-  the tray when you log in, without opening a window. It adds
+- **Start at login.** Turn on **Start at login** in Settings to start ZapFast
+  when you log in. Its sub-option **Start minimized**, off by default, loads
+  only the tray icon, without opening a window. It adds
   `~/.config/autostart/zapfast.desktop` on Linux, a LaunchAgent in
   `~/Library/LaunchAgents` on macOS, or a `Run` entry for your user on Windows,
-  and removes it when turned off. `zapfast --start-hidden` does the same by hand;
-  it opens the window anyway when no tray is available. The Flatpak does not
-  offer this setting yet.
+  and removes it when turned off. The entry passes `--start-hidden` only while
+  **Start minimized** is on, and ZapFast rewrites it when that changes; a
+  minimized start opens the window anyway when no tray is available. The
+  Flatpak does not offer this setting yet.
 - **Desktop notifications.** Get notifications with the chat picture when you
   are away from the open chat. Muted chats do not notify you, and archived
   chats stay quiet until you unarchive them. Windows notifications

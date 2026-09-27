@@ -1638,8 +1638,10 @@ pub enum Action {
         kind: crate::privacy::PrivacyKind,
         choice: crate::privacy::PrivacyChoice,
     },
-    /// Registers or removes the login entry that starts ZapFast in the tray.
+    /// Registers or removes the login entry that starts ZapFast.
     SetStartWithSystem(bool),
+    /// Whether the login entry starts ZapFast in the tray, without a window.
+    SetStartMinimized(bool),
     /// Sets the sound for mentions and replies to us (`true`) or for
     /// other new messages.
     SetNotificationSound {

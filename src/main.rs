@@ -15,8 +15,9 @@ struct Cli {
     /// Log more from the WhatsApp library.
     #[arg(short, long)]
     verbose: bool,
-    /// Start in the tray without opening a window, when the tray is available
-    /// and ZapFast keeps running in the background. For login autostart.
+    /// Started at login: never surfaces a copy already running, and stays in
+    /// the tray without a window when "Start minimized" is on, the tray is
+    /// available and ZapFast keeps running in the background.
     #[arg(long)]
     start_hidden: bool,
 
@@ -215,6 +216,7 @@ fn main() -> eframe::Result<()> {
         settings.whatsapp_emoji = true;
     }
     let demo_persistence = demo.then(|| dirs.state.join("window.ron"));
+    let start_minimized = settings.start_minimized;
 
     #[allow(unused_mut)]
     let mut app = if demo {
@@ -254,7 +256,7 @@ fn main() -> eframe::Result<()> {
     // The link, archive, and tray outlive windows. The shell recreates a
     // window when the tray, a notification, or another launch requests one;
     // without a tray a hidden start shows the window (App::start_hidden).
-    let start_hidden = cli.start_hidden && !demo && update_receipt.is_none();
+    let start_hidden = cli.start_hidden && start_minimized && !demo && update_receipt.is_none();
     fastframe_shell::Shell::new(app, &waker)
         .start_hidden(start_hidden)
         .idle(fastframe_tray::idle)

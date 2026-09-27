@@ -173,7 +173,12 @@ fn focus_ring(app: &App, ctx: &egui::Context) {
     let radius = custom.map_or(f32::from(theme::RADIUS_SMALL), |outline| outline.radius);
     let clip = custom.map_or(response.interact_rect, |outline| outline.clip);
     // An inset accent border would disappear on a filled primary button.
-    let color = if custom.is_some_and(|outline| outline.fill == app.palette.accent) {
+    let quiet = custom
+        .and_then(|outline| outline.quiet)
+        .filter(|_| !keyboard);
+    let color = if let Some(quiet) = quiet {
+        quiet
+    } else if custom.is_some_and(|outline| outline.fill == app.palette.accent) {
         app.palette.on_accent
     } else {
         app.palette.accent

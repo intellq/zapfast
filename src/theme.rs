@@ -836,10 +836,35 @@ pub struct FocusOutline {
     pub clip: egui::Rect,
     pub frame: u64,
     pub fill: Color32,
+    /// Replaces the accent ring when focus did not come from the keyboard.
+    pub quiet: Option<Color32>,
 }
 
 pub fn focus_outline(ui: &egui::Ui, id: egui::Id, rect: egui::Rect, radius: f32) {
     focus_outline_on_fill(ui, id, rect, radius, Color32::TRANSPARENT);
+}
+
+/// A focus outline drawn in `quiet` while a field is simply being typed in;
+/// keyboard navigation still gets the accent ring.
+pub fn quiet_focus_outline(
+    ui: &egui::Ui,
+    id: egui::Id,
+    rect: egui::Rect,
+    radius: f32,
+    quiet: Color32,
+) {
+    // Built before taking the context lock: reading the frame number inside
+    // `data_mut` would lock the context again and hang the interface.
+    let outline = FocusOutline {
+        rect,
+        radius,
+        clip: ui.clip_rect(),
+        frame: ui.ctx().cumulative_frame_nr(),
+        fill: Color32::TRANSPARENT,
+        quiet: Some(quiet),
+    };
+    ui.ctx()
+        .data_mut(|data| data.insert_temp(id.with("focus-outline"), outline));
 }
 
 fn focus_outline_on_fill(
@@ -855,6 +880,7 @@ fn focus_outline_on_fill(
         clip: ui.clip_rect(),
         frame: ui.ctx().cumulative_frame_nr(),
         fill,
+        quiet: None,
     };
     ui.ctx()
         .data_mut(|data| data.insert_temp(id.with("focus-outline"), outline));

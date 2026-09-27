@@ -708,9 +708,11 @@ fn sections(app: &App) -> Vec<Section> {
         |settings| &mut settings.keep_running_in_background,
     );
     if app.start_with_system.is_some() {
-        system.row(
+        // Only a switch, so the text keeps the width the other switches leave it.
+        system.row_with_width(
             translated(locale, "Start at login"),
-            translated(locale, "Starts in the tray, without a window."),
+            translated(locale, "Opens ZapFast when you log in to the computer."),
+            56.0,
             move |ui, app| {
                 let Some(mut enabled) = app.start_with_system else {
                     return;
@@ -731,6 +733,18 @@ fn sections(app: &App) -> Vec<Section> {
                 }
             },
         );
+        let title = translated(locale, "Start minimized");
+        let description = translated(locale, "Only the tray icon appears at login.");
+        system.block(vec![title.clone(), description.clone()], move |ui, app| {
+            ui.add_enabled_ui(app.start_with_system == Some(true), |ui| {
+                // Rewrites the login entry, so it is not a plain setting.
+                let mut minimized = app.settings.start_minimized;
+                if switch_row(ui, app, &title.shown, &description.shown, &mut minimized) {
+                    app.actions.push(Action::SetStartMinimized(minimized));
+                }
+            });
+        });
+        system.indent_last();
     }
     system.toggle(
         translated(locale, "Check for updates"),

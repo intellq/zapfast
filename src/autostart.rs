@@ -1,4 +1,5 @@
-//! Starting ZapFast in the tray when the person logs in.
+//! Starting ZapFast when the person logs in, in the tray when "Start
+//! minimized" is on.
 //!
 //! The platform's own login-item entry is the only record: Settings reads it
 //! back rather than keeping a copy that could disagree with it.
@@ -6,7 +7,8 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// Argument that starts ZapFast without a window.
+/// Argument the login entry carries when "Start minimized" is on: ZapFast
+/// then starts in the tray without a window.
 pub const HIDDEN: &str = "--start-hidden";
 
 /// Whether this installation can register itself to start at login.
@@ -21,8 +23,9 @@ pub fn enabled() -> bool {
     platform::enabled()
 }
 
-/// Registers or removes the login entry for the running executable.
-pub fn set(enabled: bool) -> io::Result<()> {
+/// Registers or removes the login entry for the running executable; a
+/// `minimized` one starts ZapFast in the tray.
+pub fn set(enabled: bool, minimized: bool) -> io::Result<()> {
     if !enabled {
         return platform::remove();
     }
@@ -32,7 +35,12 @@ pub fn set(enabled: bool) -> io::Result<()> {
             crate::i18n::tr("cannot locate ZapFast"),
         )
     })?;
-    platform::install(&executable)
+    platform::install(&executable, minimized)
+}
+
+/// The argument after the executable in a login entry.
+fn arguments(minimized: bool) -> &'static str {
+    if minimized { HIDDEN } else { "" }
 }
 
 /// The file to start: an AppImage runs from a temporary mount, so its own
@@ -59,11 +67,11 @@ mod platform {
         entry().is_some_and(|path| path.is_file())
     }
 
-    pub fn install(executable: &Path) -> io::Result<()> {
+    pub fn install(executable: &Path, minimized: bool) -> io::Result<()> {
         let path = entry()
             .ok_or_else(|| io::Error::other(crate::i18n::tr("no configuration directory")))?;
         std::fs::create_dir_all(path.parent().expect("autostart folder"))?;
-        std::fs::write(path, desktop_entry(executable))
+        std::fs::write(path, desktop_entry(executable, minimized))
     }
 
     pub fn remove() -> io::Result<()> {
@@ -73,18 +81,23 @@ mod platform {
         }
     }
 
-    pub(super) fn desktop_entry(executable: &Path) -> String {
+    pub(super) fn desktop_entry(executable: &Path, minimized: bool) -> String {
+        let exec = format!(
+            "{} {}",
+            exec_quote(&executable.to_string_lossy()),
+            arguments(minimized)
+        );
         format!(
             "[Desktop Entry]\n\
              Type=Application\n\
              Name=ZapFast\n\
-             Comment=Start ZapFast in the tray\n\
-             Comment[pt_BR]=Inicia o ZapFast na bandeja do sistema\n\
-             Exec={} {HIDDEN}\n\
+             Comment=Start ZapFast at login\n\
+             Comment[pt_BR]=Inicia o ZapFast ao entrar\n\
+             Exec={}\n\
              Icon=zapfast\n\
              Terminal=false\n\
              X-GNOME-Autostart-enabled=true\n",
-            exec_quote(&executable.to_string_lossy())
+            exec.trim_end()
         )
     }
 
@@ -124,10 +137,10 @@ mod platform {
         entry().is_some_and(|path| path.is_file())
     }
 
-    pub fn install(executable: &Path) -> io::Result<()> {
+    pub fn install(executable: &Path, minimized: bool) -> io::Result<()> {
         let path = entry().ok_or_else(|| io::Error::other(crate::i18n::tr("no home directory")))?;
         std::fs::create_dir_all(path.parent().expect("LaunchAgents folder"))?;
-        std::fs::write(path, launch_agent(executable))
+        std::fs::write(path, launch_agent(executable, minimized))
     }
 
     pub fn remove() -> io::Result<()> {
@@ -137,7 +150,12 @@ mod platform {
         }
     }
 
-    pub(super) fn launch_agent(executable: &Path) -> String {
+    pub(super) fn launch_agent(executable: &Path, minimized: bool) -> String {
+        let hidden = if minimized {
+            format!("\n        <string>{HIDDEN}</string>")
+        } else {
+            String::new()
+        };
         format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -147,8 +165,7 @@ mod platform {
     <string>{LABEL}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>{}</string>
-        <string>{HIDDEN}</string>
+        <string>{}</string>{hidden}
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -204,8 +221,9 @@ mod platform {
         }
     }
 
-    pub fn install(executable: &Path) -> io::Result<()> {
-        let command = wide(&format!("\"{}\" {HIDDEN}", executable.display()));
+    pub fn install(executable: &Path, minimized: bool) -> io::Result<()> {
+        let command = format!("\"{}\" {}", executable.display(), arguments(minimized));
+        let command = wide(command.trim_end());
         let (key, value) = (wide(RUN), wide(VALUE));
         // SAFETY: null-terminated UTF-16 strings; the byte length includes
         // the terminator, as REG_SZ requires.
@@ -247,7 +265,7 @@ mod platform {
         false
     }
 
-    pub fn install(_executable: &Path) -> io::Result<()> {
+    pub fn install(_executable: &Path, _minimized: bool) -> io::Result<()> {
         Err(io::Error::from(io::ErrorKind::Unsupported))
     }
 
@@ -261,21 +279,23 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn the_desktop_entry_starts_hidden_and_quotes_the_path() {
-        let entry =
-            super::platform::desktop_entry(std::path::Path::new("/opt/Zap Fast/100%/zap\"fast"));
+        let path = std::path::Path::new("/opt/Zap Fast/100%/zap\"fast");
+        let entry = super::platform::desktop_entry(path, true);
         assert!(entry.contains("Exec=\"/opt/Zap Fast/100%%/zap\\\"fast\" --start-hidden\n"));
         assert!(entry.starts_with("[Desktop Entry]\nType=Application\n"));
+        let entry = super::platform::desktop_entry(path, false);
+        assert!(entry.contains("Exec=\"/opt/Zap Fast/100%%/zap\\\"fast\"\n"));
     }
 
     #[cfg(target_os = "macos")]
     #[test]
     fn the_launch_agent_starts_hidden_and_escapes_the_path() {
-        let plist = super::platform::launch_agent(std::path::Path::new(
-            "/Applications/A&B.app/Contents/MacOS/zapfast",
-        ));
+        let path = std::path::Path::new("/Applications/A&B.app/Contents/MacOS/zapfast");
+        let plist = super::platform::launch_agent(path, true);
         assert!(
             plist.contains("<string>/Applications/A&amp;B.app/Contents/MacOS/zapfast</string>")
         );
         assert!(plist.contains("<string>--start-hidden</string>"));
+        assert!(!super::platform::launch_agent(path, false).contains("--start-hidden"));
     }
 }
