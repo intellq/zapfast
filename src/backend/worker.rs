@@ -334,6 +334,55 @@ async fn receipts_allowed(
     }
 }
 
+/// Read and played receipts in a one-to-one chat. `visible` sends the kind
+/// the contact sees (blue ticks, the played microphone); otherwise the
+/// `-self` kind, which only reaches our own devices, as WhatsApp does with
+/// read receipts turned off. Either way the phone learns what was read or
+/// heard here.
+async fn send_direct_receipts(
+    client: &Client,
+    chat: &Jid,
+    ids: &[&str],
+    played: bool,
+    visible: bool,
+) -> Result<(), String> {
+    let kind = match (played, visible) {
+        (false, true) => "read",
+        (false, false) => "read-self",
+        (true, true) => "played",
+        (true, false) => "played-self",
+    };
+    let timestamp = crate::util::now().to_string();
+    // WhatsApp takes at most 256 ids in one receipt.
+    for chunk in ids.chunks(256) {
+        let mut builder = whatsapp_rust::NodeBuilder::new("receipt")
+            .attr("to", chat)
+            .attr("type", kind)
+            .attr("id", chunk[0])
+            .attr("t", timestamp.as_str());
+        if chunk.len() > 1 {
+            let items: Vec<_> = chunk[1..]
+                .iter()
+                .map(|id| {
+                    whatsapp_rust::NodeBuilder::new("item")
+                        .attr("id", *id)
+                        .build()
+                })
+                .collect();
+            builder = builder.children(vec![
+                whatsapp_rust::NodeBuilder::new("list")
+                    .children(items)
+                    .build(),
+            ]);
+        }
+        client
+            .send_node(builder.build())
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
 /// A sticker file's size and modification time, with the emojis read from it.
 type EmojiStamp = ((u64, Option<std::time::SystemTime>), Vec<String>);
 
@@ -523,6 +572,7 @@ pub async fn run(
         poll_history: Default::default(),
         poll_sending: HashSet::new(),
         interactive_sending: HashMap::new(),
+        voice_sending: HashSet::new(),
         receipts_watch: None,
         receipts_pruned: Instant::now(),
         link_watch: Default::default(),
@@ -533,6 +583,9 @@ pub async fn run(
     worker.backfill_video_notes();
     worker.backfill_interactive();
     worker.relocate_media();
+    if let Err(error) = worker.archive.fail_unuploaded_voice() {
+        log::warn!("could not mark unsent voice messages: {error}");
+    }
     discard_attachment_staging(&worker.dirs.media_cache_dir());
     discard_attachment_staging(&worker.dirs.sticker_cache_dir());
     worker.start_bot().await;
@@ -714,6 +767,8 @@ struct Worker {
     poll_history: poll_history::Requests,
     poll_sending: HashSet<(ChatId, String)>,
     interactive_sending: HashMap<(ChatId, String), String>,
+    /// Own voice messages being encoded, uploaded and sent.
+    voice_sending: HashSet<(ChatId, String)>,
     /// The group message whose "Message info" is open.
     receipts_watch: Option<(ChatId, String)>,
     /// When receipts that never found their message were last dropped.
@@ -4809,15 +4864,19 @@ impl Worker {
                 samples,
                 quoting,
             } => self.send_voice(chat, samples, quoting),
+            Command::RetryVoice { chat, message } => self.retry_voice(chat, message),
+            Command::VoiceSaved { chat, id, path } => {
+                if let Err(error) = self.archive.set_media_path(&chat, &id, &path) {
+                    log::warn!("could not record a voice message file: {error}");
+                }
+            }
             Command::MarkPlayed {
                 chat,
                 message,
                 sender,
                 receipts,
             } => {
-                if receipts {
-                    self.mark_played(chat, message, sender);
-                }
+                self.mark_played(chat, message, sender, receipts);
             }
             Command::SendGif { chat, gif, quoting } => self.send_gif(chat, gif, quoting),
             Command::SearchGifs { query, key } => {
@@ -5342,6 +5401,13 @@ impl Worker {
                         chat: chat.clone(),
                         message,
                         pending: false,
+                    });
+                }
+                if self.voice_sending.remove(&(chat.clone(), id.clone())) {
+                    self.emit(Event::VoiceSending {
+                        chat: chat.clone(),
+                        message: id.clone(),
+                        sending: false,
                     });
                 }
                 if id.is_empty() {
@@ -6061,14 +6127,12 @@ impl Worker {
         let Ok(Some(row)) = self.archive.chat(&chat) else {
             return;
         };
-        // Collect before advancing the archive's read position.
-        let ids = if receipts {
-            self.archive
-                .unread_incoming(&chat, row.unread)
-                .unwrap_or_default()
-        } else {
-            Vec::new()
-        };
+        // Collect before advancing the archive's read position. Receipts go
+        // out even with ours turned off: then only our devices get them.
+        let ids = self
+            .archive
+            .unread_incoming(&chat, row.unread)
+            .unwrap_or_default();
         let _ = self.archive.mark_read(&chat);
         self.emit_chat(&chat);
         // A chat marked unread with nothing pending still tells the phone it
@@ -6078,7 +6142,7 @@ impl Worker {
         }
         let _ = self.archive.queue_read_sync(&chat);
         self.pump_read_sync();
-        self.send_read_receipts(chat, ids);
+        self.send_read_receipts(chat, ids, receipts);
     }
 
     fn pump_read_sync(&mut self) {
@@ -6152,7 +6216,12 @@ impl Worker {
         }
     }
 
-    fn send_read_receipts(&self, chat: ChatId, ids: Vec<(String, String)>) {
+    /// Sends read receipts for `ids`. Groups get them as the phone sends
+    /// them, whatever the settings. In a one-to-one chat the contact sees
+    /// them only when both ours and the account's read receipts are on;
+    /// otherwise they go only to our own devices, so the phone still counts
+    /// the messages as read.
+    fn send_read_receipts(&self, chat: ChatId, ids: Vec<(String, String)>, receipts: bool) {
         if ids.is_empty() {
             return;
         }
@@ -6169,7 +6238,13 @@ impl Worker {
         }
         let commands = self.commands.clone();
         tokio::spawn(async move {
-            if !receipts_allowed(&client, &jid, &commands).await {
+            if !is_group {
+                let visible = receipts && receipts_allowed(&client, &jid, &commands).await;
+                let ids: Vec<&str> = by_sender.values().flatten().map(String::as_str).collect();
+                if let Err(error) = send_direct_receipts(&client, &jid, &ids, false, visible).await
+                {
+                    log::debug!("read receipt not sent: {error}");
+                }
                 return;
             }
             for (sender, ids) in by_sender {
@@ -7046,7 +7121,9 @@ impl Worker {
         });
     }
 
-    /// Encodes and sends an OGG/Opus voice message with optional quote.
+    /// Shows a voice message in the chat at once, as the phone does, then
+    /// encodes, uploads and sends it under the same id. The bubble spins until
+    /// the server has it, and offers to send it again if it fails.
     fn send_voice(&mut self, chat: ChatId, samples: Vec<f32>, quoting: Option<String>) {
         let (context, shown) = match self.quote(&chat, quoting.as_deref()) {
             Ok(Some((context, shown))) => (Some(Box::new(context)), Some(shown)),
@@ -7060,29 +7137,175 @@ impl Worker {
             self.refuse(chat, quoting, Unsent::Voice(samples), Refusal::Offline);
             return;
         };
+        let seconds = (samples.len() as f64 / f64::from(crate::voice::RATE))
+            .round()
+            .max(1.0) as u32;
+        // The bars are relative to the loudest slice, so the gain added
+        // before encoding leaves them as they are.
+        let waveform = crate::voice::waveform(&samples);
+        let row = Message {
+            id: client.generate_message_id(),
+            chat: chat.clone(),
+            sender: self.me(),
+            sender_name: None,
+            from_me: true,
+            timestamp: crate::util::now(),
+            content: Content::Audio {
+                media: media(Some(&VOICE_MIME.to_owned()), None, None, None),
+                seconds: Some(seconds),
+                voice_note: true,
+                waveform,
+            },
+            status: Delivery::Pending,
+            delivered_at: None,
+            read_at: None,
+            quoted: shown,
+            reactions: Vec::new(),
+            edited: false,
+            mentions: Vec::new(),
+            forwarded: false,
+            thumbnail: None,
+        };
+        self.store_message(row.clone(), None, None);
+        self.upload_voice(client, row, Recording::Samples(samples), context);
+    }
+
+    /// Sends again an own voice message that failed: the stored message when
+    /// it was already uploaded, or else the saved file.
+    fn retry_voice(&mut self, chat: ChatId, id: String) {
+        let Ok(Some(row)) = self.archive.message(&chat, &id) else {
+            return;
+        };
+        let Content::Audio {
+            media,
+            voice_note: true,
+            ..
+        } = &row.content
+        else {
+            return;
+        };
+        if !row.from_me
+            || row.status != Delivery::Failed
+            || self.voice_sending.contains(&(chat.clone(), id.clone()))
+        {
+            return;
+        }
+        let (Some(client), Some(jid)) = (self.client.clone(), Self::jid_of(&chat)) else {
+            self.emit(Event::Error(tr("Not connected to WhatsApp").to_owned()));
+            return;
+        };
+        let uploaded = self
+            .archive
+            .raw(&chat, &id)
+            .ok()
+            .flatten()
+            .and_then(|raw| wa::Message::decode_from_slice(&raw).ok());
+        let saved = media.path.clone().filter(|path| path.is_file());
+        if uploaded.is_none() && saved.is_none() {
+            self.emit(Event::Error(
+                tr("The recording is no longer available to send").to_owned(),
+            ));
+            return;
+        }
+        let _ = self.archive.retry_failed(&chat, &id);
+        self.emit_message(&chat, &id);
+        if let Some(mut message) = uploaded {
+            self.voice_sending.insert((chat.clone(), id.clone()));
+            self.emit(Event::VoiceSending {
+                chat: chat.clone(),
+                message: id.clone(),
+                sending: true,
+            });
+            let expiration = self.apply_ephemeral(&chat, &mut message);
+            tokio::spawn(send_outgoing(
+                client,
+                self.commands.clone(),
+                chat,
+                jid,
+                id,
+                message,
+                expiration,
+            ));
+        } else if let Some(path) = saved {
+            // A quote whose original is gone by now goes without it.
+            let context = row
+                .quoted
+                .as_ref()
+                .and_then(|quoted| self.quote(&chat, Some(&quoted.id)).ok().flatten())
+                .map(|(context, _)| Box::new(context));
+            self.upload_voice(client, row, Recording::Saved(path), context);
+        }
+    }
+
+    /// Encodes (a new recording), uploads and sends the voice message whose
+    /// sending bubble `row` already shows. A failure marks it failed.
+    fn upload_voice(
+        &mut self,
+        client: Arc<Client>,
+        row: Message,
+        recording: Recording,
+        context: Option<Box<wa::ContextInfo>>,
+    ) {
+        self.voice_sending
+            .insert((row.chat.clone(), row.id.clone()));
+        self.emit(Event::VoiceSending {
+            chat: row.chat.clone(),
+            message: row.id.clone(),
+            sending: true,
+        });
         let commands = self.commands.clone();
         let dir = self.dirs.media_cache_dir();
-        let me = self.me();
         tokio::spawn(async move {
+            let chat = row.chat.clone();
+            let id = row.id.clone();
             let outcome = async {
-                let (bytes, seconds, waveform) = tokio::task::spawn_blocking(move || {
-                    let mut samples = samples;
-                    crate::voice::normalize(&mut samples);
-                    let seconds = (samples.len() as f64 / f64::from(crate::voice::RATE))
-                        .round()
-                        .max(1.0) as u32;
-                    let waveform = crate::voice::waveform(&samples);
-                    crate::voice::encode(&samples).map(|bytes| (bytes, seconds, waveform))
-                })
-                .await
-                .map_err(|error| error.to_string())??;
+                let (bytes, path) = match recording {
+                    Recording::Samples(samples) => {
+                        let bytes = tokio::task::spawn_blocking(move || {
+                            let mut samples = samples;
+                            crate::voice::normalize(&mut samples);
+                            crate::voice::encode(&samples)
+                        })
+                        .await
+                        .map_err(|error| error.to_string())??;
+                        let path = media_path(&dir, &chat, &id, VOICE_MIME, None);
+                        tokio::fs::create_dir_all(&dir)
+                            .await
+                            .map_err(|error| error.to_string())?;
+                        tokio::fs::write(&path, &bytes)
+                            .await
+                            .map_err(|error| error.to_string())?;
+                        let _ = commands.send(Command::VoiceSaved {
+                            chat: chat.clone(),
+                            id: id.clone(),
+                            path: path.clone(),
+                        });
+                        (bytes, path)
+                    }
+                    Recording::Saved(path) => {
+                        let bytes = tokio::fs::read(&path)
+                            .await
+                            .map_err(|error| error.to_string())?;
+                        (bytes, path)
+                    }
+                };
+                let (seconds, waveform) = match &row.content {
+                    Content::Audio {
+                        seconds, waveform, ..
+                    } => (seconds.unwrap_or(1), waveform.clone()),
+                    _ => (1, Vec::new()),
+                };
                 let prepared = prepare_voice(&client, bytes, seconds, waveform, context).await?;
-                file_outbound(&client, &chat, &me, &dir, prepared, None, Vec::new()).await
+                let mut row = row;
+                row.content = prepared.content;
+                if let Some(media) = row.content.media_mut() {
+                    media.path = Some(path);
+                }
+                Ok::<_, String>((row, prepared.message.encode_to_vec()))
             }
             .await;
             match outcome {
-                Ok((mut row, raw)) => {
-                    row.quoted = shown;
+                Ok((row, raw)) => {
                     let _ = commands.send(Command::Outbound {
                         chat,
                         row: Box::new(row),
@@ -7092,7 +7315,7 @@ impl Worker {
                 Err(error) => {
                     let _ = commands.send(Command::Sent {
                         chat,
-                        id: String::new(),
+                        id,
                         error: Some(format!("Could not send the voice message: {error}")),
                     });
                 }
@@ -7101,24 +7324,25 @@ impl Worker {
     }
 
     /// Sends a played receipt for an incoming voice message.
-    fn mark_played(&mut self, chat: ChatId, message: String, sender: String) {
+    fn mark_played(&mut self, chat: ChatId, message: String, sender: String, receipts: bool) {
         let (Some(client), Some(jid)) = (self.client.clone(), Self::jid_of(&chat)) else {
             return;
         };
-        let sender = if jid.is_group() {
-            sender.parse::<Jid>().ok()
-        } else {
-            None
-        };
         let commands = self.commands.clone();
         tokio::spawn(async move {
-            if !receipts_allowed(&client, &jid, &commands).await {
-                return;
-            }
-            if let Err(error) = client
-                .mark_as_played(&jid, sender.as_ref(), &[message.as_str()])
-                .await
-            {
+            // As with read receipts: groups always, a contact only with both
+            // settings on, and our own devices in any case.
+            let result = if jid.is_group() {
+                let sender = sender.parse::<Jid>().ok();
+                client
+                    .mark_as_played(&jid, sender.as_ref(), &[message.as_str()])
+                    .await
+                    .map_err(|error| error.to_string())
+            } else {
+                let visible = receipts && receipts_allowed(&client, &jid, &commands).await;
+                send_direct_receipts(&client, &jid, &[message.as_str()], true, visible).await
+            };
+            if let Err(error) = result {
                 log::debug!("played receipt not sent: {error}");
             }
         });
@@ -7227,14 +7451,17 @@ impl Worker {
 
     /// Archives and sends an uploaded attachment message.
     fn outbound(&mut self, chat: ChatId, row: Message, raw: Vec<u8>) {
+        // A voice message already shows as sending; a failure here marks it
+        // failed, so it can be sent again, instead of leaving it spinning.
+        let shown = self.voice_sending.contains(&(chat.clone(), row.id.clone()));
         let (Some(client), Some(jid)) = (self.client.clone(), Self::jid_of(&chat)) else {
-            self.emit(Event::Error(tr("Not connected to WhatsApp").to_owned()));
+            let error = tr("Not connected to WhatsApp").to_owned();
+            self.outbound_failed(chat, row.id, shown, error);
             return;
         };
         let Ok(mut message) = wa::Message::decode_from_slice(&raw) else {
-            self.emit(Event::Error(
-                tr("Could not encode the attachment").to_owned(),
-            ));
+            let error = tr("Could not encode the attachment").to_owned();
+            self.outbound_failed(chat, row.id, shown, error);
             return;
         };
         let expiration = self.apply_ephemeral(&chat, &mut message);
@@ -7250,6 +7477,20 @@ impl Worker {
             message,
             expiration,
         ));
+    }
+
+    /// Reports an attachment that could not go out: as a failed send when
+    /// its bubble is already shown, or else as an error.
+    fn outbound_failed(&mut self, chat: ChatId, id: String, shown: bool, error: String) {
+        if shown {
+            let _ = self.commands.send(Command::Sent {
+                chat,
+                id,
+                error: Some(error),
+            });
+        } else {
+            self.emit(Event::Error(error));
+        }
     }
 
     fn react(&mut self, chat: ChatId, id: String, emoji: String) {
@@ -7966,6 +8207,17 @@ fn thumbnail_jpeg(image: &image::DynamicImage) -> Option<Vec<u8>> {
     encode_jpeg(&small, 60).ok()
 }
 
+/// The type voice messages are recorded and sent in.
+const VOICE_MIME: &str = "audio/ogg; codecs=opus";
+
+/// Where a voice message to upload comes from.
+enum Recording {
+    /// Just recorded, still to be encoded and saved.
+    Samples(Vec<f32>),
+    /// Encoded and saved by an earlier try.
+    Saved(PathBuf),
+}
+
 /// Uploads a recording and builds a push-to-talk message with waveform.
 async fn prepare_voice(
     client: &Client,
@@ -7974,7 +8226,7 @@ async fn prepare_voice(
     waveform: Vec<u8>,
     context: Option<Box<wa::ContextInfo>>,
 ) -> Result<Prepared, String> {
-    let mime = "audio/ogg; codecs=opus".to_owned();
+    let mime = VOICE_MIME.to_owned();
     let size = bytes.len() as u64;
     let upload = client
         .upload(bytes.clone(), MediaType::Audio, UploadOptions::default())
@@ -10982,6 +11234,7 @@ mod receipt_tests {
             poll_history: Default::default(),
             poll_sending: HashSet::new(),
             interactive_sending: HashMap::new(),
+            voice_sending: HashSet::new(),
             receipts_watch: None,
             receipts_pruned: Instant::now(),
             link_watch: Default::default(),

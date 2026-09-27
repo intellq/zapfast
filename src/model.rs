@@ -1385,6 +1385,11 @@ pub enum Action {
     SendRecording,
     /// Drops a voice message the worker refused to send.
     DiscardUnsentVoice,
+    /// Sends again an own voice message that failed to go out.
+    RetryVoice {
+        chat: ChatId,
+        message: String,
+    },
     /// Opens a downloaded image in ZapFast's native preview. Only the file
     /// extension and existence are checked here, and anything else opens
     /// externally; an image that then fails to decode shows a message with an

@@ -177,6 +177,30 @@ Além das novidades do upstream, esta branch inclui as seguintes mudanças:
   sabendo do seu endereço IP, como acontece quando o celular gera a prévia.
   A opção **Prévias de links**, em **Configurações › Privacidade**, vem ligada
   e desliga a busca.
+- **Áudio "enviando" como no celular.** Ao enviar um áudio gravado, o bloco
+  dele aparece na hora na conversa, com a onda e a duração, e um círculo
+  girando no lugar do play enquanto o áudio é codificado, enviado ao servidor
+  e confirmado; depois vira o play. Se o envio falhar (sem internet, por
+  exemplo), o bloco fica como não enviado com um botão de reenviar no lugar
+  do play, que manda o mesmo áudio sem gravar de novo. Um áudio interrompido
+  por fechar o ZapFast no meio do envio aparece como não enviado na próxima
+  abertura.
+- **Play sólido e velocidade colorida no player de áudio.** O play e o pause
+  são formas sólidas na cor de destaque, quase do tamanho do antigo disco, sem
+  o disco em volta (o círculo de carregando e os botões de reenviar e baixar
+  continuam com ele). O texto do botão de velocidade muda de cor: a cor normal
+  em 1x, verde-claro em 1,25x e 1,5x, passando a amarelo em 2x e a vermelho em
+  3x; o fundo fica sempre o de 1x.
+- **Leituras feitas no ZapFast chegam ao celular.** Antes, com **Enviar
+  confirmações de leitura** desligada no ZapFast ou **Confirmações de
+  leitura** desligada na conta, o ZapFast não mandava recibo nenhum, e o
+  celular continuava mostrando como não lidas as mensagens lidas (e os áudios
+  ouvidos) aqui. Agora, nas conversas individuais, o recibo sempre sai: o
+  normal (tique azul, microfone azul) só com as duas opções ligadas; nos
+  outros casos, o `read-self`/`played-self`, que vai só para os seus aparelhos,
+  como faz o WhatsApp oficial com as confirmações desligadas. Nos grupos o
+  recibo vai sempre, como no oficial. Os tiques azuis que os contatos mandam
+  continuam aparecendo no ZapFast em qualquer combinação.
 - **Seleção primária do Linux.** Texto selecionado no compositor (com o
   mouse, pelo teclado ou com Selecionar tudo) ou no histórico da conversa
   fica disponível como seleção primária assim que a seleção termina, para ser
@@ -350,9 +374,13 @@ de sincronizar a exclusão "para mim" com o celular é uma extensão deste fork.
   Settings opens; without a connection they cannot be changed.
 - **Read state across devices.** Reading a chat syncs its unread badge with
   your phone and other linked devices, including when read receipts are off.
-  Replies from another device clear preceding unread messages. The read-receipt
-  toggle also controls voice-message played receipts; account privacy is checked
-  before sending receipts in direct chats. A hidden window does not read messages.
+  Replies from another device clear preceding unread messages. In direct
+  chats, messages read and voice messages played here always tell your other
+  devices; the contact sees them only when both ZapFast's read-receipt toggle
+  and the account's read receipts are on (otherwise ZapFast sends the
+  `read-self`/`played-self` receipts only your devices receive). Groups always
+  get read and played receipts, as from the phone. A hidden window does not
+  read messages.
 - **Conversations.** See replies, reactions, edits, deleted messages, read
   receipts, sender names, and group pictures. Older messages load as you
   scroll up, first from the local archive and then from your phone.
@@ -458,7 +486,9 @@ de sincronizar a exclusão "para mim" com o celular é uma extensão deste fork.
   and 3x on a second row, keeping the speaker's
   pitch; the last choice applies to later messages. When one ends, playback
   carries on through the voice messages right after it that you have not
-  heard yet, as on the phone; any other message ends the run. The app
+  heard yet, as on the phone; any other message ends the run. A voice message
+  you send shows at once with a spinner in place of play until the server has
+  it, and a retry button if it fails. The app
   normalizes quiet recordings and handles OGG/Opus without external tools. On Linux and
   Windows, music and other media playing in other apps pause while you record
   or play a voice message, or watch a video with sound, and resume afterwards;

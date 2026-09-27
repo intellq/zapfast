@@ -469,6 +469,8 @@ pub struct App {
     pub poll_creating: bool,
     pub poll_voting: HashSet<(ChatId, String)>,
     pub interactive_sending: HashSet<(ChatId, String)>,
+    /// Own voice messages being encoded, uploaded and sent.
+    pub voice_sending: HashSet<(ChatId, String)>,
     /// Contact-name editor buffers.
     pub contact_edit: Option<(String, String)>,
     /// The group name being typed in the group info dialog.
@@ -942,6 +944,7 @@ impl App {
             poll_creating: false,
             poll_voting: HashSet::new(),
             interactive_sending: HashSet::new(),
+            voice_sending: HashSet::new(),
             contact_edit: None,
             group_name_edit: None,
             group_saving: HashSet::new(),
@@ -2062,6 +2065,17 @@ impl App {
                         self.interactive_sending.remove(&(chat, message));
                     }
                 }
+                Event::VoiceSending {
+                    chat,
+                    message,
+                    sending,
+                } => {
+                    if sending {
+                        self.voice_sending.insert((chat, message));
+                    } else {
+                        self.voice_sending.remove(&(chat, message));
+                    }
+                }
                 Event::PollCreated { chat, error } => {
                     self.poll_creating = false;
                     if let Some(error) = error {
@@ -2462,6 +2476,7 @@ impl App {
             LinkStatus::LoggedOut => {
                 self.poll_voting.clear();
                 self.interactive_sending.clear();
+                self.voice_sending.clear();
                 self.poll_creating = false;
                 self.poll_draft = Default::default();
                 self.notifications.clear_all();
@@ -4105,6 +4120,9 @@ impl App {
                 self.refocus_composer(ctx);
             }
             Action::DiscardUnsentVoice => self.unsent_voice = None,
+            Action::RetryVoice { chat, message } => {
+                self.backend.send(Command::RetryVoice { chat, message });
+            }
             Action::SetMuted(chat, until) => {
                 if let Some(known) = self.chat_mut(&chat) {
                     known.muted_until = until;

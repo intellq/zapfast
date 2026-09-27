@@ -1872,6 +1872,8 @@ struct View<'a> {
     connected: bool,
     poll_voting: &'a HashSet<(ChatId, String)>,
     interactive_pending: &'a HashSet<(ChatId, String)>,
+    /// Own voice messages being encoded, uploaded and sent.
+    voice_sending: &'a HashSet<(ChatId, String)>,
     anchor: Option<&'a str>,
     /// Demo/test: keep this message's context menu open.
     open_menu: Option<&'a str>,
@@ -2001,6 +2003,7 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
         connected: app.link.is_connected(),
         poll_voting: &app.poll_voting,
         interactive_pending: &app.interactive_sending,
+        voice_sending: &app.voice_sending,
         anchor: if conversation.loading_older || conversation.fetching_phone {
             None
         } else {
@@ -3220,6 +3223,37 @@ pub fn speed_button_id(chat: &str, message: &str, speed: f32) -> egui::Id {
 
 /// Draws a playback speed pill labelled with `speed`, highlighted when
 /// `active` and faded while that speed is still `preparing`.
+/// The speed chip's label colour: the usual text colour at 1x, then light
+/// green from 1.5x (1.25x included), shading into yellow at 2x and red at 3x.
+fn speed_colour(palette: &Palette, speed: f32) -> Color32 {
+    if speed <= 1.0 {
+        return palette.secondary;
+    }
+    // Lighter shades read on the dark chip, deeper ones on the light chip.
+    let (green, yellow, red) = if palette.dark {
+        (
+            Color32::from_rgb(144, 238, 144),
+            Color32::from_rgb(250, 214, 70),
+            Color32::from_rgb(255, 99, 90),
+        )
+    } else {
+        (
+            Color32::from_rgb(46, 160, 67),
+            Color32::from_rgb(190, 140, 0),
+            Color32::from_rgb(211, 47, 47),
+        )
+    };
+    if speed <= 1.5 {
+        green
+    } else if speed <= 2.0 {
+        green.lerp_to_gamma(yellow, (speed - 1.5) / 0.5)
+    } else {
+        yellow.lerp_to_gamma(red, (speed - 2.0).min(1.0))
+    }
+}
+
+/// A playback speed button. `chip` is the one in the voice player: its fill
+/// stays the resting one and its label takes the speed's colour.
 fn speed_pill(
     ui: &mut egui::Ui,
     view: &View<'_>,
@@ -3227,6 +3261,7 @@ fn speed_pill(
     speed: f32,
     active: bool,
     preparing: bool,
+    chip: bool,
 ) -> egui::Response {
     let palette = view.palette;
     let label = crate::audio::speed_label(speed);
@@ -3245,7 +3280,7 @@ fn speed_pill(
         let hovered = response.hovered();
         // The resting fill uses the hover step because incoming bubbles
         // share the resting surface colour.
-        let fill = if active {
+        let fill = if active && !chip {
             palette
                 .accent
                 .gamma_multiply(if hovered { 0.42 } else { 0.30 })
@@ -3255,7 +3290,9 @@ fn speed_pill(
             palette.surface_hover
         };
         ui.painter().rect_filled(rect, rect.height() / 2.0, fill);
-        let colour = if active {
+        let colour = if chip {
+            speed_colour(&palette, speed)
+        } else if active {
             palette.accent
         } else {
             palette.secondary
@@ -3303,6 +3340,7 @@ fn speed_menu_row(
                         option,
                         selected,
                         preparing && selected,
+                        false,
                     );
                     ui.ctx().data_mut(|data| {
                         data.insert_temp(
@@ -6650,6 +6688,89 @@ fn attachment(
     }
 }
 
+/// The voice player's play or pause button: a solid shape nearly as large
+/// as the button, without a disc behind it, as on the phone.
+fn play_button(ui: &mut egui::Ui, palette: Palette, size: f32, playing: bool) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
+    theme::reveal_focus(&response);
+    theme::focus_outline(ui, response.id, rect, size / 2.0);
+    let tooltip = if playing { tr("Pause") } else { tr("Play") };
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), tooltip)
+    });
+    if ui.is_rect_visible(rect) {
+        let hovered = response.hovered();
+        let colour = if hovered {
+            palette.accent_hover
+        } else {
+            palette.accent
+        };
+        let scale = if hovered { 1.05 } else { 1.0 };
+        let centre = rect.center();
+        if playing {
+            let bar = vec2(size * 0.2, size * 0.66) * scale;
+            let offset = size * 0.15 * scale;
+            for side in [-1.0, 1.0] {
+                ui.painter().rect_filled(
+                    Rect::from_center_size(centre + vec2(side * offset, 0.0), bar),
+                    size * 0.06,
+                    colour,
+                );
+            }
+        } else {
+            // A right-pointing triangle, nudged right so it looks centred.
+            let height = size * 0.74 * scale;
+            let width = height * 0.87;
+            let nudge = width * 0.1;
+            let corners = [
+                centre + vec2(-width / 2.0 + nudge, -height / 2.0),
+                centre + vec2(width / 2.0 + nudge, 0.0),
+                centre + vec2(-width / 2.0 + nudge, height / 2.0),
+            ];
+            ui.painter().add(egui::Shape::convex_polygon(
+                rounded_corners(&corners, size * 0.07),
+                colour,
+                Stroke::NONE,
+            ));
+        }
+    }
+    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+    response.on_hover_text(tooltip)
+}
+
+/// The outline of a convex polygon with each corner rounded off by `radius`.
+fn rounded_corners(corners: &[egui::Pos2], radius: f32) -> Vec<egui::Pos2> {
+    const STEPS: usize = 6;
+    let count = corners.len();
+    let mut points = Vec::with_capacity(count * (STEPS + 1));
+    for index in 0..count {
+        let corner = corners[index];
+        let before = corners[(index + count - 1) % count];
+        let after = corners[(index + 1) % count];
+        let to_before = (before - corner).normalized();
+        let to_after = (after - corner).normalized();
+        let angle = to_before.dot(to_after).clamp(-1.0, 1.0).acos();
+        // The arc touches both edges at `reach` from the corner.
+        let reach = radius / (angle / 2.0).tan();
+        let start = corner + to_before * reach;
+        let end = corner + to_after * reach;
+        let bisector = (to_before + to_after).normalized();
+        let centre = corner + bisector * (radius / (angle / 2.0).sin());
+        let from = (start - centre).angle();
+        let mut sweep = (end - centre).angle() - from;
+        if sweep > std::f32::consts::PI {
+            sweep -= std::f32::consts::TAU;
+        } else if sweep < -std::f32::consts::PI {
+            sweep += std::f32::consts::TAU;
+        }
+        for step in 0..=STEPS {
+            let turn = from + sweep * step as f32 / STEPS as f32;
+            points.push(centre + radius * vec2(turn.cos(), turn.sin()));
+        }
+    }
+    points
+}
+
 /// In-chat voice and audio player.
 #[allow(clippy::too_many_arguments)]
 fn voice_player(
@@ -6668,9 +6789,26 @@ fn voice_player(
     let button = 36.0;
     let bar_height = 30.0;
     let chip = 44.0;
+    // As on the phone, an own voice message spins while it is encoded,
+    // uploaded and sent, and offers to go again if that failed; it plays
+    // once the server has it.
+    let own_voice = message.from_me
+        && matches!(
+            message.content,
+            Content::Audio {
+                voice_note: true,
+                ..
+            }
+        );
+    let sending = own_voice
+        && view
+            .voice_sending
+            .contains(&(view.chat.id.clone(), message.id.clone()));
+    let unsent = own_voice && !sending && message.status == Delivery::Failed;
+    let playable = media.path.as_ref().filter(|_| !sending && !unsent);
     // The chip appears with the playable clip; the waveform takes its space
     // back while the audio is still downloading.
-    let shows_chip = media.path.is_some();
+    let shows_chip = playable.is_some();
     let wave_width = (width - button - 10.0 - if shows_chip { chip + 10.0 } else { 0.0 }).max(0.0);
     let bars: Vec<u8> = if !waveform.is_empty() {
         waveform.to_vec()
@@ -6698,6 +6836,25 @@ fn voice_player(
         |ui| {
             ui.spacing_mut().item_spacing.x = 10.0;
             match (&media.path, &media.state) {
+                _ if sending => waiting(ui),
+                _ if unsent => {
+                    if theme::circle_button(
+                        ui,
+                        Icon::Refresh,
+                        button,
+                        fill,
+                        hover,
+                        palette.accent,
+                        tr("Send again"),
+                    )
+                    .clicked()
+                    {
+                        actions.push(Action::RetryVoice {
+                            chat: view.chat.id.clone(),
+                            message: message.id.clone(),
+                        });
+                    }
+                }
                 (None, MediaState::Downloading) => waiting(ui),
                 (None, _) => {
                     if theme::circle_button(
@@ -6721,21 +6878,8 @@ fn voice_player(
                 (Some(path), _) => match status.state {
                     State::Loading => waiting(ui),
                     State::Playing | State::Paused | State::Idle => {
-                        let (icon, tooltip) = if status.state == State::Playing {
-                            (Icon::Pause, tr("Pause"))
-                        } else {
-                            (Icon::Play, tr("Play"))
-                        };
-                        if theme::circle_button(
-                            ui,
-                            icon,
-                            button,
-                            fill,
-                            hover,
-                            palette.accent,
-                            tooltip,
-                        )
-                        .clicked()
+                        if play_button(ui, palette, button, status.state == State::Playing)
+                            .clicked()
                         {
                             actions.push(Action::PlayVoice {
                                 message: message.id.clone(),
@@ -6788,7 +6932,7 @@ fn voice_player(
                         palette.accent,
                     );
                 }
-                if let Some(path) = &media.path {
+                if let Some(path) = playable {
                     let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
                     if response.clicked()
                         && let Some(pointer) = response.interact_pointer_pos()
@@ -6840,7 +6984,7 @@ fn voice_player(
                 );
                 let response = ui
                     .scope_builder(egui::UiBuilder::new().max_rect(at), |ui| {
-                        speed_pill(ui, view, size, speed, speed > 1.0, preparing)
+                        speed_pill(ui, view, size, speed, speed > 1.0, preparing, true)
                     })
                     .inner;
                 ui.ctx().data_mut(|data| {

@@ -1512,6 +1512,37 @@ impl Archive {
         Ok(changed > 0)
     }
 
+    /// Marks failed the own voice messages that were still being encoded or
+    /// uploaded when ZapFast closed, so that they offer to be sent again.
+    /// A message that got as far as its upload has its raw protobuf, and may
+    /// have reached the server; it stays as it is.
+    pub fn fail_unuploaded_voice(&self) -> Result<usize> {
+        self.connection.execute(
+            "UPDATE messages SET status = ?1
+             WHERE from_me = 1 AND status = ?2 AND raw IS NULL
+               AND json_extract(content, '$.kind') = 'audio'
+               AND json_extract(content, '$.voice_note') = 1",
+            params![
+                status_rank(Delivery::Failed),
+                status_rank(Delivery::Pending)
+            ],
+        )
+    }
+
+    /// Puts a failed outgoing message back to pending for another try.
+    pub fn retry_failed(&self, chat: &str, id: &str) -> Result<bool> {
+        let changed = self.connection.execute(
+            "UPDATE messages SET status = ?3 WHERE chat = ?1 AND id = ?2 AND status = ?4",
+            params![
+                chat,
+                id,
+                status_rank(Delivery::Pending),
+                status_rank(Delivery::Failed)
+            ],
+        )?;
+        Ok(changed > 0)
+    }
+
     /// Advances outgoing messages through `timestamp` to `status` and returns changed ids.
     pub fn advance_statuses(
         &self,

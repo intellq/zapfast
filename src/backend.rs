@@ -338,6 +338,11 @@ pub enum Command {
         samples: Vec<f32>,
         quoting: Option<String>,
     },
+    /// Sends again an own voice message that failed to go out.
+    RetryVoice {
+        chat: ChatId,
+        message: String,
+    },
     /// Sends a played receipt for a voice message.
     MarkPlayed {
         chat: ChatId,
@@ -646,6 +651,13 @@ pub enum Command {
         chat: ChatId,
         paths: Vec<PathBuf>,
     },
+    /// Internal encoded voice message, saved before its upload so that a
+    /// failed send can be retried from the file.
+    VoiceSaved {
+        chat: ChatId,
+        id: String,
+        path: PathBuf,
+    },
     /// Internal uploaded attachment ready for archiving and sending.
     Outbound {
         chat: ChatId,
@@ -742,6 +754,13 @@ pub enum Event {
         chat: ChatId,
         message: String,
         pending: bool,
+    },
+    /// An own voice message started or finished being encoded, uploaded and
+    /// sent.
+    VoiceSending {
+        chat: ChatId,
+        message: String,
+        sending: bool,
     },
     PollCreated {
         chat: ChatId,

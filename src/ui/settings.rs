@@ -607,9 +607,15 @@ fn sections(app: &App) -> Vec<Section> {
 
     let mut privacy = Section::new(translated(locale, "Privacy"));
     let receipts_note = if app.account_receipts_off {
-        translated(locale, "Off for your account, so only groups get them.")
+        translated(
+            locale,
+            "Off for your account, so contacts do not see them; groups always get them, as on the phone.",
+        )
     } else {
-        translated(locale, "Let people see when you read their messages.")
+        translated(
+            locale,
+            "Lets contacts see when you read their messages; groups always get them, as on the phone.",
+        )
     };
     privacy.toggle(
         translated(locale, "Send read receipts"),
