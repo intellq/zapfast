@@ -410,6 +410,18 @@ sozinho a partir das Releases do fork (não das do upstream).
   e conferido por SHA-256: é o único acesso novo à rede. Fica em
   `~/.local/state/zapfast/whisper` (o `uninstall.sh --purge` apaga). Exige um
   processador x86-64 com AVX2; sem ele o ZapFast avisa em vez de fechar.
+- **Mensagens antigas do celular.** Ao abrir um contato antigo aparecia
+  sempre "Seu celular não enviou as mensagens antigas. Verifique se ele está
+  conectado à internet", com o celular ligado. O pedido vai ao celular (o
+  servidor só o entrega), mas o WhatsApp dá aos aparelhos conectados só parte
+  do histórico, e o celular ignora pedidos sem uma mensagem de partida. Agora
+  o pedido sai pelo id de privacidade (`@lid`) do contato, como o celular
+  guarda as conversas depois da migração (foi isso que fez carregar conversas
+  de alguns meses), e de novo pelo número quando assim não acha nada. Uma
+  conversa que chegou sem nenhuma mensagem não pede nada e diz: "As mensagens
+  antigas desta conversa, se houver, ficam no celular: o WhatsApp não as envia
+  aos aparelhos conectados." Quando o celular não responde, o aviso aparece no
+  topo da conversa, com **Tentar de novo**, e o ZapFast não insiste sozinho.
 - **Número no lugar de "Desconhecido", e uma conversa só.** Uma conversa ou
   ligação que chegava por um id de privacidade (`@lid`) antes de o ZapFast
   saber o número do contato aparecia como "Desconhecido", e, quando o número
@@ -540,7 +552,13 @@ de sincronizar a exclusão "para mim" com o celular é uma extensão deste fork.
   read messages.
 - **Conversations.** See replies, reactions, edits, deleted messages, read
   receipts, sender names, and group pictures. Older messages load as you
-  scroll up, first from the local archive and then from your phone.
+  scroll up, first from the local archive and then from your phone. The phone
+  is asked by the contact's privacy id (`@lid`), where it now files chats, and
+  once more by the number when that finds nothing. WhatsApp gives linked
+  devices only part of the history: a chat whose messages the phone did not
+  send when it was linked shows no request at all, since the phone answers
+  only from a message it can start at, and a request the phone leaves
+  unanswered says so at the top of the chat, with **Try again**.
   Group messages show two gray checks after every recipient has received
   them, and blue checks after every recipient has read them. The recipient
   list and individual receipts are saved locally; later membership changes
