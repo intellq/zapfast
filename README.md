@@ -380,8 +380,45 @@ sozinho a partir das Releases do fork (não das do upstream).
   dispositivos e desligar. O alfinete no canto dessa janela a mantém acima das
   outras (ligado por padrão e lembrado); no KDE Plasma com Wayland isso é
   feito por um script do KWin, e nos outros desktops Wayland, que não permitem,
-  o alfinete não aparece. Fechar a janela da ligação desliga; durante a
-  ligação, fechar a janela principal só a minimiza. Vídeo ainda não.
+  o alfinete não aparece. No KDE Plasma com Wayland a janela já abre no canto,
+  sem passar pelo meio da tela. Fechar a janela da ligação desliga; durante a
+  ligação, fechar a janela principal só a minimiza. Quando a ligação termina,
+  por qualquer motivo, a janela mostra como terminou por 2 segundos e some.
+  Vídeo ainda não.
+- **Sons de ligação.** Uma ligação chegando toca no alto-falante padrão até
+  ser atendida ou desfeita, a menos que a conversa esteja silenciada,
+  arquivada ou trancada (a notificação sai então sem som). Uma ligação feita
+  daqui chama até o outro lado atender. Ao conectar e ao terminar toca um
+  som, e um tom de ocupado quando o outro lado está ocupado ou recusa. Uma
+  ligação atendida ou deixada em outro aparelho só para de tocar. São os cinco
+  sons do Telegram Desktop, sem alteração, sob a GPL-3.0 ou posterior (aviso
+  e licença em `THIRD-PARTY-NOTICES.md`).
+- **Transcrição de áudios neste computador.** O WhatsApp não manda a
+  transcrição aos aparelhos conectados, então o ZapFast faz a sua, com o
+  Whisper (whisper.cpp), sem que o áudio saia do computador. Um botão com
+  ícone na linha da duração do áudio, ou **Transcrever áudio** no menu da
+  mensagem, põe o áudio na fila (uma transcrição por vez). O cartão do áudio
+  mostra o progresso, com botão de cancelar, ou o erro com **Tentar de novo**,
+  e depois o texto, selecionável, com o idioma e botões para copiar e
+  ocultar. As transcrições ficam no arquivo criptografado enquanto o áudio
+  existir. **Configurações › Transcrição de áudio** permite
+  transcrever automaticamente os áudios recebidos (desligado por padrão),
+  esconder o botão, escolher o modelo (Base, cerca de 148 MB; Small, cerca de
+  488 MB, o recomendado e o padrão; Medium, cerca de 1,5 GB), fixar o idioma
+  (o padrão é detectar) e apagar os modelos baixados. O modelo é baixado uma
+  vez, na primeira transcrição, de `huggingface.co` (pelo proxy configurado)
+  e conferido por SHA-256: é o único acesso novo à rede. Fica em
+  `~/.local/state/zapfast/whisper` (o `uninstall.sh --purge` apaga). Exige um
+  processador x86-64 com AVX2; sem ele o ZapFast avisa em vez de fechar.
+- **Número no lugar de "Desconhecido", e uma conversa só.** Uma conversa ou
+  ligação que chegava por um id de privacidade (`@lid`) antes de o ZapFast
+  saber o número do contato aparecia como "Desconhecido", e, quando o número
+  era descoberto, uma segunda conversa guardava as mensagens novas. Agora quem
+  não tem nome aparece pelo número, como no celular ("Chamador desconhecido"
+  só sem número), e as conversas do id de privacidade passam para a do número
+  (mensagens, recibos, enquetes, etiquetas, rascunhos e transcrições), que
+  fica com as não lidas. Arquivos que já conheciam a associação se unem ao
+  iniciar.
 - **Links do WhatsApp abrem no ZapFast.** Links `wa.me`, `api.whatsapp.com` e
   `whatsapp://` (inclusive os de mensagens) abrem a conversa com o texto do
   link já no compositor, ou o convite de grupo; um número sem conversa é
@@ -400,7 +437,10 @@ sozinho a partir das Releases do fork (não das do upstream).
   janela abria menor a cada início e a cada volta da bandeja (cerca de 1/6 a
   menos em 120%). Agora volta com o tamanho em que foi deixada. A posição é
   lembrada no Windows, no macOS e no X11; no Wayland quem posiciona a janela
-  é o compositor.
+  é o compositor. No KDE Plasma com Wayland, o ZapFast acrescenta ao iniciar
+  uma regra de janela do KWin, só para a janela principal (classe `zapfast`,
+  título `ZapFast`), com a posição em "Lembrar"; a regra é criada uma vez e
+  depois fica com o KWin, e o `uninstall.sh` a remove.
 - **Ícone do atalho na área de trabalho logo após instalar.** No KDE, o
   atalho criado pelo `install.sh` ficava sem ícone até a próxima sessão. O
   atalho agora aponta para o arquivo do ícone, e o instalador avisa o KDE da
@@ -621,8 +661,34 @@ de sincronizar a exclusão "para mim" com o celular é uma extensão deste fork.
   of the main window's screen, with the call's length, bars that move with the
   other side's voice, mute, the **Microphone** / **Speaker** pickers, and
   hang up. A pin keeps that window above the others where the desktop allows
-  it (on KDE Plasma under Wayland through a KWin script). The devices a call
-  uses are remembered for the next one without changing the system defaults.
+  it (on KDE Plasma under Wayland through a KWin script, which also opens the
+  window in that corner from the start). The devices a call uses are
+  remembered for the next one without changing the system defaults. When a
+  call ends, for any reason, its window shows how it ended for two seconds and
+  goes. Calls make sound: an incoming call rings on the default speaker until
+  it is answered or gone (silently for a muted, archived or locked chat), an
+  outgoing one rings back, and the call plays a sound when it connects and
+  when it ends, and a busy tone when the peer is busy or declines. The five
+  sounds are Telegram Desktop's, unmodified, under the GPL-3.0-or-later. A
+  person whose privacy id (`@lid`) has no name is shown by their number, and
+  the chat begun under the privacy id joins the one under the number once the
+  mapping is known.
+- **Voice message transcription.** WhatsApp sends linked devices no
+  transcript, so ZapFast makes its own with Whisper (whisper.cpp), on this
+  computer: the audio never leaves it. An icon button on a voice message's
+  duration row, or **Transcribe audio** in its menu, queues it (one at a
+  time). The card shows the progress with a cancel button, or the failure with
+  **Try again**, then the selectable transcript with its language and buttons
+  to copy and fold it. Transcripts live in the encrypted archive for as long
+  as their audio message does. **Settings > Voice message transcription**
+  turns on transcribing received voice messages automatically (off by
+  default), hides the button, picks the model (Base, about 148 MB; Small,
+  about 488 MB, recommended and the default; Medium, about 1.5 GB), fixes the
+  language (detected by default) and deletes the downloaded models. The model
+  is downloaded once, on the first transcription, from `huggingface.co`
+  through the configured proxy and checked against its SHA-256: it is the only
+  network access this adds. It needs an x86-64 processor with AVX2; without
+  it ZapFast says so instead of crashing.
 - **Send messages.** Press Enter to send text and Shift+Enter for a new line.
   You can swap these keys in Settings. The composer is focused when you open
   or return to a conversation; invoking search keeps focus in search, and
@@ -1137,6 +1203,7 @@ from the environment and honors `NO_PROXY`.
 | Attachments, avatars | `~/.cache/zapfast/` | Safe to delete; **Settings > Files > Change…** sends new downloads to another folder, leaving earlier ones in place |
 | Favorite stickers and packs | `~/.local/state/zapfast/stickers/` | Plain WebP files; each pack is a folder |
 | Wallpaper image | `~/.local/state/zapfast/wallpaper.jpg` | Copy of the chosen picture, or `.png`, `.webp`, `.gif`; deleted by **Remove image** |
+| Transcription models | `~/.local/state/zapfast/whisper/` | Downloaded on the first transcription; **Delete models** in Settings, or `uninstall.sh --purge`, removes them |
 | Log of the last run | `~/.local/state/zapfast/zapfast.log` | `--verbose` for more |
 
 macOS and Windows use the standard platform directories selected by the
