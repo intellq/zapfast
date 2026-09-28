@@ -3243,8 +3243,22 @@ msgstr "Connettiti a WhatsApp per cambiare la privacy del tuo account."
 msgid "Waiting for this message. Open WhatsApp on your phone"
 msgstr ""
 
-#: src/backend/worker.rs:4082
-msgid "Your phone did not send older messages. Check that it is online"
+#: src/ui/conversation.rs
+msgid "Look for messages on your phone"
+msgstr ""
+
+#: src/ui/conversation.rs
+msgid "Your phone did not send this chat's messages."
+msgstr ""
+
+#: src/ui/conversation.rs
+msgid "Your phone did not send older messages."
+msgstr ""
+
+#: src/ui/conversation.rs
+msgid ""
+"WhatsApp gives linked devices only part of the history; the rest stays on "
+"the phone."
 msgstr ""
 
 #: src/backend/worker.rs:4145

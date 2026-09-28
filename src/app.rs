@@ -85,6 +85,9 @@ pub struct Conversation {
     pub phone_misses: u32,
     /// Whether messages arrived after the latest phone request.
     pub phone_delivered: bool,
+    /// Whether the phone was last asked for history and sent nothing back.
+    /// Nothing asks it again on its own until the reader does.
+    pub phone_silent: bool,
     /// The height each row last took, keyed by message id, so the transcript
     /// can skip rows far from the viewport instead of laying them out.
     pub(crate) rows: HashMap<String, RowHeight>,
@@ -2262,14 +2265,9 @@ impl App {
                     } else if was_empty {
                         conversation.complete = complete;
                     }
-                    // Request phone history when sync created a chat without messages.
-                    let bare = !older && complete && conversation.messages.is_empty();
                     if self.open_chat.as_deref() == Some(chat.as_str()) {
                         if !older && (self.at_bottom || was_empty) {
                             self.scroll_to_bottom = true;
-                        }
-                        if bare {
-                            self.fetch_older(&chat);
                         }
                         // After the first page, load toward a pending search anchor once.
                         if !older
@@ -2526,9 +2524,10 @@ impl App {
                     }
                 }
                 Event::SyncProgress(percent) => self.sync_percent = Some(percent),
-                Event::OlderFetched { chat, more } => {
+                Event::OlderFetched { chat, more, silent } => {
                     let conversation = self.conversations.entry(chat).or_default();
                     conversation.fetching_phone = false;
+                    conversation.phone_silent = silent;
                     conversation.phone_exhausted = !more;
                     conversation.phone_answered = Some(Instant::now());
                     if conversation.phone_delivered {
@@ -3193,7 +3192,7 @@ impl App {
             return;
         };
         if conversation.complete {
-            self.fetch_older(chat);
+            self.fetch_older(chat, false);
             return;
         }
         conversation.loading_older = true;
@@ -3206,26 +3205,36 @@ impl App {
     }
 
     /// Requests older phone history when available and outside the cooldown.
-    pub fn fetch_older(&mut self, chat: &str) {
+    /// `asked` is the reader pressing the button for it, which also tries a
+    /// phone that did not answer last time and skips the cooldown.
+    pub fn fetch_older(&mut self, chat: &str, asked: bool) {
         let Some(conversation) = self.conversations.get_mut(chat) else {
             return;
         };
-        if conversation.fetching_phone || conversation.phone_exhausted {
+        if conversation.fetching_phone || (conversation.phone_exhausted && !asked) {
             return;
         }
-        // Back off after empty responses. Only a connected phone can answer.
+        // Only a connected phone can answer.
         if !matches!(self.link, LinkStatus::Connected) {
             return;
         }
-        let cooldown =
-            (PHONE_COOLDOWN * 2u32.pow(conversation.phone_misses)).min(Duration::from_secs(600));
-        if conversation
-            .phone_answered
-            .is_some_and(|answered| answered.elapsed() < cooldown)
-        {
-            return;
+        if !asked {
+            // A phone that kept quiet is not asked again behind the reader's back.
+            if conversation.phone_silent {
+                return;
+            }
+            // Back off after empty responses.
+            let cooldown = (PHONE_COOLDOWN * 2u32.pow(conversation.phone_misses))
+                .min(Duration::from_secs(600));
+            if conversation
+                .phone_answered
+                .is_some_and(|answered| answered.elapsed() < cooldown)
+            {
+                return;
+            }
         }
         conversation.fetching_phone = true;
+        conversation.phone_silent = false;
         self.scroll_anchor = conversation
             .messages
             .first()
@@ -3325,14 +3334,10 @@ impl App {
         self.scroll_to_bottom = true;
         self.at_bottom = true;
         self.focus_composer = true;
+        // A chat that history sync named without its messages offers to ask the
+        // phone instead of asking on its own: for old chats the phone mostly
+        // keeps the messages to itself.
         self.ensure_loaded(&id);
-        if self
-            .conversations
-            .get(&id)
-            .is_some_and(|conversation| conversation.complete && conversation.messages.is_empty())
-        {
-            self.fetch_older(&id);
-        }
         if self
             .chat(&id)
             .is_some_and(|chat| chat.unread > 0 || chat.marked_unread)
@@ -4105,7 +4110,7 @@ impl App {
             Action::MarkRead(chat) => self.mark_read(&chat),
             Action::MarkUnread(chat) => self.mark_unread(&chat),
             Action::LoadOlder(chat) => self.load_older(&chat),
-            Action::FetchOlder(chat) => self.fetch_older(&chat),
+            Action::FetchOlder(chat) => self.fetch_older(&chat, true),
             Action::Download {
                 card,
                 chat,
@@ -8620,6 +8625,76 @@ mod tests {
             !app.wants_quiet(),
             "a download that takes too long does not keep music paused"
         );
+    }
+
+    /// The phone-history requests the app sent since the last look.
+    fn history_requests(
+        commands: &mut tokio::sync::mpsc::UnboundedReceiver<Command>,
+    ) -> Vec<ChatId> {
+        std::iter::from_fn(|| commands.try_recv().ok())
+            .filter_map(|command| match command {
+                Command::FetchOlder(chat) => Some(chat),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_chat_synced_without_messages_asks_the_phone_only_on_request() {
+        let mut app = app();
+        let (backend, mut commands, _events) = Backend::recording_with_events();
+        app.backend = backend;
+        app.link = LinkStatus::Connected;
+        let chat = "old@s.whatsapp.net";
+        app.chats.push(Chat::new(chat.into(), "Old".into()));
+        let conversation = app.conversations.entry(chat.into()).or_default();
+        conversation.requested = true;
+        conversation.complete = true;
+        app.open_chat(chat.into());
+        app.load_older(chat);
+        assert!(
+            history_requests(&mut commands).is_empty(),
+            "opening it does not ask the phone"
+        );
+        app.apply(Action::FetchOlder(chat.into()), &egui::Context::default());
+        assert_eq!(history_requests(&mut commands), [chat.to_owned()]);
+        assert!(app.conversations[chat].fetching_phone);
+    }
+
+    #[test]
+    fn a_phone_that_kept_quiet_is_asked_again_only_by_the_reader() {
+        let mut app = app();
+        let (backend, mut commands, events) = Backend::recording_with_events();
+        app.backend = backend;
+        app.link = LinkStatus::Connected;
+        let chat = "peer@s.whatsapp.net";
+        app.chats.push(Chat::new(chat.into(), "Peer".into()));
+        let conversation = app.conversations.entry(chat.into()).or_default();
+        conversation.merge(vec![message(chat, "m1", 100)], false);
+        conversation.requested = true;
+        conversation.complete = true;
+        app.load_older(chat);
+        assert_eq!(history_requests(&mut commands), [chat.to_owned()]);
+
+        events
+            .send(Event::OlderFetched {
+                chat: chat.into(),
+                more: true,
+                silent: true,
+            })
+            .unwrap();
+        app.handle_events();
+        assert!(app.conversations[chat].phone_silent, "the chat says so");
+        app.conversations.get_mut(chat).unwrap().complete = true;
+        app.load_older(chat);
+        assert!(
+            history_requests(&mut commands).is_empty(),
+            "reaching the top again does not ask on its own"
+        );
+
+        app.apply(Action::FetchOlder(chat.into()), &egui::Context::default());
+        assert_eq!(history_requests(&mut commands), [chat.to_owned()]);
+        assert!(!app.conversations[chat].phone_silent);
     }
 
     fn message(chat: &str, id: &str, timestamp: i64) -> Message {

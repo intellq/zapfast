@@ -2695,13 +2695,14 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
     }
 }
 
-/// Loading state above the oldest visible message.
+/// Loading state above the oldest visible message, and what the phone did
+/// when it was asked for older ones.
 fn top_of_history(
     ui: &mut egui::Ui,
     palette: &Palette,
     conversation: &Conversation,
-    _chat: &Chat,
-    _actions: &mut [Action],
+    chat: &Chat,
+    actions: &mut Vec<Action>,
 ) {
     ui.vertical_centered(|ui| {
         if !conversation.complete {
@@ -2709,6 +2710,36 @@ fn top_of_history(
                 theme::spinner(ui, 18.0, palette.accent);
             } else {
                 ui.add_space(18.0);
+            }
+        } else if conversation.messages.is_empty() {
+            ui.add_space(24.0);
+            if conversation.fetching_phone {
+                widgets::chip(ui, palette, tr("Loading messages from your phone…"));
+            } else if conversation.phone_silent {
+                phone_silence(
+                    ui,
+                    palette,
+                    tr("Your phone did not send this chat's messages."),
+                    chat,
+                    actions,
+                );
+            } else {
+                widgets::chip(ui, palette, tr("No messages here yet"));
+                if !conversation.phone_exhausted {
+                    // History sync names old chats without their messages, and
+                    // the phone mostly keeps those, so it is asked only on request.
+                    ui.add_space(8.0);
+                    if theme::link(
+                        ui,
+                        tr("Look for messages on your phone"),
+                        theme::medium(12.5),
+                        palette.accent,
+                    )
+                    .clicked()
+                    {
+                        actions.push(Action::FetchOlder(chat.id.clone()));
+                    }
+                }
             }
         } else if conversation.fetching_phone {
             ui.horizontal(|ui| {
@@ -2722,16 +2753,53 @@ fn top_of_history(
                     palette.secondary,
                 );
             });
-        } else if conversation.messages.is_empty() {
-            ui.add_space(24.0);
-            if conversation.fetching_phone {
-                widgets::chip(ui, palette, tr("Loading messages from your phone…"));
-            } else {
-                widgets::chip(ui, palette, tr("No messages here yet"));
-            }
+        } else if conversation.phone_silent {
+            ui.add_space(6.0);
+            phone_silence(
+                ui,
+                palette,
+                tr("Your phone did not send older messages."),
+                chat,
+                actions,
+            );
         } else {
             ui.add_space(6.0);
         }
+    });
+}
+
+/// Says the phone was asked and sent nothing, why that happens with it online,
+/// and offers to ask again.
+fn phone_silence(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    what: &str,
+    chat: &Chat,
+    actions: &mut Vec<Action>,
+) {
+    let width = ui.available_width().min(380.0);
+    ui.horizontal(|ui| {
+        ui.add_space((ui.available_width() - width).max(0.0) / 2.0);
+        ui.allocate_ui_with_layout(
+            vec2(width, 0.0),
+            egui::Layout::top_down(egui::Align::Center),
+            |ui| {
+                ui.set_width(width);
+                theme::paragraph(
+                    ui,
+                    format!(
+                        "{what} {}",
+                        tr("WhatsApp gives linked devices only part of the history; the rest stays on the phone.")
+                    ),
+                    theme::regular(12.5),
+                    palette.secondary,
+                );
+                ui.add_space(4.0);
+                if theme::link(ui, tr("Try again"), theme::medium(12.5), palette.accent).clicked() {
+                    actions.push(Action::FetchOlder(chat.id.clone()));
+                }
+            },
+        );
     });
 }
 

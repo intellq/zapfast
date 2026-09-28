@@ -418,6 +418,47 @@ impl Downloadable for PhoneSticker {
 }
 
 /// App version in WhatsApp device-property format.
+/// A chat id's kind for the log, which must not carry the number itself.
+fn chat_kind(chat: &str) -> &'static str {
+    match chat.rsplit_once('@').map(|(_, server)| server) {
+        Some("lid") => "lid",
+        Some("s.whatsapp.net") => "pn",
+        Some("g.us") => "group",
+        _ => "other",
+    }
+}
+
+fn jid_kind(jid: &Jid) -> &'static str {
+    chat_kind(&jid.to_string())
+}
+
+/// The id to ask the phone about a direct chat by. After the move to privacy
+/// ids the phone files a person's chat under their LID, as the library's own
+/// placeholder resend assumes, so a chat known here by its number is asked
+/// about by the LID the library has for it. Groups and unmapped numbers go
+/// as they are.
+async fn phone_history_jid(
+    client: &Client,
+    jid: Jid,
+    commands: &mpsc::UnboundedSender<Command>,
+) -> Jid {
+    if !jid.is_pn() {
+        return jid;
+    }
+    match client.get_lid_pn_entry(&jid).await {
+        Ok(Some(entry)) => {
+            // The answer names the chat by this LID; the worker files it under
+            // the number only if it knows the pair too.
+            let _ = commands.send(Command::LidsFound(vec![(
+                entry.lid.to_string(),
+                entry.phone_number.to_string(),
+            )]));
+            Jid::lid(&*entry.lid)
+        }
+        _ => jid,
+    }
+}
+
 fn app_version() -> wa::device_props::AppVersion {
     let mut parts = env!("CARGO_PKG_VERSION")
         .split('.')
@@ -559,7 +600,6 @@ pub async fn run(
         online_changed: Instant::now(),
         online_sent: None,
         pending_older: HashMap::new(),
-        older_warned: HashSet::new(),
         pending_avatars: HashMap::new(),
         sticker_fetches: HashSet::new(),
         sticker_downloads: HashSet::new(),
@@ -846,8 +886,6 @@ struct Worker {
     online_sent: Option<bool>,
     /// Pending phone-history request time and boundary by chat.
     pending_older: HashMap<ChatId, (Instant, super::PageKey)>,
-    /// Chats already notified about a phone-history timeout.
-    older_warned: HashSet<ChatId>,
     /// Deferred profile-picture requests and retry counts.
     pending_avatars: HashMap<(String, bool), u32>,
     /// Active recent-sticker downloads by hash.
@@ -3779,8 +3817,13 @@ impl Worker {
             Ok(Ok(parsed)) => {
                 if on_demand {
                     log::info!(
-                        "poll recovery: on-demand history received; chats={}, messages={}, standalone_votes={}",
+                        "phone history: on-demand chunk received; chats={}, lid_chats={}, messages={}, standalone_votes={}",
                         parsed.chats.len(),
+                        parsed
+                            .chats
+                            .iter()
+                            .filter(|chat| chat.id.ends_with("@lid"))
+                            .count(),
                         parsed
                             .chats
                             .iter()
@@ -4116,9 +4159,19 @@ impl Worker {
     fn answer_older(&mut self, filed: Vec<(ChatId, usize, Option<bool>)>) {
         for (chat, count, more_on_phone) in filed {
             let more = count > 0 && more_on_phone != Some(false);
-            let Some((_, (before_time, before_id))) = self.pending_older.remove(&chat) else {
+            let pending = self.pending_older.remove(&chat);
+            log::info!(
+                "phone history: answer for chat={}; messages={count}, more_on_phone={more_on_phone:?}, requested={}",
+                chat_kind(&chat),
+                pending.is_some()
+            );
+            let Some((_, (before_time, before_id))) = pending else {
                 // Late responses are already archived; tell the app to page again.
-                self.emit(Event::OlderFetched { chat, more });
+                self.emit(Event::OlderFetched {
+                    chat,
+                    more,
+                    silent: false,
+                });
                 continue;
             };
             match self
@@ -4138,7 +4191,11 @@ impl Worker {
                 }
                 Err(error) => log::warn!("could not read older messages: {error}"),
             }
-            self.emit(Event::OlderFetched { chat, more });
+            self.emit(Event::OlderFetched {
+                chat,
+                more,
+                silent: false,
+            });
         }
     }
 
@@ -4152,17 +4209,18 @@ impl Worker {
             .collect();
         for chat in expired {
             self.pending_older.remove(&chat);
+            log::info!(
+                "phone history: no answer within {} s; chat={}",
+                PHONE_PATIENCE.as_secs(),
+                chat_kind(&chat)
+            );
+            // The conversation says so where the messages would be; a phone that
+            // is online still keeps part of the history to itself.
             self.emit(Event::OlderFetched {
-                chat: chat.clone(),
+                chat,
                 more: true,
+                silent: true,
             });
-            // Report the timeout once per chat; later retries back off silently.
-            if self.older_warned.insert(chat) {
-                self.emit(Event::Error(
-                    tr("Your phone did not send older messages. Check that it is online")
-                        .to_owned(),
-                ));
-            }
         }
     }
 
@@ -4172,7 +4230,11 @@ impl Worker {
         }
         let (Some(client), Some(jid)) = (self.client.clone(), Self::jid_of(&chat)) else {
             // Offline requests retry after reconnection; the banner shows state.
-            self.emit(Event::OlderFetched { chat, more: true });
+            self.emit(Event::OlderFetched {
+                chat,
+                more: true,
+                silent: false,
+            });
             return;
         };
         // Chats without messages request history from the current time.
@@ -4184,17 +4246,21 @@ impl Worker {
             .insert(chat.clone(), (Instant::now(), (timestamp, id.clone())));
         let commands = self.commands.clone();
         tokio::spawn(async move {
-            if let Err(error) = client
+            let jid = phone_history_jid(&client, jid, &commands).await;
+            log::info!(
+                "phone history: requesting {PHONE_BATCH} older messages; chat={}, anchor_present={}",
+                jid_kind(&jid),
+                !id.is_empty()
+            );
+            if client
                 // Despite its `Ms` name, the protocol field takes Unix seconds.
                 // https://github.com/tulir/whatsmeow/commit/54650307d891f89ab346a57953d316106caee371
                 .fetch_message_history(&jid, &id, from_me, timestamp, PHONE_BATCH)
                 .await
+                .is_err()
             {
-                log::warn!("could not request older messages");
-                let _ = commands.send(Command::OlderFailed {
-                    chat: chat.clone(),
-                    error: format!("Could not request older messages from your phone: {error}"),
-                });
+                log::warn!("phone history: the request could not be sent");
+                let _ = commands.send(Command::OlderFailed { chat });
             }
         });
     }
@@ -5557,10 +5623,13 @@ impl Worker {
                 }
             }
             Command::Shutdown => {}
-            Command::OlderFailed { chat, error } => {
+            Command::OlderFailed { chat } => {
                 self.pending_older.remove(&chat);
-                self.emit(Event::OlderFetched { chat, more: true });
-                self.emit(Event::Error(error));
+                self.emit(Event::OlderFetched {
+                    chat,
+                    more: true,
+                    silent: true,
+                });
             }
             Command::GroupInfoFailed { chat, permanent } => {
                 self.handle_failed_group(chat, permanent);
@@ -10709,6 +10778,34 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn an_unanswered_phone_history_request_is_reported_to_its_chat_only() {
+        let (mut worker, events, _, _) = receipt_tests::worker();
+        let chat = "12025550100@s.whatsapp.net";
+        worker.pending_older.insert(
+            chat.into(),
+            (Instant::now() - PHONE_PATIENCE * 2, (100, "m1".into())),
+        );
+        worker.expire_older_requests();
+        let emitted: Vec<Event> = events.try_iter().collect();
+        assert!(
+            matches!(
+                emitted.as_slice(),
+                [Event::OlderFetched { chat: answered, more: true, silent: true }] if answered == chat
+            ),
+            "the chat learns the phone kept quiet, and nothing else is said: {emitted:?}"
+        );
+        assert!(worker.pending_older.is_empty());
+    }
+
+    #[test]
+    fn phone_history_logs_name_the_kind_of_chat_and_never_the_number() {
+        assert_eq!(chat_kind("12025550100@s.whatsapp.net"), "pn");
+        assert_eq!(chat_kind("100000012345678@lid"), "lid");
+        assert_eq!(chat_kind("123-456@g.us"), "group");
+        assert_eq!(chat_kind("fixture@newsletter"), "other");
+    }
+
     #[tokio::test]
     async fn newsletter_sends_are_rejected_before_reaching_the_client() {
         let (mut worker, events, _, _) = receipt_tests::worker();
@@ -11977,7 +12074,6 @@ mod receipt_tests {
             online_changed: Instant::now(),
             online_sent: None,
             pending_older: HashMap::new(),
-            older_warned: HashSet::new(),
             pending_avatars: HashMap::new(),
             sticker_fetches: HashSet::new(),
             sticker_downloads: HashSet::new(),

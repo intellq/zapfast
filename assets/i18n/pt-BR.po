@@ -3190,11 +3190,25 @@ msgstr "Conecte-se ao WhatsApp para alterar seu perfil."
 msgid "Waiting for this message. Open WhatsApp on your phone"
 msgstr "Aguardando esta mensagem. Abra o WhatsApp no seu celular"
 
-#: src/backend/worker.rs:4082
-msgid "Your phone did not send older messages. Check that it is online"
+#: src/ui/conversation.rs
+msgid "Look for messages on your phone"
+msgstr "Buscar mensagens no celular"
+
+#: src/ui/conversation.rs
+msgid "Your phone did not send this chat's messages."
+msgstr "O celular não enviou as mensagens desta conversa."
+
+#: src/ui/conversation.rs
+msgid "Your phone did not send older messages."
+msgstr "O celular não enviou mensagens mais antigas."
+
+#: src/ui/conversation.rs
+msgid ""
+"WhatsApp gives linked devices only part of the history; the rest stays on "
+"the phone."
 msgstr ""
-"Seu celular não enviou as mensagens antigas. Verifique se ele está conectado "
-"à internet"
+"O WhatsApp entrega aos aparelhos conectados só parte do histórico; o resto "
+"fica no celular."
 
 #: src/backend/worker.rs:4145
 msgid "This conversation is read-only in ZapFast"

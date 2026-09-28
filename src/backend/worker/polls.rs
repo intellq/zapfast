@@ -118,12 +118,14 @@ impl Worker {
             self.emit_message(&chat, &id);
             return;
         };
-        log::info!(
-            "poll recovery: requesting phone history; anchor_present={}",
-            !anchor.is_empty()
-        );
         let commands = self.commands.clone();
         tokio::spawn(async move {
+            let jid = phone_history_jid(&client, jid, &commands).await;
+            log::info!(
+                "poll recovery: requesting phone history; chat={}, anchor_present={}",
+                jid_kind(&jid),
+                !anchor.is_empty()
+            );
             if client
                 .fetch_message_history(
                     &jid,

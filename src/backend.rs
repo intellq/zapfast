@@ -263,10 +263,9 @@ pub enum Command {
         chat: ChatId,
         name: String,
     },
-    /// Internal result for a failed phone-history request.
+    /// Internal result for a phone-history request that could not be sent.
     OlderFailed {
         chat: ChatId,
-        error: String,
     },
     /// Internal group-metadata failure.
     GroupInfoFailed {
@@ -954,10 +953,12 @@ pub enum Event {
     Syncing(bool),
     /// Reported history-sync percentage.
     SyncProgress(u32),
-    /// Phone-history result. `more` indicates whether another request may help.
+    /// Phone-history result. `more` indicates whether another request may help;
+    /// `silent` that the phone was asked and sent nothing back.
     OlderFetched {
         chat: ChatId,
         more: bool,
+        silent: bool,
     },
     /// Whether account privacy disables direct-chat read receipts.
     ReceiptsPrivacy {
