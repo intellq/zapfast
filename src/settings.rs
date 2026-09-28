@@ -446,6 +446,8 @@ pub struct Settings {
     pub call_microphone: Option<String>,
     /// Speaker the next 1:1 call plays through, as a PipeWire node name.
     pub call_speaker: Option<String>,
+    /// Whether the call window stays above other windows.
+    pub call_window_on_top: bool,
 }
 
 impl Default for Settings {
@@ -506,6 +508,7 @@ impl Default for Settings {
             chat_lock_hint_dismissed: false,
             call_microphone: None,
             call_speaker: None,
+            call_window_on_top: true,
         }
     }
 }

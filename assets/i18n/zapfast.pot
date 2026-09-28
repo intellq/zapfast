@@ -4316,3 +4316,11 @@ msgstr ""
 #: src/app.rs:5405
 msgid "Could not change the app for WhatsApp links"
 msgstr ""
+
+#: src/ui/call.rs
+msgid "The call window stays above other windows. Click to stop."
+msgstr ""
+
+#: src/ui/call.rs
+msgid "Keep the call window above other windows"
+msgstr ""

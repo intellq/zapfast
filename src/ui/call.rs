@@ -32,16 +32,26 @@ const WINDOW: &str = "zapfast-call-window";
 const CARD_WIDTH: f32 = 340.0;
 /// The ringing card's round buttons.
 const CARD_CONTROL: f32 = 42.0;
-/// The call window's size, in points.
-const WINDOW_SIZE: [f32; 2] = [340.0, 480.0];
-/// Padding between the call window's edge and everything it draws.
-const PADDING: f32 = 20.0;
+/// The call window's width, in points.
+const WINDOW_WIDTH: f32 = 300.0;
+/// Space between the call window's edges and what it draws.
+const MARGIN: f32 = 14.0;
+/// The avatar in the call window.
+const AVATAR: f32 = 72.0;
 /// The call window's round controls.
 const CONTROL: f32 = 52.0;
 /// The device pickers' width in the call window.
 const PICKER_WIDTH: f32 = 260.0;
 /// The height the two stacked device pickers take.
 const DEVICES_HEIGHT: f32 = 112.0;
+/// The level bars under the status: how many, how tall, and how often they move.
+const BARS: usize = 25;
+const BARS_HEIGHT: f32 = 24.0;
+const LEVEL_STEP: Duration = Duration::from_millis(50);
+/// The height of one warning line under the status.
+const WARNING_LINE: f32 = 18.0;
+/// The pin in the call window's corner.
+const PIN: f32 = 26.0;
 
 /// What the call window shows, as the app last handed it over.
 #[derive(Clone, Debug, PartialEq)]
@@ -53,6 +63,8 @@ pub struct CallView {
     pub palette: Palette,
     pub locale: Locale,
     pub devices: DeviceList,
+    /// Whether the window should stay above other windows.
+    pub on_top: bool,
 }
 
 /// What the call window asks the app to do.
@@ -62,6 +74,8 @@ pub enum CallRequest {
     Hangup,
     Microphone(Option<String>),
     Speaker(Option<String>),
+    /// Keep the window above other windows, or stop.
+    OnTop(bool),
     /// The window was closed: the app forgets the call it showed.
     Dismiss,
 }
@@ -75,6 +89,24 @@ pub struct CallWindow {
     pub requests: Vec<CallRequest>,
     /// Whether the window shows its device pickers.
     pub devices_open: bool,
+    /// The peer's loudness, newest last, one sample per [`LEVEL_STEP`].
+    levels: std::collections::VecDeque<f32>,
+    sampled: Option<Instant>,
+    /// Whether the window was last asked to stay above the others; `None` for a new window.
+    applied_on_top: Option<bool>,
+    /// The height the window was last given.
+    height: f32,
+}
+
+impl CallWindow {
+    /// Forgets what belonged to the window of the call that ended, so the next call's window starts
+    /// fresh.
+    pub fn reset(&mut self) {
+        self.levels.clear();
+        self.sampled = None;
+        self.applied_on_top = None;
+        self.height = 0.0;
+    }
 }
 
 /// The call window's state, shared between the app and the window's own viewport.
@@ -198,15 +230,29 @@ fn open_window(app: &App, ctx: &egui::Context) {
         .as_ref()
         .map(|call| app.call_name(&call.chat))
         .unwrap_or_default();
+    let size = [WINDOW_WIDTH, base_height()];
+    // Its size is set from what it shows, through the minimum and the maximum: a window made
+    // unresizable on Wayland keeps the size it opened with, which would leave no room for the device
+    // pickers.
     let builder = egui::ViewportBuilder::default()
         .with_title(title)
         .with_app_id(std::env::var("FLATPAK_ID").unwrap_or_else(|_| "zapfast".to_owned()))
-        .with_inner_size(WINDOW_SIZE)
-        .with_min_inner_size(WINDOW_SIZE)
-        .with_resizable(false)
+        .with_inner_size(size)
+        .with_min_inner_size(size)
+        .with_max_inner_size(size)
         .with_maximize_button(false)
-        .with_icon(window_icon())
-        .with_window_level(egui::WindowLevel::AlwaysOnTop);
+        .with_icon(window_icon());
+    // The top-right corner of the screen the main window is on. Wayland ignores a position, and
+    // KDE's is set by the KWin script instead.
+    let builder = match app.main_monitor {
+        Some(monitor) if crate::keep_above::method() == crate::keep_above::Method::WindowLevel => {
+            builder.with_position(pos2(
+                monitor.right() - WINDOW_WIDTH - crate::keep_above::EDGE,
+                monitor.top() + crate::keep_above::EDGE,
+            ))
+        }
+        _ => builder,
+    };
     ctx.show_viewport_deferred(window_id(), builder, move |ui, _class| {
         window(ui, &shared, &waker);
     });
@@ -225,10 +271,26 @@ fn window_icon() -> Arc<egui::IconData> {
     }))
 }
 
+/// The call window's height with nothing under the status and the device pickers closed.
+fn base_height() -> f32 {
+    MARGIN + AVATAR + 8.0 + 24.0 + 2.0 + 18.0 + 8.0 + BARS_HEIGHT + 14.0 + CONTROL + MARGIN
+}
+
+/// The call window's height for what it shows now.
+fn window_height(view: &CallView, devices_open: bool) -> f32 {
+    let warnings = view.call.lost_devices.len() + usize::from(view.call.peer_audio.is_some());
+    let devices = if devices_open {
+        DEVICES_HEIGHT + 14.0
+    } else {
+        0.0
+    };
+    base_height() + warnings as f32 * WARNING_LINE + devices
+}
+
 /// One frame of the call window, in its own viewport.
 fn window(ui: &mut egui::Ui, shared: &SharedCallWindow, waker: &crate::backend::Waker) {
     let ctx = ui.ctx().clone();
-    let (view, mut devices_open) = {
+    let (view, mut devices_open, levels) = {
         let mut state = shared.lock().unwrap_or_else(|p| p.into_inner());
         let Some(view) = state.view.clone() else {
             // The call is gone and the main window has not taken the viewport down yet (it may be
@@ -248,10 +310,34 @@ fn window(ui: &mut egui::Ui, shared: &SharedCallWindow, waker: &crate::backend::
             waker.wake();
             return;
         }
-        (view, state.devices_open)
+        keep_above(&ctx, &mut state, &view);
+        if view.call.phase == CallPhase::Active {
+            let now = Instant::now();
+            if state
+                .sampled
+                .is_none_or(|sampled| now.duration_since(sampled) >= LEVEL_STEP)
+            {
+                state.sampled = Some(now);
+                state.levels.push_back(crate::call_audio::peer_level());
+                while state.levels.len() > BARS / 2 + 1 {
+                    state.levels.pop_front();
+                }
+            }
+        } else {
+            state.levels.clear();
+        }
+        let height = window_height(&view, state.devices_open);
+        if (height - state.height).abs() > 0.5 {
+            state.height = height;
+            let size = vec2(WINDOW_WIDTH, height);
+            ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(size));
+            ctx.send_viewport_cmd(egui::ViewportCommand::MaxInnerSize(size));
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+        }
+        (view, state.devices_open, state.levels.clone())
     };
     let mut requests = Vec::new();
-    window_body(ui, &view, &mut devices_open, &mut requests);
+    window_body(ui, &view, &levels, &mut devices_open, &mut requests);
     {
         let mut state = shared.lock().unwrap_or_else(|p| p.into_inner());
         state.devices_open = devices_open;
@@ -260,16 +346,47 @@ fn window(ui: &mut egui::Ui, shared: &SharedCallWindow, waker: &crate::backend::
             waker.wake();
         }
     }
-    // The duration changes every second.
-    if view.call.phase.is_live() {
+    if view.call.phase == CallPhase::Active {
+        // The bars move with the peer's voice, and the duration with the clock.
+        ctx.request_repaint_after(LEVEL_STEP);
+    } else if view.call.phase.is_live() {
         ctx.request_repaint_after(Duration::from_millis(500));
     }
 }
 
-/// Who, how far along, and the controls.
+/// Asks the desktop to keep the window above the others, or to stop, when that changed.
+fn keep_above(ctx: &egui::Context, state: &mut CallWindow, view: &CallView) {
+    use crate::keep_above::Method;
+    if state.applied_on_top == Some(view.on_top) {
+        return;
+    }
+    let new = state.applied_on_top.is_none();
+    state.applied_on_top = Some(view.on_top);
+    match crate::keep_above::method() {
+        Method::WindowLevel => {
+            ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(if view.on_top {
+                egui::WindowLevel::AlwaysOnTop
+            } else {
+                egui::WindowLevel::Normal
+            }))
+        }
+        // A new window is moved to its corner as well, once it has had a moment to be mapped and
+        // KWin can find it.
+        Method::KWin => crate::keep_above::kwin_arrange(
+            view.peer.clone(),
+            new,
+            view.on_top,
+            Duration::from_millis(if new { 700 } else { 0 }),
+        ),
+        Method::Unsupported => {}
+    }
+}
+
+/// Who, how far along, how loud the peer is, and the controls.
 fn window_body(
     ui: &mut egui::Ui,
     view: &CallView,
+    levels: &std::collections::VecDeque<f32>,
     devices_open: &mut bool,
     requests: &mut Vec<CallRequest>,
 ) {
@@ -279,64 +396,114 @@ fn window_body(
         picture,
         palette,
         locale,
+        on_top,
         ..
     } = view;
     let rect = ui.max_rect();
     ui.painter().rect_filled(rect, 0.0, surface_color(palette));
-    let inner = rect.shrink(PADDING);
-    let controls_rect = Rect::from_min_max(pos2(inner.left(), inner.bottom() - CONTROL), inner.max);
-    let devices_rect = Rect::from_min_max(
-        pos2(inner.left(), controls_rect.top() - 14.0 - DEVICES_HEIGHT),
-        pos2(inner.right(), controls_rect.top() - 14.0),
-    );
-    let top = Rect::from_min_max(
-        inner.min,
-        pos2(
-            inner.right(),
-            if *devices_open {
-                devices_rect.top()
-            } else {
-                controls_rect.top()
-            } - 8.0,
-        ),
-    );
 
+    if crate::keep_above::method() != crate::keep_above::Method::Unsupported {
+        let pin = Rect::from_min_size(
+            pos2(rect.right() - 8.0 - PIN, rect.top() + 8.0),
+            Vec2::splat(PIN),
+        );
+        let tip = if *on_top {
+            gettext(
+                *locale,
+                "The call window stays above other windows. Click to stop.",
+            )
+        } else {
+            gettext(*locale, "Keep the call window above other windows")
+        }
+        .into_owned();
+        let response = ui
+            .scope_builder(egui::UiBuilder::new().max_rect(pin), |ui| {
+                control(
+                    ui,
+                    Icon::Pin,
+                    PIN,
+                    if *on_top {
+                        palette.accent
+                    } else {
+                        palette.surface_active
+                    },
+                    if *on_top {
+                        palette.on_accent
+                    } else {
+                        palette.secondary
+                    },
+                    &tip,
+                    true,
+                )
+            })
+            .inner;
+        if response.clicked() {
+            requests.push(CallRequest::OnTop(!*on_top));
+        }
+    }
+
+    let inner = rect.shrink(MARGIN);
     ui.scope_builder(
         egui::UiBuilder::new()
-            .max_rect(top)
+            .max_rect(inner)
             .layout(Layout::top_down(Align::Center)),
         |ui| {
-            ui.set_clip_rect(top);
-            ui.add_space(12.0);
-            widgets::avatar(ui, palette, peer, &call.chat, 96.0, picture.as_deref());
-            ui.add_space(14.0);
-            theme::text(ui, peer, theme::bold(20.0), palette.text);
-            ui.add_space(4.0);
+            ui.spacing_mut().item_spacing.y = 0.0;
+            widgets::avatar(ui, palette, peer, &call.chat, AVATAR, picture.as_deref());
+            ui.add_space(8.0);
+            theme::text(ui, peer, theme::bold(18.0), palette.text);
+            ui.add_space(2.0);
             theme::text(
                 ui,
                 status(*locale, call),
-                theme::medium(14.0),
+                theme::medium(13.0),
                 status_color(call, palette),
             );
+            ui.add_space(8.0);
+            level_bars(ui, levels, palette);
             under_status(ui, *locale, call, palette);
+            ui.add_space(14.0);
+            if *devices_open {
+                devices(ui, view, requests);
+                ui.add_space(14.0);
+            }
+            ui.horizontal(|ui| controls(ui, view, devices_open, requests));
         },
     );
+}
 
-    if *devices_open {
-        ui.scope_builder(
-            egui::UiBuilder::new()
-                .max_rect(devices_rect)
-                .layout(Layout::top_down(Align::Center)),
-            |ui| devices(ui, view, requests),
-        );
+/// The peer's loudness as bars that spread from the middle: the newest sample in the centre, older
+/// ones outwards, so the row moves like an equalizer while the peer talks and lies flat while they
+/// are quiet.
+fn level_bars(ui: &mut egui::Ui, levels: &std::collections::VecDeque<f32>, palette: &Palette) {
+    const WIDTH: f32 = 3.0;
+    const GAP: f32 = 3.0;
+    let total = BARS as f32 * (WIDTH + GAP) - GAP;
+    let (rect, _) = ui.allocate_exact_size(vec2(total, BARS_HEIGHT), Sense::hover());
+    if !ui.is_rect_visible(rect) {
+        return;
     }
-
-    ui.scope_builder(
-        egui::UiBuilder::new()
-            .max_rect(controls_rect)
-            .layout(Layout::left_to_right(Align::Center)),
-        |ui| controls(ui, view, devices_open, requests),
-    );
+    let middle = BARS / 2;
+    for bar in 0..BARS {
+        let age = bar.abs_diff(middle);
+        let level = levels
+            .len()
+            .checked_sub(1 + age)
+            .and_then(|index| levels.get(index))
+            .copied()
+            .unwrap_or(0.0);
+        let height = (WIDTH + level * (BARS_HEIGHT - WIDTH)).min(BARS_HEIGHT);
+        let x = rect.left() + bar as f32 * (WIDTH + GAP);
+        let bar_rect =
+            Rect::from_center_size(pos2(x + WIDTH / 2.0, rect.center().y), vec2(WIDTH, height));
+        let color = if level > 0.05 {
+            palette.accent
+        } else {
+            palette.secondary.gamma_multiply(0.5)
+        };
+        ui.painter()
+            .rect_filled(bar_rect, CornerRadius::same(2), color);
+    }
 }
 
 /// The backdrop: a window colour.

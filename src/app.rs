@@ -557,6 +557,8 @@ pub struct App {
     pub(crate) call_window: crate::ui::call::SharedCallWindow,
     /// Set when a call starts ringing, so the next frame brings the window up to show its card.
     call_raise: bool,
+    /// The screen the main window is on, in points, which the call window opens in the corner of.
+    pub main_monitor: Option<egui::Rect>,
     /// The generation of an incoming call the desktop was told about, so its notification can be
     /// taken back when the call is answered or given up.
     call_notified: Option<u64>,
@@ -1053,6 +1055,7 @@ impl App {
             call_windowed: None,
             call_window: Default::default(),
             call_raise: false,
+            main_monitor: None,
             call_notified: None,
             call_repaint: false,
             start_with_system: None,
@@ -1691,6 +1694,7 @@ impl App {
                 palette: self.palette,
                 locale: self.locale,
                 devices: self.call_devices.clone(),
+                on_top: self.settings.call_window_on_top,
                 call,
             })
         } else {
@@ -1699,6 +1703,9 @@ impl App {
         let requests = {
             let mut window = self.call_window.lock().unwrap_or_else(|p| p.into_inner());
             if window.view != view {
+                if view.is_none() {
+                    window.reset();
+                }
                 window.view = view;
                 ctx.request_repaint_of(crate::ui::call::window_id());
             }
@@ -1713,6 +1720,10 @@ impl App {
                     self.actions.push(Action::SetCallMicrophone(device));
                 }
                 CallRequest::Speaker(device) => self.actions.push(Action::SetCallSpeaker(device)),
+                CallRequest::OnTop(on_top) => {
+                    self.settings.call_window_on_top = on_top;
+                    self.mark_settings_dirty();
+                }
                 CallRequest::Dismiss => {
                     self.call = None;
                     self.call_surface_until = None;
@@ -10432,6 +10443,25 @@ mod tests {
             app.call_window.lock().unwrap().view.is_none(),
             "and the window has nothing left to show"
         );
+    }
+
+    #[test]
+    fn the_call_windows_pin_is_remembered() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        assert!(app.settings.call_window_on_top, "on top unless turned off");
+        app.handle_call_update(active_call("1@s.whatsapp.net"));
+        app.background_frame(&ctx);
+        app.call_window
+            .lock()
+            .unwrap()
+            .requests
+            .push(crate::ui::call::CallRequest::OnTop(false));
+        app.background_frame(&ctx);
+        assert!(!app.settings.call_window_on_top);
+        app.background_frame(&ctx);
+        let view = app.call_window.lock().unwrap().view.clone().unwrap();
+        assert!(!view.on_top, "and the window is told");
     }
 
     #[test]

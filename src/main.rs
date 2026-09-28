@@ -536,6 +536,19 @@ impl eframe::App for Shell {
         if let Some(tour) = self.tour.as_mut() {
             tour.drive(app, ctx);
         }
+        // The call window opens in the corner of the screen this window is on.
+        if app.call.is_some()
+            && let Some(monitor) = frame
+                .winit_window()
+                .and_then(|window| window.current_monitor())
+        {
+            let scale = monitor.scale_factor() as f32;
+            let (position, size) = (monitor.position(), monitor.size());
+            app.main_monitor = Some(egui::Rect::from_min_size(
+                egui::pos2(position.x as f32 / scale, position.y as f32 / scale),
+                egui::vec2(size.width as f32 / scale, size.height as f32 / scale),
+            ));
+        }
         app.background_frame(ctx);
         #[cfg(target_os = "windows")]
         if let (Some(window), Some(count)) = (frame.winit_window(), app.taskbar_badge_count())

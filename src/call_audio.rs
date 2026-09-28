@@ -654,6 +654,41 @@ fn read_microphone(
 // The speaker
 // ---------------------------------------------------------------------------
 
+/// How loud the peer was in the last frame the speaker was handed, and when.
+static PEER_LEVEL: std::sync::Mutex<Option<(f32, Instant)>> = std::sync::Mutex::new(None);
+
+/// How long a level stands for the peer's voice before it counts as silence.
+const PEER_LEVEL_HOLD: Duration = Duration::from_millis(250);
+
+/// How loud the peer is right now, from 0 (silence) to 1, for the call window's level bars.
+pub fn peer_level() -> f32 {
+    match *PEER_LEVEL.lock().unwrap_or_else(|p| p.into_inner()) {
+        Some((level, at)) if at.elapsed() < PEER_LEVEL_HOLD => level,
+        _ => 0.0,
+    }
+}
+
+/// A frame's loudness on a 50 dB scale, which is how a voice reads to the ear.
+fn loudness(frame: &[i16]) -> f32 {
+    if frame.is_empty() {
+        return 0.0;
+    }
+    let power = frame
+        .iter()
+        .map(|&sample| {
+            let sample = f32::from(sample) / 32768.0;
+            sample * sample
+        })
+        .sum::<f32>()
+        / frame.len() as f32;
+    let decibels = 10.0 * power.max(1e-10).log10();
+    ((decibels + 50.0) / 50.0).clamp(0.0, 1.0)
+}
+
+fn record_peer_level(frame: &[i16]) {
+    *PEER_LEVEL.lock().unwrap_or_else(|p| p.into_inner()) = Some((loudness(frame), Instant::now()));
+}
+
 /// The speaker side: the engine's frames written to whichever device is selected.
 pub struct AudioOutput {
     swap: Option<async_channel::Sender<Option<String>>>,
@@ -940,6 +975,7 @@ fn write_speaker(
         if stop.load(Ordering::Relaxed) {
             return;
         }
+        record_peer_level(&frame);
         sink.append(sink.layout().convert(&frame));
         accepted.store(true, Ordering::Relaxed);
         let position = sink.position();
@@ -1193,6 +1229,16 @@ pub(crate) mod fake {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn loudness_reads_silence_speech_and_full_scale() {
+        assert_eq!(loudness(&[]), 0.0);
+        assert_eq!(loudness(&[0; 480]), 0.0);
+        assert!(loudness(&[i16::MAX, i16::MIN].repeat(240)) > 0.999);
+        // A voice about 20 dB under full scale sits in the upper half of the bars.
+        let voice = loudness(&[3277, -3277].repeat(240));
+        assert!((0.55..0.65).contains(&voice), "{voice}");
+    }
 
     #[test]
     fn mono_mixes_every_channel_in() {

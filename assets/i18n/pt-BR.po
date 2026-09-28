@@ -4479,5 +4479,13 @@ msgstr "Links wa.me e api.whatsapp.com abrem a conversa no ZapFast."
 msgid "Could not change the app for WhatsApp links"
 msgstr "Não foi possível mudar o app dos links do WhatsApp"
 
+#: src/ui/call.rs
+msgid "The call window stays above other windows. Click to stop."
+msgstr "A janela da chamada fica acima das outras janelas. Clique para desativar."
+
+#: src/ui/call.rs
+msgid "Keep the call window above other windows"
+msgstr "Manter a janela da chamada acima das outras janelas"
+
 #~ msgid "Jump to the newest message"
 #~ msgstr "Ir para a mensagem mais recente"
