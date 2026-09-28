@@ -10047,8 +10047,8 @@ mod picture_edge_tests {
     }
 }
 
-/// The call screen as a window: what opens it, what puts it aside without ending the call, and the
-/// one control that does end it.
+/// The call UI: the card a ringing call shows in the main window, and the window a call that is up
+/// gets of its own.
 #[cfg(test)]
 mod call_surface_tests {
     use super::tests::{app, frame_with};
@@ -10107,72 +10107,6 @@ mod call_surface_tests {
     }
 
     #[test]
-    fn escape_leaves_full_screen_before_it_puts_the_call_aside() {
-        let (mut app, ctx) = on_a_call();
-        app.actions.push(Action::ToggleCallFullscreen);
-        frame_with(&mut app, &ctx, Vec::new());
-        assert!(app.call_fullscreen, "the surface takes the whole screen");
-        assert!(!app.call_surface_hidden);
-
-        frame_with(&mut app, &ctx, vec![key(egui::Key::Escape)]);
-        assert!(!app.call_fullscreen, "escape leaves full screen");
-        assert!(
-            !app.call_surface_hidden,
-            "and the call screen is still the screen"
-        );
-        assert_eq!(
-            app.call.as_ref().map(|call| call.phase),
-            Some(CallPhase::Active),
-            "a window state is not a call state"
-        );
-
-        frame_with(&mut app, &ctx, vec![key(egui::Key::Escape)]);
-        assert!(
-            app.call_surface_hidden,
-            "a second escape is the same move the back button makes"
-        );
-        assert_eq!(
-            app.call.as_ref().map(|call| call.phase),
-            Some(CallPhase::Active),
-            "and the call runs on behind the bar"
-        );
-    }
-
-    #[test]
-    fn only_the_hang_up_button_ends_a_call() {
-        let (mut app, ctx) = on_a_call();
-        app.backend.record_demo_commands();
-        app.actions.push(Action::ToggleCallFullscreen);
-        frame_with(&mut app, &ctx, Vec::new());
-        // Everything a reader can do to the window short of hanging up.
-        frame_with(&mut app, &ctx, vec![key(egui::Key::Escape)]);
-        frame_with(&mut app, &ctx, vec![key(egui::Key::Escape)]);
-        app.actions.push(Action::ReturnToCall);
-        frame_with(&mut app, &ctx, Vec::new());
-        app.actions.push(Action::ToggleCallFullscreen);
-        frame_with(&mut app, &ctx, Vec::new());
-        frame_with(&mut app, &ctx, vec![key(egui::Key::Escape)]);
-        let hang_ups = |commands: Vec<crate::backend::Command>| {
-            commands
-                .into_iter()
-                .filter(|command| matches!(command, crate::backend::Command::HangupCall))
-                .count()
-        };
-        assert_eq!(
-            hang_ups(app.backend.take_demo_commands()),
-            0,
-            "stepping away, returning, and full screen never hang up"
-        );
-        app.actions.push(Action::HangupCall);
-        frame_with(&mut app, &ctx, Vec::new());
-        assert_eq!(
-            hang_ups(app.backend.take_demo_commands()),
-            1,
-            "the hang-up button is the one that ends the call"
-        );
-    }
-
-    #[test]
     fn an_incoming_call_stays_on_screen_until_it_is_answered_or_declined() {
         let mut app = app();
         apply_flags(&mut app, Some("call"));
@@ -10182,7 +10116,6 @@ mod call_surface_tests {
         // Escape is not an answer and not a refusal, so the ringing call stays where it can be
         // answered.
         frame_with(&mut app, &ctx, vec![key(egui::Key::Escape)]);
-        assert!(!app.call_surface_hidden, "the ringing call is still there");
         assert_eq!(
             app.call.as_ref().map(|call| call.phase),
             Some(CallPhase::Incoming)
@@ -10200,90 +10133,7 @@ mod call_surface_tests {
     }
 
     #[test]
-    fn the_bar_brings_the_call_screen_back() {
-        let (mut app, ctx) = on_a_call();
-        ctx.enable_accesskit();
-        app.actions.push(Action::LeaveCallSurface);
-        let bar = labels(&mut app, &ctx);
-        assert!(
-            bar.contains(&"Return to the call".to_owned()),
-            "the bar offers the way back: {bar:?}"
-        );
-        assert!(
-            !bar.contains(&"Hide the call screen".to_owned()),
-            "and the surface that was put aside is not on screen: {bar:?}"
-        );
-        assert_eq!(
-            app.call.as_ref().map(|call| call.phase),
-            Some(CallPhase::Active),
-            "the bar is only ever a way back to a call that is still up"
-        );
-
-        app.actions.push(Action::ReturnToCall);
-        let screen = labels(&mut app, &ctx);
-        assert!(
-            screen.contains(&"Hide the call screen".to_owned()),
-            "the surface comes back: {screen:?}"
-        );
-        assert!(
-            !screen.contains(&"Return to the call".to_owned()),
-            "and the bar goes with it: {screen:?}"
-        );
-        assert_eq!(
-            app.call.as_ref().map(|call| call.phase),
-            Some(CallPhase::Active),
-            "returning is not a new call"
-        );
-    }
-
-    /// The bar is a way back to a call that is still up, so it goes when the call does.
-    #[test]
-    fn the_bar_leaves_with_the_call_it_belongs_to() {
-        let (mut app, ctx) = on_a_call();
-        ctx.enable_accesskit();
-        app.actions.push(Action::LeaveCallSurface);
-        frame_with(&mut app, &ctx, Vec::new());
-        let bar = labels(&mut app, &ctx);
-        assert!(
-            bar.contains(&"Return to the call".to_owned()),
-            "the call is still up behind the bar: {bar:?}"
-        );
-
-        let call = app.call.as_mut().expect("a call is up");
-        call.phase = CallPhase::Ended;
-        call.outcome = Some(crate::calls::CallOutcome::Answered);
-        let after = labels(&mut app, &ctx);
-        assert!(
-            !after.contains(&"Return to the call".to_owned()),
-            "a call that is over has no way back: {after:?}"
-        );
-    }
-
-    #[test]
-    fn the_call_screen_labels_every_control_it_offers() {
-        let (mut running, ctx) = on_a_call();
-        ctx.enable_accesskit();
-        let screen = labels(&mut running, &ctx);
-        for expected in [
-            "Hide the call screen",
-            "Full screen",
-            "Mute",
-            "Speaker and devices",
-            "Hang up",
-        ] {
-            assert!(
-                screen.contains(&expected.to_owned()),
-                "missing accessible label: {expected}"
-            );
-        }
-        // The same controls say what they do when pressed, not just which button they are.
-        running.actions.push(Action::ToggleCallFullscreen);
-        let full = labels(&mut running, &ctx);
-        assert!(
-            full.contains(&"Exit full screen".to_owned()),
-            "the full-screen control says how to leave: {full:?}"
-        );
-
+    fn a_ringing_call_is_a_card_with_its_two_answers() {
         let mut ringing = app();
         apply_flags(&mut ringing, Some("call"));
         let ctx = egui::Context::default();
@@ -10296,6 +10146,46 @@ mod call_surface_tests {
                 "missing accessible label: {expected}"
             );
         }
+        assert!(
+            !incoming.contains(&"Mute".to_owned()),
+            "a ringing call has no call window yet: {incoming:?}"
+        );
+    }
+
+    /// Tests run without a windowing system, where egui draws a viewport as a window inside the
+    /// main one, so the call window's controls show up in the same tree.
+    #[test]
+    fn the_call_window_labels_every_control_it_offers() {
+        let (mut running, ctx) = on_a_call();
+        ctx.enable_accesskit();
+        let screen = labels(&mut running, &ctx);
+        for expected in ["Mute", "Speaker and devices", "Hang up"] {
+            assert!(
+                screen.contains(&expected.to_owned()),
+                "missing accessible label: {expected} in {screen:?}"
+            );
+        }
+        assert!(
+            !screen.contains(&"Accept".to_owned()),
+            "an answered call leaves the card: {screen:?}"
+        );
+    }
+
+    #[test]
+    fn only_hanging_up_ends_a_call() {
+        let (mut app, ctx) = on_a_call();
+        app.backend.record_demo_commands();
+        frame_with(&mut app, &ctx, vec![key(egui::Key::Escape)]);
+        let hang_ups = |commands: Vec<crate::backend::Command>| {
+            commands
+                .into_iter()
+                .filter(|command| matches!(command, crate::backend::Command::HangupCall))
+                .count()
+        };
+        assert_eq!(hang_ups(app.backend.take_demo_commands()), 0);
+        app.actions.push(Action::HangupCall);
+        frame_with(&mut app, &ctx, Vec::new());
+        assert_eq!(hang_ups(app.backend.take_demo_commands()), 1);
     }
 }
 

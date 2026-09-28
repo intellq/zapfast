@@ -1300,13 +1300,6 @@ pub enum Action {
     SetCallSpeaker(Option<String>),
     /// Opens the chat a logged call belongs to.
     OpenCallChat(ChatId),
-    /// Steps away from the full call screen without ending the call.
-    LeaveCallSurface,
-    /// Opens the full call screen again.
-    ReturnToCall,
-    /// Takes the call surface full screen, or leaves full screen again. The window moves; the call
-    /// does not.
-    ToggleCallFullscreen,
     /// Creates and opens a chat for a contact without one.
     StartChat {
         id: ChatId,

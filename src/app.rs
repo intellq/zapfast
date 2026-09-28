@@ -550,15 +550,13 @@ pub struct App {
     call_surface_until: Option<Instant>,
     /// The microphones and speakers the call screen offers.
     pub call_devices: crate::calls::DeviceList,
-    /// Whether the call screen shows its device pickers.
-    pub call_devices_open: bool,
-    /// Whether the full call screen is put aside so a chat can be read while the call runs. The call
-    /// itself is untouched; the surface is what moves, and a bar offers the way back.
-    pub call_surface_hidden: bool,
-    /// Whether the call surface has taken the whole screen. A window state, kept separate from the
-    /// call: leaving it shrinks the window and never touches the call, and a call that ends puts the
-    /// window back itself.
-    pub call_fullscreen: bool,
+    /// The call that has reached the call window, by generation: a call that rang and was never
+    /// answered stays on the card in the main window until it is gone.
+    call_windowed: Option<u64>,
+    /// What the call window, a viewport of its own, shows and asks for.
+    pub(crate) call_window: crate::ui::call::SharedCallWindow,
+    /// Set when a call starts ringing, so the next frame brings the window up to show its card.
+    call_raise: bool,
     /// The generation of an incoming call the desktop was told about, so its notification can be
     /// taken back when the call is answered or given up.
     call_notified: Option<u64>,
@@ -1052,9 +1050,9 @@ impl App {
             call: None,
             call_surface_until: None,
             call_devices: crate::calls::DeviceList::default(),
-            call_devices_open: true,
-            call_surface_hidden: false,
-            call_fullscreen: false,
+            call_windowed: None,
+            call_window: Default::default(),
+            call_raise: false,
             call_notified: None,
             call_repaint: false,
             start_with_system: None,
@@ -1095,9 +1093,6 @@ impl App {
         self.window_focused = false;
         self.hide_intent = false;
         self.wants_show = false;
-        // The window is gone with the full screen it was in; a new one starts at its normal size,
-        // and only a call that is still up can ask for the full screen again.
-        self.call_fullscreen = false;
     }
 
     /// What the conversation shows behind its bubbles, for the chat and the
@@ -1664,25 +1659,65 @@ impl App {
             .unwrap_or_else(|| crate::i18n::gettext(self.locale, "Unknown caller").into_owned())
     }
 
-    /// Whether the full call screen is what the reader is looking at: a call the reader has not
-    /// stepped away from.
-    ///
-    /// A call that is over keeps its surface on screen for the farewell, but that is not a screen to
-    /// step away from; neither is a call that is still ringing, whose answers only exist on it.
-    pub fn call_surface_open(&self) -> bool {
+    /// Whether the call is shown in its own window rather than on the ringing card: any call that
+    /// is past ringing, and the farewell of one that got there.
+    pub fn call_in_window(&self) -> bool {
         self.call.as_ref().is_some_and(|call| {
-            call.phase.is_live() && call.phase != crate::calls::CallPhase::Incoming
-        }) && !self.call_surface_hidden
+            call.phase != crate::calls::CallPhase::Incoming
+                && (call.phase.is_live() || self.call_windowed == Some(call.generation))
+        })
     }
 
-    /// Takes the window in or out of full screen for the call surface.
+    /// Whether a call needs the main window to stay: the ringing card lives in it, and the call
+    /// window is its child, which goes with it. Closing it to the tray minimizes it instead.
+    fn call_keeps_window(&self) -> bool {
+        self.call.as_ref().is_some_and(|call| call.phase.is_live())
+    }
+
+    /// The handle that wakes this app from another thread or window.
+    pub(crate) fn waker(&self) -> Waker {
+        self.waker.clone()
+    }
+
+    /// Hands the call window what to show, and takes back what it asked for.
     ///
-    /// Only the window moves: a call that is up, its audio, and its signaling are all left alone,
-    /// which is why this lives here rather than behind a call command.
-    fn set_call_fullscreen(&mut self, ctx: &egui::Context, fullscreen: bool) {
-        if self.call_fullscreen != fullscreen {
-            self.call_fullscreen = fullscreen;
-            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(fullscreen));
+    /// Runs every frame the app runs, including those in which the main window only ticks its logic
+    /// (minimized on Wayland), so the call window keeps up with the call either way.
+    fn sync_call_window(&mut self, ctx: &egui::Context) {
+        let view = if self.call_in_window() {
+            self.call.clone().map(|call| crate::ui::call::CallView {
+                peer: self.call_name(&call.chat),
+                picture: self.call_avatar(&call.chat),
+                palette: self.palette,
+                locale: self.locale,
+                devices: self.call_devices.clone(),
+                call,
+            })
+        } else {
+            None
+        };
+        let requests = {
+            let mut window = self.call_window.lock().unwrap_or_else(|p| p.into_inner());
+            if window.view != view {
+                window.view = view;
+                ctx.request_repaint_of(crate::ui::call::window_id());
+            }
+            std::mem::take(&mut window.requests)
+        };
+        for request in requests {
+            use crate::ui::call::CallRequest;
+            match request {
+                CallRequest::Mute(muted) => self.actions.push(Action::SetCallMuted(muted)),
+                CallRequest::Hangup => self.actions.push(Action::HangupCall),
+                CallRequest::Microphone(device) => {
+                    self.actions.push(Action::SetCallMicrophone(device));
+                }
+                CallRequest::Speaker(device) => self.actions.push(Action::SetCallSpeaker(device)),
+                CallRequest::Dismiss => {
+                    self.call = None;
+                    self.call_surface_until = None;
+                }
+            }
         }
     }
 
@@ -1693,23 +1728,6 @@ impl App {
             return None;
         }
         self.avatar(id)
-    }
-
-    /// Whether the live call belongs to a chat the lock is hiding right now.
-    fn call_is_private(&self) -> bool {
-        self.call
-            .as_ref()
-            .is_some_and(|call| self.chat_is_private(&call.chat))
-    }
-
-    /// Puts a live call back behind the bar when its chat is locked and the folder closes.
-    ///
-    /// The locked state is otherwise only applied when a call update arrives, so a call opened
-    /// while the folder was open would keep painting full-window after it closed.
-    fn hide_private_call(&mut self) {
-        if self.call_is_private() {
-            self.call_surface_hidden = true;
-        }
     }
 
     /// Resolves message mentions for markup.
@@ -2767,9 +2785,6 @@ impl App {
         {
             self.hide_locked_chat(&id);
         }
-        // The lock is applied again: a live call in a locked chat goes back behind the bar now,
-        // rather than waiting for the next update that may never come.
-        self.hide_private_call();
     }
 
     fn clear_chat_lock_entry(&mut self) {
@@ -3529,30 +3544,18 @@ impl App {
             self.call_notified = None;
             self.notifications.clear(&update.chat);
         }
-        let finished = !update.phase.is_live();
-        if finished {
+        if !update.phase.is_live() {
             if self.call.is_none() {
                 // Nothing was drawn for this call, so there is nothing to take down.
                 return;
             }
             self.call_surface_until = Some(Instant::now() + CALL_FAREWELL);
-            // How a call ended is the whole reason the surface lingers, but a locked chat still says
-            // nothing: with the folder closed the four-second farewell stays behind the bar instead
-            // of covering the window and announcing that a hidden chat had a call.
-            self.call_surface_hidden = self.chat_is_private(&update.chat);
         } else {
             self.call_surface_until = None;
-            // A call that has just begun takes the screen. Only a call the reader deliberately
-            // stepped away from stays behind the bar, and a call in a locked chat stays behind it
-            // too: that folder hides its chats everywhere else, so its caller waits in the bar with
-            // the folder's own name until the code opens it, rather than covering the window with a
-            // locked contact.
-            if self
-                .call
-                .as_ref()
-                .is_none_or(|current| !current.phase.is_live())
-            {
-                self.call_surface_hidden = self.chat_is_private(&update.chat);
+            // Answered here, answered on the other side, or placed from here: the call moves from
+            // the card to its own window, where its farewell is shown too.
+            if update.phase != crate::calls::CallPhase::Incoming {
+                self.call_windowed = Some(update.generation);
             }
         }
         let ringing = update.phase == crate::calls::CallPhase::Incoming
@@ -3563,6 +3566,7 @@ impl App {
         self.call = Some(update);
         self.call_repaint = true;
         if ringing && let Some(call) = self.call.clone() {
+            self.call_raise = true;
             self.notify_incoming_call(&call);
         }
     }
@@ -3615,12 +3619,16 @@ impl App {
             self.call_surface_until = None;
             self.call = None;
         }
-        // Full screen belongs to the call surface and only while the reader is looking at it.
-        // Whichever way the surface was put aside (the back button, Escape, a locked chat, or a
-        // call that ended), the window comes back out with it instead of staying full screen over
-        // the chat it uncovered.
-        if self.call_fullscreen && !self.call_surface_open() {
-            self.set_call_fullscreen(ctx, false);
+        // A call that starts ringing brings the window up, from the tray or from behind other
+        // windows, because its answers are on the card in the window's corner.
+        if std::mem::take(&mut self.call_raise)
+            && self
+                .call
+                .as_ref()
+                .is_some_and(|call| call.phase == crate::calls::CallPhase::Incoming)
+            && (self.window_hidden || !self.window_focused)
+        {
+            self.actions.push(Action::ShowWindow);
         }
         if let Some(call) = &self.call {
             // The duration changes every second; asking here keeps a muted, idle call's timer
@@ -3862,25 +3870,6 @@ impl App {
             }
             Action::OpenChat(id) => self.open_chat(id),
             Action::OpenCallChat(id) => self.open_chat(id),
-            Action::LeaveCallSurface => self.call_surface_hidden = true,
-            // Returning to a locked chat's call cannot lift the redaction on its own: the bar
-            // already says "Locked chat", and showing it outside the authenticated folder would
-            // reveal the contact the lock hides. Ask for the code instead of doing nothing.
-            Action::ReturnToCall => {
-                if self.call_is_private() {
-                    self.apply(Action::OpenLockedFolder, ctx);
-                } else {
-                    self.call_surface_hidden = false;
-                }
-            }
-            // The window, not the call: taking the surface full screen (or leaving it) does not
-            // touch the call handle, its media, or its signaling.
-            Action::ToggleCallFullscreen => {
-                if self.call.is_some() {
-                    let fullscreen = !self.call_fullscreen;
-                    self.set_call_fullscreen(ctx, fullscreen);
-                }
-            }
             Action::StartChat { id, name } => {
                 if self.chat(&id).is_none() {
                     self.chats.push(Chat::new(id.clone(), name.clone()));
@@ -5471,7 +5460,10 @@ impl App {
                 }
             }
             Action::HideWindow => {
-                if self.tray.is_some() {
+                if self.call_keeps_window() {
+                    // A call's card and window go with the main window, so it only steps aside.
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                } else if self.tray.is_some() {
                     self.hide_intent = true;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
@@ -5570,6 +5562,7 @@ impl App {
         self.tick(ctx);
         self.tick_audio();
         self.tick_video(ctx);
+        self.sync_call_window(ctx);
         self.apply_actions(ctx);
         self.hold_media();
         self.follow_receipts();
@@ -5878,7 +5871,14 @@ impl App {
             && !self.quit_requested
             && self.hides_to_tray()
         {
-            self.hide_intent = true;
+            if self.call_keeps_window() {
+                // The call window is this window's child and would close with it, so during a
+                // call the window is minimized instead of going to the tray.
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            } else {
+                self.hide_intent = true;
+            }
         }
         self.lock_scroll_axis(ctx);
         self.take_drops_and_pastes(ctx);
@@ -10337,95 +10337,137 @@ mod tests {
     }
 
     #[test]
-    fn a_call_that_ends_leaves_the_surface_saying_how_it_ended() {
+    fn a_call_that_is_never_answered_says_so_on_its_card() {
         let mut app = app();
-        assert!(!app.call_surface_hidden);
         app.handle_call_update(incoming_call(9, crate::calls::CallPhase::Incoming));
-        // Stepping away from a ringing call, then the caller giving up.
-        app.call_surface_hidden = true;
+        assert!(!app.call_in_window(), "a ringing call is a card");
         let mut ended = incoming_call(9, crate::calls::CallPhase::Failed);
         ended.outcome = Some(crate::calls::CallOutcome::NoAnswer);
         app.handle_call_update(ended);
         assert!(
-            !app.call_surface_hidden,
-            "a call that ended is never left behind the bar"
+            !app.call_in_window(),
+            "a call nobody answered never opens a window"
         );
         assert!(
             app.call_surface_until.is_some(),
-            "the farewell is on screen"
+            "the farewell is on the card"
         );
     }
 
     #[test]
-    fn a_locked_chats_farewell_stays_behind_the_bar() {
+    fn an_answered_call_moves_to_its_own_window() {
         let mut app = app();
-        let id = "1@s.whatsapp.net";
-        let mut chat = Chat::new(id.into(), "Fixture".into());
-        chat.locked = true;
-        app.chats.push(chat);
-        assert!(app.chat_is_private(id), "the folder is closed");
-        app.handle_call_update(call_for(id, 1, crate::calls::CallPhase::Incoming));
-        assert!(app.call_surface_hidden, "a locked caller waits in the bar");
-        let mut ended = call_for(id, 1, crate::calls::CallPhase::Failed);
-        ended.outcome = Some(crate::calls::CallOutcome::NoAnswer);
+        app.handle_call_update(incoming_call(4, crate::calls::CallPhase::Incoming));
+        assert!(!app.call_in_window());
+        app.handle_call_update(incoming_call(4, crate::calls::CallPhase::Accepted));
+        assert!(app.call_in_window(), "answering opens the call window");
+        app.handle_call_update(incoming_call(4, crate::calls::CallPhase::Active));
+        assert!(app.call_in_window());
+        let mut ended = incoming_call(4, crate::calls::CallPhase::Ended);
+        ended.outcome = Some(crate::calls::CallOutcome::Answered);
         app.handle_call_update(ended);
-        assert!(
-            app.call_surface_hidden,
-            "the farewell must not cover the window with a hidden chat's call"
-        );
-        assert!(
-            app.call_surface_until.is_some(),
-            "the farewell is still shown"
-        );
+        assert!(app.call_in_window(), "and says there how the call ended");
     }
 
     #[test]
-    fn closing_the_locked_folder_hides_a_live_call_again() {
+    fn a_call_placed_here_opens_the_window_at_once() {
         let mut app = app();
-        let id = "1@s.whatsapp.net";
-        let mut chat = Chat::new(id.into(), "Fixture".into());
-        chat.locked = true;
-        app.chats.push(chat);
-        app.settings.set_chat_lock_code(Some("fixture-code"));
-        app.enter_locked_folder();
-        assert!(app.locked_folder_open(), "the folder is authenticated");
-        app.handle_call_update(call_for(id, 1, crate::calls::CallPhase::Active));
-        assert!(!app.call_surface_hidden, "the folder lets the call show");
-        app.close_locked_folder();
+        let mut dialing = incoming_call(2, crate::calls::CallPhase::Dialing);
+        dialing.direction = crate::model::CallDirection::Outgoing;
+        app.handle_call_update(dialing);
+        assert!(app.call_in_window());
+    }
+
+    #[test]
+    fn the_call_window_is_handed_the_call_and_answers_through_the_app() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.backend.record_demo_commands();
+        app.chats
+            .push(Chat::new("1@s.whatsapp.net".into(), "Ada".into()));
+        app.handle_call_update(active_call("1@s.whatsapp.net"));
+        app.background_frame(&ctx);
+        let view = app
+            .call_window
+            .lock()
+            .unwrap()
+            .view
+            .clone()
+            .expect("the window has the call");
+        assert_eq!(view.call.phase, crate::calls::CallPhase::Active);
+        app.call_window.lock().unwrap().requests.extend([
+            crate::ui::call::CallRequest::Mute(true),
+            crate::ui::call::CallRequest::Hangup,
+        ]);
+        app.background_frame(&ctx);
+        let commands = app.backend.take_demo_commands();
         assert!(
-            app.call_surface_hidden,
-            "the lock sends the live call back to the bar"
+            commands
+                .iter()
+                .any(|command| matches!(command, Command::SetCallMuted(true)))
+        );
+        assert!(
+            commands
+                .iter()
+                .any(|command| matches!(command, Command::HangupCall))
+        );
+        assert!(app.call_window.lock().unwrap().requests.is_empty());
+    }
+
+    #[test]
+    fn closing_the_call_window_forgets_the_call() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.handle_call_update(active_call("1@s.whatsapp.net"));
+        app.background_frame(&ctx);
+        app.call_window
+            .lock()
+            .unwrap()
+            .requests
+            .push(crate::ui::call::CallRequest::Dismiss);
+        app.background_frame(&ctx);
+        assert!(app.call.is_none());
+        app.background_frame(&ctx);
+        assert!(
+            app.call_window.lock().unwrap().view.is_none(),
+            "and the window has nothing left to show"
         );
     }
 
     #[test]
-    fn returning_to_a_locked_call_cannot_lift_the_redaction() {
+    fn a_locked_chats_call_window_does_not_name_it() {
         let mut app = app();
         let ctx = egui::Context::default();
         let id = "1@s.whatsapp.net";
         let mut chat = Chat::new(id.into(), "Fixture".into());
         chat.locked = true;
         app.chats.push(chat);
-        app.call = Some(call_for(id, 1, crate::calls::CallPhase::Active));
-        // The call of a closed locked chat is already behind the bar; returning to it must not
-        // lift that without the code.
-        app.call_surface_hidden = true;
-        app.apply(Action::ReturnToCall, &ctx);
+        app.handle_call_update(active_call(id));
+        app.background_frame(&ctx);
+        let view = app.call_window.lock().unwrap().view.clone().unwrap();
+        assert_eq!(view.peer, "Locked chat");
+        assert!(view.picture.is_none());
+    }
+
+    #[test]
+    fn a_ringing_call_brings_the_window_back_from_the_tray() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.window_hidden = true;
+        app.handle_call_update(incoming_call(3, crate::calls::CallPhase::Incoming));
+        app.background_frame(&ctx);
+        assert!(app.wants_show, "the card needs the window");
+    }
+
+    #[test]
+    fn hiding_the_window_during_a_call_only_minimizes_it() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.call = Some(active_call("1@s.whatsapp.net"));
+        app.apply(Action::HideWindow, &ctx);
         assert!(
-            app.call_surface_hidden,
-            "a locked call needs the folder to show"
-        );
-        assert_eq!(
-            app.dialog,
-            Some(Dialog::UnlockLockedChats),
-            "returning to a locked call asks for the code"
-        );
-        app.chats[0].locked = false;
-        app.dialog = None;
-        app.apply(Action::ReturnToCall, &ctx);
-        assert!(
-            !app.call_surface_hidden,
-            "an ordinary call returns as before"
+            !app.hide_intent,
+            "the call window would close with the main one"
         );
     }
 
@@ -10442,84 +10484,6 @@ mod tests {
     }
 
     #[test]
-    fn stepping_away_from_the_call_screen_keeps_the_call_running() {
-        let mut app = app();
-        let ctx = egui::Context::default();
-        app.backend.record_demo_commands();
-        app.call = Some(active_call("1@s.whatsapp.net"));
-        app.apply(Action::LeaveCallSurface, &ctx);
-        assert!(app.call_surface_hidden, "the surface steps aside");
-        assert_eq!(
-            app.call.as_ref().map(|call| call.phase),
-            Some(crate::calls::CallPhase::Active),
-            "the call itself is untouched"
-        );
-        assert!(!app.call_surface_open(), "and it is the bar that shows");
-
-        app.apply(Action::ReturnToCall, &ctx);
-        assert!(!app.call_surface_hidden, "the way back reopens it");
-        assert!(app.call_surface_open());
-
-        // The window, too: full screen comes and goes without the call noticing.
-        app.apply(Action::ToggleCallFullscreen, &ctx);
-        assert!(app.call_fullscreen);
-        app.apply(Action::ToggleCallFullscreen, &ctx);
-        assert!(!app.call_fullscreen);
-        assert_eq!(
-            app.call.as_ref().map(|call| call.phase),
-            Some(crate::calls::CallPhase::Active),
-            "a window state is not a call state"
-        );
-
-        // None of that touched the call, and only the hang-up ends it.
-        assert!(
-            !sent(&app, |command| matches!(command, Command::HangupCall)),
-            "stepping away, returning, and full screen never hang up"
-        );
-        app.apply(Action::HangupCall, &ctx);
-        assert!(
-            sent(&app, |command| matches!(command, Command::HangupCall)),
-            "the hang-up button is the one that ends the call"
-        );
-    }
-
-    #[test]
-    fn a_call_that_ends_puts_the_window_back_out_of_full_screen() {
-        let mut app = app();
-        let ctx = egui::Context::default();
-        app.call = Some(active_call("1@s.whatsapp.net"));
-        app.apply(Action::ToggleCallFullscreen, &ctx);
-        assert!(app.call_fullscreen);
-        let mut ended = active_call("1@s.whatsapp.net");
-        ended.phase = crate::calls::CallPhase::Failed;
-        ended.outcome = Some(crate::calls::CallOutcome::NoAnswer);
-        app.handle_call_update(ended);
-        // The frame that follows the last one the call appears in.
-        app.background_frame(&ctx);
-        assert!(
-            !app.call_fullscreen,
-            "full screen belongs to the surface, not to the window"
-        );
-    }
-
-    #[test]
-    fn an_accepted_incoming_call_leaves_the_call_screen_open() {
-        let mut app = app();
-        app.handle_call_update(incoming_call(4, crate::calls::CallPhase::Incoming));
-        assert!(!app.call_surface_hidden, "a ringing call takes the screen");
-        assert!(
-            !app.call_surface_open(),
-            "but a ringing call is answered, not stepped away from"
-        );
-        app.handle_call_update(incoming_call(4, crate::calls::CallPhase::Active));
-        assert!(!app.call_surface_hidden, "accepting leaves it open");
-        assert!(
-            app.call_surface_open(),
-            "and the running call is the screen"
-        );
-    }
-
-    #[test]
     fn opening_another_chat_leaves_a_running_call_alone() {
         let mut app = app();
         let ctx = egui::Context::default();
@@ -10529,10 +10493,8 @@ mod tests {
         app.chats.push(Chat::new(other.into(), "Other".into()));
         app.backend.record_demo_commands();
         app.call = Some(active_call(caller));
-        app.call_surface_hidden = true;
         app.apply(Action::OpenChat(other.into()), &ctx);
         assert_eq!(app.open_chat.as_deref(), Some(other));
-        assert!(app.call_surface_hidden, "the bar stays up in another chat");
         assert_eq!(
             app.call.as_ref().map(|call| call.phase),
             Some(crate::calls::CallPhase::Active),
@@ -10549,7 +10511,6 @@ mod tests {
         let mut app = app();
         app.backend.record_demo_commands();
         app.call = Some(active_call("1@s.whatsapp.net"));
-        app.call_fullscreen = true;
         app.window_gone();
         assert!(app.window_hidden, "the window is in the tray");
         assert_eq!(
@@ -10557,7 +10518,6 @@ mod tests {
             Some(crate::calls::CallPhase::Active),
             "a window the reader cannot see is still a call"
         );
-        assert!(!app.call_fullscreen, "and it comes back at its normal size");
         assert!(!sent(&app, |command| matches!(
             command,
             Command::HangupCall
@@ -10565,7 +10525,7 @@ mod tests {
     }
 
     #[test]
-    fn the_call_bar_goes_when_the_farewell_does() {
+    fn the_call_goes_when_the_farewell_does() {
         let mut app = app();
         let ctx = egui::Context::default();
         app.call = Some(active_call("1@s.whatsapp.net"));
@@ -10573,13 +10533,9 @@ mod tests {
         ended.phase = crate::calls::CallPhase::Failed;
         app.handle_call_update(ended);
         assert!(app.call.is_some(), "the farewell is still on screen");
-        assert!(
-            !app.call_surface_open(),
-            "a call that is over is not a call to return to"
-        );
         app.call_surface_until = Some(Instant::now() - Duration::from_secs(1));
         app.background_frame(&ctx);
-        assert!(app.call.is_none(), "and then the bar has nothing to show");
+        assert!(app.call.is_none(), "and then there is nothing to show");
     }
 
     /// An incoming call for a specific chat, as the backend would publish it.

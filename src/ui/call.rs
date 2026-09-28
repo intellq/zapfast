@@ -1,77 +1,342 @@
-//! The call surface: a full-window screen for a live 1:1 call, and the prompt for one that rings.
+//! The call UI, drawn the way WhatsApp's desktop app draws it: a call that rings is a card in the
+//! bottom-left corner of the main window, with who is calling and the two answers, and a call that
+//! is up (answered, or placed from here) gets a small window of its own.
 //!
 //! Nothing here decides what a call is doing. The phase, the point the duration counts from, the
 //! mute state and the device selections all come from [`crate::calls::CallUpdate`], which the worker
-//! fills from the backend's own events. This module only draws them, and pushes [`Action`]s when the
-//! user presses something.
+//! fills from the backend's own events. This module only draws them, and asks the app for something
+//! when the user presses a button.
+//!
+//! The call window is a separate egui viewport with its own event loop turn, so it keeps drawing
+//! while the main window is minimized. It cannot borrow the [`App`]: the app hands it a
+//! [`CallView`] each frame through [`CallWindow`] and reads its [`CallRequest`]s back.
 
-use std::path::Path;
-use std::time::Instant;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
-use egui::{Align, Color32, CornerRadius, Layout, Rect, Sense, Vec2, vec2};
+use egui::{Align, Color32, CornerRadius, Layout, Rect, Sense, Vec2, pos2, vec2};
 
 use crate::app::App;
-use crate::calls::{CallOutcome, CallPhase, CallUpdate, PeerAudio, SilenceReason};
+use crate::calls::{CallOutcome, CallPhase, CallUpdate, DeviceList, PeerAudio, SilenceReason};
 use crate::i18n::{Locale, gettext};
 use crate::model::Action;
 use crate::theme::{self, Icon, Palette};
 use crate::ui::widgets;
 
-/// The area's id, so the surface keeps one place in the layer order for the life of the call.
-const SURFACE: &str = "zapfast-call-surface";
-/// The bar a call the reader stepped away from keeps on screen.
-const MINIBAR: &str = "zapfast-call-bar";
-/// Padding between the window edge and everything the surface draws.
-const PADDING: f32 = 26.0;
-/// The main round controls.
-const CONTROL: f32 = 58.0;
+/// The ringing card's area, so it keeps one place in the layer order for the life of the call.
+const CARD: &str = "zapfast-call-card";
+/// The call window's viewport.
+const WINDOW: &str = "zapfast-call-window";
+/// The ringing card's width, including its margins.
+const CARD_WIDTH: f32 = 340.0;
+/// The ringing card's round buttons.
+const CARD_CONTROL: f32 = 42.0;
+/// The call window's size, in points.
+const WINDOW_SIZE: [f32; 2] = [340.0, 480.0];
+/// Padding between the call window's edge and everything it draws.
+const PADDING: f32 = 20.0;
+/// The call window's round controls.
+const CONTROL: f32 = 52.0;
+/// The device pickers' width in the call window.
+const PICKER_WIDTH: f32 = 260.0;
+/// The height the two stacked device pickers take.
+const DEVICES_HEIGHT: f32 = 112.0;
 
-/// Draws the call surface, if there is one.
-///
-/// A live call the reader stepped away from is not drawn over the window at all: it leaves the chat
-/// it interrupted readable and keeps a bar at the bottom, so nothing is lost and nothing is in the
-/// way. The call itself is never touched by stepping away, and hanging up is the only thing that
-/// ends it.
+/// What the call window shows, as the app last handed it over.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CallView {
+    pub call: CallUpdate,
+    /// The call's own name: "Locked chat" or "Unknown caller" where the app would not say more.
+    pub peer: String,
+    pub picture: Option<PathBuf>,
+    pub palette: Palette,
+    pub locale: Locale,
+    pub devices: DeviceList,
+}
+
+/// What the call window asks the app to do.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CallRequest {
+    Mute(bool),
+    Hangup,
+    Microphone(Option<String>),
+    Speaker(Option<String>),
+    /// The window was closed: the app forgets the call it showed.
+    Dismiss,
+}
+
+/// The state the app and the call window share.
+#[derive(Debug, Default)]
+pub struct CallWindow {
+    /// What to draw; `None` once there is no call to show, which hides the window.
+    pub view: Option<CallView>,
+    /// What the window asked for since the app last looked.
+    pub requests: Vec<CallRequest>,
+    /// Whether the window shows its device pickers.
+    pub devices_open: bool,
+}
+
+/// The call window's state, shared between the app and the window's own viewport.
+pub type SharedCallWindow = Arc<Mutex<CallWindow>>;
+
+/// The call window's viewport id, so the app can ask it to repaint.
+pub fn window_id() -> egui::ViewportId {
+    egui::ViewportId::from_hash_of(WINDOW)
+}
+
+/// Draws the call UI, if there is a call: the ringing card in this window, or the call window.
 pub fn show(app: &mut App, ctx: &egui::Context) {
     let Some(call) = app.call.clone() else {
         return;
     };
+    if app.call_in_window() {
+        open_window(app, ctx);
+    } else {
+        card(app, ctx, &call);
+    }
+}
+
+/// The card in the bottom-left corner: who is calling, and Decline and Accept. A call that rang
+/// and was never answered keeps the card for a moment to say how it ended.
+fn card(app: &mut App, ctx: &egui::Context, call: &CallUpdate) {
     let palette = app.palette;
-    // The call's own name and picture: no phone number for a caller with no name, and nothing at all
-    // for a chat the lock is hiding.
+    let locale = app.locale;
     let peer = app.call_name(&call.chat);
     let picture = app.call_avatar(&call.chat);
-    if app.call_surface_hidden && call.phase.is_live() {
-        bar(app, ctx, &call, &peer, &palette);
-        return;
-    }
-    // The whole window, minus the strip macOS reserves for the traffic lights, which the surface
-    // must not paint over.
-    let screen = ctx.content_rect();
-    let screen = match theme::titlebar_inset(ctx) {
-        0.0 => screen,
-        inset => screen.with_min_y(screen.top() + inset),
-    };
-
-    egui::Area::new(egui::Id::new(SURFACE))
+    let ringing = call.phase == CallPhase::Incoming;
+    egui::Area::new(egui::Id::new(CARD))
         .order(egui::Order::Foreground)
-        .fixed_pos(screen.min)
+        .anchor(egui::Align2::LEFT_BOTTOM, vec2(16.0, -16.0))
         .show(ctx, |ui| {
-            ui.set_min_size(screen.size());
             egui::Frame::new()
-                .fill(surface_color(&palette))
+                .fill(if palette.dark {
+                    Color32::from_rgb(28, 32, 36)
+                } else {
+                    palette.panel
+                })
+                .stroke(egui::Stroke::new(1.0, palette.outline))
+                .corner_radius(CornerRadius::same(14))
+                .inner_margin(egui::Margin::symmetric(14, 12))
+                .shadow(egui::epaint::Shadow {
+                    offset: [0, 4],
+                    blur: 18,
+                    spread: 0,
+                    color: palette.shadow,
+                })
                 .show(ui, |ui| {
-                    ui.set_min_size(screen.size());
-                    let inner = screen.shrink(PADDING);
-                    ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| {
-                        if call.phase == CallPhase::Incoming {
-                            ringing(ui, app, &call, &peer, picture.as_deref(), &palette, inner);
+                    let width = CARD_WIDTH - 28.0;
+                    ui.set_width(width);
+                    ui.horizontal(|ui| {
+                        widgets::avatar(ui, &palette, &peer, &call.chat, 44.0, picture.as_deref());
+                        ui.add_space(10.0);
+                        let buttons = if ringing {
+                            2.0 * CARD_CONTROL + 18.0
                         } else {
-                            live(ui, app, &call, &peer, picture.as_deref(), &palette, inner);
+                            0.0
+                        };
+                        let text = (width - 54.0 - buttons).max(60.0);
+                        ui.allocate_ui_with_layout(
+                            vec2(text, CARD_CONTROL),
+                            Layout::top_down(Align::Min),
+                            |ui| {
+                                ui.set_width(text);
+                                theme::text(ui, &peer, theme::semibold(15.0), palette.text);
+                                let (line, color) = if ringing {
+                                    (
+                                        gettext(locale, "Incoming voice call").into_owned(),
+                                        palette.secondary,
+                                    )
+                                } else {
+                                    (status(locale, call), status_color(call, &palette))
+                                };
+                                theme::text(ui, line, theme::medium(12.5), color);
+                            },
+                        );
+                        if ringing {
+                            ui.add_space(8.0);
+                            let decline = gettext(locale, "Decline").into_owned();
+                            let response = control(
+                                ui,
+                                Icon::Phone,
+                                CARD_CONTROL,
+                                palette.danger,
+                                Color32::WHITE,
+                                &decline,
+                                true,
+                            );
+                            if response.clicked() {
+                                app.actions.push(Action::DeclineCall);
+                            }
+                            ui.add_space(10.0);
+                            let accept = gettext(locale, "Accept").into_owned();
+                            let response = control(
+                                ui,
+                                Icon::Phone,
+                                CARD_CONTROL,
+                                palette.accent,
+                                palette.on_accent,
+                                &accept,
+                                true,
+                            );
+                            if response.clicked() {
+                                app.actions.push(Action::AnswerCall);
+                            }
                         }
                     });
                 });
         });
+}
+
+/// Keeps the call window open. Its contents come from [`CallWindow`], which the app fills in
+/// [`App::background_frame`], so this only has to say that the window exists and what it is called.
+fn open_window(app: &App, ctx: &egui::Context) {
+    let shared = Arc::clone(&app.call_window);
+    let waker = app.waker();
+    let title = app
+        .call
+        .as_ref()
+        .map(|call| app.call_name(&call.chat))
+        .unwrap_or_default();
+    let builder = egui::ViewportBuilder::default()
+        .with_title(title)
+        .with_app_id(std::env::var("FLATPAK_ID").unwrap_or_else(|_| "zapfast".to_owned()))
+        .with_inner_size(WINDOW_SIZE)
+        .with_min_inner_size(WINDOW_SIZE)
+        .with_resizable(false)
+        .with_maximize_button(false)
+        .with_icon(window_icon())
+        .with_window_level(egui::WindowLevel::AlwaysOnTop);
+    ctx.show_viewport_deferred(window_id(), builder, move |ui, _class| {
+        window(ui, &shared, &waker);
+    });
+}
+
+/// ZapFast's icon for the call window, made once.
+fn window_icon() -> Arc<egui::IconData> {
+    static ICON: OnceLock<Arc<egui::IconData>> = OnceLock::new();
+    Arc::clone(ICON.get_or_init(|| {
+        const SIZE: usize = 128;
+        Arc::new(egui::IconData {
+            rgba: crate::util::app_icon_rgba(SIZE),
+            width: SIZE as u32,
+            height: SIZE as u32,
+        })
+    }))
+}
+
+/// One frame of the call window, in its own viewport.
+fn window(ui: &mut egui::Ui, shared: &SharedCallWindow, waker: &crate::backend::Waker) {
+    let ctx = ui.ctx().clone();
+    let (view, mut devices_open) = {
+        let mut state = shared.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(view) = state.view.clone() else {
+            // The call is gone and the main window has not taken the viewport down yet (it may be
+            // minimized and not drawing), so the window gets out of the way on its own.
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            return;
+        };
+        // Closing the window is hanging up: the call has nowhere else to be shown.
+        if ctx.input(|input| input.viewport().close_requested()) {
+            if view.call.phase.is_live() {
+                state.requests.push(CallRequest::Hangup);
+            }
+            state.requests.push(CallRequest::Dismiss);
+            state.view = None;
+            drop(state);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            waker.wake();
+            return;
+        }
+        (view, state.devices_open)
+    };
+    let mut requests = Vec::new();
+    window_body(ui, &view, &mut devices_open, &mut requests);
+    {
+        let mut state = shared.lock().unwrap_or_else(|p| p.into_inner());
+        state.devices_open = devices_open;
+        if !requests.is_empty() {
+            state.requests.extend(requests);
+            waker.wake();
+        }
+    }
+    // The duration changes every second.
+    if view.call.phase.is_live() {
+        ctx.request_repaint_after(Duration::from_millis(500));
+    }
+}
+
+/// Who, how far along, and the controls.
+fn window_body(
+    ui: &mut egui::Ui,
+    view: &CallView,
+    devices_open: &mut bool,
+    requests: &mut Vec<CallRequest>,
+) {
+    let CallView {
+        call,
+        peer,
+        picture,
+        palette,
+        locale,
+        ..
+    } = view;
+    let rect = ui.max_rect();
+    ui.painter().rect_filled(rect, 0.0, surface_color(palette));
+    let inner = rect.shrink(PADDING);
+    let controls_rect = Rect::from_min_max(pos2(inner.left(), inner.bottom() - CONTROL), inner.max);
+    let devices_rect = Rect::from_min_max(
+        pos2(inner.left(), controls_rect.top() - 14.0 - DEVICES_HEIGHT),
+        pos2(inner.right(), controls_rect.top() - 14.0),
+    );
+    let top = Rect::from_min_max(
+        inner.min,
+        pos2(
+            inner.right(),
+            if *devices_open {
+                devices_rect.top()
+            } else {
+                controls_rect.top()
+            } - 8.0,
+        ),
+    );
+
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(top)
+            .layout(Layout::top_down(Align::Center)),
+        |ui| {
+            ui.set_clip_rect(top);
+            ui.add_space(12.0);
+            widgets::avatar(ui, palette, peer, &call.chat, 96.0, picture.as_deref());
+            ui.add_space(14.0);
+            theme::text(ui, peer, theme::bold(20.0), palette.text);
+            ui.add_space(4.0);
+            theme::text(
+                ui,
+                status(*locale, call),
+                theme::medium(14.0),
+                status_color(call, palette),
+            );
+            under_status(ui, *locale, call, palette);
+        },
+    );
+
+    if *devices_open {
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(devices_rect)
+                .layout(Layout::top_down(Align::Center)),
+            |ui| devices(ui, view, requests),
+        );
+    }
+
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(controls_rect)
+            .layout(Layout::left_to_right(Align::Center)),
+        |ui| controls(ui, view, devices_open, requests),
+    );
 }
 
 /// The backdrop: a window colour.
@@ -83,151 +348,8 @@ fn surface_color(palette: &Palette) -> Color32 {
     }
 }
 
-/// A call that is up, coming up, or just over.
-fn live(
-    ui: &mut egui::Ui,
-    app: &mut App,
-    call: &CallUpdate,
-    peer: &str,
-    picture: Option<&Path>,
-    palette: &Palette,
-    area: Rect,
-) {
-    ui.vertical_centered(|ui| {
-        ui.add_space(area.height() * 0.16);
-        let size = (area.height() * 0.26).clamp(96.0, 168.0);
-        widgets::avatar(ui, palette, peer, &call.chat, size, picture);
-        ui.add_space(18.0);
-        theme::text(ui, peer, theme::bold(26.0), palette.text);
-        ui.add_space(6.0);
-        theme::text(
-            ui,
-            status(app, call),
-            theme::medium(15.0),
-            status_color(call, palette),
-        );
-        under_status(ui, app, call, palette, false);
-    });
-
-    // Window-level controls: stepping back to the chat, and taking the surface full screen. Neither
-    // one ends the call. They come after whatever the surface fills itself with, so they are drawn
-    // over a picture rather than under it.
-    ui.horizontal(|ui| {
-        if call.phase.is_live() {
-            // Named for what it does rather than for where it goes: "Back to the chat" reads as
-            // ending the call to anyone who has not guessed, and this button is the one that says
-            // the call is still running behind the bar it leaves behind.
-            let back = gettext(app.locale, "Hide the call screen").into_owned();
-            let response = control(
-                ui,
-                Icon::ArrowLeft,
-                38.0,
-                palette.surface_active,
-                palette.text,
-                &back,
-                true,
-            );
-            if response.clicked() {
-                app.actions.push(Action::LeaveCallSurface);
-            }
-            ui.add_space(8.0);
-        }
-        let (icon, tip) = if app.call_fullscreen {
-            (
-                Icon::Minimize,
-                gettext(app.locale, "Exit full screen").into_owned(),
-            )
-        } else {
-            (
-                Icon::Maximize,
-                gettext(app.locale, "Full screen").into_owned(),
-            )
-        };
-        let response = control(
-            ui,
-            icon,
-            38.0,
-            palette.surface_active,
-            palette.text,
-            &tip,
-            true,
-        );
-        if response.clicked() {
-            app.actions.push(Action::ToggleCallFullscreen);
-        }
-    });
-
-    ui.with_layout(Layout::bottom_up(Align::Center), |ui| {
-        ui.add_space(6.0);
-        if app.call_devices_open {
-            devices(ui, app, call);
-            ui.add_space(12.0);
-        }
-        controls(ui, app, call, palette);
-    });
-}
-
-/// The bar that keeps a call the reader stepped away from in view.
-///
-/// It carries the same state the full screen would (who, how far along, and how long) and one way
-/// back, floating above the page rather than covering it.
-fn bar(app: &mut App, ctx: &egui::Context, call: &CallUpdate, peer: &str, palette: &Palette) {
-    let locale = app.locale;
-    let live = call.phase == CallPhase::Active;
-    egui::Area::new(egui::Id::new(MINIBAR))
-        .order(egui::Order::Foreground)
-        .anchor(egui::Align2::CENTER_BOTTOM, vec2(0.0, -18.0))
-        .show(ctx, |ui| {
-            egui::Frame::new()
-                .fill(if palette.dark {
-                    Color32::from_rgb(28, 32, 36)
-                } else {
-                    palette.panel
-                })
-                .stroke(egui::Stroke::new(1.0, palette.outline))
-                .corner_radius(CornerRadius::same(22))
-                .inner_margin(egui::Margin::symmetric(16, 9))
-                .shadow(egui::epaint::Shadow {
-                    offset: [0, 4],
-                    blur: 18,
-                    spread: 0,
-                    color: palette.shadow,
-                })
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        // A voice call, in the colour the surface uses for a call that is up. The
-                        // whole point of the bar is that the call is still there, so it says what
-                        // kind of call it is before it says who is on it.
-                        theme::icon(
-                            ui,
-                            Icon::Phone,
-                            13.0,
-                            if live { palette.danger } else { palette.accent },
-                        );
-                        ui.add_space(4.0);
-                        theme::text(ui, peer, theme::semibold(13.5), palette.text);
-                        theme::text(
-                            ui,
-                            status(app, call),
-                            theme::medium(13.0),
-                            palette.secondary,
-                        );
-                        ui.add_space(8.0);
-                        if ui
-                            .button(gettext(locale, "Return to the call"))
-                            .on_hover_text(gettext(locale, "Return to the call"))
-                            .clicked()
-                        {
-                            app.actions.push(Action::ReturnToCall);
-                        }
-                    });
-                });
-        });
-}
-
 /// The line under the peer's name, derived from the backend's phase and nothing else.
-fn status(app: &App, call: &CallUpdate) -> String {
-    let locale = app.locale;
+fn status(locale: Locale, call: &CallUpdate) -> String {
     match call.phase {
         CallPhase::Dialing => gettext(locale, "Calling…").into_owned(),
         // The peer's phone is ringing: its `<preaccept>` arrived and nobody has answered yet.
@@ -293,38 +415,27 @@ fn status_color(call: &CallUpdate, palette: &Palette) -> Color32 {
 ///
 /// A device that went away is shown rather than swallowed, so a headset switching off reads as a
 /// reason instead of as a call that quietly started using another microphone.
-fn under_status(
-    ui: &mut egui::Ui,
-    app: &App,
-    call: &CallUpdate,
-    palette: &Palette,
-    on_picture: bool,
-) {
+fn under_status(ui: &mut egui::Ui, locale: Locale, call: &CallUpdate, palette: &Palette) {
     if !call.lost_devices.is_empty() {
-        let tint = if on_picture {
-            Color32::from_rgb(255, 214, 150)
-        } else {
-            palette.warning
-        };
         ui.add_space(4.0);
         for lost in &call.lost_devices {
-            theme::text(ui, lost_device(app, lost), theme::medium(12.5), tint);
+            theme::text(
+                ui,
+                lost_device(locale, lost),
+                theme::medium(12.5),
+                palette.warning,
+            );
         }
     }
     // The engine's own diagnosis of a call that carries no audio from the peer: the peer is better
     // told that the call is one-sided than left wondering whether their microphone is broken.
     if let Some(audio) = call.peer_audio {
-        let tint = if on_picture {
-            Color32::from_rgb(255, 214, 150)
-        } else {
-            palette.warning
-        };
         ui.add_space(4.0);
         theme::text(
             ui,
-            peer_audio_text(app.locale, audio),
+            peer_audio_text(locale, audio),
             theme::medium(12.5),
-            tint,
+            palette.warning,
         );
     }
 }
@@ -359,8 +470,7 @@ fn peer_audio_text(locale: Locale, audio: PeerAudio) -> String {
 /// Why a device the user picked is not the one in use, with its name filled in.
 ///
 /// Translators: `{name}` is replaced by the device's own description, which may be long.
-fn lost_device(app: &App, lost: &crate::calls::LostDevice) -> String {
-    let locale = app.locale;
+fn lost_device(locale: Locale, lost: &crate::calls::LostDevice) -> String {
     let template = match lost.kind {
         crate::calls::DeviceKind::Microphone => gettext(
             locale,
@@ -383,79 +493,6 @@ fn elapsed(started: Instant) -> String {
     } else {
         format!("{minutes:02}:{seconds:02}")
     }
-}
-
-/// The round buttons.
-fn controls(ui: &mut egui::Ui, app: &mut App, call: &CallUpdate, palette: &Palette) {
-    let locale = app.locale;
-    let connected = call.phase.is_connected();
-    let live = call.phase.is_live();
-    let buttons = 4.0;
-    ui.horizontal(|ui| {
-        let spacing = 14.0;
-        let width = buttons * CONTROL + (buttons - 1.0) * spacing;
-        ui.add_space(((ui.available_width() - width) / 2.0).max(0.0));
-
-        // Microphone: the engine's own mute flag, which is what stops outgoing audio.
-        let tip = if call.muted {
-            gettext(locale, "Unmute").into_owned()
-        } else {
-            gettext(locale, "Mute").into_owned()
-        };
-        let response = control(
-            ui,
-            if call.muted { Icon::VolumeX } else { Icon::Mic },
-            CONTROL,
-            if call.muted {
-                palette.danger
-            } else {
-                palette.surface_active
-            },
-            palette.text,
-            &tip,
-            connected,
-        );
-        if response.clicked() {
-            app.actions.push(Action::SetCallMuted(!call.muted));
-        }
-
-        // The speaker button shows and hides the device pickers below it.
-        let tip = gettext(locale, "Speaker and devices").into_owned();
-        let response = control(
-            ui,
-            Icon::Volume2,
-            CONTROL,
-            if app.call_devices_open {
-                palette.accent
-            } else {
-                palette.surface_active
-            },
-            if app.call_devices_open {
-                palette.on_accent
-            } else {
-                palette.text
-            },
-            &tip,
-            live,
-        );
-        if response.clicked() {
-            app.call_devices_open = !app.call_devices_open;
-        }
-
-        let tip = gettext(locale, "Hang up").into_owned();
-        let response = control(
-            ui,
-            Icon::Phone,
-            CONTROL,
-            palette.danger,
-            Color32::WHITE,
-            &tip,
-            true,
-        );
-        if response.clicked() {
-            app.actions.push(Action::HangupCall);
-        }
-    });
 }
 
 /// One round control. A disabled control still reads as a control rather than disappearing.
@@ -507,29 +544,113 @@ fn control(
     response.on_hover_text(tooltip)
 }
 
-/// The device pickers. Each one rebinds a live stream, so what it shows is what is in use.
-fn devices(ui: &mut egui::Ui, app: &mut App, call: &CallUpdate) {
-    let locale = app.locale;
-    let default_label = gettext(locale, "Default device").into_owned();
-    let microphones: Vec<(String, String)> = app
-        .call_devices
-        .microphones
-        .iter()
-        .map(|device| (device.id.clone(), device.label.clone()))
-        .collect();
-    let speakers: Vec<(String, String)> = app
-        .call_devices
-        .speakers
-        .iter()
-        .map(|device| (device.id.clone(), device.label.clone()))
-        .collect();
+/// The call window's round buttons: mute, devices, and hang up.
+fn controls(
+    ui: &mut egui::Ui,
+    view: &CallView,
+    devices_open: &mut bool,
+    requests: &mut Vec<CallRequest>,
+) {
+    let CallView {
+        call,
+        palette,
+        locale,
+        ..
+    } = view;
+    let locale = *locale;
     let connected = call.phase.is_connected();
+    let live = call.phase.is_live();
+    let buttons = 3.0;
+    let spacing = 22.0;
+    let width = buttons * CONTROL + (buttons - 1.0) * spacing;
+    ui.spacing_mut().item_spacing.x = spacing;
+    ui.add_space(((ui.available_width() - width) / 2.0).max(0.0));
 
-    ui.horizontal(|ui| {
-        let width = 384.0;
-        ui.add_space(((ui.available_width() - width) / 2.0).max(0.0));
-        let mut actions = Vec::new();
-        let choices = Picker {
+    // Microphone: the engine's own mute flag, which is what stops outgoing audio.
+    let tip = if call.muted {
+        gettext(locale, "Unmute").into_owned()
+    } else {
+        gettext(locale, "Mute").into_owned()
+    };
+    let response = control(
+        ui,
+        if call.muted { Icon::VolumeX } else { Icon::Mic },
+        CONTROL,
+        if call.muted {
+            palette.danger
+        } else {
+            palette.surface_active
+        },
+        palette.text,
+        &tip,
+        connected,
+    );
+    if response.clicked() {
+        requests.push(CallRequest::Mute(!call.muted));
+    }
+
+    // The speaker button shows and hides the device pickers above it.
+    let tip = gettext(locale, "Speaker and devices").into_owned();
+    let response = control(
+        ui,
+        Icon::Volume2,
+        CONTROL,
+        if *devices_open {
+            palette.accent
+        } else {
+            palette.surface_active
+        },
+        if *devices_open {
+            palette.on_accent
+        } else {
+            palette.text
+        },
+        &tip,
+        live,
+    );
+    if response.clicked() {
+        *devices_open = !*devices_open;
+    }
+
+    let tip = gettext(locale, "Hang up").into_owned();
+    let response = control(
+        ui,
+        Icon::Phone,
+        CONTROL,
+        palette.danger,
+        Color32::WHITE,
+        &tip,
+        live,
+    );
+    if response.clicked() {
+        requests.push(CallRequest::Hangup);
+    }
+}
+
+/// The device pickers, one above the other. Each one rebinds a live stream, so what it shows is
+/// what is in use.
+fn devices(ui: &mut egui::Ui, view: &CallView, requests: &mut Vec<CallRequest>) {
+    let CallView {
+        call,
+        locale,
+        devices,
+        ..
+    } = view;
+    let locale = *locale;
+    let default_label = gettext(locale, "Default device").into_owned();
+    let list = |devices: &[crate::calls::AudioDevice]| -> Vec<(String, String)> {
+        devices
+            .iter()
+            .map(|device| (device.id.clone(), device.label.clone()))
+            .collect()
+    };
+    let microphones = list(&devices.microphones);
+    let speakers = list(&devices.speakers);
+    let connected = call.phase.is_connected();
+    let size = vec2(PICKER_WIDTH, DEVICES_HEIGHT / 2.0 - 4.0);
+
+    ui.allocate_ui_with_layout(size, Layout::top_down(Align::Min), |ui| {
+        Picker {
             salt: "call-microphone",
             icon: Icon::Mic,
             title: &gettext(locale, "Microphone"),
@@ -537,9 +658,13 @@ fn devices(ui: &mut egui::Ui, app: &mut App, call: &CallUpdate) {
             current: call.microphone.as_deref(),
             devices: &microphones,
             enabled: connected,
-        };
-        choices.show(ui, &mut actions, Action::SetCallMicrophone);
-        let choices = Picker {
+            width: PICKER_WIDTH,
+        }
+        .show(ui, requests, CallRequest::Microphone);
+    });
+    ui.add_space(8.0);
+    ui.allocate_ui_with_layout(size, Layout::top_down(Align::Min), |ui| {
+        Picker {
             salt: "call-speaker",
             icon: Icon::Volume2,
             title: &gettext(locale, "Speaker"),
@@ -547,12 +672,11 @@ fn devices(ui: &mut egui::Ui, app: &mut App, call: &CallUpdate) {
             current: call.speaker.as_deref(),
             devices: &speakers,
             enabled: connected,
-        };
-        choices.show(ui, &mut actions, Action::SetCallSpeaker);
-        app.actions.extend(actions);
+            width: PICKER_WIDTH,
+        }
+        .show(ui, requests, CallRequest::Speaker);
     });
 }
-
 /// One device picker: a title with its icon, and a list of what the machine really has.
 struct Picker<'a> {
     salt: &'a str,
@@ -562,14 +686,15 @@ struct Picker<'a> {
     current: Option<&'a str>,
     devices: &'a [(String, String)],
     enabled: bool,
+    width: f32,
 }
 
 impl Picker<'_> {
     fn show(
         &self,
         ui: &mut egui::Ui,
-        actions: &mut Vec<Action>,
-        action: impl Fn(Option<String>) -> Action,
+        actions: &mut Vec<CallRequest>,
+        action: impl Fn(Option<String>) -> CallRequest,
     ) {
         let label = self
             .current
@@ -594,7 +719,7 @@ impl Picker<'_> {
             ui.add_enabled_ui(self.enabled, |ui| {
                 egui::ComboBox::from_id_salt(self.salt)
                     .selected_text(label)
-                    .width(168.0)
+                    .width(self.width)
                     .show_ui(ui, |ui| {
                         if ui
                             .selectable_label(self.current.is_none(), self.default_label)
@@ -613,74 +738,5 @@ impl Picker<'_> {
                     });
             });
         });
-        ui.add_space(12.0);
     }
-}
-
-/// A call that is ringing: who it is, and the two answers.
-fn ringing(
-    ui: &mut egui::Ui,
-    app: &mut App,
-    call: &CallUpdate,
-    peer: &str,
-    picture: Option<&Path>,
-    palette: &Palette,
-    area: Rect,
-) {
-    let locale = app.locale;
-    ui.vertical_centered(|ui| {
-        ui.add_space(area.height() * 0.17);
-        theme::text(
-            ui,
-            gettext(locale, "Incoming call"),
-            theme::medium(13.0),
-            palette.accent,
-        );
-        ui.add_space(22.0);
-        let size = (area.height() * 0.24).clamp(96.0, 160.0);
-        widgets::avatar(ui, palette, peer, &call.chat, size, picture);
-        ui.add_space(18.0);
-        theme::text(ui, peer, theme::bold(26.0), palette.text);
-        ui.add_space(6.0);
-        theme::text(
-            ui,
-            gettext(locale, "Incoming voice call"),
-            theme::medium(15.0),
-            palette.secondary,
-        );
-    });
-    ui.with_layout(Layout::bottom_up(Align::Center), |ui| {
-        ui.add_space(10.0);
-        ui.horizontal(|ui| {
-            let width = 2.0 * CONTROL + 60.0;
-            ui.add_space(((ui.available_width() - width) / 2.0).max(0.0));
-            let accept = gettext(locale, "Accept").into_owned();
-            let response = control(
-                ui,
-                Icon::Phone,
-                CONTROL,
-                palette.accent,
-                palette.on_accent,
-                &accept,
-                true,
-            );
-            if response.clicked() {
-                app.actions.push(Action::AnswerCall);
-            }
-            ui.add_space(60.0);
-            let decline = gettext(locale, "Decline").into_owned();
-            let response = control(
-                ui,
-                Icon::Phone,
-                CONTROL,
-                palette.danger,
-                Color32::WHITE,
-                &decline,
-                true,
-            );
-            if response.clicked() {
-                app.actions.push(Action::DeclineCall);
-            }
-        });
-    });
 }
