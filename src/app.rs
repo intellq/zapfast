@@ -416,6 +416,8 @@ pub struct App {
     media_hold: Option<crate::media_pause::Hold>,
     /// Only the real app pauses other apps' media, never tests or demos.
     pauses_media: bool,
+    /// The ringtone, the ringback and the short sounds of a call.
+    call_sounds: crate::call_sounds::CallSounds,
     /// Image currently shown in the native preview.
     pub image_preview: Option<PreviewState>,
     /// Voice messages with a sent played receipt.
@@ -771,6 +773,7 @@ impl App {
         );
         let mut app = Self::with_backend(dirs, settings, backend, waker.clone());
         app.pauses_media = true;
+        app.call_sounds.enable();
         app.badge = Some(Default::default());
         app.custom_themes
             .enable_desktop_themes(crate::theme::DESKTOP_THEMES);
@@ -976,6 +979,7 @@ impl App {
             recording: None,
             media_hold: None,
             pauses_media: false,
+            call_sounds: Default::default(),
             image_preview: None,
             played_told: HashSet::new(),
             copy_rows: Default::default(),
@@ -3587,6 +3591,16 @@ impl App {
                 self.call_windowed = Some(update.generation);
             }
         }
+        let previous = self
+            .call
+            .as_ref()
+            .filter(|current| current.generation == update.generation)
+            .map(|current| current.phase);
+        let ring = self
+            .chat(&update.chat)
+            .is_some_and(|chat| call_notification_eligible(chat, crate::util::now()));
+        self.call_sounds
+            .follow(previous, &update, ring, update.speaker.as_deref());
         let ringing = update.phase == crate::calls::CallPhase::Incoming
             && self
                 .call
@@ -3625,7 +3639,12 @@ impl App {
         let picture = self.call_avatar(&call.chat);
         // A call is not a mention and not a group message, so it uses the chat's own sound when it
         // has one and the ordinary message sound otherwise.
-        let sound = notification_sound(&self.settings, chat_sound, false, false);
+        // The ringtone already sounds for the call, so the notification stays quiet.
+        let sound = if self.call_sounds.enabled() {
+            NotificationSound::None
+        } else {
+            notification_sound(&self.settings, chat_sound, false, false)
+        };
         let waker = self.waker.clone();
         self.call_notified = Some(call.generation);
         self.notifications.show(

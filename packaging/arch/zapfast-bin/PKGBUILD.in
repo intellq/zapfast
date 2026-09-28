@@ -5,7 +5,7 @@ pkgrel=@PKGREL@
 pkgdesc="Fast native WhatsApp client built with Rust and egui"
 arch=('x86_64' 'aarch64')
 url="https://zapfast.rocks"
-license=('MIT' 'GPL-2.0-only')
+license=('MIT' 'GPL-2.0-only' 'GPL-3.0-or-later')
 install="${pkgname}.install"
 # Nothing beyond libc is linked directly; winit and glutin dlopen these at
 # startup, and this is a GUI-only application, so all of them have to be

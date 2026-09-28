@@ -338,12 +338,9 @@ enum Sink {
     Fake(fake::Speaker),
 }
 
-fn open_sink(device: Option<&str>) -> Result<Sink, String> {
-    #[cfg(test)]
-    if let Some(speaker) = fake::open_speaker(device) {
-        return Ok(Sink::Fake(speaker));
-    }
-    let sink = match device {
+/// Opens the speaker PipeWire names `device`, or the system default.
+pub(crate) fn open_output(device: Option<&str>) -> Result<rodio::MixerDeviceSink, String> {
+    match device {
         Some(name) => {
             let output = rodio::cpal::default_host()
                 .output_devices()
@@ -358,11 +355,19 @@ fn open_sink(device: Option<&str>) -> Result<Sink, String> {
             rodio::DeviceSinkBuilder::from_device(output)
                 .map_err(|error| format!("the speaker {name} could not be used: {error}"))?
                 .open_stream()
-                .map_err(|error| format!("the speaker {name} could not be opened: {error}"))?
+                .map_err(|error| format!("the speaker {name} could not be opened: {error}"))
         }
         None => rodio::DeviceSinkBuilder::open_default_sink()
-            .map_err(|error| format!("no speaker is available: {error}"))?,
-    };
+            .map_err(|error| format!("no speaker is available: {error}")),
+    }
+}
+
+fn open_sink(device: Option<&str>) -> Result<Sink, String> {
+    #[cfg(test)]
+    if let Some(speaker) = fake::open_speaker(device) {
+        return Ok(Sink::Fake(speaker));
+    }
+    let sink = open_output(device)?;
     let layout = Layout {
         rate: sink.config().sample_rate().get(),
         channels: sink.config().channel_count().get(),
