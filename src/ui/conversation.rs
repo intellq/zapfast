@@ -1964,6 +1964,9 @@ struct View<'a> {
     /// Animate media only while this window is active.
     animate: bool,
     player: &'a crate::audio::Player,
+    transcriber: &'a crate::transcribe::Transcriber,
+    transcripts: &'a HashMap<crate::transcribe::Key, crate::transcribe::Transcript>,
+    transcripts_folded: &'a HashSet<crate::transcribe::Key>,
     video: &'a crate::video::Player,
     /// The video shown expanded over the window, whose message keeps its
     /// poster meanwhile.
@@ -2100,6 +2103,9 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
         now: crate::util::now(),
         animate: app.window_focused,
         player: &app.player,
+        transcriber: &app.transcriber,
+        transcripts: &app.transcripts,
+        transcripts_folded: &app.transcripts_folded,
         video: &app.video,
         video_expanded: app.video_expanded.as_deref(),
         copy_rows: app.copy_rows.as_ref(),
@@ -3748,6 +3754,14 @@ fn natural_text_width(ui: &egui::Ui, view: &View<'_>, message: &Message, cap: f3
             caption: Some(caption),
             ..
         } => caption,
+        // A shown transcript widens the card as a caption would.
+        Content::Audio { .. } => {
+            let key = (view.chat.id.clone(), message.id.clone());
+            match view.transcripts.get(&key) {
+                Some(transcript) if !view.transcripts_folded.contains(&key) => &transcript.text,
+                _ => return None,
+            }
+        }
         _ => return None,
     };
     let style = markup::Style {
@@ -4344,6 +4358,46 @@ fn context_menu(ui: &mut egui::Ui, view: &View<'_>, message: &Message, actions: 
         let mentions = mentions_of(view, message);
         actions.push(Action::CopyText(markup::plain(&text, &mentions)));
     }
+    if let Content::Audio { media, .. } = &message.content
+        && let Some(path) = media
+            .path
+            .as_ref()
+            .filter(|_| !media_sending(view, message))
+    {
+        let key = (chat.clone(), message.id.clone());
+        match view.transcripts.get(&key) {
+            Some(transcript) => {
+                if view.transcripts_folded.contains(&key)
+                    && widgets::menu_item(ui, &palette, Some(Icon::Captions), tr("Show transcript"))
+                {
+                    actions.push(Action::Transcribe {
+                        chat: chat.clone(),
+                        message: message.id.clone(),
+                        path: path.clone(),
+                    });
+                }
+                if widgets::menu_item(ui, &palette, Some(Icon::Copy), tr("Copy transcript")) {
+                    actions.push(Action::CopyText(transcript.text.clone()));
+                }
+            }
+            None => {
+                if view.transcriber.progress(&key).is_none()
+                    && widgets::menu_item(
+                        ui,
+                        &palette,
+                        Some(Icon::Captions),
+                        tr("Transcribe audio"),
+                    )
+                {
+                    actions.push(Action::Transcribe {
+                        chat: chat.clone(),
+                        message: message.id.clone(),
+                        path: path.clone(),
+                    });
+                }
+            }
+        }
+    }
     let age = view.now - message.timestamp;
     let can_edit = message.from_me
         && matches!(message.content, Content::Text { .. })
@@ -4730,10 +4784,7 @@ fn content(
             seconds,
             waveform,
             ..
-        } => {
-            voice_player(ui, view, message, media, *seconds, waveform, width, actions);
-            None
-        }
+        } => voice_player(ui, view, message, media, *seconds, waveform, width, actions),
         Content::Document {
             media,
             file_name,
@@ -7187,7 +7238,7 @@ fn voice_player(
     waveform: &[u8],
     width: f32,
     actions: &mut Vec<Action>,
-) {
+) -> Option<Rect> {
     use crate::audio::State;
     let palette = view.palette;
     let status = view.player.status(&message.id);
@@ -7211,6 +7262,14 @@ fn voice_player(
             .contains(&(view.chat.id.clone(), message.id.clone()));
     let unsent = own_voice && !sending && message.status == Delivery::Failed;
     let playable = media.path.as_ref().filter(|_| !sending && !unsent);
+    let key = (view.chat.id.clone(), message.id.clone());
+    let transcript = view.transcripts.get(&key);
+    let folded = transcript.is_some() && view.transcripts_folded.contains(&key);
+    let progress = view.transcriber.progress(&key);
+    // The button asks for a transcript, or opens a folded one.
+    let transcribe_button = playable.is_some()
+        && progress.is_none()
+        && (folded || (transcript.is_none() && view.download_settings.show_transcribe_button));
     // The chip appears with the playable clip; the waveform takes its space
     // back while the audio is still downloading.
     let shows_chip = playable.is_some();
@@ -7376,7 +7435,21 @@ fn voice_player(
                     MediaState::Failed(error) => format!("{error}. {}", tr("Click to retry.")),
                     _ => shown,
                 };
-                theme::text(ui, text, theme::regular(11.5), palette.secondary);
+                if let Some(path) = playable.filter(|_| transcribe_button) {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        theme::text(ui, text, theme::regular(11.5), palette.secondary);
+                        if transcribe_pill(ui, view, folded).clicked() {
+                            actions.push(Action::Transcribe {
+                                chat: view.chat.id.clone(),
+                                message: message.id.clone(),
+                                path: path.clone(),
+                            });
+                        }
+                    });
+                } else {
+                    theme::text(ui, text, theme::regular(11.5), palette.secondary);
+                }
             });
             // Speed chip, cycling 1x, 1.5x, and 2x like the phone. The
             // message menu lists every speed, including 1.25x and 1.75x.
@@ -7428,6 +7501,291 @@ fn voice_player(
             message: message.id.clone(),
         });
     }
+    // Received voice messages are transcribed as they show up, once.
+    if view.download_settings.transcribe_automatically
+        && !message.from_me
+        && matches!(
+            message.content,
+            Content::Audio {
+                voice_note: true,
+                ..
+            }
+        )
+        && transcript.is_none()
+        && progress.is_none()
+        && let Some(path) = playable
+    {
+        actions.push(Action::Transcribe {
+            chat: view.chat.id.clone(),
+            message: message.id.clone(),
+            path: path.clone(),
+        });
+    }
+    if let Some(progress) = &progress {
+        transcription_status(ui, view, message, playable, progress, width, actions);
+        None
+    } else {
+        transcript
+            .filter(|_| !folded)
+            .map(|transcript| transcript_block(ui, view, message, transcript, width, actions))
+    }
+}
+
+/// The icon-only button on a voice message's duration row that transcribes
+/// it, or shows its folded transcript.
+fn transcribe_pill(ui: &mut egui::Ui, view: &View<'_>, folded: bool) -> egui::Response {
+    let palette = view.palette;
+    let tooltip = if folded {
+        tr("Show transcript")
+    } else {
+        tr("Transcribe this audio on this computer. Nothing is sent.")
+    };
+    let (rect, response) = ui.allocate_exact_size(vec2(30.0, 18.0), Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), tooltip)
+    });
+    theme::reveal_focus(&response);
+    theme::focus_outline(ui, response.id, rect, rect.height() / 2.0);
+    if ui.is_rect_visible(rect) {
+        let hovered = response.hovered();
+        // As the speed chip: incoming bubbles share the resting surface colour.
+        let fill = if hovered {
+            palette.surface_active
+        } else {
+            palette.surface_hover
+        };
+        ui.painter().rect_filled(rect, rect.height() / 2.0, fill);
+        let colour = if hovered {
+            palette.text
+        } else {
+            palette.secondary
+        };
+        theme::paint_icon(ui, Icon::Captions, rect, 13.0, colour);
+    }
+    response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(tooltip)
+}
+
+/// The thin line between a voice message's player and its transcript.
+fn transcript_divider(ui: &mut egui::Ui, palette: &Palette, width: f32) {
+    ui.add_space(6.0);
+    let (rect, _) = ui.allocate_exact_size(vec2(width, 1.0), Sense::hover());
+    ui.painter().hline(
+        rect.x_range(),
+        rect.center().y,
+        Stroke::new(1.0, palette.secondary.gamma_multiply(0.25)),
+    );
+    ui.add_space(4.0);
+}
+
+/// A transcription on its way: waiting, downloading the model or running,
+/// each with a cancel button, or its failure with a retry.
+fn transcription_status(
+    ui: &mut egui::Ui,
+    view: &View<'_>,
+    message: &Message,
+    audio: Option<&PathBuf>,
+    progress: &crate::transcribe::Progress,
+    width: f32,
+    actions: &mut Vec<Action>,
+) {
+    use crate::transcribe::Progress;
+    let palette = view.palette;
+    transcript_divider(ui, &palette, width);
+    let chat = view.chat.id.clone();
+    let id = message.id.clone();
+    let fraction = match progress {
+        Progress::Downloading { received, total } if *total > 0 => {
+            Some(*received as f32 / *total as f32)
+        }
+        Progress::Transcribing(percent) => Some(f32::from(*percent) / 100.0),
+        _ => None,
+    };
+    ui.allocate_ui_with_layout(
+        vec2(width, 22.0),
+        Layout::right_to_left(Align::Center),
+        |ui| {
+            ui.set_width(width);
+            ui.spacing_mut().item_spacing.x = 6.0;
+            if let Progress::Failed(error) = progress {
+                if let Some(audio) = audio
+                    && retry_link(ui, &palette).clicked()
+                {
+                    actions.push(Action::Transcribe {
+                        chat,
+                        message: id,
+                        path: audio.clone(),
+                    });
+                }
+                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                    theme::icon(ui, Icon::CircleAlert, 15.0, palette.danger);
+                    theme::text(
+                        ui,
+                        tr("Could not transcribe"),
+                        theme::regular(12.5),
+                        palette.text,
+                    )
+                    .on_hover_text(error.as_str());
+                });
+                return;
+            }
+            if theme::icon_button(
+                ui,
+                Icon::X,
+                13.0,
+                palette.secondary,
+                palette.text,
+                tr("Cancel"),
+            )
+            .clicked()
+            {
+                actions.push(Action::CancelTranscription { chat, message: id });
+            }
+            let detail = match progress {
+                Progress::Downloading { received, total } => tr("{done} of {total}")
+                    .replace("{done}", &crate::util::bytes(*received))
+                    .replace("{total}", &crate::util::bytes(*total)),
+                Progress::Transcribing(percent) => format!("{percent}%"),
+                _ => String::new(),
+            };
+            if !detail.is_empty() {
+                theme::text(ui, detail, theme::regular(11.5), palette.secondary);
+            }
+            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                let label = match progress {
+                    Progress::Downloading { .. } => {
+                        theme::icon(ui, Icon::Download, 14.0, palette.accent);
+                        tr("Downloading the transcription model")
+                    }
+                    Progress::Waiting => {
+                        theme::spinner(ui, 13.0, palette.accent);
+                        tr("Waiting for another transcription…")
+                    }
+                    _ => {
+                        theme::spinner(ui, 13.0, palette.accent);
+                        tr("Transcribing on this computer…")
+                    }
+                };
+                theme::text(ui, label, theme::regular(12.5), palette.text);
+            });
+        },
+    );
+    if let Some(fraction) = fraction {
+        ui.add_space(2.0);
+        let (rect, _) = ui.allocate_exact_size(vec2(width, 4.0), Sense::hover());
+        ui.painter()
+            .rect_filled(rect, 2.0, palette.secondary.gamma_multiply(0.25));
+        let mut done = rect;
+        done.set_width(rect.width() * fraction.clamp(0.0, 1.0));
+        ui.painter().rect_filled(done, 2.0, palette.accent);
+    }
+}
+
+/// "Try again", in the accent colour with its icon.
+fn retry_link(ui: &mut egui::Ui, palette: &Palette) -> egui::Response {
+    let label = tr("Try again");
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_owned(), theme::medium(12.5), palette.accent);
+    let size = vec2(galley.size().x + 20.0, 20.0);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
+    });
+    theme::reveal_focus(&response);
+    theme::focus_outline(ui, response.id, rect, 4.0);
+    if ui.is_rect_visible(rect) {
+        let colour = if response.hovered() {
+            palette.accent_hover
+        } else {
+            palette.accent
+        };
+        let icon = Rect::from_min_size(rect.min, vec2(14.0, rect.height()));
+        theme::paint_icon(ui, Icon::Refresh, icon, 14.0, colour);
+        ui.painter().galley(
+            pos2(rect.left() + 20.0, rect.center().y - galley.size().y / 2.0),
+            galley,
+            colour,
+        );
+    }
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// A voice message's transcript, selectable, over a row with its language
+/// and buttons to copy and fold it. Returns that row, where the message's
+/// time goes.
+fn transcript_block(
+    ui: &mut egui::Ui,
+    view: &View<'_>,
+    message: &Message,
+    transcript: &crate::transcribe::Transcript,
+    width: f32,
+    actions: &mut Vec<Action>,
+) -> Rect {
+    let palette = view.palette;
+    transcript_divider(ui, &palette, width);
+    ui.allocate_ui_with_layout(vec2(width, 0.0), Layout::top_down(Align::Min), |ui| {
+        ui.set_width(width);
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(&transcript.text)
+                    .font(theme::regular(BODY_SIZE))
+                    .color(palette.text),
+            )
+            .wrap()
+            .selectable(true),
+        );
+    });
+    ui.add_space(2.0);
+    ui.allocate_ui_with_layout(
+        vec2(width, 22.0),
+        Layout::left_to_right(Align::Center),
+        |ui| {
+            ui.set_width(width);
+            ui.spacing_mut().item_spacing.x = 4.0;
+            theme::icon(ui, Icon::Captions, 13.0, palette.secondary);
+            let label = if transcript.language.is_empty() {
+                tr("Transcript").to_owned()
+            } else {
+                format!(
+                    "{} · {}",
+                    tr("Transcript"),
+                    crate::transcribe::language_name(&transcript.language)
+                )
+            };
+            theme::text(ui, label, theme::regular(11.5), palette.secondary);
+            if theme::icon_button(
+                ui,
+                Icon::Copy,
+                13.0,
+                palette.secondary,
+                palette.text,
+                tr("Copy transcript"),
+            )
+            .clicked()
+            {
+                actions.push(Action::CopyText(transcript.text.clone()));
+            }
+            if theme::icon_button(
+                ui,
+                Icon::ChevronUp,
+                13.0,
+                palette.secondary,
+                palette.text,
+                tr("Hide transcript"),
+            )
+            .clicked()
+            {
+                actions.push(Action::FoldTranscript {
+                    chat: view.chat.id.clone(),
+                    message: message.id.clone(),
+                });
+            }
+        },
+    )
+    .response
+    .rect
 }
 
 /// Voice-recording controls and live waveform.

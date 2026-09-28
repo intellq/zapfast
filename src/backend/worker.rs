@@ -1048,6 +1048,7 @@ impl Worker {
                 event,
                 Event::Chats(_)
                     | Event::Drafts(_)
+                    | Event::Transcripts(_)
                     | Event::ChatHits { .. }
                     | Event::ChatUpdated(_)
                     | Event::Messages { .. }
@@ -1185,6 +1186,9 @@ impl Worker {
                 self.emit(Event::Chats(chats));
                 self.emit_labels();
                 self.emit(Event::Drafts(self.archive.drafts().unwrap_or_default()));
+                self.emit(Event::Transcripts(
+                    self.archive.transcripts().unwrap_or_default(),
+                ));
             }
             Err(error) => log::warn!("could not list chats: {error}"),
         }
@@ -2689,6 +2693,7 @@ impl Worker {
         self.emit(Event::Chats(Vec::new()));
         self.emit_labels();
         self.emit(Event::Drafts(Vec::new()));
+        self.emit(Event::Transcripts(Vec::new()));
         self.privacy_ready = false;
         self.privacy_confirmed = false;
         self.privacy_snapshot = false;
@@ -4282,6 +4287,15 @@ impl Worker {
                     .unwrap_or_default();
                 if let Err(error) = self.archive.set_draft(&chat, &text, at) {
                     eprintln!("draft not stored: {error}");
+                }
+            }
+            Command::SaveTranscript {
+                chat,
+                message,
+                transcript,
+            } => {
+                if let Err(error) = self.archive.set_transcript(&chat, &message, &transcript) {
+                    log::warn!("transcript not stored: {error}");
                 }
             }
             Command::Composing { chat, composing } => {

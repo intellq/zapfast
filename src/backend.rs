@@ -195,6 +195,12 @@ pub enum Command {
         chat: ChatId,
         text: String,
     },
+    /// Stores a voice message's transcript, made on this computer.
+    SaveTranscript {
+        chat: ChatId,
+        message: String,
+        transcript: crate::transcribe::Transcript,
+    },
     /// Marks a visible chat read and optionally sends receipts.
     MarkRead {
         chat: ChatId,
@@ -832,6 +838,9 @@ pub enum Event {
     Labels(Vec<crate::model::Label>),
     /// Unsent text stored for each chat, sent once at startup.
     Drafts(Vec<(ChatId, String)>),
+    /// Stored transcripts of voice messages, by chat and message id, sent
+    /// with the drafts.
+    Transcripts(Vec<(ChatId, String, crate::transcribe::Transcript)>),
     /// Messages in one chat matching a search, newest first, echoing the
     /// query and range asked for so a stale answer can be told apart.
     ChatHits {

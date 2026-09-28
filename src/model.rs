@@ -1381,6 +1381,25 @@ pub enum Action {
     },
     /// Sets the voice playback speed to one of the supported speeds.
     SetVoiceSpeed(f32),
+    /// Transcribes a voice message on this computer, or shows its
+    /// transcript again.
+    Transcribe {
+        chat: ChatId,
+        message: String,
+        path: PathBuf,
+    },
+    /// Stops a transcription, or dismisses its failure.
+    CancelTranscription {
+        chat: ChatId,
+        message: String,
+    },
+    /// Folds a transcript away under its message.
+    FoldTranscript {
+        chat: ChatId,
+        message: String,
+    },
+    /// Deletes the downloaded transcription models.
+    DeleteTranscriptionModels,
     /// Plays or pauses a downloaded video inside its message.
     PlayVideo {
         message: String,

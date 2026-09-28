@@ -387,6 +387,12 @@ pub struct App {
     pub composer_tools_open: bool,
     /// In-chat audio player.
     pub player: Player,
+    /// Transcribes voice messages on this computer.
+    pub transcriber: crate::transcribe::Transcriber,
+    /// Transcripts of voice messages, by chat and message id.
+    pub transcripts: HashMap<crate::transcribe::Key, crate::transcribe::Transcript>,
+    /// Transcripts folded away under their message.
+    pub transcripts_folded: HashSet<crate::transcribe::Key>,
     /// In-chat video player.
     pub video: crate::video::Player,
     /// Chat of the loaded video; leaving it stops the video.
@@ -856,6 +862,7 @@ impl App {
         let open_chat = settings.last_chat.clone();
         let locale = crate::i18n::resolve(settings.interface_language);
         crate::i18n::set_current(locale);
+        let transcriber = crate::transcribe::Transcriber::new(dirs.whisper_dir(), waker.clone());
         let mut app = Self {
             dirs,
             settings,
@@ -957,6 +964,9 @@ impl App {
             pending: Vec::new(),
             composer_tools_open: false,
             player: Player::new(waker.clone()),
+            transcriber,
+            transcripts: HashMap::new(),
+            transcripts_folded: HashSet::new(),
             video: crate::video::Player::new(waker.clone()),
             video_chat: None,
             video_expanded: None,
@@ -2187,6 +2197,14 @@ impl App {
                         } else {
                             self.drafts.entry(chat).or_insert(text);
                         }
+                    }
+                }
+                Event::Transcripts(transcripts) => {
+                    // Stored by an earlier session; one made since wins.
+                    for (chat, message, transcript) in transcripts {
+                        self.transcripts
+                            .entry((chat, message))
+                            .or_insert(transcript);
                     }
                 }
                 Event::Chats(chats) => {
@@ -4477,6 +4495,31 @@ impl App {
                 self.settings.voice_speed = self.player.set_speed(speed);
                 self.mark_settings_dirty();
             }
+            Action::Transcribe {
+                chat,
+                message,
+                path,
+            } => {
+                let key = (chat, message);
+                // A folded transcript opens again rather than being redone.
+                if self.transcripts.contains_key(&key) {
+                    self.transcripts_folded.remove(&key);
+                } else {
+                    self.transcriber.transcribe(
+                        key,
+                        path,
+                        self.settings.transcription_model,
+                        self.settings.transcription_language.clone(),
+                    );
+                }
+            }
+            Action::CancelTranscription { chat, message } => {
+                self.transcriber.cancel(&(chat, message));
+            }
+            Action::FoldTranscript { chat, message } => {
+                self.transcripts_folded.insert((chat, message));
+            }
+            Action::DeleteTranscriptionModels => self.transcriber.delete_models(),
             Action::StartRecording => {
                 if self.open_chat.is_some() && self.recording.is_none() {
                     self.picker = None;
@@ -5572,6 +5615,7 @@ impl App {
         self.handle_events();
         self.tick(ctx);
         self.tick_audio();
+        self.tick_transcripts();
         self.tick_video(ctx);
         self.sync_call_window(ctx);
         self.apply_actions(ctx);
@@ -5638,6 +5682,20 @@ impl App {
         self.message_receipts = None;
         self.receipts_watch = wanted.clone();
         self.backend.send(Command::WatchReceipts(wanted));
+    }
+
+    /// Keeps the transcripts finished since the last frame, here and in the
+    /// archive.
+    fn tick_transcripts(&mut self) {
+        for (key, transcript) in self.transcriber.take_finished() {
+            self.backend.send(Command::SaveTranscript {
+                chat: key.0.clone(),
+                message: key.1.clone(),
+                transcript: transcript.clone(),
+            });
+            self.transcripts_folded.remove(&key);
+            self.transcripts.insert(key, transcript);
+        }
     }
 
     /// Polls audio state and schedules repaints while it changes.

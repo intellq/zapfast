@@ -41,3 +41,4 @@ src/ui/video_view.rs
 src/wallpaper.rs
 src/main.rs
 src/kwin_rule.rs
+src/transcribe.rs

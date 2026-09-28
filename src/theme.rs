@@ -540,6 +540,7 @@ fastframe_icons::icons! {
         Bell => "bell",
         BellOff => "bell-off",
         Calendar => "calendar",
+        Captions => "captions",
         Check => lucide "check",
         CheckCheck => "check-check",
         ChevronDown => lucide "chevron-down",

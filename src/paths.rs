@@ -90,6 +90,12 @@ impl AppDirs {
         self.config.join("fonts")
     }
 
+    /// Whisper models for transcribing voice messages, downloaded on first
+    /// use.
+    pub fn whisper_dir(&self) -> PathBuf {
+        self.state.join("whisper")
+    }
+
     pub fn settings_file(&self) -> PathBuf {
         self.config.join("settings.json")
     }

@@ -424,6 +424,15 @@ pub struct Settings {
     /// Pause other apps' media while recording, or while a voice message,
     /// audio, or video plays with sound.
     pub pause_other_media: bool,
+    /// Transcribe voice messages as they show up in a chat.
+    pub transcribe_automatically: bool,
+    /// The transcribe button on each voice message.
+    pub show_transcribe_button: bool,
+    /// The Whisper model transcripts are made with.
+    pub transcription_model: crate::transcribe::Model,
+    /// The language voice messages are in, as a Whisper code. `None` detects
+    /// it for each message.
+    pub transcription_language: Option<String>,
     /// The two switches `pause_other_media` replaced, read once and folded
     /// into it by [`Settings::load`].
     #[serde(skip_serializing)]
@@ -501,6 +510,10 @@ impl Default for Settings {
             save_contacts_to_phone: true,
             voice_speed: 1.0,
             pause_other_media: true,
+            transcribe_automatically: false,
+            show_transcribe_button: true,
+            transcription_model: crate::transcribe::Model::Small,
+            transcription_language: None,
             pause_media_while_recording: None,
             pause_media_while_playing: None,
             chat_lock_code: None,

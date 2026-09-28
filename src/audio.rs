@@ -500,7 +500,7 @@ fn clip_length(samples: usize) -> Duration {
 
 /// Decodes a file to mono 48 kHz samples. OGG/Opus uses `voice`; other
 /// supported formats use rodio.
-fn decode_file(path: &Path) -> Result<Vec<f32>, String> {
+pub(crate) fn decode_file(path: &Path) -> Result<Vec<f32>, String> {
     let bytes = std::fs::read(path)
         .map_err(|error| format!("{}: {error}", tr("Could not read the audio")))?;
     if bytes.starts_with(b"OggS")

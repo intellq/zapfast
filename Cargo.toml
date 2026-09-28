@@ -115,6 +115,9 @@ mp4 = "0.14"
 rodio = { git = "https://github.com/RustAudio/rodio", rev = "e89e685d326a684b298c5138adf94caa49e5568c", default-features = false, features = ["playback", "recording", "mp3", "mp4", "wav", "vorbis"] }
 opus = "0.4"
 ogg = "0.9"
+# Transcribes voice messages on this computer with whisper.cpp, built into the
+# app. The model is downloaded on first use (src/transcribe.rs).
+whisper-rs = { version = "0.16", features = ["log_backend"] }
 # Converts animated Signal APNG stickers to the animated WebP used by WhatsApp.
 webp-animation = "0.10"
 # Encodes stickers made from pictures as still lossy WebP. Already included

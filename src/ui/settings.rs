@@ -581,6 +581,119 @@ fn sections(app: &App) -> Vec<Section> {
         },
     );
 
+    let mut transcription = Section::new(translated(locale, "Voice message transcription"));
+    transcription.toggle(
+        translated(locale, "Transcribe automatically"),
+        translated(
+            locale,
+            "Received voice messages are transcribed as they show up in a chat.",
+        ),
+        |settings| &mut settings.transcribe_automatically,
+    );
+    transcription.toggle(
+        translated(locale, "Show the transcription button"),
+        translated(
+            locale,
+            "On each voice message. The message menu offers it either way.",
+        ),
+        |settings| &mut settings.show_transcribe_button,
+    );
+    transcription.row(
+        translated(locale, "Model"),
+        translated(
+            locale,
+            "Transcription runs on this computer, with Whisper. The audio never leaves it; only the model is downloaded, once.",
+        ),
+        move |ui, app| {
+            let label = |model: crate::transcribe::Model| {
+                let name = format!("{} · {}", model.name(), crate::util::bytes(model.size()));
+                if model == crate::transcribe::Model::default() {
+                    format!("{name} ({})", crate::i18n::gettext(app.locale, "recommended"))
+                } else {
+                    name
+                }
+            };
+            let selected = app.settings.transcription_model;
+            let mut chosen = None;
+            let response = egui::ComboBox::from_id_salt("transcription_model")
+                .selected_text(label(selected))
+                .width(240.0_f32.min(ui.available_width()))
+                .show_ui(ui, |ui| {
+                    for model in crate::transcribe::Model::ALL {
+                        if theme_option(ui, &palette, &label(model), model == selected) {
+                            chosen = Some(model);
+                        }
+                    }
+                });
+            theme::reveal_focus(&response.response);
+            if let Some(model) = chosen.filter(|model| *model != selected) {
+                app.settings.transcription_model = model;
+                app.actions.push(Action::SettingsChanged);
+            }
+        },
+    );
+    transcription.row(
+        translated(locale, "Language"),
+        translated(locale, "The language voice messages are in."),
+        move |ui, app| {
+            let name = |code: Option<&str>| match code {
+                Some(code) => crate::transcribe::language_name(code),
+                None => crate::i18n::gettext(app.locale, "Detect automatically").into_owned(),
+            };
+            let selected = app.settings.transcription_language.clone();
+            let mut chosen = None;
+            let response = egui::ComboBox::from_id_salt("transcription_language")
+                .selected_text(name(selected.as_deref()))
+                .width(240.0_f32.min(ui.available_width()))
+                .show_ui(ui, |ui| {
+                    if theme_option(ui, &palette, &name(None), selected.is_none()) {
+                        chosen = Some(None);
+                    }
+                    for code in crate::transcribe::LANGUAGES {
+                        if theme_option(
+                            ui,
+                            &palette,
+                            &name(Some(code)),
+                            selected.as_deref() == Some(code),
+                        ) {
+                            chosen = Some(Some(code.to_owned()));
+                        }
+                    }
+                });
+            theme::reveal_focus(&response.response);
+            if let Some(language) = chosen.filter(|language| *language != selected) {
+                app.settings.transcription_language = language;
+                app.actions.push(Action::SettingsChanged);
+            }
+        },
+    );
+    transcription.row(
+        translated(locale, "Downloaded models"),
+        translated(locale, "Downloaded again when needed."),
+        move |ui, app| {
+            let size = app.transcriber.downloaded_size();
+            if size == 0 {
+                theme::text(
+                    ui,
+                    crate::i18n::gettext(app.locale, "None"),
+                    theme::regular(13.0),
+                    palette.secondary,
+                );
+                return;
+            }
+            theme::text(
+                ui,
+                crate::util::bytes(size),
+                theme::regular(13.0),
+                palette.secondary,
+            );
+            let label = crate::i18n::gettext(app.locale, "Delete models");
+            if theme::soft_button(ui, &palette, Some(Icon::Trash), &label, false).clicked() {
+                app.actions.push(Action::DeleteTranscriptionModels);
+            }
+        },
+    );
+
     let mut notifications = Section::new(translated(locale, "Notifications"));
     notifications.toggle(
         translated(locale, "Desktop notifications"),
@@ -956,6 +1069,7 @@ fn sections(app: &App) -> Vec<Section> {
     vec![
         appearance,
         chats,
+        transcription,
         notifications,
         privacy,
         system,

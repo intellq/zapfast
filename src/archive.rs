@@ -18,6 +18,7 @@ pub use labels::{DEFAULT_COLOR, LABEL_LIMIT, NAME_LIMIT};
 mod polls;
 mod receipts;
 mod stickers;
+mod transcripts;
 pub use polls::PollVote;
 pub use stickers::FavoriteSticker;
 
@@ -349,6 +350,7 @@ impl Archive {
         connection.execute_batch(drafts::SCHEMA)?;
         connection.execute_batch(stickers::SCHEMA)?;
         connection.execute_batch(favorites::SCHEMA)?;
+        connection.execute_batch(transcripts::SCHEMA)?;
         for (table, column, definition) in MIGRATIONS {
             let exists = connection
                 .prepare(&format!("PRAGMA table_info({table})"))?
@@ -362,6 +364,7 @@ impl Archive {
         }
         favorites::adopt_local_marks(&connection)?;
         Self::prune_receipts(&connection)?;
+        transcripts::prune(&connection)?;
         Ok(Self { connection })
     }
 
@@ -1257,6 +1260,7 @@ impl Archive {
             "DELETE FROM messages WHERE chat = ?1 AND id = ?2",
             params![chat, id],
         )?;
+        self.clear_transcript(chat, id)?;
         Ok(deleted > 0)
     }
 
@@ -1353,6 +1357,7 @@ impl Archive {
             "poll_history",
             "local_chat_labels",
             "drafts",
+            "transcripts",
         ] {
             self.connection.execute(
                 &format!("DELETE FROM {table} WHERE chat = ?1"),
@@ -1728,7 +1733,7 @@ impl Archive {
     /// Clears all archived data during unlinking.
     pub fn clear(&self) -> Result<()> {
         self.connection.execute_batch(
-            "DELETE FROM poll_history; DELETE FROM poll_votes; DELETE FROM polls; DELETE FROM group_receipts; DELETE FROM messages; DELETE FROM chats; DELETE FROM chat_removals; DELETE FROM contacts; DELETE FROM meta; DELETE FROM lids; DELETE FROM drafts; DELETE FROM local_chat_labels; DELETE FROM local_labels; DELETE FROM removed_recent_stickers; DELETE FROM favorite_stickers; DELETE FROM favorites; DELETE FROM favorite_changes;",
+            "DELETE FROM poll_history; DELETE FROM poll_votes; DELETE FROM polls; DELETE FROM group_receipts; DELETE FROM messages; DELETE FROM chats; DELETE FROM chat_removals; DELETE FROM contacts; DELETE FROM meta; DELETE FROM lids; DELETE FROM drafts; DELETE FROM local_chat_labels; DELETE FROM local_labels; DELETE FROM removed_recent_stickers; DELETE FROM favorite_stickers; DELETE FROM favorites; DELETE FROM favorite_changes; DELETE FROM transcripts;",
         )
     }
 }

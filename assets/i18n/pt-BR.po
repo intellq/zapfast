@@ -4491,5 +4491,157 @@ msgstr "Manter a janela da chamada acima das outras janelas"
 msgid "ZapFast: remember where the main window was"
 msgstr "ZapFast: lembrar onde estava a janela principal"
 
+#: src/transcribe.rs
+msgid "Portuguese"
+msgstr "Português"
+
+#: src/transcribe.rs
+msgid "English"
+msgstr "Inglês"
+
+#: src/transcribe.rs
+msgid "Spanish"
+msgstr "Espanhol"
+
+#: src/transcribe.rs
+msgid "French"
+msgstr "Francês"
+
+#: src/transcribe.rs
+msgid "German"
+msgstr "Alemão"
+
+#: src/transcribe.rs
+msgid "Italian"
+msgstr "Italiano"
+
+#: src/transcribe.rs
+msgid "Russian"
+msgstr "Russo"
+
+#: src/transcribe.rs
+msgid "Chinese"
+msgstr "Chinês"
+
+#: src/transcribe.rs
+msgid "Could not start the transcription"
+msgstr "Não foi possível iniciar a transcrição"
+
+#: src/transcribe.rs
+msgid "Could not load the transcription model"
+msgstr "Não foi possível carregar o modelo de transcrição"
+
+#: src/transcribe.rs
+msgid "Could not transcribe"
+msgstr "Não foi possível transcrever"
+
+#: src/transcribe.rs
+msgid "No speech found"
+msgstr "Nenhuma fala encontrada"
+
+#: src/transcribe.rs
+msgid "This processor lacks the AVX2 instructions transcription needs"
+msgstr "Este processador não tem as instruções AVX2 que a transcrição exige"
+
+#: src/transcribe.rs
+msgid "Could not download the transcription model"
+msgstr "Não foi possível baixar o modelo de transcrição"
+
+#: src/transcribe.rs
+msgid "the file differs from the published one"
+msgstr "o arquivo difere do publicado"
+
+#: src/transcribe.rs
+msgid "Show transcript"
+msgstr "Mostrar transcrição"
+
+#: src/transcribe.rs
+msgid "Transcribe this audio on this computer. Nothing is sent."
+msgstr "Transcrever este áudio neste computador. Nada é enviado."
+
+#: src/transcribe.rs
+msgid "{done} of {total}"
+msgstr "{done} de {total}"
+
+#: src/transcribe.rs
+msgid "Downloading the transcription model"
+msgstr "Baixando o modelo de transcrição"
+
+#: src/transcribe.rs
+msgid "Waiting for another transcription…"
+msgstr "Aguardando outra transcrição…"
+
+#: src/transcribe.rs
+msgid "Transcribing on this computer…"
+msgstr "Transcrevendo neste computador…"
+
+#: src/transcribe.rs
+msgid "Transcript"
+msgstr "Transcrição"
+
+#: src/transcribe.rs
+msgid "Copy transcript"
+msgstr "Copiar transcrição"
+
+#: src/transcribe.rs
+msgid "Hide transcript"
+msgstr "Ocultar transcrição"
+
+#: src/transcribe.rs
+msgid "Transcribe audio"
+msgstr "Transcrever áudio"
+
+#: src/transcribe.rs
+msgid "Voice message transcription"
+msgstr "Transcrição de áudio"
+
+#: src/transcribe.rs
+msgid "Transcribe automatically"
+msgstr "Transcrever automaticamente"
+
+#: src/transcribe.rs
+msgid "Received voice messages are transcribed as they show up in a chat."
+msgstr "Os áudios recebidos são transcritos quando aparecem numa conversa."
+
+#: src/transcribe.rs
+msgid "Show the transcription button"
+msgstr "Mostrar o botão de transcrição"
+
+#: src/transcribe.rs
+msgid "On each voice message. The message menu offers it either way."
+msgstr "Em cada áudio. O menu da mensagem oferece a transcrição de qualquer forma."
+
+#: src/transcribe.rs
+msgid "Model"
+msgstr "Modelo"
+
+#: src/transcribe.rs
+msgid "Transcription runs on this computer, with Whisper. The audio never leaves it; only the model is downloaded, once."
+msgstr "A transcrição roda neste computador, com o Whisper. O áudio não sai dele; só o modelo é baixado, uma vez."
+
+#: src/transcribe.rs
+msgid "recommended"
+msgstr "recomendado"
+
+#: src/transcribe.rs
+msgid "The language voice messages are in."
+msgstr "O idioma dos áudios."
+
+#: src/transcribe.rs
+msgid "Detect automatically"
+msgstr "Detectar automaticamente"
+
+#: src/transcribe.rs
+msgid "Downloaded models"
+msgstr "Modelos baixados"
+
+#: src/transcribe.rs
+msgid "Downloaded again when needed."
+msgstr "Baixados de novo quando for preciso."
+
+#: src/transcribe.rs
+msgid "Delete models"
+msgstr "Apagar modelos"
+
 #~ msgid "Jump to the newest message"
 #~ msgstr "Ir para a mensagem mais recente"
