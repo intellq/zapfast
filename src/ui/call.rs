@@ -28,6 +28,8 @@ use crate::ui::widgets;
 const CARD: &str = "zapfast-call-card";
 /// The call window's viewport.
 const WINDOW: &str = "zapfast-call-window";
+/// How long a new call window waits for KWin to be ready to place it.
+const PLACE_WAIT: Duration = Duration::from_secs(1);
 /// The ringing card's width, including its margins.
 const CARD_WIDTH: f32 = 340.0;
 /// The ringing card's round buttons.
@@ -96,6 +98,16 @@ pub struct CallWindow {
     applied_on_top: Option<bool>,
     /// The height the window was last given.
     height: f32,
+    /// KWin being asked to place the new window as it appears.
+    placing: Option<Placing>,
+}
+
+/// KWin being asked to place a new call window as it appears, on KDE Plasma under Wayland.
+#[derive(Debug)]
+struct Placing {
+    since: Instant,
+    /// Set once KWin waits for the window (`true`), or could not be asked (`false`).
+    placed: Arc<OnceLock<bool>>,
 }
 
 impl CallWindow {
@@ -106,6 +118,7 @@ impl CallWindow {
         self.sampled = None;
         self.applied_on_top = None;
         self.height = 0.0;
+        self.placing = None;
     }
 }
 
@@ -230,6 +243,9 @@ fn open_window(app: &App, ctx: &egui::Context) {
         .as_ref()
         .map(|call| app.call_name(&call.chat))
         .unwrap_or_default();
+    if !placement_ready(app, ctx, &title) {
+        return;
+    }
     let size = [WINDOW_WIDTH, base_height()];
     // Its size is set from what it shows, through the minimum and the maximum: a window made
     // unresizable on Wayland keeps the size it opened with, which would leave no room for the device
@@ -256,6 +272,42 @@ fn open_window(app: &App, ctx: &egui::Context) {
     ctx.show_viewport_deferred(window_id(), builder, move |ui, _class| {
         window(ui, &shared, &waker);
     });
+}
+
+/// Whether the call window may open. On KDE Plasma under Wayland a new one waits until KWin is
+/// ready to move it to its corner as it appears, so it opens there instead of in the middle of the
+/// screen and then jumping; after [`PLACE_WAIT`] it opens anyway, and is moved once it is there.
+fn placement_ready(app: &App, ctx: &egui::Context, title: &str) -> bool {
+    if crate::keep_above::method() != crate::keep_above::Method::KWin {
+        return true;
+    }
+    let mut state = app.call_window.lock().unwrap_or_else(|p| p.into_inner());
+    let placing = state.placing.get_or_insert_with(|| {
+        let placed = Arc::new(OnceLock::new());
+        let told = Arc::clone(&placed);
+        let waker = app.waker();
+        crate::keep_above::kwin_await(
+            title.to_owned(),
+            app.settings.call_window_on_top,
+            move |ready| {
+                let _ = told.set(ready);
+                waker.wake();
+            },
+        );
+        Placing {
+            since: Instant::now(),
+            placed,
+        }
+    });
+    if placing.placed.get().is_some() {
+        return true;
+    }
+    let waited = placing.since.elapsed();
+    if waited >= PLACE_WAIT {
+        return true;
+    }
+    ctx.request_repaint_after(PLACE_WAIT - waited);
+    false
 }
 
 /// ZapFast's icon for the call window, made once.
@@ -362,6 +414,14 @@ fn keep_above(ctx: &egui::Context, state: &mut CallWindow, view: &CallView) {
     }
     let new = state.applied_on_top.is_none();
     state.applied_on_top = Some(view.on_top);
+    // KWin placed the new window and kept it above as it appeared.
+    let placed = state
+        .placing
+        .as_ref()
+        .is_some_and(|placing| placing.placed.get() == Some(&true));
+    if new && placed {
+        return;
+    }
     match crate::keep_above::method() {
         Method::WindowLevel => {
             ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(if view.on_top {
