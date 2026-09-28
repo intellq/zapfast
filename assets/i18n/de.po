@@ -4153,7 +4153,7 @@ msgid "Waiting for a code from WhatsApp…"
 msgstr ""
 
 #: src/ui/login.rs:144
-msgid "Unofficial client. Using it may be against WhatsApp's terms of service."
+msgid "Unofficial client. See WhatsApp's terms of service."
 msgstr ""
 
 #: src/ui/login.rs:168

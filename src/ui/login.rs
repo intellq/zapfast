@@ -141,7 +141,7 @@ fn body(app: &mut App, ui: &mut egui::Ui) {
     ui.add_space(18.0);
     theme::paragraph(
         ui,
-        tr("Unofficial client. Using it may be against WhatsApp's terms of service."),
+        tr("Unofficial client. See WhatsApp's terms of service."),
         theme::regular(11.5),
         palette.dim,
     );

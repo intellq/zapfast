@@ -4046,9 +4046,9 @@ msgid "Waiting for a code from WhatsApp…"
 msgstr "Aguardando um código do WhatsApp…"
 
 #: src/ui/login.rs:144
-msgid "Unofficial client. Using it may be against WhatsApp's terms of service."
+msgid "Unofficial client. See WhatsApp's terms of service."
 msgstr ""
-"Cliente não oficial. Usá-lo pode violar os termos de serviço do WhatsApp."
+"Cliente não oficial. Consulte os termos de serviço do WhatsApp."
 
 #: src/ui/login.rs:168
 msgid "Link this computer"
