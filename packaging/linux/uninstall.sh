@@ -60,7 +60,7 @@ desktop_dir=$(xdg-user-dir DESKTOP 2>/dev/null || true)
 if [[ -z $desktop_dir || $desktop_dir == "$HOME" ]]; then
   desktop_dir=$HOME/Desktop
 fi
-rm -f "$desktop_dir/zapfast.desktop"
+rm -f "$desktop_dir/zapfast.desktop" "$desktop_dir/.zapfast.desktop.new"
 if command -v update-desktop-database >/dev/null 2>&1; then
   update-desktop-database "$data_dir/applications" 2>/dev/null || true
 fi

@@ -61,8 +61,12 @@ mkdir -p "$bin_dir"
 install -m 755 "$here/zapfast" "$bin_dir/.zapfast.new"
 mv -f "$bin_dir/.zapfast.new" "$installed"
 install -Dm644 "$here/zapfast.svg" "$icons_dir/zapfast.svg"
-if command -v gtk-update-icon-cache >/dev/null 2>&1 && [[ -f "$data_dir/icons/hicolor/index.theme" ]]; then
-  gtk-update-icon-cache -q -t "$data_dir/icons/hicolor" 2>/dev/null || true
+# A GTK icon cache left in the folder by other apps hides an icon it does not
+# list, so it is rebuilt when there is one.
+hicolor=$data_dir/icons/hicolor
+if command -v gtk-update-icon-cache >/dev/null 2>&1 &&
+  [[ -f $hicolor/index.theme || -f $hicolor/icon-theme.cache || -f $hicolor/.icon-theme.cache ]]; then
+  gtk-update-icon-cache -q -f -t "$hicolor" 2>/dev/null || true
 fi
 
 # The launcher names the binary by its full path, so it works before the
@@ -81,9 +85,12 @@ exec_quoted() {
     print out "\""
   }'
 }
+# With an icon, the entry names it by its full path instead of by name: the
+# desktop of an open session looks icons up in folders it listed at login.
 exec_line() {
-  EXEC_QUOTED=$(exec_quoted) awk '
+  EXEC_QUOTED=$(exec_quoted) ICON=${1:-} awk '
     /^Exec=/ { print "Exec=" ENVIRON["EXEC_QUOTED"]; next }
+    /^Icon=/ && ENVIRON["ICON"] != "" { print "Icon=" ENVIRON["ICON"]; next }
     { print }
   ' "$here/zapfast.desktop"
 }
@@ -129,17 +136,6 @@ awk '
   }
 ' "$mimeapps" > "$mimeapps.zapfast" && mv -f "$mimeapps.zapfast" "$mimeapps"
 
-if command -v update-desktop-database >/dev/null 2>&1; then
-  update-desktop-database "$apps_dir" 2>/dev/null || true
-fi
-# KDE apps see a new entry once their service cache is rebuilt.
-for sycoca in kbuildsycoca6 kbuildsycoca5; do
-  if command -v "$sycoca" >/dev/null 2>&1; then
-    "$sycoca" >/dev/null 2>&1 || true
-    break
-  fi
-done
-
 # The desktop folder has a translated name ("Área de Trabalho"), which
 # xdg-user-dir knows.
 if [[ $desktop_shortcut == yes ]]; then
@@ -148,14 +144,32 @@ if [[ $desktop_shortcut == yes ]]; then
     desktop_dir=$HOME/Desktop
   fi
   if [[ -d $desktop_dir ]]; then
-    exec_line > "$desktop_dir/zapfast.desktop"
-    # KDE runs a desktop file only when it is executable; GNOME asks for it
-    # to be marked trusted.
-    chmod 755 "$desktop_dir/zapfast.desktop"
+    # Written whole and executable under a hidden name, then renamed, so the
+    # desktop, which watches the folder, never shows it half written. KDE
+    # runs a desktop file only when it is executable; GNOME asks for it to be
+    # marked trusted.
+    exec_line "$icons_dir/zapfast.svg" > "$desktop_dir/.zapfast.desktop.new"
+    chmod 755 "$desktop_dir/.zapfast.desktop.new"
+    mv -f "$desktop_dir/.zapfast.desktop.new" "$desktop_dir/zapfast.desktop"
     if command -v gio >/dev/null 2>&1; then
       gio set "$desktop_dir/zapfast.desktop" metadata::trusted true 2>/dev/null || true
     fi
   fi
+fi
+
+if command -v update-desktop-database >/dev/null 2>&1; then
+  update-desktop-database "$apps_dir" 2>/dev/null || true
+fi
+# KDE apps see a new entry once their service cache is rebuilt, and an icon
+# that was missing once they are told the icons changed.
+for sycoca in kbuildsycoca6 kbuildsycoca5; do
+  if command -v "$sycoca" >/dev/null 2>&1; then
+    "$sycoca" >/dev/null 2>&1 || true
+    break
+  fi
+done
+if command -v dbus-send >/dev/null 2>&1; then
+  dbus-send --session --type=signal /KIconLoader org.kde.KIconLoader.iconChanged int32:0 2>/dev/null || true
 fi
 
 # Put the bin folder on PATH for shells and new sessions, once. Every line

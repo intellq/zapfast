@@ -58,6 +58,9 @@ WizardStyle=modern
 CloseApplications=yes
 RestartApplications=no
 UninstallDisplayIcon={app}\{#AppExeName}
+; Tells Explorer the whatsapp:// entries changed, and has it drop the icons it
+; kept of an earlier zapfast.exe, when setup finishes.
+ChangesAssociations=yes
 VersionInfoVersion={#NumericVersion}.0
 
 [Tasks]
