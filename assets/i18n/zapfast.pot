@@ -4324,3 +4324,7 @@ msgstr ""
 #: src/ui/call.rs
 msgid "Keep the call window above other windows"
 msgstr ""
+
+#: src/kwin_rule.rs
+msgid "ZapFast: remember where the main window was"
+msgstr ""

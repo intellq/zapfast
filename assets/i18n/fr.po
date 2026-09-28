@@ -4594,6 +4594,10 @@ msgstr ""
 msgid "Could not change the app for WhatsApp links"
 msgstr ""
 
+#: src/kwin_rule.rs
+msgid "ZapFast: remember where the main window was"
+msgstr ""
+
 #, fuzzy
 #~ msgid "Back to the chat"
 #~ msgstr "Envoyer ce pack dans la discussion"

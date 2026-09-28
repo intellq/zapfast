@@ -244,6 +244,10 @@ fn main() -> eframe::Result<()> {
     } else {
         app::App::new(&waker, dirs, settings, app::AppOptions { tray: true })
     };
+    if !demo {
+        // After App::new, which sets the interface language the rule is named in.
+        zapfast::kwin_rule::ensure();
+    }
     if cli.verbose {
         app.update_arguments.push("--verbose".into());
     }

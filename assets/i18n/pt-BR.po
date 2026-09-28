@@ -4487,5 +4487,9 @@ msgstr "A janela da chamada fica acima das outras janelas. Clique para desativar
 msgid "Keep the call window above other windows"
 msgstr "Manter a janela da chamada acima das outras janelas"
 
+#: src/kwin_rule.rs
+msgid "ZapFast: remember where the main window was"
+msgstr "ZapFast: lembrar onde estava a janela principal"
+
 #~ msgid "Jump to the newest message"
 #~ msgstr "Ir para a mensagem mais recente"
