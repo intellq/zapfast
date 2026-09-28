@@ -57,7 +57,7 @@ const TYPING_TIMEOUT: Duration = Duration::from_secs(12);
 /// run downloads. A stalled download must not keep music paused for good.
 const VOICE_FETCH_HOLD: Duration = Duration::from_secs(10);
 /// How long a finished call's outcome stays on screen before the surface goes away.
-const CALL_FAREWELL: Duration = Duration::from_secs(4);
+const CALL_FAREWELL: Duration = Duration::from_secs(2);
 
 /// Skin-tone variants share the first (unmodified) emoji in their variant set.
 pub(crate) fn emoji_family(value: &str) -> &str {
