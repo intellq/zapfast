@@ -366,6 +366,48 @@ sozinho a partir das Releases do fork (não das do upstream).
   antes do clique direito é preservada, então Recortar e Copiar atuam sobre
   ela e Colar substitui o trecho selecionado. As ações passam pelo tratamento
   normal de texto, área de transferência e desfazer do editor.
+- **Ligações de voz 1:1.** Traz o
+  [PR #220 do upstream](https://github.com/crmne/zapfast/pull/220), de
+  alitura1: receber, atender, recusar e fazer ligações de voz para um contato,
+  com mudo e escolha de microfone e alto-falante (lembrada para a próxima
+  ligação, sem mexer nos padrões do sistema). Como no cliente da Meta, uma
+  ligação chegando aparece num cartão no canto inferior esquerdo da janela,
+  com foto, nome, **Recusar** e **Atender**, e também numa notificação; se a
+  janela estiver na bandeja ou atrás de outras, ela volta à frente. Atendida,
+  ou feita pelo botão de telefone do cabeçalho, a ligação abre numa janela
+  própria e compacta, no canto superior direito da tela da janela principal:
+  foto, nome, duração, barras que se mexem com a voz do outro lado, mudo,
+  dispositivos e desligar. O alfinete no canto dessa janela a mantém acima das
+  outras (ligado por padrão e lembrado); no KDE Plasma com Wayland isso é
+  feito por um script do KWin, e nos outros desktops Wayland, que não permitem,
+  o alfinete não aparece. Fechar a janela da ligação desliga; durante a
+  ligação, fechar a janela principal só a minimiza. Vídeo ainda não.
+- **Links do WhatsApp abrem no ZapFast.** Links `wa.me`, `api.whatsapp.com` e
+  `whatsapp://` (inclusive os de mensagens) abrem a conversa com o texto do
+  link já no compositor, ou o convite de grupo; um número sem conversa é
+  consultado no WhatsApp antes. Com o ZapFast aberto, até na bandeja, o link
+  vai para ele. O ZapFast se registra para o `whatsapp://` (Linux: entrada
+  oculta e `mimeapps.list`; Windows: `HKCU\Software\Classes\whatsapp`)
+  enquanto **Configurações › Sistema › Abrir links do WhatsApp** estiver
+  ligada, o padrão; desligar devolve a associação. Links `https://wa.me/...`
+  clicados fora do ZapFast passam antes pelo navegador, porque o sistema não
+  associa um site a um app; a página do WhatsApp então chama o ZapFast.
+- **Janela minimizada volta à frente no Wayland.** Mostrar o ZapFast pela
+  bandeja, por uma notificação, por um link ou por uma segunda execução
+  restaura também uma janela minimizada no KDE Plasma com Wayland, pelo
+  `xdg-activation`.
+- **Tamanho da janela lembrado com zoom.** Com zoom diferente de 100%, a
+  janela abria menor a cada início e a cada volta da bandeja (cerca de 1/6 a
+  menos em 120%). Agora volta com o tamanho em que foi deixada. A posição é
+  lembrada no Windows, no macOS e no X11; no Wayland quem posiciona a janela
+  é o compositor.
+- **Ícone do atalho na área de trabalho logo após instalar.** No KDE, o
+  atalho criado pelo `install.sh` ficava sem ícone até a próxima sessão. O
+  atalho agora aponta para o arquivo do ícone, e o instalador avisa o KDE da
+  mudança. O instalador do Windows avisa o Explorer das associações novas.
+- **Aviso de cliente não oficial mais curto.** No cartão de abertura e no
+  diálogo **Sobre**: "Cliente não oficial. Consulte os termos de serviço do
+  WhatsApp."
 
 Esta sincronização também incorpora mudanças recentes do upstream: confirmação
 antes de apagar mensagens, aba de figurinhas recebidas, recuperação de conexão
@@ -571,6 +613,16 @@ de sincronizar a exclusão "para mim" com o celular é uma extensão deste fork.
   playing are resumed. **Pause other media while recording or playing** in
   Settings turns this off. Linux uses MPRIS, so any player that implements it
   works; macOS has no public API for this, so the switch is hidden there.
+- **Voice calls.** One-to-one voice calls, from upstream pull request #220 by
+  alitura1. A ringing call shows as a card in the window's bottom-left corner
+  with the caller's picture and name and **Accept** / **Decline**, and as a
+  desktop notification. An answered call, or one started from the phone
+  button in a chat's header, gets its own small window in the top-right corner
+  of the main window's screen, with the call's length, bars that move with the
+  other side's voice, mute, the **Microphone** / **Speaker** pickers, and
+  hang up. A pin keeps that window above the others where the desktop allows
+  it (on KDE Plasma under Wayland through a KWin script). The devices a call
+  uses are remembered for the next one without changing the system defaults.
 - **Send messages.** Press Enter to send text and Shift+Enter for a new line.
   You can swap these keys in Settings. The composer is focused when you open
   or return to a conversation; invoking search keeps focus in search, and
@@ -814,8 +866,9 @@ de sincronizar a exclusão "para mim" com o celular é uma extensão deste fork.
 
 - Play videos in codecs other than H.264 in the app on Windows, macOS, or
   Linux without FFmpeg (they open in your system player).
-- Calls, status posts, communities, newsletters, and group administration
-  beyond a group's name and photo (members, admins, descriptions, settings).
+- Video calls, group calls, and screen sharing.
+- Status posts, communities, newsletters, and group administration beyond a
+  group's name and photo (members, admins, descriptions, settings).
 - Submit interactive forms, payments, shopping flows, or carousel selections.
   Use these in WhatsApp Web or on your phone. Embedded videos and documents,
   and templates without readable text also need another client.
