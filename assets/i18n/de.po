@@ -4771,6 +4771,79 @@ msgstr ""
 msgid "Delete models"
 msgstr ""
 
+#: src/backend/worker.rs
+msgid "Unblock this contact to send messages"
+msgstr ""
+
+#: src/backend/worker/calls.rs
+msgid "Unblock this contact to call them"
+msgstr ""
+
+#: src/app.rs
+msgid "Could not block this contact. Try again in a moment."
+msgstr ""
+
+#: src/app.rs
+msgid "Could not unblock this contact. Try again in a moment."
+msgstr ""
+
+#: src/app.rs
+msgid "Connect to WhatsApp to block or unblock contacts"
+msgstr ""
+
+#. Translators: {name} is the contact's name or number.
+#: src/ui/dialogs.rs
+msgid "Block {name}?"
+msgstr ""
+
+#: src/ui/dialogs.rs
+msgid "Blocked contacts cannot call you or send you messages. This contact will not be told."
+msgstr ""
+
+#: src/ui/dialogs.rs
+msgid "Block"
+msgstr ""
+
+#: src/ui/dialogs.rs
+msgid "Unblock"
+msgstr ""
+
+#: src/ui/dialogs.rs
+msgid "You blocked this contact."
+msgstr ""
+
+#: src/ui/dialogs.rs
+msgid "Blocked"
+msgstr ""
+
+#: src/ui/chats.rs
+msgid "Block…"
+msgstr ""
+
+#: src/ui/settings.rs
+msgid "Blocked contacts"
+msgstr ""
+
+#: src/ui/settings.rs
+msgid "Connect to WhatsApp to see the contacts you blocked."
+msgstr ""
+
+#: src/ui/settings.rs
+msgid "Nobody. Block a contact from its chat menu or its info."
+msgstr ""
+
+#: src/ui/settings.rs
+msgid "Blocked: {count}. They cannot call you or send you messages."
+msgstr ""
+
+#: src/ui/settings.rs
+msgid "Hide"
+msgstr ""
+
+#: src/ui/settings.rs
+msgid "Show"
+msgstr ""
+
 #, fuzzy
 #~ msgid "Back to the chat"
 #~ msgstr "Dieses Pack in den Chat senden"

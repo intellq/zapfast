@@ -4657,5 +4657,78 @@ msgstr "Baixados de novo quando for preciso."
 msgid "Delete models"
 msgstr "Apagar modelos"
 
+#: src/backend/worker.rs
+msgid "Unblock this contact to send messages"
+msgstr "Desbloqueie este contato para enviar mensagens"
+
+#: src/backend/worker/calls.rs
+msgid "Unblock this contact to call them"
+msgstr "Desbloqueie este contato para fazer a ligação"
+
+#: src/app.rs
+msgid "Could not block this contact. Try again in a moment."
+msgstr "Não foi possível bloquear este contato. Tente de novo daqui a pouco."
+
+#: src/app.rs
+msgid "Could not unblock this contact. Try again in a moment."
+msgstr "Não foi possível desbloquear este contato. Tente de novo daqui a pouco."
+
+#: src/app.rs
+msgid "Connect to WhatsApp to block or unblock contacts"
+msgstr "Conecte-se ao WhatsApp para bloquear ou desbloquear contatos"
+
+#. Translators: {name} is the contact's name or number.
+#: src/ui/dialogs.rs
+msgid "Block {name}?"
+msgstr "Bloquear {name}?"
+
+#: src/ui/dialogs.rs
+msgid "Blocked contacts cannot call you or send you messages. This contact will not be told."
+msgstr "Contatos bloqueados não podem ligar nem enviar mensagens para você. Este contato não será avisado."
+
+#: src/ui/dialogs.rs
+msgid "Block"
+msgstr "Bloquear"
+
+#: src/ui/dialogs.rs
+msgid "Unblock"
+msgstr "Desbloquear"
+
+#: src/ui/dialogs.rs
+msgid "You blocked this contact."
+msgstr "Você bloqueou este contato."
+
+#: src/ui/dialogs.rs
+msgid "Blocked"
+msgstr "Bloqueado"
+
+#: src/ui/chats.rs
+msgid "Block…"
+msgstr "Bloquear…"
+
+#: src/ui/settings.rs
+msgid "Blocked contacts"
+msgstr "Contatos bloqueados"
+
+#: src/ui/settings.rs
+msgid "Connect to WhatsApp to see the contacts you blocked."
+msgstr "Conecte-se ao WhatsApp para ver os contatos que você bloqueou."
+
+#: src/ui/settings.rs
+msgid "Nobody. Block a contact from its chat menu or its info."
+msgstr "Ninguém. Bloqueie um contato pelo menu da conversa ou pelas informações do contato."
+
+#: src/ui/settings.rs
+msgid "Blocked: {count}. They cannot call you or send you messages."
+msgstr "Bloqueados: {count}. Não podem ligar nem enviar mensagens para você."
+
+#: src/ui/settings.rs
+msgid "Hide"
+msgstr "Ocultar"
+
+#: src/ui/settings.rs
+msgid "Show"
+msgstr "Mostrar"
+
 #~ msgid "Jump to the newest message"
 #~ msgstr "Ir para a mensagem mais recente"

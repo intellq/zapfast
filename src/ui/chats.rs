@@ -1039,6 +1039,8 @@ fn row(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> egui::Response {
             tr("Mute for a week"),
             tr("Mute indefinitely"),
             tr("Unlock chat"),
+            tr("Block…"),
+            tr("Unblock"),
             tr("Copy number"),
         ],
         true,
@@ -1359,6 +1361,24 @@ fn compact_badge_center(avatar: Rect) -> egui::Pos2 {
     pos2(avatar.right() - 6.0, avatar.top() + 2.0)
 }
 
+/// "Block…" or "Unblock" for a person's chat, the same in the chat list and
+/// the chat header. It waits for a connection and for a change on its way.
+pub(crate) fn block_menu_item(app: &mut App, ui: &mut egui::Ui, palette: &Palette, chat: &Chat) {
+    if !app.can_block(&chat.id) {
+        return;
+    }
+    let enabled = app.is_connected() && !app.blocking.contains(&chat.id);
+    if chat.blocked {
+        if widgets::menu_item_enabled(ui, palette, Some(Icon::CircleCheck), tr("Unblock"), enabled)
+        {
+            app.actions.push(Action::SetBlocked(chat.id.clone(), false));
+        }
+    } else if widgets::menu_item_enabled(ui, palette, Some(Icon::Ban), tr("Block…"), enabled) {
+        app.actions
+            .push(Action::ShowDialog(Dialog::ConfirmBlock(chat.id.clone())));
+    }
+}
+
 fn context_menu(app: &mut App, ui: &mut egui::Ui, chat: &Chat, palette: &Palette) {
     if chat.looks_unread()
         && widgets::menu_item(ui, palette, Some(Icon::CheckCheck), tr("Mark as read"))
@@ -1461,6 +1481,7 @@ fn context_menu(app: &mut App, ui: &mut egui::Ui, chat: &Chat, palette: &Palette
             Action::ShowDialog(Dialog::ConfirmLockChat(chat.id.clone()))
         });
     }
+    block_menu_item(app, ui, palette, chat);
     widgets::menu_separator(ui, palette);
     if let Some(phone) = chat.phone()
         && widgets::menu_item(ui, palette, Some(Icon::Copy), tr("Copy number"))

@@ -31,7 +31,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                 Dialog::Shortcuts => 540.0,
                 Dialog::About => 380.0,
                 Dialog::ConfirmUnlink => 380.0,
-                Dialog::ConfirmLeaveGroup(_) => 380.0,
+                Dialog::ConfirmLeaveGroup(_) | Dialog::ConfirmBlock(_) => 380.0,
                 Dialog::PairWithPhone => 380.0,
                 Dialog::NewContact => 380.0,
                 Dialog::NewChat => 420.0,
@@ -69,6 +69,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                 Dialog::About => about(app, ui),
                 Dialog::ConfirmUnlink => confirm_unlink(app, ui),
                 Dialog::ConfirmLeaveGroup(id) => confirm_leave_group(app, ui, &id),
+                Dialog::ConfirmBlock(id) => confirm_block(app, ui, &id),
                 Dialog::PairWithPhone => pair_with_phone(app, ui),
                 Dialog::NewContact => new_contact(app, ui),
                 Dialog::NewChat => new_chat(app, ui),
@@ -542,8 +543,11 @@ fn forward(app: &mut App, ui: &mut egui::Ui, from_chat: &str, messages: &[String
             for chat in &chats[range] {
                 let title = app.chat_title(chat);
                 let selected = app.forward_targets.contains(&chat.id);
+                // A blocked contact stays listed, so it is not taken for
+                // missing, but cannot be chosen.
                 let enabled = selected
-                    || (app.forward_targets.len() < app.forward_max_chats
+                    || (!chat.blocked
+                        && app.forward_targets.len() < app.forward_max_chats
                         && (chat.kind != crate::model::ChatKind::Group
                             || selected_groups < app.forward_max_groups));
                 let (rect, response) =
@@ -565,19 +569,33 @@ fn forward(app: &mut App, ui: &mut egui::Ui, from_chat: &str, messages: &[String
                         &chat.id,
                         picture.as_deref(),
                     );
+                    let (color, reserved) = if chat.blocked {
+                        (palette.secondary, 92.0 + 80.0)
+                    } else {
+                        (palette.text, 92.0)
+                    };
                     let line = super::widgets::line(
                         ui,
                         &title,
                         theme::medium(14.5),
-                        palette.text,
-                        rect.width() - 92.0,
+                        color,
+                        rect.width() - reserved,
                         1,
                     );
                     line.paint(
                         ui,
                         pos2(rect.left() + 50.0, rect.center().y - line.size().y / 2.0),
-                        palette.text,
+                        color,
                     );
+                    if chat.blocked {
+                        ui.painter().text(
+                            pos2(rect.right() - 40.0, rect.center().y),
+                            egui::Align2::RIGHT_CENTER,
+                            tr("Blocked"),
+                            theme::regular(12.5),
+                            palette.secondary,
+                        );
+                    }
                     ui.painter().hline(
                         (rect.left() + 50.0)..=rect.right(),
                         rect.bottom() - 0.5,
@@ -1262,6 +1280,38 @@ fn confirm_unlink(app: &mut App, ui: &mut egui::Ui) {
     });
 }
 
+fn confirm_block(app: &mut App, ui: &mut egui::Ui, id: &str) {
+    let palette = app.palette;
+    let locale = app.locale;
+    let name = app
+        .chat(id)
+        .map_or_else(|| app.display_name(id), |chat| app.chat_title(chat));
+    // Translators: {name} is the contact's name or number.
+    let question = crate::i18n::gettext(locale, "Block {name}?").replace("{name}", &name);
+    title(ui, app, &question);
+    theme::paragraph(
+        ui,
+        crate::i18n::gettext(
+            locale,
+            "Blocked contacts cannot call you or send you messages. This contact will not be told.",
+        ),
+        theme::regular(13.5),
+        palette.text,
+    );
+    ui.add_space(10.0);
+    ui.horizontal(|ui| {
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if danger_button(ui, app, crate::i18n::gettext(locale, "Block").as_ref()) {
+                app.actions.push(Action::SetBlocked(id.to_owned(), true));
+                app.actions.push(Action::CloseDialog);
+            }
+            if theme::pill_button(ui, &palette, tr("Cancel"), false).clicked() {
+                app.actions.push(Action::CloseDialog);
+            }
+        });
+    });
+}
+
 fn confirm_leave_group(app: &mut App, ui: &mut egui::Ui, id: &str) {
     let palette = app.palette;
     let chat = app.chat(id);
@@ -1825,6 +1875,10 @@ fn chat_info(app: &mut App, ui: &mut egui::Ui, id: &str) {
                 leave = true;
             }
         }
+        if app.can_block(id) {
+            ui.add_space(8.0);
+            block_button(app, ui, id);
+        }
     });
     if let Some((first, last)) = saved {
         editing = None;
@@ -2192,6 +2246,35 @@ fn group_name_field(app: &App, ui: &mut egui::Ui, draft: &mut String) -> Option<
 /// The group name editor's text field.
 pub fn group_name_field_id() -> egui::Id {
     egui::Id::new("group-name-field")
+}
+
+/// Blocks the contact after asking, or unblocks it at once, as the phone
+/// does. Nothing is offered while a change is on its way or offline.
+fn block_button(app: &mut App, ui: &mut egui::Ui, id: &str) {
+    let blocked = app.is_blocked(id);
+    let enabled = app.is_connected() && !app.blocking.contains(id);
+    ui.add_enabled_ui(enabled, |ui| {
+        if blocked {
+            let label = crate::i18n::gettext(app.locale, "Unblock");
+            if theme::pill_button(ui, &app.palette, label.as_ref(), false).clicked() {
+                app.actions.push(Action::SetBlocked(id.to_owned(), false));
+            }
+        } else {
+            let label = crate::i18n::gettext(app.locale, "Block");
+            if danger_button(ui, app, label.as_ref()) {
+                app.actions
+                    .push(Action::ShowDialog(Dialog::ConfirmBlock(id.to_owned())));
+            }
+        }
+    });
+    if blocked {
+        theme::text(
+            ui,
+            crate::i18n::gettext(app.locale, "You blocked this contact."),
+            theme::regular(12.5),
+            app.palette.secondary,
+        );
+    }
 }
 
 /// A filled button for a destructive action.

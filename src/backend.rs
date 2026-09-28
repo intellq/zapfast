@@ -766,6 +766,21 @@ pub enum Command {
     },
     /// Internal: followed channels and whether each is muted on the server.
     ChannelMutes(Vec<(String, bool)>),
+    /// Asks the server for the blocklist, unless it answered a moment ago.
+    RefreshBlocklist,
+    /// Internal: the blocklist by bare JID, or what kept it from coming.
+    BlocklistFetched(Result<Vec<String>, &'static str>),
+    /// Blocks a contact, or unblocks one, on WhatsApp.
+    SetBlocked {
+        chat: ChatId,
+        blocked: bool,
+    },
+    /// Internal: whether the server took a block or unblock.
+    BlockAnswered {
+        chat: ChatId,
+        blocked: bool,
+        ok: bool,
+    },
     /// Internal: phone numbers the protocol library knows for privacy ids (bare user parts, the
     /// privacy id first) that the archive had none for.
     LidsFound(Vec<(String, String)>),
@@ -979,6 +994,15 @@ pub enum Event {
     },
     /// How many chats this account may pin: more with WhatsApp Plus.
     PinLimit(usize),
+    /// Every contact the account has blocked, by chat id.
+    Blocklist(Vec<ChatId>),
+    /// A block or unblock asked for through `SetBlocked` finished; `ok`
+    /// whether WhatsApp took it.
+    BlockDone {
+        chat: ChatId,
+        blocked: bool,
+        ok: bool,
+    },
     /// The followed message's receipts, sent when following starts and
     /// whenever one arrives.
     Receipts(crate::model::MessageReceipts),

@@ -140,6 +140,9 @@ pub struct Chat {
     pub labels: Vec<String>,
     /// This chat's own notification sound; `None` follows Settings.
     pub notification_sound: Option<crate::settings::NotificationSound>,
+    /// Whether the account blocked this contact, as the server's blocklist
+    /// last said. The worker sets it; the archive does not keep it.
+    pub blocked: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -182,12 +185,17 @@ impl Chat {
             ephemeral_expiration: None,
             labels: Vec::new(),
             notification_sound: None,
+            blocked: false,
         }
     }
 
     /// Newsletter publishing permissions are not supported by this client.
     pub fn can_send(&self) -> bool {
-        !self.locked && !self.read_only && !self.left && self.kind != ChatKind::Broadcast
+        !self.locked
+            && !self.read_only
+            && !self.left
+            && !self.blocked
+            && self.kind != ChatKind::Broadcast
     }
 
     /// A followed WhatsApp channel (newsletter).
@@ -1111,6 +1119,8 @@ pub enum Dialog {
     ConfirmClearChat(ChatId),
     /// Leaves a group or channel, optionally archiving the chat.
     ConfirmLeaveGroup(ChatId),
+    /// Confirms blocking a contact.
+    ConfirmBlock(ChatId),
     /// Confirms deleting one message. The archive is the only copy, so a
     /// local delete cannot be undone either.
     ConfirmDeleteMessage {
@@ -1595,6 +1605,8 @@ pub enum Action {
         emoji: String,
     },
     SetArchived(ChatId, bool),
+    /// Blocks a contact, or unblocks one, on WhatsApp.
+    SetBlocked(ChatId, bool),
     /// Leaves a group or a channel. `archive` also hides the chat in Archived.
     LeaveGroup {
         chat: ChatId,

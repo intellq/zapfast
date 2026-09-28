@@ -4004,6 +4004,44 @@ mod tests {
     }
 
     #[test]
+    fn a_blocked_contact_offers_unblocking_instead_of_the_composer() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        let id = app
+            .chats
+            .iter()
+            .find(|chat| chat.kind == crate::model::ChatKind::Direct && app.can_block(&chat.id))
+            .map(|chat| chat.id.clone())
+            .expect("the demo has a person to chat with");
+        app.open_chat = Some(id.clone());
+        app.chat_mut(&id).unwrap().blocked = true;
+        render(&mut app, &ctx);
+        ctx.enable_accesskit();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1180.0, 780.0),
+                )),
+                ..Default::default()
+            },
+            |ui| app.frame_ui(ui),
+        );
+        output.textures_delta.clear();
+        let tree = output.platform_output.accesskit_update.unwrap();
+        let labels: Vec<_> = tree
+            .nodes
+            .iter()
+            .filter_map(|(_, node)| node.label().or_else(|| node.value()))
+            .collect();
+        assert!(labels.contains(&"You blocked this contact."), "{labels:?}");
+        assert!(labels.contains(&"Unblock"), "{labels:?}");
+        assert!(!labels.contains(&"Send message"), "{labels:?}");
+        assert!(!labels.contains(&"Voice call"), "{labels:?}");
+    }
+
+    #[test]
     fn every_surface_lays_out() {
         let mut app = app();
         let ctx = egui::Context::default();

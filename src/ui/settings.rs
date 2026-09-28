@@ -806,6 +806,7 @@ fn sections(app: &App) -> Vec<Section> {
             ui.add_enabled_ui(editable, |ui| privacy_control(ui, app, kind));
         });
     }
+    blocked_contacts(app, &mut privacy);
     if app.settings_more {
         privacy.toggle(
             translated(locale, "Keep deleted messages"),
@@ -1081,6 +1082,96 @@ fn sections(app: &App) -> Vec<Section> {
 
 /// A translated description that names keys, with Cmd and Option on macOS.
 /// The search still finds it by its English source.
+/// The contacts the account blocked, as the server last said, each with a
+/// way to unblock it. The list opens on request: it can be long.
+fn blocked_contacts(app: &App, privacy: &mut Section) {
+    let locale = app.locale;
+    let palette = app.palette;
+    let title = translated(locale, "Blocked contacts");
+    let count = app.blocklist.as_ref().map(Vec::len);
+    let description = match count {
+        None if !app.is_connected() => translated(
+            locale,
+            "Connect to WhatsApp to see the contacts you blocked.",
+        ),
+        None => translated(locale, "Loading…"),
+        Some(0) => translated(
+            locale,
+            "Nobody. Block a contact from its chat menu or its info.",
+        ),
+        Some(count) => {
+            let source = "Blocked: {count}. They cannot call you or send you messages.";
+            Text {
+                shown: crate::i18n::gettext(locale, source)
+                    .replace("{count}", &count.to_string())
+                    .into(),
+                source: source.into(),
+            }
+        }
+    };
+    let listed = count.unwrap_or(0) > 0;
+    privacy.row_with_width(title.clone(), description, 120.0, move |ui, app| {
+        if !listed {
+            return;
+        }
+        let label = if app.blocked_list_open {
+            crate::i18n::gettext(app.locale, "Hide")
+        } else {
+            crate::i18n::gettext(app.locale, "Show")
+        };
+        if theme::pill_button(ui, &palette, label.as_ref(), false).clicked() {
+            app.blocked_list_open = !app.blocked_list_open;
+        }
+    });
+    if !listed || !app.blocked_list_open {
+        return;
+    }
+    let mut people: Vec<(String, String, Option<String>)> = app
+        .blocklist
+        .iter()
+        .flatten()
+        .map(|id| {
+            let name = app
+                .chat(id)
+                .map_or_else(|| app.display_name(id), |chat| app.chat_title(chat));
+            let phone = id
+                .strip_suffix("@s.whatsapp.net")
+                .map(|digits| format!("+{digits}"))
+                .filter(|phone| *phone != name);
+            (id.clone(), name, phone)
+        })
+        .collect();
+    people.sort_by_key(|(_, name, _)| crate::util::search_key(name));
+    privacy.block(vec![title], move |ui, app| {
+        for (id, name, phone) in people {
+            ui.horizontal(|ui| {
+                ui.set_min_height(34.0);
+                ui.add_space(SUB_OPTION_INDENT);
+                ui.vertical(|ui| {
+                    widgets::rich_text(ui, &name, theme::medium(13.5), palette.text);
+                    if let Some(phone) = &phone {
+                        widgets::rich_text(ui, phone, theme::regular(12.0), palette.secondary);
+                    }
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let enabled = app.is_connected() && !app.blocking.contains(&id);
+                    let label = crate::i18n::gettext(app.locale, "Unblock");
+                    if ui
+                        .add_enabled_ui(enabled, |ui| {
+                            theme::pill_button(ui, &palette, label.as_ref(), false)
+                        })
+                        .inner
+                        .clicked()
+                    {
+                        app.actions.push(Action::SetBlocked(id.clone(), false));
+                    }
+                });
+            });
+        }
+        ui.add_space(6.0);
+    });
+}
+
 fn keyed(text: Text) -> Text {
     Text {
         shown: super::keys::label(&text.shown).into(),

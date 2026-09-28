@@ -327,6 +327,13 @@ pub struct App {
     pub account_receipts_off: bool,
     /// Last account privacy snapshot from the phone.
     pub account_privacy: crate::privacy::Snapshot,
+    /// Every contact the account has blocked, by chat id; `None` until the
+    /// server has said on this link.
+    pub blocklist: Option<Vec<ChatId>>,
+    /// Contacts a block or unblock is on its way for.
+    pub blocking: HashSet<ChatId>,
+    /// Whether Settings lists the blocked contacts.
+    pub blocked_list_open: bool,
     /// Receipts of the message whose "Message info" is open.
     pub message_receipts: Option<crate::model::MessageReceipts>,
     /// The group message the backend is following receipts for.
@@ -939,6 +946,9 @@ impl App {
             presence: HashMap::new(),
             account_receipts_off: false,
             account_privacy: crate::privacy::Snapshot::default(),
+            blocklist: None,
+            blocking: HashSet::new(),
+            blocked_list_open: false,
             message_receipts: None,
             receipts_watch: None,
             invite: None,
@@ -1287,6 +1297,21 @@ impl App {
 
     /// Every id a member list may name us by: the phone number and, before
     /// the worker knows the pair, the privacy id.
+    /// Whether `id` is a person this account can block: not a group, a
+    /// channel, or us.
+    pub fn can_block(&self, id: &str) -> bool {
+        (id.ends_with("@s.whatsapp.net") || id.ends_with("@lid")) && !self.our_ids().contains(&id)
+    }
+
+    /// Whether the account blocked `id`, as the server last said.
+    pub fn is_blocked(&self, id: &str) -> bool {
+        self.chat(id).is_some_and(|chat| chat.blocked)
+            || self
+                .blocklist
+                .as_ref()
+                .is_some_and(|blocked| blocked.iter().any(|known| known == id))
+    }
+
     pub fn our_ids(&self) -> Vec<&str> {
         [self.me.as_deref(), self.me_lid.as_deref()]
             .into_iter()
@@ -2567,6 +2592,17 @@ impl App {
                 }
                 Event::AccountPrivacyFailed { kind } => self.account_privacy.fail_set(kind),
                 Event::PinLimit(limit) => self.pin_limit = limit,
+                Event::Blocklist(blocked) => self.blocklist = Some(blocked),
+                Event::BlockDone { chat, blocked, ok } => {
+                    self.blocking.remove(&chat);
+                    if !ok {
+                        self.toast_error(if blocked {
+                            tr("Could not block this contact. Try again in a moment.")
+                        } else {
+                            tr("Could not unblock this contact. Try again in a moment.")
+                        });
+                    }
+                }
                 Event::Receipts(receipts) => {
                     // A late answer for a dialog that has since closed is stale.
                     if self.receipts_watch.as_ref().is_some_and(|(chat, message)| {
@@ -2777,6 +2813,8 @@ impl App {
                 self.avatars.clear();
                 self.account_privacy = crate::privacy::Snapshot::default();
                 self.account_receipts_off = false;
+                self.blocklist = None;
+                self.blocking.clear();
                 self.open_chat = None;
                 // Unsent text belongs to the account that was unlinked.
                 self.drafts.clear();
@@ -3340,6 +3378,15 @@ impl App {
         // A chat that history sync named without its messages is not asked
         // about: the phone answers only from a message it can start at.
         self.ensure_loaded(&id);
+        // The phone may have blocked or unblocked this contact meanwhile, and
+        // nothing says so: ask again, unless the server answered a moment ago.
+        if self
+            .chat(&id)
+            .is_some_and(|chat| chat.kind == crate::model::ChatKind::Direct)
+            && self.is_connected()
+        {
+            self.backend.send(Command::RefreshBlocklist);
+        }
         if self
             .chat(&id)
             .is_some_and(|chat| chat.unread > 0 || chat.marked_unread)
@@ -3918,6 +3965,8 @@ impl App {
                 // announces it: read it again whenever Settings opens.
                 if page == Page::Settings && self.page != Page::Settings && self.is_connected() {
                     self.backend.send(Command::FetchAccountPrivacy);
+                    // So is the blocklist, unless it came a moment ago.
+                    self.backend.send(Command::RefreshBlocklist);
                 }
                 self.page = page;
                 self.dialog = None;
@@ -4934,6 +4983,13 @@ impl App {
                 // archived and closed itself would not come back. The
                 // confirmed update does both.
                 self.backend.send(Command::LeaveGroup { chat, archive });
+            }
+            Action::SetBlocked(chat, blocked) => {
+                if !self.is_connected() {
+                    self.toast_error(tr("Connect to WhatsApp to block or unblock contacts"));
+                } else if self.blocking.insert(chat.clone()) {
+                    self.backend.send(Command::SetBlocked { chat, blocked });
+                }
             }
             Action::SetArchived(chat, archived) => {
                 if let Some(known) = self.chat_mut(&chat) {
@@ -8639,6 +8695,76 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn opening_a_person_s_chat_asks_the_blocklist_again() {
+        let mut app = app();
+        let (backend, mut commands, _events) = Backend::recording_with_events();
+        app.backend = backend;
+        app.link = LinkStatus::Connected;
+        let person = "peer@s.whatsapp.net";
+        let group = "123-456@g.us";
+        app.chats.push(Chat::new(person.into(), "Peer".into()));
+        app.chats.push(Chat::new(group.into(), "Group".into()));
+        let refreshes = |commands: &mut tokio::sync::mpsc::UnboundedReceiver<Command>| {
+            std::iter::from_fn(|| commands.try_recv().ok())
+                .filter(|command| matches!(command, Command::RefreshBlocklist))
+                .count()
+        };
+        app.open_chat(group.into());
+        assert_eq!(refreshes(&mut commands), 0, "a group has nobody to block");
+        app.open_chat(person.into());
+        assert_eq!(refreshes(&mut commands), 1);
+    }
+
+    #[test]
+    fn a_block_waits_for_the_server_and_a_refusal_says_so() {
+        let ctx = egui::Context::default();
+        let mut app = app();
+        let (backend, mut commands, events) = Backend::recording_with_events();
+        app.backend = backend;
+        app.link = LinkStatus::Connected;
+        let person = "peer@s.whatsapp.net";
+        app.apply(Action::SetBlocked(person.into(), true), &ctx);
+        // A second click while the first is on its way sends nothing.
+        app.apply(Action::SetBlocked(person.into(), true), &ctx);
+        let sent: Vec<Command> = std::iter::from_fn(|| commands.try_recv().ok()).collect();
+        assert!(
+            matches!(sent.as_slice(), [Command::SetBlocked { blocked: true, .. }]),
+            "{sent:?}"
+        );
+        assert!(app.blocking.contains(person));
+
+        events
+            .send(Event::BlockDone {
+                chat: person.into(),
+                blocked: true,
+                ok: false,
+            })
+            .unwrap();
+        app.handle_events();
+        assert!(app.blocking.is_empty());
+        assert!(
+            app.toasts
+                .iter()
+                .any(|toast| toast.kind == ToastKind::Error)
+        );
+    }
+
+    #[test]
+    fn the_blocklist_names_who_the_account_blocked() {
+        let mut app = app();
+        let (backend, _commands, events) = Backend::recording_with_events();
+        app.backend = backend;
+        let person = "peer@s.whatsapp.net";
+        assert!(app.can_block(person));
+        assert!(!app.can_block("123-456@g.us"));
+        assert!(!app.can_block("fixture@newsletter"));
+        assert!(!app.is_blocked(person));
+        events.send(Event::Blocklist(vec![person.into()])).unwrap();
+        app.handle_events();
+        assert!(app.is_blocked(person), "even without a chat, for Settings");
     }
 
     #[test]

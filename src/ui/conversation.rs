@@ -238,6 +238,8 @@ fn header(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> Rect {
                             tr("Pin to top"),
                             tr("Unarchive"),
                             tr("Clear chat"),
+                            tr("Block…"),
+                            tr("Unblock"),
                             leave_label.as_ref(),
                             tr("Copy number"),
                             tr("Close chat"),
@@ -297,6 +299,7 @@ fn header(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> Rect {
                                         chat.id.clone(),
                                     )));
                             }
+                            super::chats::block_menu_item(app, ui, &palette, chat);
                             widgets::menu_separator(ui, &palette);
                             if chat.can_leave(&app.our_ids())
                                 && widgets::menu_item(
@@ -333,8 +336,9 @@ fn header(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> Rect {
                     // A live call still offers its hang-up button, which can only exist where the
                     // backend does.
                     let calls_here = crate::calls::capabilities();
+                    // A blocked contact cannot be called, as on the phone.
                     if chat.kind == crate::model::ChatKind::Direct
-                        && (calls_here.voice || call_here)
+                        && ((calls_here.voice && !chat.blocked) || call_here)
                     {
                         // While this chat is the one on a call, the phone button ends it;
                         // otherwise it starts a voice call. A call in another chat is refused by
@@ -923,6 +927,10 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                             palette.secondary,
                         );
                     });
+                    return;
+                }
+                if chat.blocked {
+                    blocked_strip(app, ui, chat);
                     return;
                 }
                 if chat.locked {
@@ -2766,6 +2774,29 @@ fn phone_silence(ui: &mut egui::Ui, palette: &Palette, chat: &Chat, actions: &mu
         if theme::link(ui, tr("Try again"), theme::medium(12.5), palette.accent).clicked() {
             actions.push(Action::FetchOlder(chat.id.clone()));
         }
+    });
+}
+
+/// What stands where the composer would in a chat with a contact the
+/// account blocked: nothing can be sent until it is unblocked.
+fn blocked_strip(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
+    let palette = app.palette;
+    let enabled = app.is_connected() && !app.blocking.contains(&chat.id);
+    ui.vertical_centered(|ui| {
+        ui.add_space(8.0);
+        theme::text(
+            ui,
+            tr("You blocked this contact."),
+            theme::regular(13.5),
+            palette.secondary,
+        );
+        ui.add_space(2.0);
+        ui.add_enabled_ui(enabled, |ui| {
+            if theme::link(ui, tr("Unblock"), theme::medium(13.5), palette.accent).clicked() {
+                app.actions.push(Action::SetBlocked(chat.id.clone(), false));
+            }
+        });
+        ui.add_space(8.0);
     });
 }
 

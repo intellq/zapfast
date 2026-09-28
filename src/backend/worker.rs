@@ -37,6 +37,7 @@ use whatsapp_rust::wacore_binary::jid::JidExt;
 use whatsapp_rust::waproto::buffa::Message as _;
 use whatsapp_rust::{MediaRetryResult, MediaReuploadRequest};
 
+mod blocking;
 mod calls;
 mod device_store;
 mod favorite_chats;
@@ -601,6 +602,10 @@ pub async fn run(
         online_sent: None,
         pending_older: HashMap::new(),
         older_by_number: HashSet::new(),
+        blocklist: None,
+        blocklist_asked: None,
+        blocklist_fetching: false,
+        blocklist_again: false,
         pending_avatars: HashMap::new(),
         sticker_fetches: HashSet::new(),
         sticker_downloads: HashSet::new(),
@@ -890,6 +895,15 @@ struct Worker {
     /// Direct chats the phone keeps under the number rather than the privacy
     /// id: asked by the LID, it answered with nothing although it had more.
     older_by_number: HashSet<ChatId>,
+    /// The server's blocklist by bare JID as it last answered; `None` until
+    /// it has on this link.
+    blocklist: Option<Vec<String>>,
+    /// When the blocklist was last asked for.
+    blocklist_asked: Option<Instant>,
+    /// Whether a blocklist answer is pending.
+    blocklist_fetching: bool,
+    /// Whether a change asked for the list again while it was pending.
+    blocklist_again: bool,
     /// Deferred profile-picture requests and retry counts.
     pending_avatars: HashMap<(String, bool), u32>,
     /// Active recent-sticker downloads by hash.
@@ -1279,6 +1293,7 @@ impl Worker {
             last.full = self.pn_tokens(&last.full);
         }
         chat.labels = self.archive.chat_labels(&chat.id).unwrap_or_default();
+        chat.blocked = self.is_blocked(&chat.id);
     }
 
     fn emit_message(&self, chat: &str, id: &str) {
@@ -2358,6 +2373,7 @@ impl Worker {
                 self.refresh_legacy_preferences();
                 self.retry_avatars();
                 self.resolve_unmapped_lids();
+                self.fetch_blocklist(true);
                 self.pump_read_sync();
                 self.pump_favorite_chats();
                 self.poll_history.reconnect(Instant::now());
@@ -2761,6 +2777,9 @@ impl Worker {
         self.forward_queue = None;
         self.pending_older.clear();
         self.older_by_number.clear();
+        self.blocklist = None;
+        self.blocklist_asked = None;
+        self.blocklist_again = false;
         self.pending_avatars.clear();
         self.me_pn = None;
         self.me_lid = None;
@@ -4304,6 +4323,46 @@ impl Worker {
             Command::Forward { to_chats, .. } => to_chats.iter().collect(),
             _ => Vec::new(),
         };
+        let blocked_target = match &command {
+            Command::VotePoll { chat, .. }
+            | Command::React { chat, .. }
+            | Command::EditText { chat, .. }
+            | Command::RetryMedia { chat, .. }
+            | Command::SendStickerPack { chat, .. }
+            | Command::MakeSticker {
+                chat: Some(chat), ..
+            } => Some(chat),
+            _ => destinations
+                .iter()
+                .copied()
+                .find(|chat| self.is_blocked(chat)),
+        }
+        .filter(|chat| self.is_blocked(chat));
+        if let Some(chat) = blocked_target {
+            log::info!("blocklist: refused to send to a blocked contact");
+            let error = tr("Unblock this contact to send messages").to_owned();
+            match &command {
+                Command::CreatePoll { .. } => self.emit(Event::PollCreated {
+                    chat: chat.clone(),
+                    error: Some(error),
+                }),
+                Command::VotePoll { message, .. } => self.emit(Event::PollVoted {
+                    chat: chat.clone(),
+                    message: message.clone(),
+                    error: Some(error),
+                }),
+                Command::ReplyInteractive { message, .. } => {
+                    self.emit(Event::InteractiveReplyState {
+                        chat: chat.clone(),
+                        message: message.clone(),
+                        pending: false,
+                    });
+                    self.emit(Event::Error(error));
+                }
+                _ => self.emit(Event::Error(error)),
+            }
+            return;
+        }
         for chat in destinations {
             let writable = self.privacy_ready
                 && match self.archive.chat(chat) {
@@ -5516,7 +5575,13 @@ impl Worker {
                     self.learn_lid(&lid, &pn);
                 }
                 self.emit_chats();
+                // A blocked privacy id may now name a number.
+                self.blocklist_changed(&Default::default());
             }
+            Command::RefreshBlocklist => self.fetch_blocklist(false),
+            Command::BlocklistFetched(result) => self.blocklist_fetched(result),
+            Command::SetBlocked { chat, blocked } => self.set_blocked(chat, blocked),
+            Command::BlockAnswered { chat, blocked, ok } => self.block_answered(chat, blocked, ok),
             Command::ChannelMutes(mutes) => {
                 for (chat, muted) in mutes {
                     let Ok(Some(known)) = self.archive.chat(&chat) else {
@@ -10865,6 +10930,136 @@ mod tests {
         assert_eq!(chat_kind("fixture@newsletter"), "other");
     }
 
+    #[test]
+    fn a_blocked_privacy_id_names_the_chat_by_its_number() {
+        let (mut worker, events, _, _) = receipt_tests::worker();
+        let chat = "12025550100@s.whatsapp.net";
+        worker.learn_lid("100000012345678", "12025550100");
+        worker.blocklist_fetched(Ok(vec!["100000012345678@lid".into()]));
+        assert!(worker.is_blocked(chat));
+        assert!(worker.is_blocked("100000012345678@lid"));
+        assert!(!worker.is_blocked("12025550199@s.whatsapp.net"));
+        let emitted: Vec<Event> = events.try_iter().collect();
+        assert!(
+            emitted
+                .iter()
+                .any(|event| matches!(event, Event::Blocklist(ids) if ids == &[chat.to_owned()])),
+            "{emitted:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn messages_and_calls_to_a_blocked_contact_are_refused() {
+        let (mut worker, events, _, _) = receipt_tests::worker();
+        let chat = "12025550100@s.whatsapp.net";
+        worker.archive.ensure_chat(chat, "Fixture").unwrap();
+        worker.blocklist = Some(vec![chat.into()]);
+        worker
+            .handle_command(Command::SendText {
+                chat: chat.into(),
+                text: "Fixture".into(),
+                quoting: None,
+                mentions: Vec::new(),
+                preview: None,
+            })
+            .await;
+        worker
+            .handle_command(Command::CreatePoll {
+                chat: chat.into(),
+                draft: Default::default(),
+            })
+            .await;
+        worker
+            .handle_command(Command::StartCall { chat: chat.into() })
+            .await;
+        let emitted: Vec<Event> = events.try_iter().collect();
+        let unblock = "Unblock this contact to send messages";
+        assert!(
+            matches!(&emitted[0], Event::Error(error) if error == unblock),
+            "{emitted:?}"
+        );
+        assert!(
+            matches!(&emitted[1], Event::PollCreated { error: Some(error), .. } if error == unblock),
+            "{emitted:?}"
+        );
+        assert!(
+            matches!(&emitted[2], Event::Error(error) if error == "Unblock this contact to call them"),
+            "{emitted:?}"
+        );
+        assert_eq!(emitted.len(), 3, "{emitted:?}");
+    }
+
+    #[test]
+    fn a_change_the_server_took_shows_before_the_list_comes_back() {
+        let (mut worker, events, _, _) = receipt_tests::worker();
+        let chat = "12025550100@s.whatsapp.net";
+        worker.archive.ensure_chat(chat, "Fixture").unwrap();
+        worker.blocklist = Some(Vec::new());
+        worker.block_answered(chat.into(), true, true);
+        let emitted: Vec<Event> = events.try_iter().collect();
+        assert!(
+            emitted
+                .iter()
+                .any(|event| matches!(event, Event::Blocklist(ids) if ids == &[chat.to_owned()])),
+            "{emitted:?}"
+        );
+        assert!(
+            emitted.iter().any(
+                |event| matches!(event, Event::ChatUpdated(row) if row.id == chat && row.blocked)
+            ),
+            "{emitted:?}"
+        );
+        assert!(matches!(
+            emitted.last(),
+            Some(Event::BlockDone {
+                ok: true,
+                blocked: true,
+                ..
+            })
+        ));
+
+        worker.block_answered(chat.into(), false, true);
+        let emitted: Vec<Event> = events.try_iter().collect();
+        assert!(
+            emitted.iter().any(
+                |event| matches!(event, Event::ChatUpdated(row) if row.id == chat && !row.blocked)
+            ),
+            "{emitted:?}"
+        );
+        assert!(!worker.is_blocked(chat));
+    }
+
+    #[test]
+    fn a_change_the_server_refused_leaves_the_list_as_it_was() {
+        let (mut worker, events, _, _) = receipt_tests::worker();
+        let chat = "12025550100@s.whatsapp.net";
+        worker.blocklist = Some(Vec::new());
+        worker.block_answered(chat.into(), true, false);
+        let emitted: Vec<Event> = events.try_iter().collect();
+        assert!(
+            matches!(
+                emitted.as_slice(),
+                [Event::BlockDone {
+                    ok: false,
+                    blocked: true,
+                    ..
+                }]
+            ),
+            "{emitted:?}"
+        );
+        assert!(!worker.is_blocked(chat));
+    }
+
+    #[test]
+    fn a_block_asked_for_offline_is_answered_at_once() {
+        let (mut worker, events, _, _) = receipt_tests::worker();
+        worker.set_blocked("12025550100@s.whatsapp.net".into(), true);
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            Event::BlockDone { ok: false, .. }
+        ));
+    }
+
     #[tokio::test]
     async fn newsletter_sends_are_rejected_before_reaching_the_client() {
         let (mut worker, events, _, _) = receipt_tests::worker();
@@ -12134,6 +12329,10 @@ mod receipt_tests {
             online_sent: None,
             pending_older: HashMap::new(),
             older_by_number: HashSet::new(),
+            blocklist: None,
+            blocklist_asked: None,
+            blocklist_fetching: false,
+            blocklist_again: false,
             pending_avatars: HashMap::new(),
             sticker_fetches: HashSet::new(),
             sticker_downloads: HashSet::new(),

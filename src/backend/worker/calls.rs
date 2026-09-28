@@ -136,6 +136,13 @@ impl Worker {
             self.emit(Event::Error("Calls are one to one only".to_owned()));
             return;
         }
+        if self.is_blocked(&chat) {
+            log::info!("[CALL] refusing a call to a blocked contact");
+            self.emit(Event::Error(
+                crate::i18n::tr("Unblock this contact to call them").to_owned(),
+            ));
+            return;
+        }
         let Some(client) = self.client.clone() else {
             log::warn!("[CALL] cannot start a call: WhatsApp is not connected");
             self.emit(Event::Error(
