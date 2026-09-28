@@ -600,6 +600,7 @@ pub async fn run(
         online_changed: Instant::now(),
         online_sent: None,
         pending_older: HashMap::new(),
+        older_by_number: HashSet::new(),
         pending_avatars: HashMap::new(),
         sticker_fetches: HashSet::new(),
         sticker_downloads: HashSet::new(),
@@ -886,6 +887,9 @@ struct Worker {
     online_sent: Option<bool>,
     /// Pending phone-history request time and boundary by chat.
     pending_older: HashMap<ChatId, (Instant, super::PageKey)>,
+    /// Direct chats the phone keeps under the number rather than the privacy
+    /// id: asked by the LID, it answered with nothing although it had more.
+    older_by_number: HashSet<ChatId>,
     /// Deferred profile-picture requests and retry counts.
     pending_avatars: HashMap<(String, bool), u32>,
     /// Active recent-sticker downloads by hash.
@@ -2756,6 +2760,7 @@ impl Worker {
         self.poll_history = Default::default();
         self.forward_queue = None;
         self.pending_older.clear();
+        self.older_by_number.clear();
         self.pending_avatars.clear();
         self.me_pn = None;
         self.me_lid = None;
@@ -4165,6 +4170,20 @@ impl Worker {
                 chat_kind(&chat),
                 pending.is_some()
             );
+            // Not every phone files a person's chat under the privacy id yet: one
+            // that has the chat under the number answers a LID request with an
+            // empty chunk that still says more messages remain. It is asked
+            // once more by the number, which then serves this chat from now on.
+            if pending.is_some()
+                && count == 0
+                && more_on_phone != Some(false)
+                && chat_kind(&chat) == "pn"
+                && self.older_by_number.insert(chat.clone())
+            {
+                log::info!("phone history: nothing under the privacy id; asking by the number");
+                self.fetch_older(chat);
+                continue;
+            }
             let Some((_, (before_time, before_id))) = pending else {
                 // Late responses are already archived; tell the app to page again.
                 self.emit(Event::OlderFetched {
@@ -4244,9 +4263,14 @@ impl Worker {
         };
         self.pending_older
             .insert(chat.clone(), (Instant::now(), (timestamp, id.clone())));
+        let by_number = self.older_by_number.contains(&chat);
         let commands = self.commands.clone();
         tokio::spawn(async move {
-            let jid = phone_history_jid(&client, jid, &commands).await;
+            let jid = if by_number {
+                jid
+            } else {
+                phone_history_jid(&client, jid, &commands).await
+            };
             log::info!(
                 "phone history: requesting {PHONE_BATCH} older messages; chat={}, anchor_present={}",
                 jid_kind(&jid),
@@ -10799,6 +10823,41 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_answer_to_a_privacy_id_request_asks_by_the_number_once() {
+        let (mut worker, events, _, _) = receipt_tests::worker();
+        let chat = "12025550100@s.whatsapp.net";
+        let ask = |worker: &mut Worker| {
+            worker
+                .pending_older
+                .insert(chat.into(), (Instant::now(), (100, "m1".into())));
+        };
+        ask(&mut worker);
+        worker.answer_older(vec![(chat.into(), 0, Some(true))]);
+        assert!(
+            worker.older_by_number.contains(chat),
+            "the chat is asked about by its number from now on"
+        );
+        let _: Vec<Event> = events.try_iter().collect();
+
+        // The number came back empty too: nothing more to ask.
+        ask(&mut worker);
+        worker.answer_older(vec![(chat.into(), 0, Some(true))]);
+        let emitted: Vec<Event> = events.try_iter().collect();
+        assert!(
+            emitted.iter().any(|event| matches!(
+                event,
+                Event::OlderFetched {
+                    more: false,
+                    silent: false,
+                    ..
+                }
+            )),
+            "{emitted:?}"
+        );
+        assert!(worker.pending_older.is_empty());
+    }
+
+    #[test]
     fn phone_history_logs_name_the_kind_of_chat_and_never_the_number() {
         assert_eq!(chat_kind("12025550100@s.whatsapp.net"), "pn");
         assert_eq!(chat_kind("100000012345678@lid"), "lid");
@@ -12074,6 +12133,7 @@ mod receipt_tests {
             online_changed: Instant::now(),
             online_sent: None,
             pending_older: HashMap::new(),
+            older_by_number: HashSet::new(),
             pending_avatars: HashMap::new(),
             sticker_fetches: HashSet::new(),
             sticker_downloads: HashSet::new(),
