@@ -711,47 +711,60 @@ pub fn switch(ui: &mut Ui, palette: &Palette, on: &mut bool) -> egui::Response {
 /// The author's website, linked from the credit line.
 pub const AUTHOR_URL: &str = "https://paolino.me";
 
-/// This fork's author's GitHub page, linked from the credit line.
-pub const FORK_AUTHOR_URL: &str = "https://github.com/intellq";
+/// This fork's author's page, linked from the credit lines.
+pub const FORK_AUTHOR_URL: &str = "https://twitter.com/intellq";
 
-/// "Built with love by Carmine Paolino (changes by @intell)", with each name
-/// linking to its page. Returns the page of the name clicked.
+/// "Built with love by Carmine Paolino" and, below it, "With fixes and
+/// changes by intell", with each name linking to its page. Returns the page
+/// of the name clicked.
 pub fn credit(ui: &mut Ui, palette: &Palette, locale: crate::i18n::Locale) -> Option<&'static str> {
     // Translators: {name} is replaced by the author's name, shown as a link.
     let sentence = crate::i18n::gettext(locale, "Built with love by {name}");
-    let (before, after) = sentence.split_once("{name}").unwrap_or((&sentence, ""));
     // Translators: {name} is replaced by the fork author's handle, a link.
-    let changes = crate::i18n::gettext(locale, "(changes by {name})");
-    let (changes_before, changes_after) = changes.split_once("{name}").unwrap_or((&changes, ""));
+    let changes = crate::i18n::gettext(locale, "With fixes and changes by {name}");
     let mut clicked = None;
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing.x = 0.0;
-        theme::text(ui, "\u{2665}  ", theme::regular(13.0), palette.danger);
-        theme::text(ui, before, theme::regular(13.0), palette.secondary);
-        if theme::link(ui, "Carmine Paolino", theme::medium(13.0), palette.link)
-            .on_hover_text(AUTHOR_URL)
-            .clicked()
-        {
-            clicked = Some(AUTHOR_URL);
-        }
-        if !after.is_empty() {
-            theme::text(ui, after, theme::regular(13.0), palette.secondary);
-        }
-        theme::text(
+    let mut row = |ui: &mut Ui, mark: &dyn Fn(&mut Ui), sentence: &str, name: &str, url| {
+        let (before, after) = sentence.split_once("{name}").unwrap_or((sentence, ""));
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            mark(ui);
+            theme::text(ui, before, theme::regular(13.0), palette.secondary);
+            if theme::link(ui, name, theme::medium(13.0), palette.link)
+                .on_hover_text(url)
+                .clicked()
+            {
+                clicked = Some(url);
+            }
+            if !after.is_empty() {
+                theme::text(ui, after, theme::regular(13.0), palette.secondary);
+            }
+        });
+    };
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = 4.0;
+        row(
             ui,
-            format!(" {changes_before}"),
-            theme::regular(13.0),
-            palette.secondary,
+            &|ui: &mut Ui| {
+                theme::text(ui, "\u{2665}  ", theme::regular(13.0), palette.danger);
+            },
+            &sentence,
+            "Carmine Paolino",
+            AUTHOR_URL,
         );
-        if theme::link(ui, "@intell", theme::medium(13.0), palette.link)
-            .on_hover_text(FORK_AUTHOR_URL)
-            .clicked()
-        {
-            clicked = Some(FORK_AUTHOR_URL);
-        }
-        if !changes_after.is_empty() {
-            theme::text(ui, changes_after, theme::regular(13.0), palette.secondary);
-        }
+        row(
+            ui,
+            &|ui: &mut Ui| {
+                rich_text(
+                    ui,
+                    "\u{1F44D}\u{1F3FD} ",
+                    theme::regular(13.0),
+                    palette.secondary,
+                );
+            },
+            &changes,
+            "intell",
+            FORK_AUTHOR_URL,
+        );
     });
     clicked
 }
@@ -1076,6 +1089,126 @@ pub fn dotted_chip(
         )
     });
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// A file's kind, from its extension, for the page it is drawn as.
+fn file_kind_color(extension: &str) -> Color32 {
+    match extension {
+        "pdf" => Color32::from_rgb(0xe5, 0x53, 0x4b),
+        "doc" | "docx" | "odt" | "rtf" | "pages" => Color32::from_rgb(0x4a, 0x8f, 0xe7),
+        "xls" | "xlsx" | "ods" | "csv" | "tsv" | "numbers" => Color32::from_rgb(0x2f, 0xb6, 0x6b),
+        "ppt" | "pptx" | "odp" | "key" => Color32::from_rgb(0xf0, 0x8c, 0x3a),
+        "zip" | "rar" | "7z" | "tar" | "gz" | "tgz" | "bz2" | "xz" | "zst" | "tar.gz"
+        | "tar.xz" | "tar.bz2" | "tar.zst" | "iso" => Color32::from_rgb(0xe0, 0xb4, 0x3c),
+        "json" | "xml" | "html" | "htm" | "css" | "js" | "ts" | "py" | "rs" | "c" | "cpp" | "h"
+        | "java" | "sh" | "yml" | "yaml" | "toml" | "sql" | "ini" => {
+            Color32::from_rgb(0x3f, 0xb9, 0xc4)
+        }
+        "mp3" | "m4a" | "aac" | "ogg" | "opus" | "wav" | "flac" | "wma" => {
+            Color32::from_rgb(0xe0, 0x5e, 0xa8)
+        }
+        "mp4" | "mkv" | "mov" | "avi" | "webm" | "wmv" | "m4v" | "3gp" => {
+            Color32::from_rgb(0xa3, 0x71, 0xf7)
+        }
+        "jpg" | "jpeg" | "png" | "gif" | "webp" | "svg" | "bmp" | "heic" | "tif" | "tiff" => {
+            Color32::from_rgb(0x5f, 0xb3, 0xf0)
+        }
+        "txt" | "md" | "log" => Color32::from_rgb(0x9a, 0xa5, 0xad),
+        _ => Color32::from_rgb(0x7d, 0x8a, 0x93),
+    }
+}
+
+/// A file name's extension in lower case, taking `.tar.gz` and its kin
+/// whole; empty when it has none.
+pub fn file_extension(name: &str) -> String {
+    let lower = name.to_lowercase();
+    for compound in ["tar.gz", "tar.xz", "tar.bz2", "tar.zst"] {
+        if lower.ends_with(&format!(".{compound}")) {
+            return compound.to_owned();
+        }
+    }
+    match lower.rsplit_once('.') {
+        Some((stem, extension))
+            if !stem.is_empty()
+                && !extension.is_empty()
+                && extension.chars().all(|c| c.is_ascii_alphanumeric()) =>
+        {
+            extension.to_owned()
+        }
+        _ => String::new(),
+    }
+}
+
+/// A file drawn as a page with a folded corner and a band in its kind's
+/// color carrying its extension, as tall as `rect`, centered in it.
+pub fn paint_file_badge(ui: &Ui, palette: &Palette, rect: Rect, file_name: &str) {
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
+    let extension = file_extension(file_name);
+    let height = rect.height();
+    let width = height * 0.76;
+    let left = rect.center().x - width / 2.0;
+    let top = rect.top();
+    let fold = width * 0.32;
+    let (page, folded, edge) = if palette.dark {
+        (
+            Color32::from_rgb(0xe9, 0xed, 0xef),
+            Color32::from_rgb(0xb9, 0xc3, 0xc8),
+            Stroke::NONE,
+        )
+    } else {
+        (
+            Color32::WHITE,
+            Color32::from_rgb(0xdd, 0xe3, 0xe6),
+            Stroke::new(1.0, Color32::from_rgb(0xc9, 0xd1, 0xd5)),
+        )
+    };
+    let painter = ui.painter();
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            pos2(left, top),
+            pos2(left + width - fold, top),
+            pos2(left + width, top + fold),
+            pos2(left + width, top + height),
+            pos2(left, top + height),
+        ],
+        page,
+        edge,
+    ));
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            pos2(left + width - fold, top),
+            pos2(left + width - fold, top + fold),
+            pos2(left + width, top + fold),
+        ],
+        folded,
+        edge,
+    ));
+    if extension.is_empty() {
+        return;
+    }
+    let label = extension.to_uppercase();
+    let label: String = if label.chars().count() > 6 {
+        label.chars().take(5).collect()
+    } else {
+        label
+    };
+    let band = Rect::from_min_size(
+        pos2(left - height * 0.14, top + height * 0.5),
+        vec2(width + height * 0.28, height * 0.3),
+    );
+    painter.rect_filled(band, height * 0.08, file_kind_color(&extension));
+    // The largest size that fits the band.
+    let mut size = height * 0.3;
+    let galley = loop {
+        let galley = painter.layout_no_wrap(label.clone(), theme::semibold(size), Color32::WHITE);
+        if galley.size().x <= band.width() - 4.0 || size <= 6.0 {
+            break galley;
+        }
+        size -= 0.5;
+    };
+    painter.galley(band.center() - galley.size() / 2.0, galley, Color32::WHITE);
 }
 
 #[cfg(test)]

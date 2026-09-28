@@ -338,8 +338,13 @@ pub enum Command {
         samples: Vec<f32>,
         quoting: Option<String>,
     },
-    /// Sends again an own voice message that failed to go out.
-    RetryVoice {
+    /// Sends again an own voice message or attachment that failed to go out.
+    RetryMedia {
+        chat: ChatId,
+        message: String,
+    },
+    /// Stops an own attachment's upload; it stays in the chat as not sent.
+    CancelMedia {
         chat: ChatId,
         message: String,
     },
@@ -658,6 +663,18 @@ pub enum Command {
         id: String,
         path: PathBuf,
     },
+    /// Internal attachment about to be uploaded: its row shows as sending
+    /// at once, and [`Command::Outbound`] or a failed [`Command::Sent`]
+    /// follows under the same id.
+    Staged {
+        row: Box<Message>,
+    },
+    /// Internal share of a staged attachment uploaded so far, in percent.
+    Uploading {
+        chat: ChatId,
+        message: String,
+        percent: u8,
+    },
     /// Internal uploaded attachment ready for archiving and sending.
     Outbound {
         chat: ChatId,
@@ -755,12 +772,18 @@ pub enum Event {
         message: String,
         pending: bool,
     },
-    /// An own voice message started or finished being encoded, uploaded and
-    /// sent.
-    VoiceSending {
+    /// An own voice message or attachment started or finished being
+    /// prepared, uploaded and sent.
+    MediaSending {
         chat: ChatId,
         message: String,
         sending: bool,
+    },
+    /// Share of a sending attachment uploaded so far, in percent.
+    MediaProgress {
+        chat: ChatId,
+        message: String,
+        percent: u8,
     },
     PollCreated {
         chat: ChatId,

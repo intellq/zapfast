@@ -1512,16 +1512,19 @@ impl Archive {
         Ok(changed > 0)
     }
 
-    /// Marks failed the own voice messages that were still being encoded or
-    /// uploaded when ZapFast closed, so that they offer to be sent again.
-    /// A message that got as far as its upload has its raw protobuf, and may
-    /// have reached the server; it stays as it is.
-    pub fn fail_unuploaded_voice(&self) -> Result<usize> {
+    /// Marks failed the own voice messages and attachments that were still
+    /// being prepared or uploaded when ZapFast closed, so that they offer to
+    /// be sent again. A message that got as far as its upload has its raw
+    /// protobuf, and may have reached the server; it stays as it is. An
+    /// attachment shown while sending always has its saved file.
+    pub fn fail_unuploaded_media(&self) -> Result<usize> {
         self.connection.execute(
             "UPDATE messages SET status = ?1
              WHERE from_me = 1 AND status = ?2 AND raw IS NULL
-               AND json_extract(content, '$.kind') = 'audio'
-               AND json_extract(content, '$.voice_note') = 1",
+               AND ((json_extract(content, '$.kind') = 'audio'
+                     AND json_extract(content, '$.voice_note') = 1)
+                 OR (json_extract(content, '$.kind') IN ('audio', 'image', 'video', 'document')
+                     AND json_extract(content, '$.media.path') IS NOT NULL))",
             params![
                 status_rank(Delivery::Failed),
                 status_rank(Delivery::Pending)

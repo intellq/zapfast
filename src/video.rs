@@ -795,6 +795,37 @@ fn spawn_decoder(
     receiver
 }
 
+/// How long a decoder may take to hand over a poster's first frame.
+const POSTER_WAIT: Duration = Duration::from_secs(15);
+
+/// The first frame, no larger than `max_side`, and length of a video about
+/// to be sent, from the built-in decoders or else the system's; `None` when
+/// none reads it. Blocks until then.
+pub fn poster(path: &Path, max_side: u32) -> Option<(ColorImage, Duration)> {
+    let mut backends = vec![None];
+    #[cfg(windows)]
+    if crate::media_foundation::available() {
+        backends.push(Some(Backend::MediaFoundation));
+    }
+    #[cfg(not(windows))]
+    if let Some(tools) = crate::ffmpeg::tools() {
+        backends.push(Some(Backend::Ffmpeg(tools)));
+    }
+    for backend in backends {
+        let frames = spawn_decoder(path, Duration::ZERO, Waker::default(), backend, max_side);
+        let mut length = Duration::ZERO;
+        // Dropping the receiver stops the decoder.
+        loop {
+            match frames.recv_timeout(POSTER_WAIT) {
+                Ok(Delivery::Length(total)) => length = total,
+                Ok(Delivery::Frame(_, image)) => return Some((image, length)),
+                _ => break,
+            }
+        }
+    }
+    None
+}
+
 /// Sample timing of a video track, in the track's own time units.
 #[derive(Debug, Default)]
 struct Timeline {

@@ -1810,6 +1810,12 @@ fn chat_info(app: &mut App, ui: &mut egui::Ui, id: &str) {
                 theme::text(ui, status, theme::regular(12.5), palette.dim);
             }
         }
+        if let Some(seconds) = chat.ephemeral_expiration.filter(|seconds| *seconds > 0) {
+            // Translators: {duration} is how long messages stay, like "7 days".
+            let label = crate::i18n::gettext(app.locale, "Disappearing messages: {duration}")
+                .replace("{duration}", &disappearing_duration(app.locale, seconds));
+            theme::text(ui, label, theme::regular(13.0), palette.secondary);
+        }
         if can_leave {
             ui.add_space(8.0);
             let leave_label = if chat.is_channel() {
@@ -2035,6 +2041,25 @@ fn chat_info(app: &mut App, ui: &mut egui::Ui, id: &str) {
 }
 
 /// Where the pencil that renames a group was drawn, for interaction tests.
+/// How long a chat's disappearing messages stay, in the largest whole unit.
+fn disappearing_duration(locale: crate::i18n::Locale, seconds: u32) -> String {
+    use crate::i18n::ngettext;
+    let (count, text) = if seconds.is_multiple_of(86_400) {
+        let days = seconds / 86_400;
+        (days, ngettext(locale, "{} day", "{} days", days))
+    } else if seconds.is_multiple_of(3_600) {
+        let hours = seconds / 3_600;
+        (hours, ngettext(locale, "{} hour", "{} hours", hours))
+    } else {
+        let minutes = seconds.div_ceil(60);
+        (
+            minutes,
+            ngettext(locale, "{} minute", "{} minutes", minutes),
+        )
+    };
+    text.replace("{}", &count.to_string())
+}
+
 pub fn group_name_button_id() -> egui::Id {
     egui::Id::new("group-name-edit")
 }

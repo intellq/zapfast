@@ -1385,8 +1385,13 @@ pub enum Action {
     SendRecording,
     /// Drops a voice message the worker refused to send.
     DiscardUnsentVoice,
-    /// Sends again an own voice message that failed to go out.
-    RetryVoice {
+    /// Sends again an own voice message or attachment that failed to go out.
+    RetryMedia {
+        chat: ChatId,
+        message: String,
+    },
+    /// Stops an own attachment's upload; it stays in the chat as not sent.
+    CancelMedia {
         chat: ChatId,
         message: String,
     },

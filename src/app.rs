@@ -469,8 +469,10 @@ pub struct App {
     pub poll_creating: bool,
     pub poll_voting: HashSet<(ChatId, String)>,
     pub interactive_sending: HashSet<(ChatId, String)>,
-    /// Own voice messages being encoded, uploaded and sent.
-    pub voice_sending: HashSet<(ChatId, String)>,
+    /// Own voice messages and attachments being prepared, uploaded and sent.
+    pub media_sending: HashSet<(ChatId, String)>,
+    /// Share of each sending attachment uploaded so far, in percent.
+    pub media_progress: HashMap<(ChatId, String), u8>,
     /// Contact-name editor buffers.
     pub contact_edit: Option<(String, String)>,
     /// The group name being typed in the group info dialog.
@@ -625,6 +627,13 @@ impl Pending {
         mime_guess2::from_path(path)
             .first()
             .is_some_and(|mime| mime.type_() == "image")
+    }
+
+    /// Whether the preview can show the file's first frame.
+    pub fn is_video_file(path: &std::path::Path) -> bool {
+        mime_guess2::from_path(path)
+            .first()
+            .is_some_and(|mime| mime.type_() == "video")
     }
 }
 
@@ -951,7 +960,8 @@ impl App {
             poll_creating: false,
             poll_voting: HashSet::new(),
             interactive_sending: HashSet::new(),
-            voice_sending: HashSet::new(),
+            media_sending: HashSet::new(),
+            media_progress: HashMap::new(),
             contact_edit: None,
             group_name_edit: None,
             group_saving: HashSet::new(),
@@ -2072,15 +2082,28 @@ impl App {
                         self.interactive_sending.remove(&(chat, message));
                     }
                 }
-                Event::VoiceSending {
+                Event::MediaSending {
                     chat,
                     message,
                     sending,
                 } => {
+                    self.media_progress.remove(&(chat.clone(), message.clone()));
                     if sending {
-                        self.voice_sending.insert((chat, message));
+                        self.media_sending.insert((chat, message));
                     } else {
-                        self.voice_sending.remove(&(chat, message));
+                        self.media_sending.remove(&(chat, message));
+                    }
+                }
+                Event::MediaProgress {
+                    chat,
+                    message,
+                    percent,
+                } => {
+                    if self
+                        .media_sending
+                        .contains(&(chat.clone(), message.clone()))
+                    {
+                        self.media_progress.insert((chat, message), percent);
                     }
                 }
                 Event::PollCreated { chat, error } => {
@@ -2483,7 +2506,8 @@ impl App {
             LinkStatus::LoggedOut => {
                 self.poll_voting.clear();
                 self.interactive_sending.clear();
-                self.voice_sending.clear();
+                self.media_sending.clear();
+                self.media_progress.clear();
                 self.poll_creating = false;
                 self.poll_draft = Default::default();
                 self.notifications.clear_all();
@@ -4127,8 +4151,11 @@ impl App {
                 self.refocus_composer(ctx);
             }
             Action::DiscardUnsentVoice => self.unsent_voice = None,
-            Action::RetryVoice { chat, message } => {
-                self.backend.send(Command::RetryVoice { chat, message });
+            Action::CancelMedia { chat, message } => {
+                self.backend.send(Command::CancelMedia { chat, message });
+            }
+            Action::RetryMedia { chat, message } => {
+                self.backend.send(Command::RetryMedia { chat, message });
             }
             Action::SetMuted(chat, until) => {
                 if let Some(known) = self.chat_mut(&chat) {

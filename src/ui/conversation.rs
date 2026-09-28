@@ -48,7 +48,13 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         super::banner(app, ui);
     }
     composer(app, ui, &chat);
-    messages(app, ui, &chat);
+    // Attachments waiting to be sent take the history's place, as on the
+    // phone, with the composer below for their caption.
+    if app.pending.is_empty() {
+        messages(app, ui, &chat);
+    } else {
+        pending_preview(app, ui);
+    }
     // Over the messages, which scroll under the header.
     widgets::paint_shadow_below(
         ui,
@@ -964,9 +970,6 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                 };
                 (has_focus && typed(":"), has_focus && typed("@"))
             });
-            if !app.pending.is_empty() {
-                pending_strip(app, ui);
-            }
             if app.recording.is_some() {
                 widgets::raised(ui, &palette, composer_pill(&palette), |ui| {
                     recording_strip(app, ui)
@@ -1717,6 +1720,7 @@ fn reply_strip(app: &mut App, ui: &mut egui::Ui, quoted: &Message) {
         app.display_name_or(&quoted.sender, quoted.sender_name.as_deref())
     };
     let summary = markup::plain(&quoted.summary(), &app.mention_list(quoted));
+    let picture = quote_picture(quoted);
     let strip = widgets::raised(
         ui,
         &palette,
@@ -1731,7 +1735,8 @@ fn reply_strip(app: &mut App, ui: &mut egui::Ui, quoted: &Message) {
                 ui.painter().rect_filled(bar, 2.0, palette.accent);
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 1.0;
-                    ui.set_max_width((ui.available_width() - 40.0).max(0.0));
+                    let reserved = if picture.is_some() { 88.0 } else { 40.0 };
+                    ui.set_max_width((ui.available_width() - reserved).max(0.0));
                     widgets::rich_text(
                         ui,
                         &tr("Replying to {who}").replace("{who}", &who),
@@ -1752,6 +1757,16 @@ fn reply_strip(app: &mut App, ui: &mut egui::Ui, quoted: &Message) {
                     .clicked()
                     {
                         app.actions.push(Action::CancelReply);
+                    }
+                    if let Some(picture) = &picture {
+                        let (rect, _) = ui.allocate_exact_size(Vec2::splat(40.0), Sense::hover());
+                        paint_quote_picture(
+                            ui,
+                            picture,
+                            rect,
+                            CornerRadius::same(4),
+                            palette.surface_hover,
+                        );
                     }
                 });
             });
@@ -1880,8 +1895,12 @@ struct View<'a> {
     connected: bool,
     poll_voting: &'a HashSet<(ChatId, String)>,
     interactive_pending: &'a HashSet<(ChatId, String)>,
-    /// Own voice messages being encoded, uploaded and sent.
-    voice_sending: &'a HashSet<(ChatId, String)>,
+    /// Own voice messages and attachments being prepared, uploaded and sent.
+    media_sending: &'a HashSet<(ChatId, String)>,
+    /// Share of each sending attachment uploaded so far, in percent.
+    media_progress: &'a HashMap<(ChatId, String), u8>,
+    /// Pictures of the loaded messages that others quote, by message id.
+    quote_pictures: &'a HashMap<String, QuotePicture>,
     anchor: Option<&'a str>,
     /// Demo/test: keep this message's context menu open.
     open_menu: Option<&'a str>,
@@ -1999,6 +2018,7 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
             avatars.insert(sender, picture);
         }
     }
+    let quote_pictures = quote_pictures(&conversation.messages);
     let names_or = |id: &str, hint: Option<&str>| app.display_name_or(id, hint);
     let mention_names = |id: &str| app.mention_name(id);
     let keyboard_navigation = std::cell::Cell::new(false);
@@ -2011,7 +2031,9 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
         connected: app.link.is_connected(),
         poll_voting: &app.poll_voting,
         interactive_pending: &app.interactive_sending,
-        voice_sending: &app.voice_sending,
+        media_sending: &app.media_sending,
+        media_progress: &app.media_progress,
+        quote_pictures: &quote_pictures,
         anchor: if conversation.loading_older || conversation.fetching_phone {
             None
         } else {
@@ -3708,8 +3730,106 @@ fn natural_text_width(ui: &egui::Ui, view: &View<'_>, message: &Message, cap: f3
 
 /// Width of a quote's accent bar.
 const QUOTE_BAR: f32 = 4.0;
+/// Side of a quoted photo's square in a reply.
+const QUOTE_PICTURE: f32 = 48.0;
 /// Corner radius of a quote.
 const QUOTE_RADIUS: u8 = 6;
+
+/// Where a quoted photo or video's small picture comes from.
+#[derive(Clone)]
+enum QuotePicture {
+    /// The downloaded photo.
+    File(PathBuf),
+    /// The thumbnail that came with the message.
+    Thumbnail {
+        chat: ChatId,
+        id: String,
+        bytes: Vec<u8>,
+    },
+}
+
+/// The picture a reply to `message` shows beside its quote, if any: the
+/// downloaded photo, or else the thumbnail of a photo or video.
+fn quote_picture(message: &Message) -> Option<QuotePicture> {
+    let thumbnail = || {
+        message
+            .thumbnail
+            .clone()
+            .map(|bytes| QuotePicture::Thumbnail {
+                chat: message.chat.clone(),
+                id: message.id.clone(),
+                bytes,
+            })
+    };
+    match &message.content {
+        Content::Image { media, .. } => media
+            .path
+            .clone()
+            .map(QuotePicture::File)
+            .or_else(thumbnail),
+        Content::Video { .. } => thumbnail(),
+        _ => None,
+    }
+}
+
+/// Pictures for the quotes in `messages`, by quoted message id, from the
+/// quoted messages that are loaded.
+fn quote_pictures(messages: &[Message]) -> HashMap<String, QuotePicture> {
+    let quoted: HashSet<&str> = messages
+        .iter()
+        .filter_map(|message| message.quoted.as_ref().map(|quoted| quoted.id.as_str()))
+        .collect();
+    if quoted.is_empty() {
+        return HashMap::new();
+    }
+    messages
+        .iter()
+        .filter(|message| quoted.contains(message.id.as_str()))
+        .filter_map(|message| Some((message.id.clone(), quote_picture(message)?)))
+        .collect()
+}
+
+/// Paints a quoted picture cropped to fill `rect`, or `fallback` while it
+/// loads.
+fn paint_quote_picture(
+    ui: &egui::Ui,
+    picture: &QuotePicture,
+    rect: Rect,
+    corners: CornerRadius,
+    fallback: Color32,
+) {
+    let image = match picture {
+        QuotePicture::File(path) => widgets::file_image(ui, path),
+        QuotePicture::Thumbnail { chat, id, bytes } => {
+            egui::Image::new(thumbnail_uri(ui.ctx(), chat, id, bytes))
+        }
+    };
+    let Ok(egui::load::TexturePoll::Ready { texture }) = image.load_for_size(ui.ctx(), rect.size())
+    else {
+        ui.painter().rect_filled(rect, corners, fallback);
+        return;
+    };
+    egui::Image::from_texture(texture)
+        .uv(cover_uv(texture.size, rect.size()))
+        .corner_radius(corners)
+        .paint_at(ui, rect);
+}
+
+/// The part of a picture of `size` that fills a frame of `frame` without
+/// stretching, centred.
+fn cover_uv(size: Vec2, frame: Vec2) -> Rect {
+    let picture = size.x.max(1.0) / size.y.max(1.0);
+    let target = frame.x.max(1.0) / frame.y.max(1.0);
+    if picture > target {
+        let visible = target / picture;
+        let left = (1.0 - visible) / 2.0;
+        Rect::from_min_max(egui::pos2(left, 0.0), egui::pos2(left + visible, 1.0))
+    } else {
+        let visible = picture / target;
+        let top = (1.0 - visible) / 2.0;
+        Rect::from_min_max(egui::pos2(0.0, top), egui::pos2(1.0, top + visible))
+    }
+}
 
 fn quote_block(
     ui: &mut egui::Ui,
@@ -3744,24 +3864,38 @@ fn quote_block(
         palette.text,
         3.0,
     );
+    // A quoted photo or video shows a small square of it at the right end,
+    // as on the phone.
+    let picture = view.quote_pictures.get(&quoted.id);
+    let side = if picture.is_some() {
+        QUOTE_PICTURE
+    } else {
+        0.0
+    };
     let response = Frame::new()
         .fill(palette.window.gamma_multiply(0.35))
         .corner_radius(CornerRadius::same(QUOTE_RADIUS))
         .inner_margin(Margin {
             left: QUOTE_BAR as i8 + 7,
-            right: 10,
+            right: if picture.is_some() {
+                side as i8 + 8
+            } else {
+                10
+            },
             top: 5,
             bottom: 6,
         })
         .show(ui, |ui| {
             // Include frame margins in the settled width. Use a bounded,
             // left-aligned layout because own bubbles inherit right-to-left flow.
-            let inner_width = (width - QUOTE_BAR - 17.0).max(0.0);
+            let extra = if picture.is_some() { side - 2.0 } else { 0.0 };
+            let inner_width = (width - QUOTE_BAR - 17.0 - extra).max(0.0);
             ui.allocate_ui_with_layout(
                 vec2(inner_width, 0.0),
                 Layout::top_down(Align::Min),
                 |ui| {
                     ui.set_width(inner_width);
+                    ui.set_min_height((side - 11.0).max(0.0));
                     ui.spacing_mut().item_spacing.y = 1.0;
                     widgets::rich_text(ui, &who, theme::semibold(12.5), tint);
                     widgets::rich_text(ui, &summary, theme::regular(12.5), palette.secondary);
@@ -3769,6 +3903,21 @@ fn quote_block(
             );
         })
         .response;
+    if let Some(picture) = picture {
+        let rect = Rect::from_min_max(
+            egui::pos2(response.rect.right() - side, response.rect.top()),
+            response.rect.right_bottom(),
+        );
+        let corners = CornerRadius {
+            nw: 0,
+            sw: 0,
+            ne: QUOTE_RADIUS,
+            se: QUOTE_RADIUS,
+        };
+        if ui.is_rect_visible(rect) {
+            paint_quote_picture(ui, picture, rect, corners, palette.surface);
+        }
+    }
     // The bar runs the quote's full height along its rounded left edge.
     let bar = Rect::from_min_size(response.rect.min, vec2(QUOTE_BAR, response.rect.height()));
     ui.painter().rect_filled(
@@ -4096,6 +4245,14 @@ fn context_menu(ui: &mut egui::Ui, view: &View<'_>, message: &Message, actions: 
         },
     );
     widgets::menu_separator(ui, &palette);
+    if media_unsent(view, message)
+        && widgets::menu_item(ui, &palette, Some(Icon::Refresh), tr("Send again"))
+    {
+        actions.push(Action::RetryMedia {
+            chat: chat.clone(),
+            message: message.id.clone(),
+        });
+    }
     if !matches!(message.content, Content::Revoked { .. })
         && widgets::menu_item(ui, &palette, Some(Icon::Reply), tr("Reply"))
     {
@@ -4551,7 +4708,6 @@ fn content(
                 view,
                 message,
                 media,
-                Icon::FileText,
                 file_name,
                 &detail.join(" · "),
                 width,
@@ -5825,6 +5981,7 @@ fn picture(
                         .corner_radius(if sticker.is_some() { 0.0 } else { 6.0 })
                         .sense(Sense::click()),
                 );
+                let drawn_rect = response.rect;
                 if response
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
                     .clicked()
@@ -5838,6 +5995,9 @@ fn picture(
                         }
                     };
                     actions.push(action);
+                }
+                if sticker.is_none() {
+                    sending_overlay(ui, view, message, drawn_rect, actions);
                 }
                 size.x
             }
@@ -5971,6 +6131,132 @@ fn picture(
     size.x
 }
 
+/// Whether an own attachment or voice message is being prepared, uploaded
+/// and sent.
+fn media_sending(view: &View<'_>, message: &Message) -> bool {
+    message.from_me
+        && view
+            .media_sending
+            .contains(&(view.chat.id.clone(), message.id.clone()))
+}
+
+/// Whether an own attachment failed to go out and can be sent again.
+fn media_unsent(view: &View<'_>, message: &Message) -> bool {
+    message.from_me
+        && message.status == Delivery::Failed
+        && matches!(
+            message.content,
+            Content::Image { .. }
+                | Content::Video { .. }
+                | Content::Audio { .. }
+                | Content::Document { .. }
+        )
+        && !media_sending(view, message)
+}
+
+/// Share of an own attachment uploaded so far, in percent, once its upload
+/// has started.
+fn media_progress(view: &View<'_>, message: &Message) -> Option<u8> {
+    view.media_progress
+        .get(&(view.chat.id.clone(), message.id.clone()))
+        .copied()
+}
+
+/// A sending attachment's disc, as on the phone: a ring that fills as it
+/// uploads (a spinner until the upload starts) around an X that cancels it,
+/// with the share done below.
+fn paint_upload_progress(ui: &egui::Ui, disc: Rect, percent: Option<u8>, hovered: bool) {
+    let center = disc.center();
+    ui.painter().circle_filled(
+        center,
+        disc.width() / 2.0,
+        Color32::from_black_alpha(if hovered { 170 } else { 120 }),
+    );
+    match percent {
+        Some(percent) => {
+            let radius = disc.width() / 2.0 - 5.0;
+            ui.painter().circle_stroke(
+                center,
+                radius,
+                Stroke::new(3.0, Color32::from_white_alpha(60)),
+            );
+            if percent > 0 {
+                ui.painter().add(egui::Shape::line(
+                    crate::video::arc(center, radius, f32::from(percent) / 100.0),
+                    Stroke::new(3.0, Color32::WHITE),
+                ));
+            }
+            let galley = ui.painter().layout_no_wrap(
+                format!("{percent}%"),
+                theme::medium(11.0),
+                Color32::WHITE,
+            );
+            let chip = Rect::from_center_size(
+                pos2(center.x, disc.bottom() + 6.0 + galley.size().y / 2.0 + 2.0),
+                galley.size() + vec2(10.0, 4.0),
+            );
+            ui.painter()
+                .rect_filled(chip, chip.height() / 2.0, Color32::from_black_alpha(140));
+            ui.painter()
+                .galley(chip.min + vec2(5.0, 2.0), galley, Color32::WHITE);
+        }
+        None => theme::paint_spinner(ui, disc, disc.width() / 2.0, Color32::WHITE),
+    }
+    theme::paint_icon(ui, Icon::X, disc, 18.0, Color32::WHITE);
+}
+
+/// Over an own picture or video, as on the phone: the upload's progress
+/// with a button that cancels it while it is sent, and a button to send it
+/// again if that failed or was cancelled.
+fn sending_overlay(
+    ui: &mut egui::Ui,
+    view: &View<'_>,
+    message: &Message,
+    rect: Rect,
+    actions: &mut Vec<Action>,
+) {
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
+    let disc = Rect::from_center_size(rect.center(), Vec2::splat(48.0));
+    if media_sending(view, message) {
+        ui.painter()
+            .rect_filled(rect, 6.0, Color32::from_black_alpha(60));
+        let response = ui
+            .interact(
+                disc,
+                ui.id().with(("cancel-upload", &message.id)),
+                Sense::click(),
+            )
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text(tr("Cancel sending"));
+        paint_upload_progress(ui, disc, media_progress(view, message), response.hovered());
+        if response.clicked() {
+            actions.push(Action::CancelMedia {
+                chat: view.chat.id.clone(),
+                message: message.id.clone(),
+            });
+        }
+    } else if media_unsent(view, message) {
+        let response = ui
+            .interact(disc, ui.id().with(("resend", &message.id)), Sense::click())
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text(tr("Send again"));
+        ui.painter().circle_filled(
+            disc.center(),
+            22.0,
+            Color32::from_black_alpha(if response.hovered() { 170 } else { 120 }),
+        );
+        theme::paint_icon(ui, Icon::Refresh, disc, 22.0, Color32::WHITE);
+        if response.clicked() {
+            actions.push(Action::RetryMedia {
+                chat: view.chat.id.clone(),
+                message: message.id.clone(),
+            });
+        }
+    }
+}
+
 /// Media downloads when visible as its kind's setting says, within the
 /// shared size limit.
 fn auto_download_allowed(
@@ -6067,7 +6353,10 @@ fn video(
             },
         }
         let state = status.as_ref().map(|status| status.state);
-        if state != Some(State::Playing) {
+        let outgoing = media_sending(view, message) || media_unsent(view, message);
+        if outgoing {
+            sending_overlay(ui, view, message, rect, actions);
+        } else if state != Some(State::Playing) {
             ui.painter()
                 .rect_filled(rect, 6.0, Color32::from_black_alpha(40));
             let disc = Rect::from_center_size(rect.center(), Vec2::splat(48.0));
@@ -6120,8 +6409,16 @@ fn video(
                 if let Some(seconds) = seconds {
                     label.push(crate::util::duration(seconds));
                 }
-                if media.path.is_none() {
-                    label.push(crate::util::bytes(media.size));
+                match media_progress(view, message).filter(|_| media_sending(view, message)) {
+                    Some(percent) => label.push(format!(
+                        "{} / {}",
+                        crate::util::bytes(media.size * u64::from(percent) / 100),
+                        crate::util::bytes(media.size)
+                    )),
+                    None if media.path.is_none() || media_sending(view, message) => {
+                        label.push(crate::util::bytes(media.size))
+                    }
+                    None => {}
                 }
                 if !label.is_empty() {
                     let galley = ui.painter().layout_no_wrap(
@@ -6162,6 +6459,7 @@ fn video(
     if response
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .clicked()
+        && !media_sending(view, message)
     {
         video_clicked(view, message, media, gif, auto, actions);
     }
@@ -6592,13 +6890,13 @@ fn attachment(
     view: &View<'_>,
     message: &Message,
     media: &Media,
-    icon: Icon,
     title: &str,
     detail: &str,
     width: f32,
     actions: &mut Vec<Action>,
 ) {
     let palette = view.palette;
+    let cancel_ring = std::cell::Cell::new(None);
     let response = Frame::new()
         .fill(palette.window.gamma_multiply(0.35))
         .corner_radius(CornerRadius::same(8))
@@ -6609,15 +6907,33 @@ fn attachment(
             ui.set_width(card);
 
             let disc = |ui: &mut egui::Ui| {
-                let (disc, _) = ui.allocate_exact_size(Vec2::splat(36.0), Sense::hover());
-                ui.painter().circle_filled(
-                    disc.center(),
-                    18.0,
-                    palette.accent.gamma_multiply(0.25),
-                );
-                theme::paint_icon(ui, icon, disc, 18.0, palette.accent);
+                let (slot, _) = ui.allocate_exact_size(Vec2::splat(36.0), Sense::hover());
+                widgets::paint_file_badge(ui, &palette, slot.shrink2(vec2(0.0, 1.0)), title);
             };
+            let sending = media_sending(view, message);
+            let progress = media_progress(view, message).filter(|_| sending);
             let action = |ui: &mut egui::Ui| match (&media.path, &media.state) {
+                _ if sending => {
+                    // A ring that fills as it uploads, around an X that
+                    // cancels it.
+                    let (ring, _) = ui.allocate_exact_size(Vec2::splat(24.0), Sense::hover());
+                    match progress {
+                        Some(percent) => {
+                            ui.painter().circle_stroke(
+                                ring.center(),
+                                10.0,
+                                Stroke::new(2.5, palette.accent.gamma_multiply(0.25)),
+                            );
+                            ui.painter().add(egui::Shape::line(
+                                crate::video::arc(ring.center(), 10.0, f32::from(percent) / 100.0),
+                                Stroke::new(2.5, palette.accent),
+                            ));
+                        }
+                        None => theme::paint_spinner(ui, ring, 11.0, palette.accent),
+                    }
+                    theme::paint_icon(ui, Icon::X, ring, 11.0, palette.accent);
+                    cancel_ring.set(Some(ring));
+                }
                 (Some(_), _) => {
                     theme::icon(ui, Icon::ExternalLink, 18.0, palette.secondary);
                 }
@@ -6634,8 +6950,15 @@ fn attachment(
                     // Reserve 70 points for the icon, action, and gaps.
                     ui.set_width((card - 70.0).max(0.0));
                     widgets::rich_text(ui, title, theme::medium(14.0), palette.text);
-                    let detail = match &media.state {
-                        MediaState::Failed(error) => format!("{error}. {}", tr("Click to retry.")),
+                    let detail = match (&media.state, progress) {
+                        (_, Some(percent)) => format!(
+                            "{} / {} · {percent}%",
+                            crate::util::bytes(media.size * u64::from(percent) / 100),
+                            crate::util::bytes(media.size)
+                        ),
+                        (MediaState::Failed(error), None) => {
+                            format!("{error}. {}", tr("Click to retry."))
+                        }
                         _ => detail.to_owned(),
                     };
                     theme::text(ui, detail, theme::regular(12.0), palette.secondary);
@@ -6681,7 +7004,23 @@ fn attachment(
             Sense::click(),
         )
         .on_hover_cursor(egui::CursorIcon::PointingHand);
-    if response.clicked() && !auto {
+    // Over the card, so it takes the click.
+    let cancelled = cancel_ring.get().is_some_and(|ring| {
+        ui.interact(
+            ring.expand(4.0),
+            ui.id().with(("cancel-upload", &message.id)),
+            Sense::click(),
+        )
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(tr("Cancel sending"))
+        .clicked()
+    });
+    if cancelled {
+        actions.push(Action::CancelMedia {
+            chat: view.chat.id.clone(),
+            message: message.id.clone(),
+        });
+    } else if response.clicked() && !auto && !media_sending(view, message) {
         match &media.path {
             Some(path) => actions.push(Action::OpenFile(path.clone())),
             None if !matches!(media.state, MediaState::Downloading) => {
@@ -6823,7 +7162,7 @@ fn voice_player(
         );
     let sending = own_voice
         && view
-            .voice_sending
+            .media_sending
             .contains(&(view.chat.id.clone(), message.id.clone()));
     let unsent = own_voice && !sending && message.status == Delivery::Failed;
     let playable = media.path.as_ref().filter(|_| !sending && !unsent);
@@ -6870,7 +7209,7 @@ fn voice_player(
                     )
                     .clicked()
                     {
-                        actions.push(Action::RetryVoice {
+                        actions.push(Action::RetryMedia {
                             chat: view.chat.id.clone(),
                             message: message.id.clone(),
                         });
@@ -7639,125 +7978,479 @@ mod reaction_tests {
     }
 }
 
-/// Pending attachment tiles above the composer.
-fn pending_strip(app: &mut App, ui: &mut egui::Ui) {
+/// Side of a tile in the strip of attachments waiting to be sent.
+const PENDING_TILE: f32 = 64.0;
+
+/// Attachments waiting to be sent, over the history as on the phone: the
+/// chosen one large, and all of them in a strip below, to pick, remove or
+/// add to. The caption is typed in the composer underneath.
+fn pending_preview(app: &mut App, ui: &mut egui::Ui) {
     let palette = app.palette;
-    let tile = 72.0;
-    let mut remove = None;
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
-        for (index, item) in app.pending.iter_mut().enumerate() {
-            let (rect, response) = ui.allocate_exact_size(Vec2::splat(tile), Sense::hover());
-            if ui.is_rect_visible(rect) {
-                ui.painter().rect_filled(rect, 8.0, palette.surface);
-                match item {
-                    crate::app::Pending::Picture {
-                        width,
-                        height,
-                        rgba,
-                        texture,
-                    } => {
-                        let handle = texture.get_or_insert_with(|| {
-                            // Limit thumbnails to the GPU's maximum texture size.
-                            let image = if *width > 1024 || *height > 1024 {
-                                let scale = 1024.0 / (*width).max(*height) as f32;
-                                let (w, h) = (
-                                    ((*width as f32 * scale) as u32).max(1),
-                                    ((*height as f32 * scale) as u32).max(1),
-                                );
-                                match image::RgbaImage::from_raw(
-                                    *width as u32,
-                                    *height as u32,
-                                    rgba.to_vec(),
-                                ) {
-                                    Some(full) => {
-                                        let small = image::imageops::resize(
-                                            &full,
-                                            w,
-                                            h,
-                                            image::imageops::FilterType::Triangle,
-                                        );
-                                        egui::ColorImage::from_rgba_unmultiplied(
-                                            [w as usize, h as usize],
-                                            &small,
-                                        )
-                                    }
-                                    None => egui::ColorImage::example(),
-                                }
-                            } else {
-                                egui::ColorImage::from_rgba_unmultiplied([*width, *height], rgba)
-                            };
-                            ui.ctx().load_texture(
-                                format!("pending-picture-{index}"),
-                                image,
-                                egui::TextureOptions::LINEAR,
-                            )
-                        });
-                        // Preserve aspect ratio while filling the tile.
-                        let side = tile - 8.0;
-                        let scale =
-                            (side / (*width).max(1) as f32).min(side / (*height).max(1) as f32);
-                        let fitted = vec2(*width as f32 * scale, *height as f32 * scale);
-                        let inner = Rect::from_center_size(rect.center(), fitted);
-                        egui::Image::from_texture((handle.id(), fitted))
-                            .corner_radius(6.0)
-                            .paint_at(ui, inner);
-                    }
-                    crate::app::Pending::File(path) => {
-                        if crate::app::Pending::is_picture_file(path) {
-                            widgets::file_image(ui, path)
-                                .fit_to_exact_size(Vec2::splat(tile - 8.0))
-                                .corner_radius(6.0)
-                                .paint_at(ui, rect.shrink(4.0));
-                        } else {
-                            let icon = Rect::from_center_size(
-                                rect.center() - vec2(0.0, 10.0),
-                                Vec2::splat(24.0),
-                            );
-                            theme::paint_icon(ui, Icon::FileText, icon, 22.0, palette.secondary);
-                            let name = path
-                                .file_name()
-                                .map(|name| name.to_string_lossy().into_owned())
-                                .unwrap_or_default();
-                            let line = widgets::line(
-                                ui,
-                                &name,
-                                theme::regular(10.5),
-                                palette.text,
-                                tile - 8.0,
-                                1,
-                            );
-                            line.paint(
-                                ui,
-                                egui::pos2(
-                                    rect.center().x - line.size().x / 2.0,
-                                    rect.bottom() - 18.0,
-                                ),
-                                palette.text,
-                            );
-                        }
-                    }
-                }
-                // Remove button in the corner.
-                let close =
-                    Rect::from_center_size(rect.right_top() + vec2(-10.0, 10.0), Vec2::splat(18.0));
-                let close_response =
-                    ui.interact(close, ui.id().with(("unstage", index)), Sense::click());
-                ui.painter()
-                    .circle_filled(close.center(), 9.0, palette.overlay);
-                theme::paint_icon(ui, Icon::X, close, 12.0, palette.text);
-                if close_response
-                    .on_hover_cursor(egui::CursorIcon::PointingHand)
-                    .clicked()
-                {
-                    remove = Some(index);
-                }
-            }
-            let _ = response;
-        }
+    let area = ui.available_rect_before_wrap();
+    ui.allocate_rect(area, Sense::hover());
+    ui.painter().rect_filled(area, 0.0, palette.panel);
+    let count = app.pending.len();
+    // A file just added is the one shown.
+    let selected_id = egui::Id::new("pending-selected");
+    let (selected, seen) = ui.ctx().data(|data| {
+        (
+            data.get_temp::<usize>(selected_id).unwrap_or(0),
+            data.get_temp::<usize>(selected_id.with("count"))
+                .unwrap_or(0),
+        )
     });
+    let mut selected = if count > seen { count - 1 } else { selected }.min(count - 1);
+    forget_pending_posters(ui.ctx(), &app.pending);
+
+    let top = Rect::from_min_size(area.min, vec2(area.width(), 52.0));
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(top.shrink2(vec2(12.0, 0.0)))
+            .layout(Layout::left_to_right(Align::Center)),
+        |ui| {
+            if theme::icon_button(
+                ui,
+                Icon::X,
+                20.0,
+                palette.secondary,
+                palette.text,
+                tr("Discard (Esc)"),
+            )
+            .clicked()
+            {
+                app.actions.push(Action::ClearPending);
+            }
+        },
+    );
+    let title = match &app.pending[selected] {
+        crate::app::Pending::Picture { .. } => tr("Pasted picture").to_owned(),
+        crate::app::Pending::File(path) => path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    };
+    let title = widgets::line(
+        ui,
+        &title,
+        theme::semibold(14.0),
+        palette.text,
+        (area.width() - 140.0).max(40.0),
+        1,
+    );
+    title.paint(ui, top.center() - title.size() / 2.0, palette.text);
+
+    let strip = Rect::from_min_max(
+        egui::pos2(area.left(), area.bottom() - PENDING_TILE - 24.0),
+        area.right_bottom(),
+    );
+    let stage = Rect::from_min_max(
+        egui::pos2(area.left() + 24.0, top.bottom() + 4.0),
+        egui::pos2(area.right() - 24.0, strip.top() - 8.0),
+    );
+    if stage.width() > 16.0 && stage.height() > 16.0 {
+        let item = &mut app.pending[selected];
+        pending_large(ui, &palette, item, selected, stage);
+    }
+
+    let tiles = count as f32 + 1.0;
+    let row = tiles * PENDING_TILE + (tiles - 1.0) * 8.0;
+    let mut x = (strip.center().x - row / 2.0).max(strip.left() + 12.0);
+    let y = strip.top() + 8.0;
+    let mut remove = None;
+    for index in 0..count {
+        let rect = Rect::from_min_size(egui::pos2(x, y), Vec2::splat(PENDING_TILE));
+        x += PENDING_TILE + 8.0;
+        let response = ui
+            .interact(rect, ui.id().with(("pending-tile", index)), Sense::click())
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        if response.clicked() {
+            selected = index;
+            // The caption keeps the keyboard.
+            app.focus_composer = true;
+        }
+        if !ui.is_rect_visible(rect) {
+            continue;
+        }
+        ui.painter().rect_filled(rect, 8.0, palette.surface);
+        pending_thumbnail(
+            ui,
+            &palette,
+            &mut app.pending[index],
+            index,
+            rect.shrink(3.0),
+        );
+        if index == selected {
+            ui.painter().rect_stroke(
+                rect,
+                8.0,
+                Stroke::new(2.0, palette.accent),
+                egui::StrokeKind::Inside,
+            );
+        }
+        // Remove button in the corner.
+        let close = Rect::from_center_size(rect.right_top() + vec2(-10.0, 10.0), Vec2::splat(18.0));
+        let close_response = ui
+            .interact(close, ui.id().with(("unstage", index)), Sense::click())
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text(tr("Remove"));
+        ui.painter()
+            .circle_filled(close.center(), 9.0, palette.overlay);
+        theme::paint_icon(ui, Icon::X, close, 12.0, palette.text);
+        if close_response.clicked() {
+            remove = Some(index);
+            app.focus_composer = true;
+        }
+    }
+    // More files join the same message.
+    let add = Rect::from_min_size(egui::pos2(x, y), Vec2::splat(PENDING_TILE));
+    let add_response = ui
+        .interact(add, ui.id().with("pending-add"), Sense::click())
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(crate::i18n::gettext(app.locale, "Attach").as_ref());
+    ui.painter().rect_stroke(
+        add,
+        8.0,
+        Stroke::new(
+            1.5,
+            if add_response.hovered() {
+                palette.accent
+            } else {
+                palette.outline
+            },
+        ),
+        egui::StrokeKind::Inside,
+    );
+    theme::paint_icon(ui, Icon::Plus, add, 22.0, palette.secondary);
+    if add_response.clicked() {
+        app.actions.push(Action::Attach);
+    }
+
     if let Some(index) = remove {
         app.actions.push(Action::RemovePending(index));
+        if selected > index || selected + 1 == count {
+            selected = selected.saturating_sub(1);
+        }
     }
-    ui.add_space(4.0);
+    let remaining = if remove.is_some() { count - 1 } else { count };
+    ui.ctx().data_mut(|data| {
+        data.insert_temp(selected_id, selected);
+        data.insert_temp(selected_id.with("count"), remaining);
+    });
+}
+
+/// The largest side a pasted picture's preview texture is made at.
+const PENDING_TEXTURE_SIDE: usize = 2048;
+
+/// A pasted picture's preview texture, made once, no larger than
+/// [`PENDING_TEXTURE_SIDE`] (and the GPU's limit).
+fn pending_texture(
+    ctx: &egui::Context,
+    index: usize,
+    width: usize,
+    height: usize,
+    rgba: &[u8],
+    texture: &mut Option<egui::TextureHandle>,
+) -> egui::TextureId {
+    texture
+        .get_or_insert_with(|| {
+            let limit = ctx
+                .input(|input| input.max_texture_side)
+                .min(PENDING_TEXTURE_SIDE);
+            let image = if width > limit || height > limit {
+                let scale = limit as f32 / width.max(height) as f32;
+                let (w, h) = (
+                    ((width as f32 * scale) as u32).max(1),
+                    ((height as f32 * scale) as u32).max(1),
+                );
+                match image::RgbaImage::from_raw(width as u32, height as u32, rgba.to_vec()) {
+                    Some(full) => {
+                        let small = image::imageops::resize(
+                            &full,
+                            w,
+                            h,
+                            image::imageops::FilterType::Triangle,
+                        );
+                        egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &small)
+                    }
+                    None => egui::ColorImage::example(),
+                }
+            } else {
+                egui::ColorImage::from_rgba_unmultiplied([width, height], rgba)
+            };
+            ctx.load_texture(
+                format!("pending-picture-{index}"),
+                image,
+                egui::TextureOptions::LINEAR,
+            )
+        })
+        .id()
+}
+
+/// Longest side of a video's first frame in the attachment preview.
+const PENDING_POSTER_SIDE: u32 = 1280;
+
+/// The first frames of the videos in the attachment preview, read on a
+/// thread each.
+#[derive(Clone, Default)]
+struct PendingPosters(std::sync::Arc<std::sync::Mutex<HashMap<PathBuf, PosterSlot>>>);
+
+enum PosterSlot {
+    Reading,
+    Read(Option<(egui::ColorImage, std::time::Duration)>),
+    Shown(Option<(egui::TextureHandle, std::time::Duration)>),
+}
+
+fn pending_posters(ctx: &egui::Context) -> PendingPosters {
+    ctx.data_mut(|data| {
+        data.get_temp_mut_or_default::<PendingPosters>(egui::Id::new("pending-posters"))
+            .clone()
+    })
+}
+
+/// A pending video's first frame and length: `None` while it is read,
+/// `Some(None)` when no decoder here reads it.
+fn pending_poster(
+    ctx: &egui::Context,
+    path: &Path,
+) -> Option<Option<(egui::TextureHandle, std::time::Duration)>> {
+    let posters = pending_posters(ctx);
+    let mut slots = posters.0.lock().ok()?;
+    match slots.get_mut(path) {
+        None => {
+            slots.insert(path.to_owned(), PosterSlot::Reading);
+            let (file, posters, ctx) = (path.to_owned(), posters.clone(), ctx.clone());
+            let spawned = std::thread::Builder::new()
+                .name("video-poster".into())
+                .spawn(move || {
+                    let poster = crate::video::poster(&file, PENDING_POSTER_SIDE);
+                    if let Ok(mut slots) = posters.0.lock()
+                        && let Some(slot) = slots.get_mut(&file)
+                    {
+                        *slot = PosterSlot::Read(poster);
+                    }
+                    ctx.request_repaint();
+                });
+            if spawned.is_err() {
+                slots.insert(path.to_owned(), PosterSlot::Shown(None));
+            }
+            None
+        }
+        Some(PosterSlot::Reading) => None,
+        Some(slot @ PosterSlot::Read(_)) => {
+            let PosterSlot::Read(poster) = std::mem::replace(slot, PosterSlot::Reading) else {
+                return None;
+            };
+            let shown = poster.map(|(image, length)| {
+                let texture = ctx.load_texture(
+                    format!("pending-poster-{}", path.display()),
+                    image,
+                    egui::TextureOptions::LINEAR,
+                );
+                (texture, length)
+            });
+            *slot = PosterSlot::Shown(shown.clone());
+            Some(shown)
+        }
+        Some(PosterSlot::Shown(shown)) => Some(shown.clone()),
+    }
+}
+
+/// Forgets the first frames of videos no longer attached.
+fn forget_pending_posters(ctx: &egui::Context, pending: &[crate::app::Pending]) {
+    if let Ok(mut slots) = pending_posters(ctx).0.lock() {
+        slots.retain(|path, _| {
+            pending
+                .iter()
+                .any(|item| matches!(item, crate::app::Pending::File(file) if file == path))
+        });
+    }
+}
+
+/// A play sign over a video's first frame, with its length below it.
+fn paint_poster_marks(ui: &egui::Ui, rect: Rect, length: std::time::Duration, large: bool) {
+    let side = if large { 56.0 } else { 22.0 };
+    let disc = Rect::from_center_size(rect.center(), Vec2::splat(side));
+    ui.painter()
+        .circle_filled(disc.center(), side / 2.0, Color32::from_black_alpha(140));
+    theme::paint_icon(ui, Icon::Play, disc, side * 0.45, Color32::WHITE);
+    if !large || length.is_zero() {
+        return;
+    }
+    let seconds = (length.as_secs_f64().round() as u32).max(1);
+    let galley = ui.painter().layout_no_wrap(
+        crate::util::duration(seconds),
+        theme::medium(12.0),
+        Color32::WHITE,
+    );
+    let chip = Rect::from_min_size(
+        pos2(rect.left() + 10.0, rect.bottom() - galley.size().y - 16.0),
+        galley.size() + vec2(12.0, 6.0),
+    );
+    ui.painter()
+        .rect_filled(chip, chip.height() / 2.0, Color32::from_black_alpha(140));
+    ui.painter()
+        .galley(chip.min + vec2(6.0, 3.0), galley, Color32::WHITE);
+}
+
+/// Fits a picture of `pixels` in `bounds`, keeping its shape, never larger
+/// than its own size on screen.
+fn fit_contain(pixels: Vec2, bounds: Vec2, pixels_per_point: f32) -> Vec2 {
+    let pixels = pixels.max(Vec2::splat(1.0));
+    let scale = (bounds.x / pixels.x)
+        .min(bounds.y / pixels.y)
+        .min(1.0 / pixels_per_point.max(0.1));
+    pixels * scale
+}
+
+/// The chosen attachment, as large as `stage` allows.
+fn pending_large(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    item: &mut crate::app::Pending,
+    index: usize,
+    stage: Rect,
+) {
+    let ppp = ui.ctx().pixels_per_point();
+    match item {
+        crate::app::Pending::Picture {
+            width,
+            height,
+            rgba,
+            texture,
+        } => {
+            let id = pending_texture(ui.ctx(), index, *width, *height, rgba, texture);
+            let size = fit_contain(vec2(*width as f32, *height as f32), stage.size(), ppp);
+            egui::Image::from_texture((id, size))
+                .corner_radius(6.0)
+                .paint_at(ui, Rect::from_center_size(stage.center(), size));
+        }
+        crate::app::Pending::File(path) => {
+            if crate::app::Pending::is_video_file(path) {
+                match pending_poster(ui.ctx(), path) {
+                    Some(Some((texture, length))) => {
+                        let size = fit_contain(texture.size_vec2(), stage.size(), ppp);
+                        let rect = Rect::from_center_size(stage.center(), size);
+                        egui::Image::from_texture((texture.id(), size))
+                            .corner_radius(6.0)
+                            .paint_at(ui, rect);
+                        paint_poster_marks(ui, rect, length, true);
+                        return;
+                    }
+                    None => {
+                        theme::paint_spinner(ui, stage, 28.0, palette.accent);
+                        return;
+                    }
+                    Some(None) => {}
+                }
+            }
+            if crate::app::Pending::is_picture_file(path) {
+                let image = widgets::file_image(ui, path);
+                match image.load_for_size(ui.ctx(), stage.size()) {
+                    Ok(egui::load::TexturePoll::Ready { texture }) => {
+                        let size = fit_contain(texture.size, stage.size(), ppp);
+                        egui::Image::from_texture(texture)
+                            .corner_radius(6.0)
+                            .paint_at(ui, Rect::from_center_size(stage.center(), size));
+                        return;
+                    }
+                    Ok(egui::load::TexturePoll::Pending { .. }) => {
+                        theme::paint_spinner(ui, stage, 28.0, palette.accent);
+                        return;
+                    }
+                    Err(_) => {}
+                }
+            }
+            // Anything else goes as a document: its icon, name and size.
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let icon = Rect::from_center_size(stage.center() - vec2(0.0, 40.0), Vec2::splat(80.0));
+            widgets::paint_file_badge(ui, palette, icon, &name);
+            let line = widgets::line(
+                ui,
+                &name,
+                theme::semibold(15.0),
+                palette.text,
+                (stage.width() - 32.0).max(40.0),
+                2,
+            );
+            let at = egui::pos2(stage.center().x - line.size().x / 2.0, icon.bottom() + 12.0);
+            line.paint(ui, at, palette.text);
+            if let Ok(metadata) = std::fs::metadata(&*path) {
+                ui.painter().text(
+                    egui::pos2(stage.center().x, at.y + line.size().y + 14.0),
+                    Align2::CENTER_CENTER,
+                    crate::util::bytes(metadata.len()),
+                    theme::regular(12.5),
+                    palette.secondary,
+                );
+            }
+        }
+    }
+}
+
+/// An attachment's small picture in the strip, filling `rect`.
+fn pending_thumbnail(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    item: &mut crate::app::Pending,
+    index: usize,
+    rect: Rect,
+) {
+    match item {
+        crate::app::Pending::Picture {
+            width,
+            height,
+            rgba,
+            texture,
+        } => {
+            let id = pending_texture(ui.ctx(), index, *width, *height, rgba, texture);
+            egui::Image::from_texture((id, vec2(*width as f32, *height as f32)))
+                .uv(cover_uv(vec2(*width as f32, *height as f32), rect.size()))
+                .corner_radius(6.0)
+                .paint_at(ui, rect);
+        }
+        crate::app::Pending::File(path) => {
+            if crate::app::Pending::is_video_file(path)
+                && let Some(Some((texture, length))) = pending_poster(ui.ctx(), path)
+            {
+                egui::Image::from_texture((texture.id(), texture.size_vec2()))
+                    .uv(cover_uv(texture.size_vec2(), rect.size()))
+                    .corner_radius(6.0)
+                    .paint_at(ui, rect);
+                paint_poster_marks(ui, rect, length, false);
+                return;
+            }
+            if crate::app::Pending::is_picture_file(path)
+                && let Ok(egui::load::TexturePoll::Ready { texture }) =
+                    widgets::file_image(ui, path).load_for_size(ui.ctx(), rect.size())
+            {
+                egui::Image::from_texture(texture)
+                    .uv(cover_uv(texture.size, rect.size()))
+                    .corner_radius(6.0)
+                    .paint_at(ui, rect);
+                return;
+            }
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let icon = Rect::from_center_size(rect.center() - vec2(0.0, 8.0), Vec2::splat(30.0));
+            widgets::paint_file_badge(ui, palette, icon, &name);
+            let line = widgets::line(
+                ui,
+                &name,
+                theme::regular(10.5),
+                palette.text,
+                rect.width() - 4.0,
+                1,
+            );
+            line.paint(
+                ui,
+                egui::pos2(rect.center().x - line.size().x / 2.0, rect.bottom() - 16.0),
+                palette.text,
+            );
+        }
+    }
 }

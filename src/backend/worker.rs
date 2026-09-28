@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
@@ -572,7 +573,9 @@ pub async fn run(
         poll_history: Default::default(),
         poll_sending: HashSet::new(),
         interactive_sending: HashMap::new(),
-        voice_sending: HashSet::new(),
+        media_sending: HashSet::new(),
+        media_uploads: HashMap::new(),
+        media_cancelled: HashSet::new(),
         receipts_watch: None,
         receipts_pruned: Instant::now(),
         link_watch: Default::default(),
@@ -583,8 +586,8 @@ pub async fn run(
     worker.backfill_video_notes();
     worker.backfill_interactive();
     worker.relocate_media();
-    if let Err(error) = worker.archive.fail_unuploaded_voice() {
-        log::warn!("could not mark unsent voice messages: {error}");
+    if let Err(error) = worker.archive.fail_unuploaded_media() {
+        log::warn!("could not mark unsent attachments: {error}");
     }
     discard_attachment_staging(&worker.dirs.media_cache_dir());
     discard_attachment_staging(&worker.dirs.sticker_cache_dir());
@@ -767,8 +770,13 @@ struct Worker {
     poll_history: poll_history::Requests,
     poll_sending: HashSet<(ChatId, String)>,
     interactive_sending: HashMap<(ChatId, String), String>,
-    /// Own voice messages being encoded, uploaded and sent.
-    voice_sending: HashSet<(ChatId, String)>,
+    /// Own voice messages and attachments being prepared, uploaded and sent.
+    media_sending: HashSet<(ChatId, String)>,
+    /// Own attachments still being prepared or uploaded, which can be
+    /// cancelled until they are sent.
+    media_uploads: HashMap<(ChatId, String), Upload>,
+    /// Cancelled attachments whose upload may still report back.
+    media_cancelled: HashSet<(ChatId, String)>,
     /// The group message whose "Message info" is open.
     receipts_watch: Option<(ChatId, String)>,
     /// When receipts that never found their message were last dropped.
@@ -4892,7 +4900,34 @@ impl Worker {
                 samples,
                 quoting,
             } => self.send_voice(chat, samples, quoting),
-            Command::RetryVoice { chat, message } => self.retry_voice(chat, message),
+            Command::CancelMedia { chat, message } => self.cancel_media(chat, message),
+            Command::RetryMedia { chat, message } => self.retry_media(chat, message),
+            Command::Staged { row } => {
+                let (chat, id) = (row.chat.clone(), row.id.clone());
+                self.media_sending.insert((chat.clone(), id.clone()));
+                self.emit(Event::MediaSending {
+                    chat,
+                    message: id,
+                    sending: true,
+                });
+                self.store_message(*row, None, None);
+            }
+            Command::Uploading {
+                chat,
+                message,
+                percent,
+            } => {
+                if self
+                    .media_sending
+                    .contains(&(chat.clone(), message.clone()))
+                {
+                    self.emit(Event::MediaProgress {
+                        chat,
+                        message,
+                        percent,
+                    });
+                }
+            }
             Command::VoiceSaved { chat, id, path } => {
                 if let Err(error) = self.archive.set_media_path(&chat, &id, &path) {
                     log::warn!("could not record a voice message file: {error}");
@@ -5431,8 +5466,12 @@ impl Worker {
                         pending: false,
                     });
                 }
-                if self.voice_sending.remove(&(chat.clone(), id.clone())) {
-                    self.emit(Event::VoiceSending {
+                self.media_uploads.remove(&(chat.clone(), id.clone()));
+                if self.media_cancelled.remove(&(chat.clone(), id.clone())) {
+                    return;
+                }
+                if self.media_sending.remove(&(chat.clone(), id.clone())) {
+                    self.emit(Event::MediaSending {
                         chat: chat.clone(),
                         message: id.clone(),
                         sending: false,
@@ -7030,13 +7069,8 @@ impl Worker {
             return;
         };
         for (index, path) in paths.into_iter().enumerate() {
-            let client = client.clone();
             // Like the caption, the reply belongs to the first file.
             let quote = quote.take();
-            let commands = self.commands.clone();
-            let chat = chat.clone();
-            let dir = self.dirs.media_cache_dir();
-            let me = self.me();
             // Attach the caption to the first file.
             let caption = if index == 0 { caption.clone() } else { None };
             let mentions = if index == 0 {
@@ -7044,42 +7078,28 @@ impl Worker {
             } else {
                 Vec::new()
             };
-            tokio::spawn(async move {
-                let outcome = async {
-                    let bytes = tokio::fs::read(&path)
-                        .await
-                        .map_err(|error| format!("{}: {error}", path.display()))?;
-                    let mime = mime_guess2::from_path(&path)
-                        .first_or_octet_stream()
-                        .to_string();
-                    let file_name = path
-                        .file_name()
-                        .map(|name| name.to_string_lossy().into_owned());
-                    let prepared =
-                        prepare_media(&client, bytes, &mime, file_name.as_deref(), false).await?;
-                    quoted_outbound(
-                        &client, &chat, &me, &dir, prepared, caption, mentions, quote,
-                    )
+            let staging = async move {
+                let bytes = tokio::fs::read(&path)
                     .await
-                }
-                .await;
-                match outcome {
-                    Ok((row, raw)) => {
-                        let _ = commands.send(Command::Outbound {
-                            chat,
-                            row: Box::new(row),
-                            raw,
-                        });
-                    }
-                    Err(error) => {
-                        let _ = commands.send(Command::Sent {
-                            chat,
-                            id: String::new(),
-                            error: Some(format!("Could not send the file: {error}")),
-                        });
-                    }
-                }
-            });
+                    .map_err(|error| format!("{}: {error}", path.display()))?;
+                let mime = mime_guess2::from_path(&path)
+                    .first_or_octet_stream()
+                    .to_string();
+                let file_name = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned());
+                let staged = stage_media(bytes, &mime, file_name.as_deref(), false).await?;
+                Ok(with_poster(path, staged).await)
+            };
+            self.spawn_attachment(
+                &client,
+                &chat,
+                staging,
+                caption,
+                mentions,
+                quote,
+                "Could not send the file",
+            );
         }
     }
 
@@ -7111,27 +7131,219 @@ impl Worker {
             self.refuse(chat, quoting, unsent(rgba, caption), Refusal::Offline);
             return;
         };
+        let staging = async move {
+            let encoded = tokio::task::spawn_blocking(move || {
+                let image = image::RgbaImage::from_raw(width, height, rgba)
+                    .ok_or_else(|| tr("Clipboard image data is invalid").to_owned())?;
+                encode_jpeg(&image::DynamicImage::ImageRgba8(image), 88)
+            })
+            .await
+            .map_err(|error| error.to_string())??;
+            stage_media(encoded, "image/jpeg", None, false).await
+        };
+        self.spawn_attachment(
+            &client,
+            &chat,
+            staging,
+            caption,
+            mentions,
+            quote,
+            "Could not send the picture",
+        );
+    }
+
+    /// What a spawned attachment send needs from the worker.
+    /// Starts sending one attachment under a new id, which can be
+    /// cancelled until it is sent.
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_attachment(
+        &mut self,
+        client: &Arc<Client>,
+        chat: &str,
+        staging: impl std::future::Future<Output = Result<Prepared, String>> + Send + 'static,
+        caption: Option<String>,
+        mentions: Vec<String>,
+        quote: Option<(wa::ContextInfo, Quoted)>,
+        failure: &'static str,
+    ) {
+        let id = client.generate_message_id();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let task = tokio::spawn(send_attachment(
+            self.attachment_sender(client, chat),
+            id.clone(),
+            Arc::clone(&cancelled),
+            staging,
+            caption,
+            mentions,
+            quote,
+            failure,
+        ));
+        self.track_upload(
+            chat,
+            id,
+            Upload {
+                task: task.abort_handle(),
+                cancelled,
+            },
+        );
+    }
+
+    fn attachment_sender(&self, client: &Arc<Client>, chat: &str) -> AttachmentSender {
+        AttachmentSender {
+            client: Arc::clone(client),
+            commands: self.commands.clone(),
+            chat: chat.to_owned(),
+            me: self.me(),
+            dir: self.dirs.media_cache_dir(),
+        }
+    }
+
+    /// Stops an attachment's upload, as on the phone: it stays in the chat
+    /// as not sent, and can be sent again.
+    fn cancel_media(&mut self, chat: ChatId, id: String) {
+        let key = (chat.clone(), id.clone());
+        let Some(upload) = self.media_uploads.remove(&key) else {
+            return;
+        };
+        upload.cancel();
+        self.media_cancelled.insert(key.clone());
+        if self.media_sending.remove(&key) {
+            self.emit(Event::MediaSending {
+                chat: chat.clone(),
+                message: id.clone(),
+                sending: false,
+            });
+        }
+        let _ = self
+            .archive
+            .set_status(&chat, &id, Delivery::Failed, crate::util::now());
+        self.emit_message(&chat, &id);
+        self.emit_chat(&chat);
+    }
+
+    /// Keeps a spawned attachment upload so it can be cancelled.
+    fn track_upload(&mut self, chat: &str, id: String, upload: Upload) {
+        self.media_uploads.retain(|_, upload| !upload.finished());
+        self.media_uploads.insert((chat.to_owned(), id), upload);
+    }
+
+    /// Sends again an own attachment or voice message that failed: the
+    /// stored message when it was already uploaded, or else its saved file.
+    fn retry_media(&mut self, chat: ChatId, id: String) {
+        let Ok(Some(row)) = self.archive.message(&chat, &id) else {
+            return;
+        };
+        if matches!(
+            row.content,
+            Content::Audio {
+                voice_note: true,
+                ..
+            }
+        ) {
+            self.retry_voice(chat, id);
+            return;
+        }
+        let Some(media) = row.content.media().cloned() else {
+            return;
+        };
+        if !row.from_me
+            || row.status != Delivery::Failed
+            || !matches!(
+                row.content,
+                Content::Image { .. }
+                    | Content::Video { .. }
+                    | Content::Audio { .. }
+                    | Content::Document { .. }
+            )
+            || self.media_sending.contains(&(chat.clone(), id.clone()))
+        {
+            return;
+        }
+        let (Some(client), Some(jid)) = (self.client.clone(), Self::jid_of(&chat)) else {
+            self.emit(Event::Error(tr("Not connected to WhatsApp").to_owned()));
+            return;
+        };
+        let uploaded = self
+            .archive
+            .raw(&chat, &id)
+            .ok()
+            .flatten()
+            .and_then(|raw| wa::Message::decode_from_slice(&raw).ok());
+        let saved = media.path.clone().filter(|path| path.is_file());
+        if uploaded.is_none() && saved.is_none() {
+            self.emit(Event::Error(
+                tr("The file is no longer available to send").to_owned(),
+            ));
+            return;
+        }
+        let _ = self.archive.retry_failed(&chat, &id);
+        self.emit_message(&chat, &id);
+        self.media_sending.insert((chat.clone(), id.clone()));
+        self.emit(Event::MediaSending {
+            chat: chat.clone(),
+            message: id.clone(),
+            sending: true,
+        });
+        if let Some(mut message) = uploaded {
+            let expiration = self.apply_ephemeral(&chat, &mut message);
+            tokio::spawn(send_outgoing(
+                client,
+                self.commands.clone(),
+                chat,
+                jid,
+                id,
+                message,
+                expiration,
+            ));
+            return;
+        }
+        let Some(path) = saved else { return };
+        // A quote whose original is gone by now goes without it.
+        let context = row
+            .quoted
+            .as_ref()
+            .and_then(|quoted| self.quote(&chat, Some(&quoted.id)).ok().flatten())
+            .map(|(context, _)| context);
         let commands = self.commands.clone();
-        let dir = self.dirs.media_cache_dir();
-        let me = self.me();
-        tokio::spawn(async move {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let stop = Arc::clone(&cancelled);
+        let task = tokio::spawn(async move {
             let outcome = async {
-                let encoded = tokio::task::spawn_blocking(move || {
-                    let image = image::RgbaImage::from_raw(width, height, rgba)
-                        .ok_or_else(|| tr("Clipboard image data is invalid").to_owned())?;
-                    encode_jpeg(&image::DynamicImage::ImageRgba8(image), 88)
-                })
-                .await
-                .map_err(|error| error.to_string())??;
-                let prepared = prepare_media(&client, encoded, "image/jpeg", None, false).await?;
-                quoted_outbound(
-                    &client, &chat, &me, &dir, prepared, caption, mentions, quote,
-                )
-                .await
+                let bytes = tokio::fs::read(&path)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let staged = Prepared {
+                    message: wa::Message::default(),
+                    content: row.content.clone(),
+                    thumbnail: row.thumbnail.clone(),
+                    bytes,
+                    mime: media.mime.clone(),
+                    file_name: None,
+                };
+                let progress = Progress {
+                    commands: commands.clone(),
+                    chat: row.chat.clone(),
+                    id: row.id.clone(),
+                    cancelled: stop,
+                };
+                let mut uploaded = upload_media(&client, staged, Some(progress)).await?;
+                let mentions: Vec<String> = row
+                    .mentions
+                    .iter()
+                    .map(|mention| mention.id.clone())
+                    .collect();
+                dress_attachment(
+                    &mut uploaded.message,
+                    caption_of(&row.content),
+                    &mentions,
+                    context,
+                )?;
+                Ok::<_, String>(uploaded.message.encode_to_vec())
             }
             .await;
+            let chat = row.chat.clone();
             match outcome {
-                Ok((row, raw)) => {
+                Ok(raw) => {
                     let _ = commands.send(Command::Outbound {
                         chat,
                         row: Box::new(row),
@@ -7141,12 +7353,20 @@ impl Worker {
                 Err(error) => {
                     let _ = commands.send(Command::Sent {
                         chat,
-                        id: String::new(),
-                        error: Some(format!("Could not send the picture: {error}")),
+                        id: row.id,
+                        error: Some(format!("Could not send the file: {error}")),
                     });
                 }
             }
         });
+        self.track_upload(
+            &chat,
+            id,
+            Upload {
+                task: task.abort_handle(),
+                cancelled,
+            },
+        );
     }
 
     /// Shows a voice message in the chat at once, as the phone does, then
@@ -7214,7 +7434,7 @@ impl Worker {
         };
         if !row.from_me
             || row.status != Delivery::Failed
-            || self.voice_sending.contains(&(chat.clone(), id.clone()))
+            || self.media_sending.contains(&(chat.clone(), id.clone()))
         {
             return;
         }
@@ -7238,8 +7458,8 @@ impl Worker {
         let _ = self.archive.retry_failed(&chat, &id);
         self.emit_message(&chat, &id);
         if let Some(mut message) = uploaded {
-            self.voice_sending.insert((chat.clone(), id.clone()));
-            self.emit(Event::VoiceSending {
+            self.media_sending.insert((chat.clone(), id.clone()));
+            self.emit(Event::MediaSending {
                 chat: chat.clone(),
                 message: id.clone(),
                 sending: true,
@@ -7274,9 +7494,9 @@ impl Worker {
         recording: Recording,
         context: Option<Box<wa::ContextInfo>>,
     ) {
-        self.voice_sending
+        self.media_sending
             .insert((row.chat.clone(), row.id.clone()));
-        self.emit(Event::VoiceSending {
+        self.emit(Event::MediaSending {
             chat: row.chat.clone(),
             message: row.id.clone(),
             sending: true,
@@ -7479,9 +7699,13 @@ impl Worker {
 
     /// Archives and sends an uploaded attachment message.
     fn outbound(&mut self, chat: ChatId, row: Message, raw: Vec<u8>) {
+        self.media_uploads.remove(&(chat.clone(), row.id.clone()));
+        if self.media_cancelled.remove(&(chat.clone(), row.id.clone())) {
+            return;
+        }
         // A voice message already shows as sending; a failure here marks it
         // failed, so it can be sent again, instead of leaving it spinning.
-        let shown = self.voice_sending.contains(&(chat.clone(), row.id.clone()));
+        let shown = self.media_sending.contains(&(chat.clone(), row.id.clone()));
         let (Some(client), Some(jid)) = (self.client.clone(), Self::jid_of(&chat)) else {
             let error = tr("Not connected to WhatsApp").to_owned();
             self.outbound_failed(chat, row.id, shown, error);
@@ -8308,44 +8532,54 @@ async fn prepare_media(
     file_name: Option<&str>,
     gif: bool,
 ) -> Result<Prepared, String> {
+    let staged = stage_media(bytes, mime, file_name, gif).await?;
+    upload_media(client, staged, None).await
+}
+
+/// What an attachment's row shows before it is uploaded, with the bytes to
+/// upload; its message is still empty. Images are measured, given a
+/// thumbnail and encoded as JPEG.
+async fn stage_media(
+    bytes: Vec<u8>,
+    mime: &str,
+    file_name: Option<&str>,
+    gif: bool,
+) -> Result<Prepared, String> {
     let kind = mime.split('/').next().unwrap_or_default();
     let is_picture = matches!(
         mime,
         "image/jpeg" | "image/png" | "image/webp" | "image/bmp" | "image/tiff"
     );
+    let size = bytes.len() as u64;
+    let mime_owned = mime.to_owned();
+    let staged = |content, mime: String, bytes| Prepared {
+        message: wa::Message::default(),
+        content,
+        thumbnail: None,
+        bytes,
+        mime,
+        file_name: file_name.map(str::to_owned),
+    };
     if is_picture {
-        let decoded = tokio::task::spawn_blocking({
-            let bytes = bytes.clone();
-            move || image::load_from_memory(&bytes).map_err(|error| error.to_string())
+        let jpeg_input = mime == "image/jpeg";
+        let (jpeg, width, height, thumbnail) = tokio::task::spawn_blocking(move || {
+            let decoded = image::load_from_memory(&bytes).map_err(|error| error.to_string())?;
+            let jpeg = if jpeg_input {
+                bytes
+            } else {
+                encode_jpeg(&decoded, 88)?
+            };
+            Ok::<_, String>((
+                jpeg,
+                decoded.width(),
+                decoded.height(),
+                thumbnail_jpeg(&decoded),
+            ))
         })
         .await
         .map_err(|error| error.to_string())??;
-        let (width, height) = (decoded.width(), decoded.height());
-        let jpeg = if mime == "image/jpeg" {
-            bytes
-        } else {
-            encode_jpeg(&decoded, 88)?
-        };
-        let thumbnail = thumbnail_jpeg(&decoded);
-        let upload = client
-            .upload(jpeg.clone(), MediaType::Image, UploadOptions::default())
-            .await
-            .map_err(|error| error.to_string())?;
-        let mut message = image_message(
-            upload,
-            ImageOptions {
-                caption: None,
-                mimetype: Some("image/jpeg".to_owned()),
-                jpeg_thumbnail: thumbnail.clone(),
-                context_info: None,
-            },
-        );
-        if let Some(image) = message.image_message.as_option_mut() {
-            image.width = Some(width);
-            image.height = Some(height);
-        }
         return Ok(Prepared {
-            message,
+            message: wa::Message::default(),
             content: Content::Image {
                 caption: None,
                 media: media(
@@ -8361,91 +8595,276 @@ async fn prepare_media(
             file_name: None,
         });
     }
-    let size = bytes.len() as u64;
-    let mime_owned = mime.to_owned();
     if kind == "video" {
-        let upload = client
-            .upload(bytes.clone(), MediaType::Video, UploadOptions::default())
-            .await
-            .map_err(|error| error.to_string())?;
-        let message = video_message(
-            upload,
-            VideoOptions {
-                mimetype: Some(mime_owned.clone()),
-                gif_playback: Some(gif),
-                ..Default::default()
-            },
-        );
-        return Ok(Prepared {
-            message,
-            content: Content::Video {
-                caption: None,
-                media: media(Some(&mime_owned), Some(size), None, None),
-                seconds: None,
-                gif,
-                note: false,
-            },
-            thumbnail: None,
-            bytes,
-            mime: mime_owned,
-            file_name: file_name.map(str::to_owned),
-        });
+        let content = Content::Video {
+            caption: None,
+            media: media(Some(&mime_owned), Some(size), None, None),
+            seconds: None,
+            gif,
+            note: false,
+        };
+        return Ok(staged(content, mime_owned, bytes));
     }
     if let Some(audio_mime) = whatsapp_audio_mime(mime) {
         let mime_owned = audio_mime.to_owned();
-        let upload = client
-            .upload(bytes.clone(), MediaType::Audio, UploadOptions::default())
+        let content = Content::Audio {
+            media: media(Some(&mime_owned), Some(size), None, None),
+            seconds: None,
+            voice_note: false,
+            waveform: Vec::new(),
+        };
+        return Ok(staged(content, mime_owned, bytes));
+    }
+    let name = file_name.unwrap_or("file").to_owned();
+    let content = Content::Document {
+        media: media(Some(&mime_owned), Some(size), None, None),
+        file_name: name.clone(),
+        caption: None,
+        pages: None,
+    };
+    let mut staged = staged(content, mime_owned, bytes);
+    staged.file_name = Some(name);
+    Ok(staged)
+}
+
+/// Uploads an attachment from [`stage_media`] (or one rebuilt from its
+/// archived row) and builds its message, without caption or context.
+async fn upload_media(
+    client: &Client,
+    mut staged: Prepared,
+    progress: Option<Progress>,
+) -> Result<Prepared, String> {
+    let bytes = staged.bytes.clone();
+    let mime = Some(staged.mime.clone());
+    staged.message = match &staged.content {
+        Content::Image { media, .. } => {
+            let upload = upload_counted(client, bytes, MediaType::Image, progress).await?;
+            let mut message = image_message(
+                upload,
+                ImageOptions {
+                    caption: None,
+                    mimetype: mime,
+                    jpeg_thumbnail: staged.thumbnail.clone(),
+                    context_info: None,
+                },
+            );
+            if let Some(image) = message.image_message.as_option_mut() {
+                image.width = media.width;
+                image.height = media.height;
+            }
+            message
+        }
+        Content::Video {
+            gif,
+            media,
+            seconds,
+            ..
+        } => {
+            let upload = upload_counted(client, bytes, MediaType::Video, progress).await?;
+            let mut message = video_message(
+                upload,
+                VideoOptions {
+                    mimetype: mime,
+                    gif_playback: Some(*gif),
+                    jpeg_thumbnail: staged.thumbnail.as_deref().and_then(wire_thumbnail),
+                    duration_seconds: *seconds,
+                    ..Default::default()
+                },
+            );
+            if let Some(video) = message.video_message.as_option_mut() {
+                video.width = media.width;
+                video.height = media.height;
+            }
+            message
+        }
+        Content::Audio { .. } => {
+            let upload = upload_counted(client, bytes, MediaType::Audio, progress).await?;
+            audio_message(
+                upload,
+                AudioOptions {
+                    mimetype: mime,
+                    ptt: Some(false),
+                    ..Default::default()
+                },
+            )
+        }
+        Content::Document { file_name, .. } => {
+            let upload = upload_counted(client, bytes, MediaType::Document, progress).await?;
+            document_message(
+                upload,
+                DocumentOptions {
+                    mimetype: mime,
+                    file_name: Some(file_name.clone()),
+                    title: Some(file_name.clone()),
+                    ..Default::default()
+                },
+            )
+        }
+        _ => return Err(tr("Could not encode the attachment").to_owned()),
+    };
+    Ok(staged)
+}
+
+/// Uploads an attachment's bytes, reporting to `progress` how much of them
+/// has gone up.
+async fn upload_counted(
+    client: &Client,
+    bytes: Vec<u8>,
+    kind: MediaType,
+    progress: Option<Progress>,
+) -> Result<whatsapp_rust::upload::UploadResponse, String> {
+    let Some(progress) = progress else {
+        return client
+            .upload(bytes, kind, UploadOptions::default())
             .await
-            .map_err(|error| error.to_string())?;
-        let message = audio_message(
-            upload,
-            AudioOptions {
-                mimetype: Some(mime_owned.clone()),
-                ptt: Some(false),
-                ..Default::default()
-            },
-        );
-        return Ok(Prepared {
-            message,
-            content: Content::Audio {
-                media: media(Some(&mime_owned), Some(size), None, None),
-                seconds: None,
-                voice_note: false,
-                waveform: Vec::new(),
-            },
-            thumbnail: None,
-            bytes,
-            mime: mime_owned,
-            file_name: file_name.map(str::to_owned),
+            .map_err(|error| error.to_string());
+    };
+    let (info, encrypted) = tokio::task::spawn_blocking(move || {
+        let mut encrypted = Vec::with_capacity(bytes.len() + 64);
+        let info = whatsapp_rust::wacore::upload::encrypt_media_streaming(
+            io::Cursor::new(&bytes),
+            &mut encrypted,
+            kind,
+        )
+        .map_err(|error| error.to_string())?;
+        Ok::<_, String>((info, encrypted))
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    let source = Counted {
+        data: Arc::new(encrypted),
+        progress,
+    };
+    client
+        .upload_stream(source, info, kind)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// Where a staged attachment reports how much of it has been uploaded,
+/// and learns that it was cancelled.
+#[derive(Clone)]
+struct Progress {
+    commands: mpsc::UnboundedSender<Command>,
+    chat: ChatId,
+    id: String,
+    cancelled: Arc<AtomicBool>,
+}
+
+/// A spawned attachment send that can still be cancelled.
+struct Upload {
+    task: tokio::task::AbortHandle,
+    /// Stops the upload thread, which aborting the task leaves running.
+    cancelled: Arc<AtomicBool>,
+}
+
+impl Upload {
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+        self.task.abort();
+    }
+
+    fn finished(&self) -> bool {
+        self.task.is_finished()
+    }
+}
+
+impl Progress {
+    fn report(&self, percent: u8) {
+        let _ = self.commands.send(Command::Uploading {
+            chat: self.chat.clone(),
+            message: self.id.clone(),
+            percent,
         });
     }
-    let upload = client
-        .upload(bytes.clone(), MediaType::Document, UploadOptions::default())
-        .await
-        .map_err(|error| error.to_string())?;
-    let name = file_name.unwrap_or("file").to_owned();
-    let message = document_message(
-        upload,
-        DocumentOptions {
-            mimetype: Some(mime_owned.clone()),
-            file_name: Some(name.clone()),
-            title: Some(name.clone()),
-            ..Default::default()
-        },
-    );
-    Ok(Prepared {
-        message,
-        content: Content::Document {
-            media: media(Some(&mime_owned), Some(size), None, None),
-            file_name: name.clone(),
-            caption: None,
-            pages: None,
-        },
-        thumbnail: None,
-        bytes,
-        mime: mime_owned,
-        file_name: Some(name),
+}
+
+/// An encrypted attachment whose readers report how far the upload read.
+struct Counted {
+    data: Arc<Vec<u8>>,
+    progress: Progress,
+}
+
+impl whatsapp_rust::wacore::upload::UploadSource for Counted {
+    fn len(&self) -> u64 {
+        self.data.len() as u64
+    }
+
+    fn reader_from(&self, offset: u64) -> io::Result<Box<dyn io::Read + Send>> {
+        Ok(Box::new(CountedReader {
+            at: usize::try_from(offset)
+                .unwrap_or(usize::MAX)
+                .min(self.data.len()),
+            data: Arc::clone(&self.data),
+            progress: self.progress.clone(),
+            shown: None,
+        }))
+    }
+}
+
+struct CountedReader {
+    data: Arc<Vec<u8>>,
+    at: usize,
+    progress: Progress,
+    shown: Option<u8>,
+}
+
+impl io::Read for CountedReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.progress.cancelled.load(Ordering::Relaxed) {
+            return Err(io::Error::other("upload cancelled"));
+        }
+        let rest = &self.data[self.at..];
+        let read = rest.len().min(buf.len());
+        buf[..read].copy_from_slice(&rest[..read]);
+        self.at += read;
+        let percent = (self.at as u64 * 100 / self.data.len().max(1) as u64) as u8;
+        if self.shown != Some(percent) {
+            self.shown = Some(percent);
+            self.progress.report(percent);
+        }
+        Ok(read)
+    }
+}
+
+/// The small poster a video message carries, from a larger one.
+fn wire_thumbnail(poster: &[u8]) -> Option<Vec<u8>> {
+    thumbnail_jpeg(&image::load_from_memory(poster).ok()?)
+}
+
+/// Longest side of the poster a video about to be sent shows with.
+const POSTER_SIDE: u32 = 640;
+
+/// Gives a video about to be sent its poster, length and size, as the
+/// phone does, when a decoder here reads it.
+async fn with_poster(path: PathBuf, mut staged: Prepared) -> Prepared {
+    if !matches!(staged.content, Content::Video { .. }) {
+        return staged;
+    }
+    let poster = tokio::task::spawn_blocking(move || {
+        let (frame, length) = crate::video::poster(&path, POSTER_SIDE)?;
+        let [width, height] = frame.size.map(|side| side as u32);
+        let rgba = frame
+            .pixels
+            .iter()
+            .flat_map(|pixel| pixel.to_srgba_unmultiplied())
+            .collect();
+        let picture = image::RgbaImage::from_raw(width, height, rgba)?;
+        let jpeg = encode_jpeg(&image::DynamicImage::ImageRgba8(picture), 80).ok()?;
+        Some((jpeg, width, height, length))
     })
+    .await
+    .ok()
+    .flatten();
+    if let Some((jpeg, width, height, length)) = poster {
+        if let Content::Video { media, seconds, .. } = &mut staged.content {
+            media.width = Some(width);
+            media.height = Some(height);
+            *seconds = (!length.is_zero()).then(|| (length.as_secs_f64().round() as u32).max(1));
+        }
+        staged.thumbnail = Some(jpeg);
+    }
+    staged
 }
 
 /// Uploads a WebP sticker and builds its message without a library builder.
@@ -8662,6 +9081,203 @@ fn attach_quote(
         return Err(tr("Could not attach the reply context").to_owned());
     }
     Ok(Some(shown))
+}
+
+/// What a spawned attachment send needs from the worker.
+struct AttachmentSender {
+    client: Arc<Client>,
+    commands: mpsc::UnboundedSender<Command>,
+    chat: ChatId,
+    me: String,
+    dir: PathBuf,
+}
+
+/// Sends one attachment as the phone does: once `staging` has read and
+/// prepared it, its bubble shows at once, sending, and it is then uploaded
+/// and sent under the same id. A failure before that is only reported; one
+/// after it marks the message failed, so it can be sent again.
+#[allow(clippy::too_many_arguments)]
+async fn send_attachment(
+    sender: AttachmentSender,
+    id: String,
+    cancelled: Arc<AtomicBool>,
+    staging: impl std::future::Future<Output = Result<Prepared, String>>,
+    caption: Option<String>,
+    mentions: Vec<String>,
+    quote: Option<(wa::ContextInfo, Quoted)>,
+    failure: &'static str,
+) {
+    let AttachmentSender {
+        client,
+        commands,
+        chat,
+        me,
+        dir,
+    } = sender;
+    let (context, quoted) = quote.unzip();
+    let shown = async {
+        let mut staged = staging.await?;
+        let row = staged_row(
+            &chat,
+            &me,
+            &dir,
+            id.clone(),
+            &mut staged,
+            caption.clone(),
+            &mentions,
+            quoted,
+        )
+        .await?;
+        Ok::<_, String>((staged, row))
+    }
+    .await;
+    let (staged, row) = match shown {
+        Ok(shown) => shown,
+        Err(error) => {
+            let _ = commands.send(Command::Sent {
+                chat,
+                id: String::new(),
+                error: Some(format!("{failure}: {error}")),
+            });
+            return;
+        }
+    };
+    let _ = commands.send(Command::Staged {
+        row: Box::new(row.clone()),
+    });
+    let outcome = async {
+        let progress = Progress {
+            commands: commands.clone(),
+            chat: chat.clone(),
+            id: id.clone(),
+            cancelled,
+        };
+        let mut uploaded = upload_media(&client, staged, Some(progress)).await?;
+        dress_attachment(&mut uploaded.message, caption, &mentions, context)?;
+        Ok::<_, String>(uploaded.message.encode_to_vec())
+    }
+    .await;
+    match outcome {
+        Ok(raw) => {
+            let _ = commands.send(Command::Outbound {
+                chat,
+                row: Box::new(row),
+                raw,
+            });
+        }
+        Err(error) => {
+            let _ = commands.send(Command::Sent {
+                chat,
+                id,
+                error: Some(format!("{failure}: {error}")),
+            });
+        }
+    }
+}
+
+/// The row an attachment shows while it is uploaded and sent: its bytes
+/// saved to media storage, its caption, mentions and quote, sending.
+#[allow(clippy::too_many_arguments)]
+async fn staged_row(
+    chat: &str,
+    me: &str,
+    dir: &Path,
+    id: String,
+    staged: &mut Prepared,
+    caption: Option<String>,
+    mentions: &[String],
+    quoted: Option<Quoted>,
+) -> Result<Message, String> {
+    let path = media_path(dir, chat, &id, &staged.mime, staged.file_name.as_deref());
+    tokio::fs::create_dir_all(dir)
+        .await
+        .map_err(|error| error.to_string())?;
+    tokio::fs::write(&path, &staged.bytes)
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut content = staged.content.clone();
+    if let Some(caption) = caption.filter(|caption| !caption.trim().is_empty()) {
+        match &mut content {
+            Content::Image { caption: slot, .. }
+            | Content::Video { caption: slot, .. }
+            | Content::Document { caption: slot, .. } => *slot = Some(caption),
+            _ => {}
+        }
+    }
+    if let Some(media) = content.media_mut() {
+        media.path = Some(path);
+    }
+    Ok(Message {
+        id,
+        chat: chat.to_owned(),
+        sender: me.to_owned(),
+        sender_name: None,
+        from_me: true,
+        timestamp: crate::util::now(),
+        content,
+        status: Delivery::Pending,
+        delivered_at: None,
+        read_at: None,
+        quoted,
+        reactions: Vec::new(),
+        edited: false,
+        mentions: mention_refs(mentions),
+        forwarded: false,
+        thumbnail: staged.thumbnail.clone(),
+    })
+}
+
+/// The caption an attachment's row carries.
+fn caption_of(content: &Content) -> Option<String> {
+    match content {
+        Content::Image { caption, .. }
+        | Content::Video { caption, .. }
+        | Content::Document { caption, .. } => caption.clone(),
+        _ => None,
+    }
+}
+
+/// Puts a caption, a reply's context and mentions on an uploaded
+/// attachment's message. A message kind that cannot carry the context is an
+/// error.
+fn dress_attachment(
+    message: &mut wa::Message,
+    caption: Option<String>,
+    mentions: &[String],
+    context: Option<wa::ContextInfo>,
+) -> Result<(), String> {
+    if let Some(caption) = caption.filter(|caption| !caption.trim().is_empty()) {
+        if let Some(image) = message.image_message.as_option_mut() {
+            image.caption = Some(caption.clone());
+        }
+        if let Some(video) = message.video_message.as_option_mut() {
+            video.caption = Some(caption.clone());
+        }
+        if let Some(document) = message.document_message.as_option_mut() {
+            document.caption = Some(caption);
+        }
+    }
+    if let Some(context) = context
+        && !message.set_context_info(context)
+    {
+        return Err(tr("Could not attach the reply context").to_owned());
+    }
+    add_mentions(message, mentions);
+    Ok(())
+}
+
+/// A row's mention references, from the mentioned ids.
+fn mention_refs(mentions: &[String]) -> Vec<MentionRef> {
+    mentions
+        .iter()
+        .filter_map(|id| {
+            let user = id.split('@').next()?.to_owned();
+            (!user.is_empty()).then(|| MentionRef {
+                user,
+                id: id.clone(),
+            })
+        })
+        .collect()
 }
 
 /// Mentions people in an attachment, keeping a reply context it carries.
@@ -11262,7 +11878,9 @@ mod receipt_tests {
             poll_history: Default::default(),
             poll_sending: HashSet::new(),
             interactive_sending: HashMap::new(),
-            voice_sending: HashSet::new(),
+            media_sending: HashSet::new(),
+            media_uploads: HashMap::new(),
+            media_cancelled: HashSet::new(),
             receipts_watch: None,
             receipts_pruned: Instant::now(),
             link_watch: Default::default(),
