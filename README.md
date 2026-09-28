@@ -31,8 +31,8 @@ Além das novidades do upstream, esta branch inclui as seguintes mudanças:
 
 As versões do fork ficam em
 [Releases](https://github.com/intellq/zapfast/releases/latest), para Linux e
-Windows x86_64. Os números seguem o upstream: a versão 0.17.1 é o fork sobre o
-upstream 0.17.0, e depois do upstream 0.17.1 vem a 0.17.101. Os pacotes são
+Windows x86_64. Os números seguem o upstream: as versões 0.17.1 e 0.17.2 são o
+fork sobre o upstream 0.17.0, e depois do upstream 0.17.1 vem a 0.17.101. Os pacotes são
 assinados com a chave do fork, e o ZapFast instalado por eles se atualiza
 sozinho a partir das Releases do fork (não das do upstream).
 
@@ -217,6 +217,30 @@ sozinho a partir das Releases do fork (não das do upstream).
   do play, que manda o mesmo áudio sem gravar de novo. Um áudio interrompido
   por fechar o ZapFast no meio do envio aparece como não enviado na próxima
   abertura.
+- **Imagens e arquivos "enviando" como no celular.** Imagens coladas com
+  Ctrl+V e arquivos anexados aparecem na conversa assim que você envia, em vez
+  de sumir até chegarem ao servidor. Imagens e vídeos mostram por cima um
+  anel com o percentual já enviado (vídeos também os megabytes); documentos
+  mostram o mesmo no cartão. Vídeos saem com miniatura, duração e proporção,
+  lidas do próprio arquivo. Se o envio falhar, um botão no meio da imagem ou do
+  vídeo (ou **Enviar de novo** no menu da mensagem, para os demais arquivos)
+  reenvia o mesmo arquivo. Um envio interrompido por fechar o ZapFast aparece como não
+  enviado na próxima abertura.
+- **Prévia grande ao colar ou anexar.** Uma imagem colada ou arquivos
+  anexados ocupam o lugar do histórico, como no celular: o arquivo escolhido
+  aparece grande, e uma faixa embaixo mostra todos, para escolher, remover ou
+  anexar mais. A legenda vai na caixa de digitação logo abaixo; Esc ou o X
+  descartam tudo.
+- **Ícone por tipo de arquivo.** Documentos aparecem como uma folha com a
+  extensão (PDF, DOCX, XLSX, ZIP, RAR, 7Z…) numa faixa na cor do tipo, na
+  conversa e na prévia de anexos, em vez de um ícone genérico.
+- **Duração das mensagens temporárias nas informações.** Em **⋯ ›
+  Informações** de um contato ou grupo com mensagens temporárias ligadas,
+  aparece por quanto tempo elas ficam (por exemplo, "Mensagens temporárias:
+  7 dias").
+- **Miniatura da foto citada.** Ao responder a uma foto ou vídeo, a citação
+  mostra uma miniatura dele à direita, na mensagem e na barra de resposta,
+  como no celular. Vale quando a mensagem citada está carregada na conversa.
 - **Play sólido e velocidade colorida no player de áudio.** O play e o pause
   são formas sólidas num verde um pouco mais escuro que o de destaque (nos seus
   áudios, no tema escuro, um verde-folha mais claro, que se destaca do balão
@@ -333,9 +357,9 @@ sozinho a partir das Releases do fork (não das do upstream).
   real; o programa já foi aberto numa máquina virtual.
 - **Créditos e código-fonte do fork.** Em **Configurações › Sobre** e no
   diálogo **Sobre**, **Código-fonte** abre este repositório
-  (`intellq/zapfast`), e a linha "Feito com amor por Carmine Paolino" ganhou
-  "(modificações @intell)", com **@intell** levando a
-  [github.com/intellq](https://github.com/intellq).
+  (`intellq/zapfast`), e abaixo de "Feito com amor por Carmine Paolino" há
+  uma segunda linha, "👍🏽 Com correções e modificações por intell", com
+  **intell** levando a [twitter.com/intellq](https://twitter.com/intellq).
 - **Menu de contexto na caixa de digitação.** O botão direito no compositor
   abre **Recortar**, **Copiar**, **Colar** e **Selecionar tudo**, em todas as
   plataformas (o `TextEdit` do egui não oferece menu próprio). A seleção feita

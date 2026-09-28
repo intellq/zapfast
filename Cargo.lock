@@ -7553,7 +7553,7 @@ dependencies = [
 
 [[package]]
 name = "zapfast"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "aes",
  "anyhow",
