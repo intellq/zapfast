@@ -14,6 +14,7 @@ mod encryption;
 mod favorites;
 pub use favorites::Favorite;
 mod labels;
+mod lid_chats;
 pub use labels::{DEFAULT_COLOR, LABEL_LIMIT, NAME_LIMIT};
 mod polls;
 mod receipts;
@@ -838,9 +839,9 @@ impl Archive {
         rows.collect()
     }
 
-    /// Stores a privacy id mapping and carries early mute/pin/lock sync and
-    /// the favorite mark to the canonical chat. Returns whether that chat's
-    /// preferences were touched.
+    /// Stores a privacy id mapping and carries early mute/pin/lock sync, the
+    /// favorite mark and the messages to the canonical chat. Returns whether
+    /// that chat was touched.
     pub fn put_lid(&self, lid: &str, pn: &str) -> Result<bool> {
         self.connection.execute(
             "INSERT INTO lids (lid, pn) VALUES (?1, ?2) ON CONFLICT(lid) DO UPDATE SET pn = excluded.pn",
@@ -880,7 +881,8 @@ impl Archive {
                 archive_updated_at = NULLIF(MAX(COALESCE(archive_updated_at, -1), COALESCE(excluded.archive_updated_at, -1)), -1)",
             params![format!("{lid}@lid"), format!("{pn}@s.whatsapp.net"), pn],
         )?;
-        Ok(changed > 0 || favorite)
+        let merged = self.merge_lid_chat(lid, pn)?;
+        Ok(changed > 0 || favorite || merged)
     }
 
     pub fn lids(&self) -> Result<Vec<(String, String)>> {

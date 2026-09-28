@@ -319,7 +319,9 @@ impl Worker {
         if self.call_busy() {
             return;
         }
-        let chat = self.canonical(&incoming.from);
+        // The offer carries the caller's number beside their privacy id, which the library has
+        // learned by now, so a stranger's call lands in the chat named by that number.
+        let chat = self.canonical_sync_chat(&incoming.from).await;
         // A group, broadcast or newsletter offer never reaches the 1:1 call surface. The interface
         // hides the buttons for those chats, but the worker is the boundary: a non-direct offer is
         // refused here rather than rung, so no call is created and no history entry is written.

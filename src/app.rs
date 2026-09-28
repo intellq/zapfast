@@ -418,6 +418,8 @@ pub struct App {
     pauses_media: bool,
     /// The ringtone, the ringback and the short sounds of a call.
     call_sounds: crate::call_sounds::CallSounds,
+    /// The phone number, as digits, of each privacy id (`<id>@lid`) that has one.
+    lid_phones: HashMap<ChatId, String>,
     /// Image currently shown in the native preview.
     pub image_preview: Option<PreviewState>,
     /// Voice messages with a sent played receipt.
@@ -980,6 +982,7 @@ impl App {
             media_hold: None,
             pauses_media: false,
             call_sounds: Default::default(),
+            lid_phones: HashMap::new(),
             image_preview: None,
             played_told: HashSet::new(),
             copy_rows: Default::default(),
@@ -1628,16 +1631,19 @@ impl App {
 
     fn person_name(&self, id: &str, hint: Option<&str>) -> String {
         self.known_name(id, hint)
-            .unwrap_or_else(|| match crate::model::phone_of(id) {
-                Some(digits) => crate::util::phone(digits),
-                None => tr("Unknown").to_owned(),
-            })
+            .or_else(|| self.phone_name(id))
+            .unwrap_or_else(|| tr("Unknown").to_owned())
+    }
+
+    /// The phone number a person goes by when nothing names them, as on the phone: the number in
+    /// their id, or the one known for their privacy id.
+    fn phone_name(&self, id: &str) -> Option<String> {
+        crate::model::phone_of(id)
+            .or_else(|| self.lid_phones.get(id).map(String::as_str))
+            .map(crate::util::phone)
     }
 
     /// What a chat is known by, or nothing at all when only a number is left.
-    ///
-    /// Split out of [`Self::person_name`] for the call surfaces, which must not answer a stranger
-    /// with their own number the way a chat title may.
     fn known_name(&self, id: &str, hint: Option<&str>) -> Option<String> {
         let contact = self.contacts.get(id);
         let present = |name: Option<&str>| name.filter(|name| !name.is_empty()).map(str::to_owned);
@@ -1663,16 +1669,15 @@ impl App {
         self.chat(id).is_some_and(|chat| chat.locked) && !self.locked_folder_open()
     }
 
-    /// The name a call shows for the other side.
-    ///
-    /// Not [`Self::display_name`]: that ends at the phone number, and a call screen or a desktop
-    /// notification that prints an unknown caller's number says more about them than WhatsApp does.
-    /// A locked chat says nothing until the folder is open.
+    /// The name a call shows for the other side: a saved or profile name, else the caller's number
+    /// as the phone shows it, and "Unknown caller" only when WhatsApp gave neither. A locked chat
+    /// says nothing until the folder is open.
     pub fn call_name(&self, id: &str) -> String {
         if self.chat_is_private(id) {
             return crate::i18n::gettext(self.locale, "Locked chat").into_owned();
         }
         self.known_name(id, None)
+            .or_else(|| self.phone_name(id))
             .unwrap_or_else(|| crate::i18n::gettext(self.locale, "Unknown caller").into_owned())
     }
 
@@ -2218,6 +2223,17 @@ impl App {
                         }
                     }
                     self.chats = chats;
+                    // A chat begun under a privacy id joins its number's chat once that is known,
+                    // and the reader stays in it.
+                    if let Some(open) = self.open_chat.clone()
+                        && self.chat(&open).is_none()
+                        && let Some(phone) = self.lid_phones.get(&open)
+                    {
+                        let moved = format!("{phone}@s.whatsapp.net");
+                        if self.chat(&moved).is_some() {
+                            self.open_chat = Some(moved);
+                        }
+                    }
                     if let Some(open) = self.open_chat.clone() {
                         if self.chat(&open).is_none_or(|chat| chat.locked) {
                             self.open_chat = None;
@@ -2400,6 +2416,7 @@ impl App {
                         self.contacts.insert(contact.id.clone(), contact);
                     }
                 }
+                Event::Phones(phones) => self.lid_phones = phones.into_iter().collect(),
                 Event::Typing {
                     chat,
                     sender,
@@ -6581,17 +6598,18 @@ mod tests {
     }
 
     #[test]
-    fn a_call_does_not_answer_a_stranger_with_their_own_number() {
+    fn a_stranger_is_called_by_their_number_as_on_the_phone() {
         let mut app = app();
         let id = "15551234567@s.whatsapp.net";
         app.chats.push(Chat::new(id.into(), String::new()));
-        // The chat list may still show the number, because the reader opened that chat.
-        assert_eq!(
-            app.chat_title(&app.chats[0].clone()),
-            crate::util::phone("15551234567")
-        );
-        // The call surface says no more than it knows: a number is not a name there.
-        assert_eq!(app.call_name(id), "Unknown caller");
+        let number = crate::util::phone("15551234567");
+        assert_eq!(app.chat_title(&app.chats[0].clone()), number);
+        assert_eq!(app.call_name(id), number);
+        // A privacy id is named by the number known for it, and only unknown without one.
+        assert_eq!(app.call_name("42@lid"), "Unknown caller");
+        app.lid_phones.insert("42@lid".into(), "15551234567".into());
+        assert_eq!(app.call_name("42@lid"), number);
+        assert_eq!(app.display_name("42@lid"), number);
         // A saved contact is named, and so is the call.
         app.contacts.insert(
             id.into(),

@@ -1055,6 +1055,7 @@ impl Worker {
                     | Event::MessageUpdated(_)
                     | Event::Incoming { .. }
                     | Event::Contacts(_)
+                    | Event::Phones(_)
                     | Event::SearchHits { .. }
                     | Event::Labels(_)
                     | Event::Typing { .. }
@@ -1183,6 +1184,13 @@ impl Worker {
                 for chat in &mut chats {
                     self.polish_chat(chat);
                 }
+                // Before the chats, so an open chat that moved to its number can follow it.
+                self.emit(Event::Phones(
+                    self.lid_to_pn
+                        .iter()
+                        .map(|(lid, pn)| (format!("{lid}@lid"), pn.clone()))
+                        .collect(),
+                ));
                 self.emit(Event::Chats(chats));
                 self.emit_labels();
                 self.emit(Event::Drafts(self.archive.drafts().unwrap_or_default()));
@@ -1330,6 +1338,9 @@ impl Worker {
             .filter(|about| !about.is_empty());
         if let Ok(lids) = self.archive.lids() {
             self.lid_to_pn = lids.into_iter().collect();
+        }
+        if let Err(error) = self.archive.merge_mapped_lid_chats() {
+            log::warn!("could not merge chats begun under a privacy id: {error}");
         }
         if let Ok(contacts) = self.archive.contacts() {
             self.contacts = contacts
@@ -1871,8 +1882,9 @@ impl Worker {
         }
     }
 
-    /// App-state mutations may use a privacy id before a message teaches the UI
-    /// its mapping. Consult the protocol library's persisted mapping as well.
+    /// App-state mutations and call offers may use a privacy id before a message teaches the UI
+    /// its mapping. Consult the protocol library's persisted mapping as well: it also learns from
+    /// what ZapFast does not look at, such as the caller's number on a call offer.
     async fn canonical_sync_chat(&mut self, jid: &Jid) -> String {
         if jid.is_lid()
             && !self.lid_to_pn.contains_key(jid.user_base())
@@ -1880,11 +1892,43 @@ impl Worker {
         {
             match client.get_lid_pn_entry(jid).await {
                 Ok(Some(entry)) => self.learn_lid(&entry.lid, &entry.phone_number),
-                Ok(None) => log::info!("chat removal: privacy mapping not yet available"),
-                Err(_) => log::warn!("chat removal: could not resolve privacy mapping"),
+                Ok(None) => log::info!("privacy mapping not yet available"),
+                Err(_) => log::warn!("could not resolve a privacy mapping"),
             }
         }
         self.canonical(jid)
+    }
+
+    /// Looks up, off the worker, the numbers the protocol library knows for the privacy ids that
+    /// name chats and contacts here without one, as those from before ZapFast learned them.
+    fn resolve_unmapped_lids(&self) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let chats = self.archive.chats().unwrap_or_default();
+        let unmapped: std::collections::BTreeSet<String> = chats
+            .iter()
+            .map(|chat| chat.id.as_str())
+            .chain(self.contacts.keys().map(String::as_str))
+            .filter_map(|id| id.strip_suffix("@lid"))
+            .filter(|lid| !self.lid_to_pn.contains_key(*lid))
+            .map(str::to_owned)
+            .collect();
+        if unmapped.is_empty() {
+            return;
+        }
+        let commands = self.commands.clone();
+        tokio::spawn(async move {
+            let mut found = Vec::new();
+            for lid in unmapped {
+                if let Ok(Some(entry)) = client.get_lid_pn_entry(&Jid::lid(&lid)).await {
+                    found.push((entry.lid.to_string(), entry.phone_number.to_string()));
+                }
+            }
+            if !found.is_empty() {
+                let _ = commands.send(Command::LidsFound(found));
+            }
+        });
     }
 
     fn jid_of(id: &str) -> Option<Jid> {
@@ -2271,6 +2315,7 @@ impl Worker {
                 self.set_status(LinkStatus::Connected);
                 self.refresh_legacy_preferences();
                 self.retry_avatars();
+                self.resolve_unmapped_lids();
                 self.pump_read_sync();
                 self.pump_favorite_chats();
                 self.poll_history.reconnect(Instant::now());
@@ -5375,6 +5420,12 @@ impl Worker {
                     }
                     .map_err(|error| error.to_string())
                 });
+            }
+            Command::LidsFound(lids) => {
+                for (lid, pn) in lids {
+                    self.learn_lid(&lid, &pn);
+                }
+                self.emit_chats();
             }
             Command::ChannelMutes(mutes) => {
                 for (chat, muted) in mutes {

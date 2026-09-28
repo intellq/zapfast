@@ -767,6 +767,9 @@ pub enum Command {
     },
     /// Internal: followed channels and whether each is muted on the server.
     ChannelMutes(Vec<(String, bool)>),
+    /// Internal: phone numbers the protocol library knows for privacy ids (bare user parts, the
+    /// privacy id first) that the archive had none for.
+    LidsFound(Vec<(String, String)>),
     /// Looks up the group behind an invite code without joining.
     PreviewInvite(String),
     /// Joins the group behind an invite code.
@@ -874,6 +877,9 @@ pub enum Event {
         message: Box<Message>,
     },
     Contacts(Vec<Contact>),
+    /// The phone number of each privacy id (`<id>@lid`) that has one, as digits, so a chat or a
+    /// person known only by that id is named by their number, as on the phone.
+    Phones(Vec<(ChatId, String)>),
     /// Message search results with their query, newest first.
     SearchHits {
         query: String,
