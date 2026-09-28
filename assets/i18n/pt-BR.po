@@ -1254,12 +1254,8 @@ msgstr ""
 "dispositivo."
 
 #: src/ui/dialogs.rs:762
-msgid ""
-"This is an unofficial client. Using it may be against WhatsApp's terms of "
-"service and could get an account suspended."
-msgstr ""
-"Este é um cliente não oficial. Usá-lo pode violar os termos de serviço do "
-"WhatsApp e levar à suspensão da conta."
+msgid "This is an unofficial client. See WhatsApp's terms of service."
+msgstr "Este é um cliente não oficial. Consulte os termos de serviço do WhatsApp."
 
 #: src/ui/dialogs.rs:769 src/ui/settings.rs:921 src/ui/settings.rs:1694
 msgid "Source code"

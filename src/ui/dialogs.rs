@@ -758,9 +758,7 @@ fn about(app: &mut App, ui: &mut egui::Ui) {
     );
     theme::paragraph(
         ui,
-        tr(
-            "This is an unofficial client. Using it may be against WhatsApp's terms of service and could get an account suspended.",
-        ),
+        tr("This is an unofficial client. See WhatsApp's terms of service."),
         theme::regular(12.5),
         palette.secondary,
     );
