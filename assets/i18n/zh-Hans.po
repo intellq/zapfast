@@ -66,7 +66,6 @@ msgid "Audio"
 msgstr ""
 
 #: src/model.rs:726
-#, rust-format
 msgid "Document: {name}"
 msgstr ""
 
@@ -76,12 +75,12 @@ msgid "Sticker"
 msgstr "贴图包"
 
 #: src/model.rs:728
-#, fuzzy, rust-format
+#, fuzzy
 msgid "Sticker pack: {name}"
 msgstr "贴图包"
 
 #: src/model.rs:730
-#, fuzzy, rust-format
+#, fuzzy
 msgid "Location: {name}"
 msgstr "位置"
 
@@ -99,12 +98,11 @@ msgid "Live location"
 msgstr "实时位置"
 
 #: src/model.rs:741
-#, fuzzy, rust-format
+#, fuzzy
 msgid "Contact: {name}"
 msgstr "联系人"
 
 #: src/model.rs:743
-#, rust-format
 msgid "Poll: {question}"
 msgstr ""
 
@@ -114,7 +112,6 @@ msgid "This message was deleted"
 msgstr "此消息已不可用。"
 
 #: src/model.rs:746
-#, rust-format
 msgid "Unsupported message ({what})"
 msgstr ""
 
@@ -183,17 +180,14 @@ msgid "Yesterday"
 msgstr "昨天"
 
 #: src/util.rs:236
-#, rust-format
 msgid "Yesterday at {time}"
 msgstr "昨天 {time}"
 
 #: src/util.rs:237
-#, rust-format
 msgid "{weekday} at {time}"
 msgstr "{weekday} {time}"
 
 #: src/util.rs:240
-#, rust-format
 msgid "{date} at {time}"
 msgstr "{date} {time}"
 
@@ -446,7 +440,6 @@ msgid "Message yourself"
 msgstr "给自己发消息"
 
 #: src/ui/chats.rs:955 src/ui/conversation.rs:368
-#, rust-format
 msgid "{name} is typing…"
 msgstr ""
 
@@ -555,12 +548,11 @@ msgid "Delete chat"
 msgstr ""
 
 #: src/ui/chats.rs:1488
-#, rust-format
 msgid "{title}, unread"
 msgstr ""
 
 #: src/ui/chats.rs:1490
-#, fuzzy, rust-format
+#, fuzzy
 msgid "{title}, {count} unread messages"
 msgstr "{} 条未读消息"
 
@@ -632,7 +624,6 @@ msgid "Search messages"
 msgstr "搜索消息"
 
 #: src/ui/conversation.rs:369
-#, rust-format
 msgid "{names} and {last} are typing…"
 msgstr ""
 
@@ -646,7 +637,7 @@ msgid "online"
 msgstr "在线状态"
 
 #: src/ui/conversation.rs:395 src/ui/dialogs.rs:1802
-#, fuzzy, rust-format
+#, fuzzy
 msgid "last seen {time}"
 msgstr "更新于 {time}"
 
@@ -742,7 +733,6 @@ msgid "Hide shortcut hints (bring them back from Keyboard shortcuts)"
 msgstr "隐藏快捷键提示（可从“键盘快捷键”恢复）"
 
 #: src/ui/conversation.rs:1477
-#, rust-format
 msgid "All shortcuts ({})"
 msgstr "全部快捷键（{}）"
 
@@ -755,7 +745,6 @@ msgid "Create poll"
 msgstr "创建投票"
 
 #: src/ui/conversation.rs:1638
-#, rust-format
 msgid "Voice message ({duration}) not sent"
 msgstr "语音消息（{duration}）未发送"
 
@@ -772,7 +761,6 @@ msgid "Stop editing (Esc)"
 msgstr ""
 
 #: src/ui/conversation.rs:1742
-#, rust-format
 msgid "Replying to {who}"
 msgstr ""
 
@@ -791,7 +779,6 @@ msgid "Remove link preview"
 msgstr ""
 
 #: src/ui/conversation.rs:2281 src/notify/badge_windows.rs:255
-#, rust-format
 msgid "{} unread message"
 msgid_plural "{} unread messages"
 msgstr[0] "{} 条未读消息"
@@ -820,7 +807,6 @@ msgid "React to your message"
 msgstr "搜索消息"
 
 #: src/ui/conversation.rs:2811
-#, rust-format
 msgid "React to {sender}'s message"
 msgstr ""
 
@@ -846,7 +832,7 @@ msgid "[video]"
 msgstr ""
 
 #: src/ui/conversation.rs:3142
-#, fuzzy, rust-format
+#, fuzzy
 msgid "[voice message, {duration}]"
 msgstr "语音消息（{duration}）未发送"
 
@@ -860,7 +846,6 @@ msgid "[audio]"
 msgstr ""
 
 #: src/ui/conversation.rs:3148
-#, rust-format
 msgid "[document: {name}]"
 msgstr ""
 
@@ -885,27 +870,23 @@ msgid "[live location]"
 msgstr "实时位置"
 
 #: src/ui/conversation.rs:3161
-#, rust-format
 msgid "[contact: {name}]"
 msgstr ""
 
 #: src/ui/conversation.rs:3164
-#, fuzzy, rust-format
+#, fuzzy
 msgid "[sticker pack: {name}]"
 msgstr "贴图包"
 
 #: src/ui/conversation.rs:3167
-#, rust-format
 msgid "[poll: {question}]"
 msgstr ""
 
 #: src/ui/conversation.rs:3204
-#, rust-format
 msgid "(replying to {name}: \"{quote}\")"
 msgstr ""
 
 #: src/ui/conversation.rs:3304
-#, rust-format
 msgid "Playback speed {label}"
 msgstr ""
 
@@ -1000,13 +981,11 @@ msgid "Interactive message"
 msgstr "搜索消息"
 
 #: src/ui/conversation.rs:4701
-#, rust-format
 msgid "{} page"
 msgid_plural "{} pages"
 msgstr[0] ""
 
 #: src/ui/conversation.rs:4775
-#, rust-format
 msgid "Updated {time}"
 msgstr "更新于 {time}"
 
@@ -1019,7 +998,6 @@ msgid "Add"
 msgstr "添加"
 
 #: src/ui/conversation.rs:4884
-#, rust-format
 msgid "{} sticker"
 msgid_plural "{} stickers"
 msgstr[0] "{} 个贴图"
@@ -1042,7 +1020,6 @@ msgid "This message can only be seen on your phone."
 msgstr "请在手机上更改排除的联系人。"
 
 #: src/ui/conversation.rs:5004
-#, rust-format
 msgid "Unsupported: {what}"
 msgstr ""
 
@@ -1111,7 +1088,6 @@ msgid "Open this option in WhatsApp Web or on your phone"
 msgstr "在手机上打开 WhatsApp 即可查看。"
 
 #: src/ui/conversation.rs:5556
-#, rust-format
 msgid "Send reply: {label}"
 msgstr ""
 
@@ -1175,7 +1151,6 @@ msgid "1 selected"
 msgstr ""
 
 #: src/ui/conversation.rs:7496
-#, rust-format
 msgid "{count} selected"
 msgstr ""
 
@@ -1303,7 +1278,7 @@ msgid "Forward message"
 msgstr "{} 条未读消息"
 
 #: src/ui/dialogs.rs:478
-#, fuzzy, rust-format
+#, fuzzy
 msgid "Forward {count} messages"
 msgstr "搜索消息"
 
@@ -1364,7 +1339,6 @@ msgid "Delete chat?"
 msgstr ""
 
 #: src/ui/dialogs.rs:794
-#, rust-format
 msgid ""
 "This deletes your chat with {name}, including all messages, on this computer "
 "and on your phone. It cannot be undone."
@@ -1380,7 +1354,6 @@ msgid "Clear chat?"
 msgstr "清除"
 
 #: src/ui/dialogs.rs:821
-#, rust-format
 msgid ""
 "This clears every message in your chat with {name}, including downloaded "
 "media, on this computer and on your phone. The chat itself stays. It cannot "
@@ -1403,7 +1376,7 @@ msgid "1 member"
 msgstr "{} 位成员"
 
 #: src/ui/dialogs.rs:870
-#, fuzzy, rust-format
+#, fuzzy
 msgid "{count} members"
 msgstr "{} 位成员"
 
@@ -1625,19 +1598,17 @@ msgid "Saving…"
 msgstr "正在保存…"
 
 #: src/ui/dialogs.rs:1789
-#, rust-format
 msgid "{} member"
 msgid_plural "{} members"
 msgstr[0] "{} 位成员"
 
 #. Translators: {duration} is how long messages stay, like "7 days".
 #: src/ui/dialogs.rs:1815
-#, fuzzy, rust-format
+#, fuzzy
 msgid "Disappearing messages: {duration}"
 msgstr "语音消息（{duration}）未发送"
 
 #: src/ui/dialogs.rs:1853
-#, rust-format
 msgid "Members ({count})"
 msgstr ""
 
@@ -1647,7 +1618,7 @@ msgid "Muted"
 msgstr "静音"
 
 #: src/ui/dialogs.rs:1928
-#, fuzzy, rust-format
+#, fuzzy
 msgid "Muted until {time}"
 msgstr "昨天 {time}"
 
@@ -1666,19 +1637,16 @@ msgid "Pin"
 msgstr "粉色"
 
 #: src/ui/dialogs.rs:2049
-#, rust-format
 msgid "{} day"
 msgid_plural "{} days"
 msgstr[0] ""
 
 #: src/ui/dialogs.rs:2052
-#, rust-format
 msgid "{} hour"
 msgid_plural "{} hours"
 msgstr[0] ""
 
 #: src/ui/dialogs.rs:2057
-#, rust-format
 msgid "{} minute"
 msgid_plural "{} minutes"
 msgstr[0] ""
@@ -1713,7 +1681,6 @@ msgid "Settings"
 msgstr "设置"
 
 #: src/ui/settings.rs:325
-#, rust-format
 msgid "No settings match “{query}”."
 msgstr "没有与“{query}”匹配的设置。"
 
@@ -2009,7 +1976,6 @@ msgid ""
 msgstr "重启时机仍由你决定。包管理器和 Flatpak 会自行更新 ZapFast。"
 
 #: src/ui/settings.rs:774
-#, rust-format
 msgid "Using {proxy} from the environment."
 msgstr "正在使用环境中的 {proxy}。"
 
@@ -2102,7 +2068,6 @@ msgid ""
 msgstr ""
 
 #: src/ui/settings.rs:1065
-#, rust-format
 msgid ""
 "Decodes videos with {method} when it can, and on the processor otherwise. "
 "Lighter on high-resolution HEVC and AV1."
@@ -2229,7 +2194,6 @@ msgid "A native WhatsApp client built with Rust, egui, and whatsapp-rust."
 msgstr "用 Rust、egui 和 whatsapp-rust 构建的原生 WhatsApp 客户端。"
 
 #: src/ui/settings.rs:1662
-#, rust-format
 msgid "Update to {version}"
 msgstr "更新到 {version}"
 
@@ -2257,18 +2221,15 @@ msgstr "无"
 
 #. Translators: {name} is replaced by the author's name, shown as a link.
 #: src/ui/widgets.rs:722
-#, rust-format
 msgid "Built with love by {name}"
 msgstr "由 {name} 倾心打造"
 
 #. Translators: {name} is replaced by the fork author's handle, a link.
 #: src/ui/widgets.rs:724
-#, rust-format
 msgid "With fixes and changes by {name}"
 msgstr ""
 
 #: src/ui/widgets.rs:1078
-#, rust-format
 msgid "{label}, {count} unread"
 msgstr ""
 
@@ -2321,7 +2282,6 @@ msgid "Delivered to"
 msgstr "送达对象"
 
 #: src/ui/message_info.rs:246
-#, rust-format
 msgid "{} remaining"
 msgid_plural "{} remaining"
 msgstr[0] "剩余 {}"
@@ -2339,12 +2299,10 @@ msgid "Quit"
 msgstr ""
 
 #: src/app.rs:1413
-#, rust-format
 msgid "A label named “{name}” already exists."
 msgstr "已存在名为“{name}”的标签。"
 
 #: src/app.rs:1473
-#, rust-format
 msgid "{name} (You)"
 msgstr "{name}（你）"
 
@@ -2365,7 +2323,6 @@ msgid "Request sent. An admin must approve it before you join."
 msgstr ""
 
 #: src/app.rs:2435 src/ui/mod.rs:258
-#, rust-format
 msgid "ZapFast {version} is available"
 msgstr ""
 
@@ -2396,7 +2353,7 @@ msgid "Open a chat first"
 msgstr ""
 
 #: src/app.rs:3301
-#, fuzzy, rust-format
+#, fuzzy
 msgid "Sending {} file…"
 msgid_plural "Sending {} files…"
 msgstr[0] "发送文件"
@@ -2445,12 +2402,10 @@ msgid "Sending GIF…"
 msgstr ""
 
 #: src/app.rs:4519
-#, rust-format
 msgid "You can only pin {count} chats"
 msgstr ""
 
 #: src/app.rs:4690 src/ui/labels.rs:237
-#, rust-format
 msgid "You have {limit} labels, the most ZapFast keeps."
 msgstr "你已有 {limit} 个标签，这是 ZapFast 的上限。"
 
@@ -2568,7 +2523,6 @@ msgid "Next colour"
 msgstr "下一个颜色"
 
 #: src/ui/labels.rs:375
-#, rust-format
 msgid "{} chat"
 msgid_plural "{} chats"
 msgstr[0] "{} 个聊天"
@@ -2794,7 +2748,6 @@ msgid "Filter by date"
 msgstr "按日期筛选"
 
 #: src/ui/pane.rs:204
-#, rust-format
 msgid "Search messages with {}"
 msgstr "在 {} 中搜索消息"
 
@@ -2807,7 +2760,6 @@ msgid "Try another word or pick a different day."
 msgstr "换个词试试，或选择其他日期。"
 
 #: src/ui/pane.rs:255
-#, rust-format
 msgid "Only the newest {} matches are listed. Narrow the search or pick a day."
 msgstr "只列出最新的 {} 条结果。请缩小搜索范围或选择某一天。"
 
@@ -3341,17 +3293,14 @@ msgid "Sticker packs"
 msgstr "贴图包"
 
 #: src/backend/worker.rs:4818
-#, rust-format
 msgid "Added {name} to contacts"
 msgstr ""
 
 #: src/backend/worker.rs:4861
-#, rust-format
 msgid "{phone} is not on WhatsApp"
 msgstr ""
 
 #: src/backend/worker.rs:4884 src/backend/worker/stickers.rs:987
-#, rust-format
 msgid "Added sticker pack \"{name}\""
 msgstr ""
 
@@ -3397,7 +3346,6 @@ msgid "Not connected to WhatsApp yet"
 msgstr "未发送：ZapFast 未连接到 WhatsApp。"
 
 #: src/backend/worker.rs:5611
-#, rust-format
 msgid "A group name can have at most {count} characters."
 msgstr ""
 
@@ -3512,7 +3460,7 @@ msgid "Document"
 msgstr ""
 
 #: src/backend/worker.rs:8306
-#, fuzzy, rust-format
+#, fuzzy
 msgid "{count} contacts"
 msgstr "我的联系人"
 
@@ -3529,7 +3477,6 @@ msgid "GIF search needs a GIPHY API key."
 msgstr ""
 
 #: src/backend/worker.rs:8964
-#, rust-format
 msgid "GIPHY rejected the API key (error {code})."
 msgstr ""
 
@@ -3745,7 +3692,6 @@ msgid "The proxy refused the connection"
 msgstr ""
 
 #: src/proxy.rs:452
-#, rust-format
 msgid "The proxy {proxy} did not answer"
 msgstr ""
 
@@ -4005,32 +3951,28 @@ msgid "no address answered"
 msgstr ""
 
 #: src/transport.rs:224
-#, fuzzy, rust-format
+#, fuzzy
 msgid "Could not resolve {host}"
 msgstr "无法使用此图片"
 
 #: src/transport.rs:230
-#, rust-format
 msgid "{host} resolved to no address"
 msgstr ""
 
 #: src/transport.rs:234
-#, fuzzy, rust-format
+#, fuzzy
 msgid "Could not reach {host}"
 msgstr "未记录时间"
 
 #: src/transport.rs:242
-#, rust-format
 msgid "to {address}"
 msgstr ""
 
 #: src/transport.rs:272
-#, rust-format
 msgid "TLS {via} failed"
 msgstr ""
 
 #: src/transport.rs:283
-#, rust-format
 msgid "WebSocket connection {via} failed"
 msgstr ""
 
@@ -4134,7 +4076,6 @@ msgid "Start over…"
 msgstr ""
 
 #: src/ui/login.rs:132
-#, rust-format
 msgid "Requesting a code for {phone}…"
 msgstr ""
 
@@ -4174,7 +4115,6 @@ msgid "Enter this code on your phone"
 msgstr "请在手机上更改排除的联系人。"
 
 #: src/ui/login.rs:223
-#, rust-format
 msgid "for {phone}"
 msgstr ""
 
@@ -4183,12 +4123,10 @@ msgid "Tap Link a device, then Link with phone number instead"
 msgstr ""
 
 #: src/ui/mod.rs:229
-#, rust-format
 msgid "Drop to send to {name}"
 msgstr ""
 
 #: src/ui/mod.rs:246
-#, rust-format
 msgid "Loading chat history… {percent}%"
 msgstr ""
 
@@ -4198,7 +4136,6 @@ msgid "Loading chat history…"
 msgstr "正在加载你的贴图…"
 
 #: src/ui/mod.rs:274
-#, rust-format
 msgid "Offline ({reason}). Reconnecting…"
 msgstr ""
 
@@ -4237,7 +4174,6 @@ msgid "Answers"
 msgstr ""
 
 #: src/ui/polls.rs:78
-#, rust-format
 msgid "Answer {number}"
 msgstr ""
 
@@ -4291,7 +4227,6 @@ msgid "Earlier votes have not been loaded yet"
 msgstr ""
 
 #: src/ui/polls.rs:305
-#, rust-format
 msgid "{} voter"
 msgid_plural "{} voters"
 msgstr[0] ""
@@ -4322,7 +4257,6 @@ msgid "Earlier votes may still be missing. Results update as they arrive."
 msgstr ""
 
 #: src/ui/polls.rs:503
-#, rust-format
 msgid "{} vote"
 msgid_plural "{} votes"
 msgstr[0] ""
@@ -4405,8 +4339,201 @@ msgid ""
 "driver. If you are running in a virtual machine, turn on 3D acceleration."
 msgstr ""
 
-#~ msgid "Starts in the tray, without a window."
-#~ msgstr "在托盘中启动，不打开窗口。"
+#: src/ui/conversation.rs:327 src/ui/call.rs:445
+msgid "Hang up"
+msgstr ""
 
-#~ msgid "Let people see when you read their messages."
-#~ msgstr "让对方看到你何时读了他们的消息。"
+#: src/ui/conversation.rs:334
+msgid "Voice call"
+msgstr ""
+
+#: src/ui/settings.rs:352
+msgid "Download files automatically"
+msgstr "自动下载文件"
+
+#: src/ui/settings.rs:355
+msgid "Files up to 64 MiB download as they come into view."
+msgstr "文件进入视野后自动下载，最大 64 MiB。"
+
+#: src/ui/settings.rs:428
+msgid "Off for your account, so only groups get them."
+msgstr "你的账号已关闭，因此只有群组会发送。"
+
+#: src/ui/settings.rs:430
+msgid "Let people see when you read their messages."
+msgstr "让对方看到你何时读了他们的消息。"
+
+#: src/ui/settings.rs:510
+msgid "Starts in the tray, without a window."
+msgstr "在托盘中启动，不打开窗口。"
+
+#: src/ui/call.rs:120
+msgid "Hide the call screen"
+msgstr ""
+
+#: src/ui/call.rs:138
+msgid "Exit full screen"
+msgstr ""
+
+#: src/ui/call.rs:143
+msgid "Full screen"
+msgstr ""
+
+#: src/ui/call.rs:217 src/ui/call.rs:218
+msgid "Return to the call"
+msgstr ""
+
+#: src/ui/call.rs:232
+#, fuzzy
+msgid "Calling…"
+msgstr "正在保存…"
+
+#: src/ui/call.rs:234
+#, fuzzy
+msgid "Ringing…"
+msgstr "正在保存…"
+
+#: src/ui/call.rs:237 src/ui/call.rs:245
+msgid "Connected"
+msgstr ""
+
+#: src/ui/call.rs:239
+#, fuzzy
+msgid "Connecting…"
+msgstr "加载中…"
+
+#: src/ui/call.rs:251 src/ui/call.rs:262
+msgid "Call ended"
+msgstr ""
+
+#: src/ui/call.rs:252 src/ui/call.rs:635
+msgid "Incoming call"
+msgstr ""
+
+#: src/ui/call.rs:263
+msgid "Missed call"
+msgstr ""
+
+#: src/ui/call.rs:264
+msgid "Declined"
+msgstr ""
+
+#: src/ui/call.rs:265
+msgid "Busy"
+msgstr ""
+
+#: src/ui/call.rs:266
+msgid "Could not connect"
+msgstr ""
+
+#: src/ui/call.rs:267
+msgid "No answer"
+msgstr ""
+
+#: src/ui/call.rs:270
+msgid "Connection lost"
+msgstr ""
+
+#: src/ui/call.rs:272
+msgid "The call could not be established"
+msgstr ""
+
+#: src/ui/call.rs:276
+msgid "Answered on another device"
+msgstr ""
+
+#: src/ui/call.rs:279
+msgid "Declined on another device"
+msgstr ""
+
+#: src/ui/call.rs:335
+msgid "No audio is arriving from this call"
+msgstr ""
+
+#: src/ui/call.rs:337
+msgid "This call's audio cannot be decoded"
+msgstr ""
+
+#: src/ui/call.rs:340
+msgid "This call's audio is not authenticating"
+msgstr ""
+
+#: src/ui/call.rs:344
+msgid "This call's audio is arriving in an unexpected format"
+msgstr ""
+
+#: src/ui/call.rs:348
+msgid "This call's audio is being rejected by the decoder"
+msgstr ""
+
+#: src/ui/call.rs:351
+msgid "This call's audio format keeps changing"
+msgstr ""
+
+#: src/ui/call.rs:354
+msgid "The peer's audio stopped"
+msgstr ""
+
+#: src/ui/call.rs:367
+msgid "Microphone “{name}” is not available; using the system default"
+msgstr ""
+
+#: src/ui/call.rs:371
+msgid "Speaker “{name}” is not available; using the system default"
+msgstr ""
+
+#: src/ui/call.rs:423
+#, fuzzy
+msgid "Speaker and devices"
+msgstr "已关联的设备"
+
+#: src/ui/call.rs:513
+msgid "Default device"
+msgstr ""
+
+#: src/ui/call.rs:535
+msgid "Microphone"
+msgstr ""
+
+#: src/ui/call.rs:545
+msgid "Speaker"
+msgstr ""
+
+#: src/ui/call.rs:647 src/app.rs:3350
+msgid "Incoming voice call"
+msgstr ""
+
+#: src/ui/call.rs:657
+msgid "Accept"
+msgstr ""
+
+#: src/ui/call.rs:671
+#, fuzzy
+msgid "Decline"
+msgstr "在线状态"
+
+#: src/app.rs:1496
+#, fuzzy
+msgid "Locked chat"
+msgstr "已锁定聊天的密码"
+
+#: src/app.rs:1499
+#, fuzzy
+msgid "Unknown caller"
+msgstr "静音未知来电"
+
+#, fuzzy
+#~ msgid "Back to the chat"
+#~ msgstr "把这个贴图包发送到聊天"
+
+#, fuzzy
+#~ msgid "Share your screen"
+#~ msgstr "自己制作"
+
+#, fuzzy
+#~ msgid "Calls"
+#~ msgstr "通话"
+
+#, fuzzy
+#~ msgid "No calls yet"
+#~ msgstr "还没有收藏"

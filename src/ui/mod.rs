@@ -1,5 +1,6 @@
 //! Window layout: panels, overlays, keyboard shortcuts.
 
+pub mod call;
 pub mod chats;
 pub mod conversation;
 pub mod dialogs;
@@ -81,6 +82,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     dialogs::show(app, ctx);
     image_preview::show(app, ctx);
     video_view::show(app, ctx);
+    call::show(app, ctx);
     drop_target(app, ctx);
     toasts(app, ctx);
     focus_ring(app, ctx);

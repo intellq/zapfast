@@ -66,7 +66,6 @@ msgid "Audio"
 msgstr ""
 
 #: src/model.rs:726
-#, rust-format
 msgid "Document: {name}"
 msgstr ""
 
@@ -76,12 +75,12 @@ msgid "Sticker"
 msgstr "Pacchetto di sticker"
 
 #: src/model.rs:728
-#, fuzzy, rust-format
+#, fuzzy
 msgid "Sticker pack: {name}"
 msgstr "Pacchetto di sticker"
 
 #: src/model.rs:730
-#, fuzzy, rust-format
+#, fuzzy
 msgid "Location: {name}"
 msgstr "Posizione in tempo reale"
 
@@ -100,12 +99,11 @@ msgid "Live location"
 msgstr "Posizione in tempo reale"
 
 #: src/model.rs:741
-#, fuzzy, rust-format
+#, fuzzy
 msgid "Contact: {name}"
 msgstr "Contatto"
 
 #: src/model.rs:743
-#, rust-format
 msgid "Poll: {question}"
 msgstr ""
 
@@ -115,7 +113,6 @@ msgid "This message was deleted"
 msgstr "Questo messaggio non è più disponibile."
 
 #: src/model.rs:746
-#, rust-format
 msgid "Unsupported message ({what})"
 msgstr ""
 
@@ -184,17 +181,14 @@ msgid "Yesterday"
 msgstr "Ieri"
 
 #: src/util.rs:236
-#, rust-format
 msgid "Yesterday at {time}"
 msgstr "Ieri alle {time}"
 
 #: src/util.rs:237
-#, rust-format
 msgid "{weekday} at {time}"
 msgstr "{weekday} alle {time}"
 
 #: src/util.rs:240
-#, rust-format
 msgid "{date} at {time}"
 msgstr "{date} alle {time}"
 
@@ -447,7 +441,6 @@ msgid "Message yourself"
 msgstr "Invia un messaggio a te stesso"
 
 #: src/ui/chats.rs:955 src/ui/conversation.rs:368
-#, rust-format
 msgid "{name} is typing…"
 msgstr ""
 
@@ -556,12 +549,11 @@ msgid "Delete chat"
 msgstr ""
 
 #: src/ui/chats.rs:1488
-#, rust-format
 msgid "{title}, unread"
 msgstr ""
 
 #: src/ui/chats.rs:1490
-#, fuzzy, rust-format
+#, fuzzy
 msgid "{title}, {count} unread messages"
 msgstr "{} messaggio non letto"
 
@@ -633,7 +625,6 @@ msgid "Search messages"
 msgstr "Cerca messaggi"
 
 #: src/ui/conversation.rs:369
-#, rust-format
 msgid "{names} and {last} are typing…"
 msgstr ""
 
@@ -647,7 +638,7 @@ msgid "online"
 msgstr "Online"
 
 #: src/ui/conversation.rs:395 src/ui/dialogs.rs:1802
-#, fuzzy, rust-format
+#, fuzzy
 msgid "last seen {time}"
 msgstr "Aggiornata alle {time}"
 
@@ -749,7 +740,6 @@ msgstr ""
 "tastiera)"
 
 #: src/ui/conversation.rs:1477
-#, rust-format
 msgid "All shortcuts ({})"
 msgstr "Tutte le scorciatoie ({})"
 
@@ -762,7 +752,6 @@ msgid "Create poll"
 msgstr "Crea sondaggio"
 
 #: src/ui/conversation.rs:1638
-#, rust-format
 msgid "Voice message ({duration}) not sent"
 msgstr "Messaggio vocale ({duration}) non inviato"
 
@@ -779,7 +768,6 @@ msgid "Stop editing (Esc)"
 msgstr ""
 
 #: src/ui/conversation.rs:1742
-#, rust-format
 msgid "Replying to {who}"
 msgstr ""
 
@@ -798,7 +786,6 @@ msgid "Remove link preview"
 msgstr ""
 
 #: src/ui/conversation.rs:2281 src/notify/badge_windows.rs:255
-#, rust-format
 msgid "{} unread message"
 msgid_plural "{} unread messages"
 msgstr[0] "{} messaggio non letto"
@@ -828,7 +815,6 @@ msgid "React to your message"
 msgstr "Cerca messaggi"
 
 #: src/ui/conversation.rs:2811
-#, rust-format
 msgid "React to {sender}'s message"
 msgstr ""
 
@@ -854,7 +840,7 @@ msgid "[video]"
 msgstr ""
 
 #: src/ui/conversation.rs:3142
-#, fuzzy, rust-format
+#, fuzzy
 msgid "[voice message, {duration}]"
 msgstr "Messaggio vocale ({duration}) non inviato"
 
@@ -868,7 +854,6 @@ msgid "[audio]"
 msgstr ""
 
 #: src/ui/conversation.rs:3148
-#, rust-format
 msgid "[document: {name}]"
 msgstr ""
 
@@ -893,27 +878,23 @@ msgid "[live location]"
 msgstr "Posizione in tempo reale"
 
 #: src/ui/conversation.rs:3161
-#, rust-format
 msgid "[contact: {name}]"
 msgstr ""
 
 #: src/ui/conversation.rs:3164
-#, fuzzy, rust-format
+#, fuzzy
 msgid "[sticker pack: {name}]"
 msgstr "Pacchetto di sticker"
 
 #: src/ui/conversation.rs:3167
-#, rust-format
 msgid "[poll: {question}]"
 msgstr ""
 
 #: src/ui/conversation.rs:3204
-#, rust-format
 msgid "(replying to {name}: \"{quote}\")"
 msgstr ""
 
 #: src/ui/conversation.rs:3304
-#, rust-format
 msgid "Playback speed {label}"
 msgstr ""
 
@@ -1008,14 +989,12 @@ msgid "Interactive message"
 msgstr "Cerca messaggi"
 
 #: src/ui/conversation.rs:4701
-#, rust-format
 msgid "{} page"
 msgid_plural "{} pages"
 msgstr[0] ""
 msgstr[1] ""
 
 #: src/ui/conversation.rs:4775
-#, rust-format
 msgid "Updated {time}"
 msgstr "Aggiornata alle {time}"
 
@@ -1029,7 +1008,6 @@ msgid "Add"
 msgstr ""
 
 #: src/ui/conversation.rs:4884
-#, rust-format
 msgid "{} sticker"
 msgid_plural "{} stickers"
 msgstr[0] "{} sticker"
@@ -1053,7 +1031,6 @@ msgid "This message can only be seen on your phone."
 msgstr "Cambia chi è escluso dal tuo telefono."
 
 #: src/ui/conversation.rs:5004
-#, rust-format
 msgid "Unsupported: {what}"
 msgstr ""
 
@@ -1122,7 +1099,6 @@ msgid "Open this option in WhatsApp Web or on your phone"
 msgstr "Apri WhatsApp sul telefono per seguirla."
 
 #: src/ui/conversation.rs:5556
-#, rust-format
 msgid "Send reply: {label}"
 msgstr ""
 
@@ -1186,7 +1162,6 @@ msgid "1 selected"
 msgstr ""
 
 #: src/ui/conversation.rs:7496
-#, rust-format
 msgid "{count} selected"
 msgstr ""
 
@@ -1314,7 +1289,7 @@ msgid "Forward message"
 msgstr "{} messaggio non letto"
 
 #: src/ui/dialogs.rs:478
-#, fuzzy, rust-format
+#, fuzzy
 msgid "Forward {count} messages"
 msgstr "Cerca messaggi"
 
@@ -1375,7 +1350,6 @@ msgid "Delete chat?"
 msgstr ""
 
 #: src/ui/dialogs.rs:794
-#, rust-format
 msgid ""
 "This deletes your chat with {name}, including all messages, on this computer "
 "and on your phone. It cannot be undone."
@@ -1391,7 +1365,6 @@ msgid "Clear chat?"
 msgstr "Cancella"
 
 #: src/ui/dialogs.rs:821
-#, rust-format
 msgid ""
 "This clears every message in your chat with {name}, including downloaded "
 "media, on this computer and on your phone. The chat itself stays. It cannot "
@@ -1414,7 +1387,7 @@ msgid "1 member"
 msgstr "{} membro"
 
 #: src/ui/dialogs.rs:870
-#, fuzzy, rust-format
+#, fuzzy
 msgid "{count} members"
 msgstr "{} membro"
 
@@ -1637,7 +1610,6 @@ msgid "Saving…"
 msgstr "Salvataggio…"
 
 #: src/ui/dialogs.rs:1789
-#, rust-format
 msgid "{} member"
 msgid_plural "{} members"
 msgstr[0] "{} membro"
@@ -1645,12 +1617,11 @@ msgstr[1] "{} membri"
 
 #. Translators: {duration} is how long messages stay, like "7 days".
 #: src/ui/dialogs.rs:1815
-#, fuzzy, rust-format
+#, fuzzy
 msgid "Disappearing messages: {duration}"
 msgstr "Messaggio vocale ({duration}) non inviato"
 
 #: src/ui/dialogs.rs:1853
-#, rust-format
 msgid "Members ({count})"
 msgstr ""
 
@@ -1660,7 +1631,7 @@ msgid "Muted"
 msgstr "Disattiva audio"
 
 #: src/ui/dialogs.rs:1928
-#, fuzzy, rust-format
+#, fuzzy
 msgid "Muted until {time}"
 msgstr "Ieri alle {time}"
 
@@ -1679,21 +1650,18 @@ msgid "Pin"
 msgstr "Rosa"
 
 #: src/ui/dialogs.rs:2049
-#, rust-format
 msgid "{} day"
 msgid_plural "{} days"
 msgstr[0] ""
 msgstr[1] ""
 
 #: src/ui/dialogs.rs:2052
-#, rust-format
 msgid "{} hour"
 msgid_plural "{} hours"
 msgstr[0] ""
 msgstr[1] ""
 
 #: src/ui/dialogs.rs:2057
-#, rust-format
 msgid "{} minute"
 msgid_plural "{} minutes"
 msgstr[0] ""
@@ -1729,7 +1697,6 @@ msgid "Settings"
 msgstr "Impostazioni"
 
 #: src/ui/settings.rs:325
-#, rust-format
 msgid "No settings match “{query}”."
 msgstr "Nessuna impostazione corrisponde a «{query}»."
 
@@ -2031,7 +1998,6 @@ msgstr ""
 "ZapFast da soli."
 
 #: src/ui/settings.rs:774
-#, rust-format
 msgid "Using {proxy} from the environment."
 msgstr "Viene usato {proxy} dall’ambiente."
 
@@ -2126,7 +2092,6 @@ msgid ""
 msgstr ""
 
 #: src/ui/settings.rs:1065
-#, rust-format
 msgid ""
 "Decodes videos with {method} when it can, and on the processor otherwise. "
 "Lighter on high-resolution HEVC and AV1."
@@ -2253,7 +2218,6 @@ msgid "A native WhatsApp client built with Rust, egui, and whatsapp-rust."
 msgstr "Un client WhatsApp nativo scritto in Rust con egui e whatsapp-rust."
 
 #: src/ui/settings.rs:1662
-#, rust-format
 msgid "Update to {version}"
 msgstr "Aggiorna a {version}"
 
@@ -2281,18 +2245,15 @@ msgstr "Nessuno"
 
 #. Translators: {name} is replaced by the author's name, shown as a link.
 #: src/ui/widgets.rs:722
-#, rust-format
 msgid "Built with love by {name}"
 msgstr "Fatto con amore da {name}"
 
 #. Translators: {name} is replaced by the fork author's handle, a link.
 #: src/ui/widgets.rs:724
-#, rust-format
 msgid "With fixes and changes by {name}"
 msgstr ""
 
 #: src/ui/widgets.rs:1078
-#, rust-format
 msgid "{label}, {count} unread"
 msgstr ""
 
@@ -2349,7 +2310,6 @@ msgid "Delivered to"
 msgstr "Consegnato a"
 
 #: src/ui/message_info.rs:246
-#, rust-format
 msgid "{} remaining"
 msgid_plural "{} remaining"
 msgstr[0] "{} in attesa"
@@ -2368,12 +2328,10 @@ msgid "Quit"
 msgstr ""
 
 #: src/app.rs:1413
-#, rust-format
 msgid "A label named “{name}” already exists."
 msgstr "Esiste già un’etichetta chiamata «{name}»."
 
 #: src/app.rs:1473
-#, rust-format
 msgid "{name} (You)"
 msgstr "{name} (Tu)"
 
@@ -2394,7 +2352,6 @@ msgid "Request sent. An admin must approve it before you join."
 msgstr ""
 
 #: src/app.rs:2435 src/ui/mod.rs:258
-#, rust-format
 msgid "ZapFast {version} is available"
 msgstr ""
 
@@ -2427,7 +2384,7 @@ msgid "Open a chat first"
 msgstr ""
 
 #: src/app.rs:3301
-#, fuzzy, rust-format
+#, fuzzy
 msgid "Sending {} file…"
 msgid_plural "Sending {} files…"
 msgstr[0] "Invia file"
@@ -2477,12 +2434,10 @@ msgid "Sending GIF…"
 msgstr ""
 
 #: src/app.rs:4519
-#, rust-format
 msgid "You can only pin {count} chats"
 msgstr ""
 
 #: src/app.rs:4690 src/ui/labels.rs:237
-#, rust-format
 msgid "You have {limit} labels, the most ZapFast keeps."
 msgstr "Hai {limit} etichette, il massimo che ZapFast conserva."
 
@@ -2604,7 +2559,6 @@ msgid "Next colour"
 msgstr "Colore successivo"
 
 #: src/ui/labels.rs:375
-#, rust-format
 msgid "{} chat"
 msgid_plural "{} chats"
 msgstr[0] "{} chat"
@@ -2836,7 +2790,6 @@ msgid "Filter by date"
 msgstr "Filtra per data"
 
 #: src/ui/pane.rs:204
-#, rust-format
 msgid "Search messages with {}"
 msgstr "Cerca messaggi in {}"
 
@@ -2849,7 +2802,6 @@ msgid "Try another word or pick a different day."
 msgstr "Prova un'altra parola o scegli un altro giorno."
 
 #: src/ui/pane.rs:255
-#, rust-format
 msgid "Only the newest {} matches are listed. Narrow the search or pick a day."
 msgstr ""
 "Sono elencate solo le {} corrispondenze più recenti. Restringi la ricerca o "
@@ -3385,17 +3337,14 @@ msgid "Sticker packs"
 msgstr "Pacchetto di sticker"
 
 #: src/backend/worker.rs:4818
-#, rust-format
 msgid "Added {name} to contacts"
 msgstr ""
 
 #: src/backend/worker.rs:4861
-#, rust-format
 msgid "{phone} is not on WhatsApp"
 msgstr ""
 
 #: src/backend/worker.rs:4884 src/backend/worker/stickers.rs:987
-#, rust-format
 msgid "Added sticker pack \"{name}\""
 msgstr ""
 
@@ -3441,7 +3390,6 @@ msgid "Not connected to WhatsApp yet"
 msgstr "Non inviato: ZapFast non è connesso a WhatsApp."
 
 #: src/backend/worker.rs:5611
-#, rust-format
 msgid "A group name can have at most {count} characters."
 msgstr ""
 
@@ -3556,7 +3504,7 @@ msgid "Document"
 msgstr ""
 
 #: src/backend/worker.rs:8306
-#, fuzzy, rust-format
+#, fuzzy
 msgid "{count} contacts"
 msgstr "I miei contatti"
 
@@ -3573,7 +3521,6 @@ msgid "GIF search needs a GIPHY API key."
 msgstr ""
 
 #: src/backend/worker.rs:8964
-#, rust-format
 msgid "GIPHY rejected the API key (error {code})."
 msgstr ""
 
@@ -3789,7 +3736,6 @@ msgid "The proxy refused the connection"
 msgstr ""
 
 #: src/proxy.rs:452
-#, rust-format
 msgid "The proxy {proxy} did not answer"
 msgstr ""
 
@@ -4049,32 +3995,28 @@ msgid "no address answered"
 msgstr ""
 
 #: src/transport.rs:224
-#, fuzzy, rust-format
+#, fuzzy
 msgid "Could not resolve {host}"
 msgstr "Impossibile usare questa immagine"
 
 #: src/transport.rs:230
-#, rust-format
 msgid "{host} resolved to no address"
 msgstr ""
 
 #: src/transport.rs:234
-#, fuzzy, rust-format
+#, fuzzy
 msgid "Could not reach {host}"
 msgstr "Orario non registrato"
 
 #: src/transport.rs:242
-#, rust-format
 msgid "to {address}"
 msgstr ""
 
 #: src/transport.rs:272
-#, rust-format
 msgid "TLS {via} failed"
 msgstr ""
 
 #: src/transport.rs:283
-#, rust-format
 msgid "WebSocket connection {via} failed"
 msgstr ""
 
@@ -4178,7 +4120,6 @@ msgid "Start over…"
 msgstr ""
 
 #: src/ui/login.rs:132
-#, rust-format
 msgid "Requesting a code for {phone}…"
 msgstr ""
 
@@ -4218,7 +4159,6 @@ msgid "Enter this code on your phone"
 msgstr "Cambia chi è escluso dal tuo telefono."
 
 #: src/ui/login.rs:223
-#, rust-format
 msgid "for {phone}"
 msgstr ""
 
@@ -4227,12 +4167,10 @@ msgid "Tap Link a device, then Link with phone number instead"
 msgstr ""
 
 #: src/ui/mod.rs:229
-#, rust-format
 msgid "Drop to send to {name}"
 msgstr ""
 
 #: src/ui/mod.rs:246
-#, rust-format
 msgid "Loading chat history… {percent}%"
 msgstr ""
 
@@ -4242,7 +4180,6 @@ msgid "Loading chat history…"
 msgstr "Caricamento dei tuoi sticker…"
 
 #: src/ui/mod.rs:274
-#, rust-format
 msgid "Offline ({reason}). Reconnecting…"
 msgstr ""
 
@@ -4281,7 +4218,6 @@ msgid "Answers"
 msgstr ""
 
 #: src/ui/polls.rs:78
-#, rust-format
 msgid "Answer {number}"
 msgstr ""
 
@@ -4335,7 +4271,6 @@ msgid "Earlier votes have not been loaded yet"
 msgstr ""
 
 #: src/ui/polls.rs:305
-#, rust-format
 msgid "{} voter"
 msgid_plural "{} voters"
 msgstr[0] ""
@@ -4367,7 +4302,6 @@ msgid "Earlier votes may still be missing. Results update as they arrive."
 msgstr ""
 
 #: src/ui/polls.rs:503
-#, rust-format
 msgid "{} vote"
 msgid_plural "{} votes"
 msgstr[0] ""
@@ -4451,8 +4385,201 @@ msgid ""
 "driver. If you are running in a virtual machine, turn on 3D acceleration."
 msgstr ""
 
-#~ msgid "Starts in the tray, without a window."
-#~ msgstr "Si avvia nell’area di notifica, senza finestra."
+#: src/ui/conversation.rs:327 src/ui/call.rs:445
+msgid "Hang up"
+msgstr ""
 
-#~ msgid "Let people see when you read their messages."
-#~ msgstr "Gli altri vedono quando leggi i loro messaggi."
+#: src/ui/conversation.rs:334
+msgid "Voice call"
+msgstr ""
+
+#: src/ui/settings.rs:352
+msgid "Download files automatically"
+msgstr "Scarica i file automaticamente"
+
+#: src/ui/settings.rs:355
+msgid "Files up to 64 MiB download as they come into view."
+msgstr "I file fino a 64 MiB si scaricano appena compaiono."
+
+#: src/ui/settings.rs:428
+msgid "Off for your account, so only groups get them."
+msgstr "Disattivate per il tuo account, quindi le ricevono solo i gruppi."
+
+#: src/ui/settings.rs:430
+msgid "Let people see when you read their messages."
+msgstr "Gli altri vedono quando leggi i loro messaggi."
+
+#: src/ui/settings.rs:510
+msgid "Starts in the tray, without a window."
+msgstr "Si avvia nell’area di notifica, senza finestra."
+
+#: src/ui/call.rs:120
+msgid "Hide the call screen"
+msgstr ""
+
+#: src/ui/call.rs:138
+msgid "Exit full screen"
+msgstr ""
+
+#: src/ui/call.rs:143
+msgid "Full screen"
+msgstr ""
+
+#: src/ui/call.rs:217 src/ui/call.rs:218
+msgid "Return to the call"
+msgstr ""
+
+#: src/ui/call.rs:232
+#, fuzzy
+msgid "Calling…"
+msgstr "Salvataggio…"
+
+#: src/ui/call.rs:234
+#, fuzzy
+msgid "Ringing…"
+msgstr "Salvataggio…"
+
+#: src/ui/call.rs:237 src/ui/call.rs:245
+msgid "Connected"
+msgstr ""
+
+#: src/ui/call.rs:239
+#, fuzzy
+msgid "Connecting…"
+msgstr "Caricamento…"
+
+#: src/ui/call.rs:251 src/ui/call.rs:262
+msgid "Call ended"
+msgstr ""
+
+#: src/ui/call.rs:252 src/ui/call.rs:635
+msgid "Incoming call"
+msgstr ""
+
+#: src/ui/call.rs:263
+msgid "Missed call"
+msgstr ""
+
+#: src/ui/call.rs:264
+msgid "Declined"
+msgstr ""
+
+#: src/ui/call.rs:265
+msgid "Busy"
+msgstr ""
+
+#: src/ui/call.rs:266
+msgid "Could not connect"
+msgstr ""
+
+#: src/ui/call.rs:267
+msgid "No answer"
+msgstr ""
+
+#: src/ui/call.rs:270
+msgid "Connection lost"
+msgstr ""
+
+#: src/ui/call.rs:272
+msgid "The call could not be established"
+msgstr ""
+
+#: src/ui/call.rs:276
+msgid "Answered on another device"
+msgstr ""
+
+#: src/ui/call.rs:279
+msgid "Declined on another device"
+msgstr ""
+
+#: src/ui/call.rs:335
+msgid "No audio is arriving from this call"
+msgstr ""
+
+#: src/ui/call.rs:337
+msgid "This call's audio cannot be decoded"
+msgstr ""
+
+#: src/ui/call.rs:340
+msgid "This call's audio is not authenticating"
+msgstr ""
+
+#: src/ui/call.rs:344
+msgid "This call's audio is arriving in an unexpected format"
+msgstr ""
+
+#: src/ui/call.rs:348
+msgid "This call's audio is being rejected by the decoder"
+msgstr ""
+
+#: src/ui/call.rs:351
+msgid "This call's audio format keeps changing"
+msgstr ""
+
+#: src/ui/call.rs:354
+msgid "The peer's audio stopped"
+msgstr ""
+
+#: src/ui/call.rs:367
+msgid "Microphone “{name}” is not available; using the system default"
+msgstr ""
+
+#: src/ui/call.rs:371
+msgid "Speaker “{name}” is not available; using the system default"
+msgstr ""
+
+#: src/ui/call.rs:423
+#, fuzzy
+msgid "Speaker and devices"
+msgstr "Dispositivo collegato"
+
+#: src/ui/call.rs:513
+msgid "Default device"
+msgstr ""
+
+#: src/ui/call.rs:535
+msgid "Microphone"
+msgstr ""
+
+#: src/ui/call.rs:545
+msgid "Speaker"
+msgstr ""
+
+#: src/ui/call.rs:647 src/app.rs:3350
+msgid "Incoming voice call"
+msgstr ""
+
+#: src/ui/call.rs:657
+msgid "Accept"
+msgstr ""
+
+#: src/ui/call.rs:671
+#, fuzzy
+msgid "Decline"
+msgstr "Online"
+
+#: src/app.rs:1496
+#, fuzzy
+msgid "Locked chat"
+msgstr "Codice delle chat bloccate"
+
+#: src/app.rs:1499
+#, fuzzy
+msgid "Unknown caller"
+msgstr "Silenzia chiamate sconosciute"
+
+#, fuzzy
+#~ msgid "Back to the chat"
+#~ msgstr "Invia questo pacchetto nella chat"
+
+#, fuzzy
+#~ msgid "Share your screen"
+#~ msgstr "Creane di tuoi"
+
+#, fuzzy
+#~ msgid "Calls"
+#~ msgstr "Chiamate"
+
+#, fuzzy
+#~ msgid "No calls yet"
+#~ msgstr "Ancora nessun preferito"

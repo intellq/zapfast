@@ -65,7 +65,6 @@ msgid "Audio"
 msgstr "Áudio"
 
 #: src/model.rs:726
-#, rust-format
 msgid "Document: {name}"
 msgstr "Documento: {name}"
 
@@ -74,12 +73,10 @@ msgid "Sticker"
 msgstr "Figurinha"
 
 #: src/model.rs:728
-#, rust-format
 msgid "Sticker pack: {name}"
 msgstr "Pacote de figurinhas: {name}"
 
 #: src/model.rs:730
-#, rust-format
 msgid "Location: {name}"
 msgstr "Localização: {name}"
 
@@ -97,12 +94,10 @@ msgid "Live location"
 msgstr "Localização em tempo real"
 
 #: src/model.rs:741
-#, rust-format
 msgid "Contact: {name}"
 msgstr "Contato: {name}"
 
 #: src/model.rs:743
-#, rust-format
 msgid "Poll: {question}"
 msgstr "Enquete: {question}"
 
@@ -111,7 +106,6 @@ msgid "This message was deleted"
 msgstr "Esta mensagem foi apagada"
 
 #: src/model.rs:746
-#, rust-format
 msgid "Unsupported message ({what})"
 msgstr "Mensagem não suportada ({what})"
 
@@ -172,17 +166,14 @@ msgid "Yesterday"
 msgstr "Ontem"
 
 #: src/util.rs:236
-#, rust-format
 msgid "Yesterday at {time}"
 msgstr "Ontem às {time}"
 
 #: src/util.rs:237
-#, rust-format
 msgid "{weekday} at {time}"
 msgstr "{weekday} às {time}"
 
 #: src/util.rs:240
-#, rust-format
 msgid "{date} at {time}"
 msgstr "{date} às {time}"
 
@@ -423,7 +414,6 @@ msgid "Message yourself"
 msgstr "Envie uma mensagem para você mesmo"
 
 #: src/ui/chats.rs:955 src/ui/conversation.rs:368
-#, rust-format
 msgid "{name} is typing…"
 msgstr "{name} está digitando…"
 
@@ -526,12 +516,10 @@ msgid "Delete chat"
 msgstr "Apagar conversa"
 
 #: src/ui/chats.rs:1488
-#, rust-format
 msgid "{title}, unread"
 msgstr "{title}, não lida"
 
 #: src/ui/chats.rs:1490
-#, rust-format
 msgid "{title}, {count} unread messages"
 msgstr "{title}, {count} mensagens não lidas"
 
@@ -600,7 +588,6 @@ msgid "Search messages"
 msgstr "Buscar mensagens"
 
 #: src/ui/conversation.rs:369
-#, rust-format
 msgid "{names} and {last} are typing…"
 msgstr "{names} e {last} estão digitando…"
 
@@ -613,7 +600,6 @@ msgid "online"
 msgstr "online"
 
 #: src/ui/conversation.rs:395 src/ui/dialogs.rs:1802
-#, rust-format
 msgid "last seen {time}"
 msgstr "visto por último {time}"
 
@@ -708,7 +694,6 @@ msgid "Hide shortcut hints (bring them back from Keyboard shortcuts)"
 msgstr "Ocultar dicas de atalho (reative em Atalhos de teclado)"
 
 #: src/ui/conversation.rs:1477
-#, rust-format
 msgid "All shortcuts ({})"
 msgstr "Todos os atalhos ({})"
 
@@ -721,7 +706,6 @@ msgid "Create poll"
 msgstr "Criar enquete"
 
 #: src/ui/conversation.rs:1638
-#, rust-format
 msgid "Voice message ({duration}) not sent"
 msgstr "Mensagem de voz ({duration}) não enviada"
 
@@ -738,7 +722,6 @@ msgid "Stop editing (Esc)"
 msgstr "Parar de editar (Esc)"
 
 #: src/ui/conversation.rs:1742
-#, rust-format
 msgid "Replying to {who}"
 msgstr "Respondendo a {who}"
 
@@ -755,7 +738,6 @@ msgid "Remove link preview"
 msgstr "Remover a prévia do link"
 
 #: src/ui/conversation.rs:2281 src/notify/badge_windows.rs:255
-#, rust-format
 msgid "{} unread message"
 msgid_plural "{} unread messages"
 msgstr[0] "{} mensagem não lida"
@@ -782,7 +764,6 @@ msgid "React to your message"
 msgstr "Reagir à sua mensagem"
 
 #: src/ui/conversation.rs:2811
-#, rust-format
 msgid "React to {sender}'s message"
 msgstr "Reagir à mensagem de {sender}"
 
@@ -808,7 +789,6 @@ msgid "[video]"
 msgstr "[vídeo]"
 
 #: src/ui/conversation.rs:3142
-#, rust-format
 msgid "[voice message, {duration}]"
 msgstr "[mensagem de voz, {duration}]"
 
@@ -821,7 +801,6 @@ msgid "[audio]"
 msgstr "[áudio]"
 
 #: src/ui/conversation.rs:3148
-#, rust-format
 msgid "[document: {name}]"
 msgstr "[documento: {name}]"
 
@@ -842,27 +821,22 @@ msgid "[live location]"
 msgstr "[localização em tempo real]"
 
 #: src/ui/conversation.rs:3161
-#, rust-format
 msgid "[contact: {name}]"
 msgstr "[contato: {name}]"
 
 #: src/ui/conversation.rs:3164
-#, rust-format
 msgid "[sticker pack: {name}]"
 msgstr "[pacote de figurinhas: {name}]"
 
 #: src/ui/conversation.rs:3167
-#, rust-format
 msgid "[poll: {question}]"
 msgstr "[enquete: {question}]"
 
 #: src/ui/conversation.rs:3204
-#, rust-format
 msgid "(replying to {name}: \"{quote}\")"
 msgstr "(respondendo a {name}: \"{quote}\")"
 
 #: src/ui/conversation.rs:3304
-#, rust-format
 msgid "Playback speed {label}"
 msgstr "Velocidade de reprodução {label}"
 
@@ -949,14 +923,12 @@ msgid "Interactive message"
 msgstr "Mensagem interativa"
 
 #: src/ui/conversation.rs:4701
-#, rust-format
 msgid "{} page"
 msgid_plural "{} pages"
 msgstr[0] "{} página"
 msgstr[1] "{} páginas"
 
 #: src/ui/conversation.rs:4775
-#, rust-format
 msgid "Updated {time}"
 msgstr "Atualizada às {time}"
 
@@ -969,7 +941,6 @@ msgid "Add"
 msgstr "Adicionar"
 
 #: src/ui/conversation.rs:4884
-#, rust-format
 msgid "{} sticker"
 msgid_plural "{} stickers"
 msgstr[0] "{} figurinha"
@@ -994,7 +965,6 @@ msgid "This message can only be seen on your phone."
 msgstr "Esta mensagem só pode ser vista no seu celular."
 
 #: src/ui/conversation.rs:5004
-#, rust-format
 msgid "Unsupported: {what}"
 msgstr "Não suportado: {what}"
 
@@ -1055,7 +1025,6 @@ msgid "Open this option in WhatsApp Web or on your phone"
 msgstr "Abra esta opção no WhatsApp Web ou no seu celular"
 
 #: src/ui/conversation.rs:5556
-#, rust-format
 msgid "Send reply: {label}"
 msgstr "Enviar resposta: {label}"
 
@@ -1119,7 +1088,6 @@ msgid "1 selected"
 msgstr "1 selecionada"
 
 #: src/ui/conversation.rs:7496
-#, rust-format
 msgid "{count} selected"
 msgstr "{count} selecionadas"
 
@@ -1244,7 +1212,6 @@ msgid "Forward message"
 msgstr "Encaminhar mensagem"
 
 #: src/ui/dialogs.rs:478
-#, rust-format
 msgid "Forward {count} messages"
 msgstr "Encaminhar {count} mensagens"
 
@@ -1307,7 +1274,6 @@ msgid "Delete chat?"
 msgstr "Apagar conversa?"
 
 #: src/ui/dialogs.rs:794
-#, rust-format
 msgid ""
 "This deletes your chat with {name}, including all messages, on this computer "
 "and on your phone. It cannot be undone."
@@ -1324,7 +1290,6 @@ msgid "Clear chat?"
 msgstr "Limpar conversa?"
 
 #: src/ui/dialogs.rs:821
-#, rust-format
 msgid ""
 "This clears every message in your chat with {name}, including downloaded "
 "media, on this computer and on your phone. The chat itself stays. It cannot "
@@ -1347,7 +1312,6 @@ msgid "1 member"
 msgstr "1 membro"
 
 #: src/ui/dialogs.rs:870
-#, rust-format
 msgid "{count} members"
 msgstr "{count} membros"
 
@@ -1579,7 +1543,6 @@ msgid "Saving…"
 msgstr "Salvando…"
 
 #: src/ui/dialogs.rs:1789
-#, rust-format
 msgid "{} member"
 msgid_plural "{} members"
 msgstr[0] "{} membro"
@@ -1587,12 +1550,10 @@ msgstr[1] "{} membros"
 
 #. Translators: {duration} is how long messages stay, like "7 days".
 #: src/ui/dialogs.rs:1815
-#, rust-format
 msgid "Disappearing messages: {duration}"
 msgstr "Mensagens temporárias: {duration}"
 
 #: src/ui/dialogs.rs:1853
-#, rust-format
 msgid "Members ({count})"
 msgstr "Membros ({count})"
 
@@ -1601,7 +1562,6 @@ msgid "Muted"
 msgstr "Silenciada"
 
 #: src/ui/dialogs.rs:1928
-#, rust-format
 msgid "Muted until {time}"
 msgstr "Silenciada até {time}"
 
@@ -1618,21 +1578,18 @@ msgid "Pin"
 msgstr "Fixar"
 
 #: src/ui/dialogs.rs:2049
-#, rust-format
 msgid "{} day"
 msgid_plural "{} days"
 msgstr[0] "{} dia"
 msgstr[1] "{} dias"
 
 #: src/ui/dialogs.rs:2052
-#, rust-format
 msgid "{} hour"
 msgid_plural "{} hours"
 msgstr[0] "{} hora"
 msgstr[1] "{} horas"
 
 #: src/ui/dialogs.rs:2057
-#, rust-format
 msgid "{} minute"
 msgid_plural "{} minutes"
 msgstr[0] "{} minuto"
@@ -1667,7 +1624,6 @@ msgid "Settings"
 msgstr "Configurações"
 
 #: src/ui/settings.rs:325
-#, rust-format
 msgid "No settings match “{query}”."
 msgstr "Nenhuma configuração corresponde a “{query}”."
 
@@ -1972,7 +1928,6 @@ msgstr ""
 "atualizam o ZapFast por conta própria."
 
 #: src/ui/settings.rs:774
-#, rust-format
 msgid "Using {proxy} from the environment."
 msgstr "Usando {proxy} do ambiente."
 
@@ -2068,7 +2023,6 @@ msgstr ""
 "não conseguir ler usam o player interno."
 
 #: src/ui/settings.rs:1065
-#, rust-format
 msgid ""
 "Decodes videos with {method} when it can, and on the processor otherwise. "
 "Lighter on high-resolution HEVC and AV1."
@@ -2211,7 +2165,6 @@ msgid "A native WhatsApp client built with Rust, egui, and whatsapp-rust."
 msgstr "Um cliente nativo do WhatsApp feito com Rust, egui e whatsapp-rust."
 
 #: src/ui/settings.rs:1662
-#, rust-format
 msgid "Update to {version}"
 msgstr "Atualizar para {version}"
 
@@ -2239,18 +2192,15 @@ msgstr "Nenhum"
 
 #. Translators: {name} is replaced by the author's name, shown as a link.
 #: src/ui/widgets.rs:722
-#, rust-format
 msgid "Built with love by {name}"
 msgstr "Feito com amor por {name}"
 
 #. Translators: {name} is replaced by the fork author's handle, a link.
 #: src/ui/widgets.rs:724
-#, rust-format
 msgid "With fixes and changes by {name}"
 msgstr "Com correções e modificações por {name}"
 
 #: src/ui/widgets.rs:1078
-#, rust-format
 msgid "{label}, {count} unread"
 msgstr "{label}, {count} não lidas"
 
@@ -2307,7 +2257,6 @@ msgid "Delivered to"
 msgstr "Entregue para"
 
 #: src/ui/message_info.rs:246
-#, rust-format
 msgid "{} remaining"
 msgid_plural "{} remaining"
 msgstr[0] "{} restante"
@@ -2326,12 +2275,10 @@ msgid "Quit"
 msgstr "Sair"
 
 #: src/app.rs:1413
-#, rust-format
 msgid "A label named “{name}” already exists."
 msgstr "Já existe uma etiqueta chamada “{name}”."
 
 #: src/app.rs:1473
-#, rust-format
 msgid "{name} (You)"
 msgstr "{name} (Você)"
 
@@ -2353,7 +2300,6 @@ msgstr ""
 "Pedido enviado. Um administrador precisa aprová-lo antes que você entre."
 
 #: src/app.rs:2435 src/ui/mod.rs:258
-#, rust-format
 msgid "ZapFast {version} is available"
 msgstr "O ZapFast {version} está disponível"
 
@@ -2386,7 +2332,6 @@ msgid "Open a chat first"
 msgstr "Abra uma conversa primeiro"
 
 #: src/app.rs:3301
-#, rust-format
 msgid "Sending {} file…"
 msgid_plural "Sending {} files…"
 msgstr[0] "Enviando {} arquivo…"
@@ -2433,12 +2378,10 @@ msgid "Sending GIF…"
 msgstr "Enviando GIF…"
 
 #: src/app.rs:4519
-#, rust-format
 msgid "You can only pin {count} chats"
 msgstr "Você só pode fixar {count} conversas"
 
 #: src/app.rs:4690 src/ui/labels.rs:237
-#, rust-format
 msgid "You have {limit} labels, the most ZapFast keeps."
 msgstr "Você tem {limit} etiquetas, o máximo que o ZapFast guarda."
 
@@ -2559,7 +2502,6 @@ msgid "Next colour"
 msgstr "Próxima cor"
 
 #: src/ui/labels.rs:375
-#, rust-format
 msgid "{} chat"
 msgid_plural "{} chats"
 msgstr[0] "{} conversa"
@@ -2792,7 +2734,6 @@ msgid "Filter by date"
 msgstr "Filtrar por data"
 
 #: src/ui/pane.rs:204
-#, rust-format
 msgid "Search messages with {}"
 msgstr "Buscar mensagens em {}"
 
@@ -2805,7 +2746,6 @@ msgid "Try another word or pick a different day."
 msgstr "Tente outra palavra ou escolha outro dia."
 
 #: src/ui/pane.rs:255
-#, rust-format
 msgid "Only the newest {} matches are listed. Narrow the search or pick a day."
 msgstr ""
 "Só as {} correspondências mais recentes são listadas. Restrinja a busca ou "
@@ -3335,17 +3275,14 @@ msgid "Sticker packs"
 msgstr "Pacotes de figurinhas"
 
 #: src/backend/worker.rs:4818
-#, rust-format
 msgid "Added {name} to contacts"
 msgstr "{name} foi adicionado aos contatos"
 
 #: src/backend/worker.rs:4861
-#, rust-format
 msgid "{phone} is not on WhatsApp"
 msgstr "{phone} não está no WhatsApp"
 
 #: src/backend/worker.rs:4884 src/backend/worker/stickers.rs:987
-#, rust-format
 msgid "Added sticker pack \"{name}\""
 msgstr "Pacote de figurinhas \"{name}\" adicionado"
 
@@ -3389,7 +3326,6 @@ msgid "Not connected to WhatsApp yet"
 msgstr "Ainda sem conexão com o WhatsApp"
 
 #: src/backend/worker.rs:5611
-#, rust-format
 msgid "A group name can have at most {count} characters."
 msgstr "O nome do grupo pode ter no máximo {count} caracteres."
 
@@ -3494,7 +3430,6 @@ msgid "Document"
 msgstr "Documento"
 
 #: src/backend/worker.rs:8306
-#, rust-format
 msgid "{count} contacts"
 msgstr "{count} contatos"
 
@@ -3511,7 +3446,6 @@ msgid "GIF search needs a GIPHY API key."
 msgstr "A busca de GIFs precisa de uma chave de API do GIPHY."
 
 #: src/backend/worker.rs:8964
-#, rust-format
 msgid "GIPHY rejected the API key (error {code})."
 msgstr "O GIPHY recusou a chave de API (erro {code})."
 
@@ -3716,7 +3650,6 @@ msgid "The proxy refused the connection"
 msgstr "O proxy recusou a conexão"
 
 #: src/proxy.rs:452
-#, rust-format
 msgid "The proxy {proxy} did not answer"
 msgstr "O proxy {proxy} não respondeu"
 
@@ -3984,32 +3917,26 @@ msgid "no address answered"
 msgstr "nenhum endereço respondeu"
 
 #: src/transport.rs:224
-#, rust-format
 msgid "Could not resolve {host}"
 msgstr "Não foi possível resolver {host}"
 
 #: src/transport.rs:230
-#, rust-format
 msgid "{host} resolved to no address"
 msgstr "{host} não foi resolvido para nenhum endereço"
 
 #: src/transport.rs:234
-#, rust-format
 msgid "Could not reach {host}"
 msgstr "Não foi possível acessar {host}"
 
 #: src/transport.rs:242
-#, rust-format
 msgid "to {address}"
 msgstr "com {address}"
 
 #: src/transport.rs:272
-#, rust-format
 msgid "TLS {via} failed"
 msgstr "Falha no TLS {via}"
 
 #: src/transport.rs:283
-#, rust-format
 msgid "WebSocket connection {via} failed"
 msgstr "Falha na conexão WebSocket {via}"
 
@@ -4111,7 +4038,6 @@ msgid "Start over…"
 msgstr "Começar de novo…"
 
 #: src/ui/login.rs:132
-#, rust-format
 msgid "Requesting a code for {phone}…"
 msgstr "Solicitando um código para {phone}…"
 
@@ -4149,7 +4075,6 @@ msgid "Enter this code on your phone"
 msgstr "Digite este código no seu celular"
 
 #: src/ui/login.rs:223
-#, rust-format
 msgid "for {phone}"
 msgstr "para {phone}"
 
@@ -4159,12 +4084,10 @@ msgstr ""
 "Toque em Conectar dispositivo e depois em Conectar com número de telefone"
 
 #: src/ui/mod.rs:229
-#, rust-format
 msgid "Drop to send to {name}"
 msgstr "Solte para enviar para {name}"
 
 #: src/ui/mod.rs:246
-#, rust-format
 msgid "Loading chat history… {percent}%"
 msgstr "Carregando o histórico de conversas… {percent}%"
 
@@ -4173,7 +4096,6 @@ msgid "Loading chat history…"
 msgstr "Carregando o histórico de conversas…"
 
 #: src/ui/mod.rs:274
-#, rust-format
 msgid "Offline ({reason}). Reconnecting…"
 msgstr "Desconectado ({reason}). Reconectando…"
 
@@ -4210,7 +4132,6 @@ msgid "Answers"
 msgstr "Respostas"
 
 #: src/ui/polls.rs:78
-#, rust-format
 msgid "Answer {number}"
 msgstr "Resposta {number}"
 
@@ -4259,7 +4180,6 @@ msgid "Earlier votes have not been loaded yet"
 msgstr "Os votos anteriores ainda não foram carregados"
 
 #: src/ui/polls.rs:305
-#, rust-format
 msgid "{} voter"
 msgid_plural "{} voters"
 msgstr[0] "{} votante"
@@ -4292,7 +4212,6 @@ msgstr ""
 "conforme chegam."
 
 #: src/ui/polls.rs:503
-#, rust-format
 msgid "{} vote"
 msgid_plural "{} votes"
 msgstr[0] "{} voto"
@@ -4375,11 +4294,182 @@ msgstr ""
 "Este sistema operacional não oferece OpenGL 2.0. Atualize o driver de sua "
 "placa de vídeo. Se estiver executando em uma VM, ative aceleração 3D."
 
-#~ msgid "Starts in the tray, without a window."
-#~ msgstr "Inicia na bandeja do sistema, sem janela."
+#: src/ui/conversation.rs:327 src/ui/call.rs:445
+msgid "Hang up"
+msgstr "Desligar"
 
-#~ msgid "Let people see when you read their messages."
-#~ msgstr "Permite que as pessoas vejam quando você lê as mensagens delas."
+#: src/ui/conversation.rs:334
+msgid "Voice call"
+msgstr "Chamada de voz"
+
+#: src/ui/settings.rs:352
+msgid "Download files automatically"
+msgstr "Baixar arquivos automaticamente"
+
+#: src/ui/settings.rs:355
+msgid "Files up to 64 MiB download as they come into view."
+msgstr "Arquivos de até 64 MiB são baixados quando aparecem na tela."
+
+#: src/ui/settings.rs:428
+msgid "Off for your account, so only groups get them."
+msgstr "Desligadas na sua conta, então só os grupos as recebem."
+
+#: src/ui/settings.rs:430
+msgid "Let people see when you read their messages."
+msgstr "Permite que as pessoas vejam quando você lê as mensagens delas."
+
+#: src/ui/settings.rs:510
+msgid "Starts in the tray, without a window."
+msgstr "Inicia na bandeja do sistema, sem janela."
+
+#: src/ui/call.rs:120
+msgid "Hide the call screen"
+msgstr "Ocultar a tela da chamada"
+
+#: src/ui/call.rs:138
+msgid "Exit full screen"
+msgstr "Sair da tela cheia"
+
+#: src/ui/call.rs:143
+msgid "Full screen"
+msgstr "Tela cheia"
+
+#: src/ui/call.rs:217 src/ui/call.rs:218
+msgid "Return to the call"
+msgstr "Voltar à chamada"
+
+#: src/ui/call.rs:232
+msgid "Calling…"
+msgstr "Chamando…"
+
+#: src/ui/call.rs:234
+msgid "Ringing…"
+msgstr "Tocando…"
+
+#: src/ui/call.rs:237 src/ui/call.rs:245
+msgid "Connected"
+msgstr "Conectado"
+
+#: src/ui/call.rs:239
+msgid "Connecting…"
+msgstr "Conectando…"
+
+#: src/ui/call.rs:251 src/ui/call.rs:262
+msgid "Call ended"
+msgstr "Chamada encerrada"
+
+#: src/ui/call.rs:252 src/ui/call.rs:635
+msgid "Incoming call"
+msgstr "Chamada recebida"
+
+#: src/ui/call.rs:263
+msgid "Missed call"
+msgstr "Chamada perdida"
+
+#: src/ui/call.rs:264
+msgid "Declined"
+msgstr "Recusada"
+
+#: src/ui/call.rs:265
+msgid "Busy"
+msgstr "Ocupado"
+
+#: src/ui/call.rs:266
+msgid "Could not connect"
+msgstr "Não foi possível conectar"
+
+#: src/ui/call.rs:267
+msgid "No answer"
+msgstr "Sem resposta"
+
+#: src/ui/call.rs:270
+msgid "Connection lost"
+msgstr "Conexão perdida"
+
+#: src/ui/call.rs:272
+msgid "The call could not be established"
+msgstr "Não foi possível estabelecer a chamada"
+
+#: src/ui/call.rs:276
+msgid "Answered on another device"
+msgstr "Atendida em outro dispositivo"
+
+#: src/ui/call.rs:279
+msgid "Declined on another device"
+msgstr "Recusada em outro dispositivo"
+
+#: src/ui/call.rs:335
+msgid "No audio is arriving from this call"
+msgstr "Nenhum áudio está chegando desta chamada"
+
+#: src/ui/call.rs:337
+msgid "This call's audio cannot be decoded"
+msgstr "Não é possível decodificar o áudio desta chamada"
+
+#: src/ui/call.rs:340
+msgid "This call's audio is not authenticating"
+msgstr "O áudio desta chamada não está sendo autenticado"
+
+#: src/ui/call.rs:344
+msgid "This call's audio is arriving in an unexpected format"
+msgstr "O áudio desta chamada está chegando num formato inesperado"
+
+#: src/ui/call.rs:348
+msgid "This call's audio is being rejected by the decoder"
+msgstr "O decodificador está rejeitando o áudio desta chamada"
+
+#: src/ui/call.rs:351
+msgid "This call's audio format keeps changing"
+msgstr "O formato do áudio desta chamada muda o tempo todo"
+
+#: src/ui/call.rs:354
+msgid "The peer's audio stopped"
+msgstr "O áudio do contato parou"
+
+#: src/ui/call.rs:367
+msgid "Microphone “{name}” is not available; using the system default"
+msgstr "O microfone “{name}” não está disponível; usando o padrão do sistema"
+
+#: src/ui/call.rs:371
+msgid "Speaker “{name}” is not available; using the system default"
+msgstr ""
+"O alto-falante “{name}” não está disponível; usando o padrão do sistema"
+
+#: src/ui/call.rs:423
+msgid "Speaker and devices"
+msgstr "Alto-falante e dispositivos"
+
+#: src/ui/call.rs:513
+msgid "Default device"
+msgstr "Dispositivo padrão"
+
+#: src/ui/call.rs:535
+msgid "Microphone"
+msgstr "Microfone"
+
+#: src/ui/call.rs:545
+msgid "Speaker"
+msgstr "Alto-falante"
+
+#: src/ui/call.rs:647 src/app.rs:3350
+msgid "Incoming voice call"
+msgstr "Chamada de voz recebida"
+
+#: src/ui/call.rs:657
+msgid "Accept"
+msgstr "Atender"
+
+#: src/ui/call.rs:671
+msgid "Decline"
+msgstr "Recusar"
+
+#: src/app.rs:1496
+msgid "Locked chat"
+msgstr "Conversa trancada"
+
+#: src/app.rs:1499
+msgid "Unknown caller"
+msgstr "Chamador desconhecido"
 
 #~ msgid "Jump to the newest message"
 #~ msgstr "Ir para a mensagem mais recente"
