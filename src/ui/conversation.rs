@@ -2713,34 +2713,18 @@ fn top_of_history(
             }
         } else if conversation.messages.is_empty() {
             ui.add_space(24.0);
-            if conversation.fetching_phone {
-                widgets::chip(ui, palette, tr("Loading messages from your phone…"));
-            } else if conversation.phone_silent {
-                phone_silence(
+            widgets::chip(ui, palette, tr("No messages here yet"));
+            // History sync names old chats without their messages, and the phone
+            // answers a request only from a message it can start at.
+            ui.add_space(8.0);
+            centered_note(ui, |ui| {
+                theme::paragraph(
                     ui,
-                    palette,
-                    tr("Your phone did not send this chat's messages."),
-                    chat,
-                    actions,
+                    tr("Older messages from this chat, if any, stay on your phone: WhatsApp does not send them to linked devices."),
+                    theme::regular(12.5),
+                    palette.secondary,
                 );
-            } else {
-                widgets::chip(ui, palette, tr("No messages here yet"));
-                if !conversation.phone_exhausted {
-                    // History sync names old chats without their messages, and
-                    // the phone mostly keeps those, so it is asked only on request.
-                    ui.add_space(8.0);
-                    if theme::link(
-                        ui,
-                        tr("Look for messages on your phone"),
-                        theme::medium(12.5),
-                        palette.accent,
-                    )
-                    .clicked()
-                    {
-                        actions.push(Action::FetchOlder(chat.id.clone()));
-                    }
-                }
-            }
+            });
         } else if conversation.fetching_phone {
             ui.horizontal(|ui| {
                 let width = 260.0;
@@ -2755,13 +2739,7 @@ fn top_of_history(
             });
         } else if conversation.phone_silent {
             ui.add_space(6.0);
-            phone_silence(
-                ui,
-                palette,
-                tr("Your phone did not send older messages."),
-                chat,
-                actions,
-            );
+            phone_silence(ui, palette, chat, actions);
         } else {
             ui.add_space(6.0);
         }
@@ -2770,36 +2748,37 @@ fn top_of_history(
 
 /// Says the phone was asked and sent nothing, why that happens with it online,
 /// and offers to ask again.
-fn phone_silence(
-    ui: &mut egui::Ui,
-    palette: &Palette,
-    what: &str,
-    chat: &Chat,
-    actions: &mut Vec<Action>,
-) {
+fn phone_silence(ui: &mut egui::Ui, palette: &Palette, chat: &Chat, actions: &mut Vec<Action>) {
+    centered_note(ui, |ui| {
+        theme::paragraph(
+            ui,
+            format!(
+                "{} {}",
+                tr("Your phone did not send older messages."),
+                tr(
+                    "WhatsApp gives linked devices only part of the history; the rest stays on the phone."
+                )
+            ),
+            theme::regular(12.5),
+            palette.secondary,
+        );
+        ui.add_space(4.0);
+        if theme::link(ui, tr("Try again"), theme::medium(12.5), palette.accent).clicked() {
+            actions.push(Action::FetchOlder(chat.id.clone()));
+        }
+    });
+}
+
+/// A column of at most 380 points, centred in the transcript, for lines that
+/// wrap.
+fn centered_note(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) {
     let width = ui.available_width().min(380.0);
     ui.horizontal(|ui| {
         ui.add_space((ui.available_width() - width).max(0.0) / 2.0);
-        ui.allocate_ui_with_layout(
-            vec2(width, 0.0),
-            egui::Layout::top_down(egui::Align::Center),
-            |ui| {
-                ui.set_width(width);
-                theme::paragraph(
-                    ui,
-                    format!(
-                        "{what} {}",
-                        tr("WhatsApp gives linked devices only part of the history; the rest stays on the phone.")
-                    ),
-                    theme::regular(12.5),
-                    palette.secondary,
-                );
-                ui.add_space(4.0);
-                if theme::link(ui, tr("Try again"), theme::medium(12.5), palette.accent).clicked() {
-                    actions.push(Action::FetchOlder(chat.id.clone()));
-                }
-            },
-        );
+        ui.allocate_ui_with_layout(vec2(width, 0.0), Layout::top_down(Align::Center), |ui| {
+            ui.set_width(width);
+            add_contents(ui);
+        });
     });
 }
 

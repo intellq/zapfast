@@ -3261,11 +3261,9 @@ msgid "Waiting for this message. Open WhatsApp on your phone"
 msgstr ""
 
 #: src/ui/conversation.rs
-msgid "Look for messages on your phone"
-msgstr ""
-
-#: src/ui/conversation.rs
-msgid "Your phone did not send this chat's messages."
+msgid ""
+"Older messages from this chat, if any, stay on your phone: WhatsApp does not "
+"send them to linked devices."
 msgstr ""
 
 #: src/ui/conversation.rs

@@ -2536,8 +2536,11 @@ impl App {
                         conversation.phone_misses = (conversation.phone_misses + 1).min(7);
                     }
                     conversation.phone_delivered = false;
-                    // Page the archive again after phone history arrives.
-                    conversation.complete = false;
+                    // Page the archive again after phone history arrives. A phone
+                    // that sent nothing left it as it was, and the chat says so.
+                    if !silent {
+                        conversation.complete = false;
+                    }
                 }
                 Event::ReceiptsPrivacy { disabled } => self.account_receipts_off = disabled,
                 Event::AccountPrivacy { values, failed } => {
@@ -3334,9 +3337,8 @@ impl App {
         self.scroll_to_bottom = true;
         self.at_bottom = true;
         self.focus_composer = true;
-        // A chat that history sync named without its messages offers to ask the
-        // phone instead of asking on its own: for old chats the phone mostly
-        // keeps the messages to itself.
+        // A chat that history sync named without its messages is not asked
+        // about: the phone answers only from a message it can start at.
         self.ensure_loaded(&id);
         if self
             .chat(&id)
@@ -8640,7 +8642,7 @@ mod tests {
     }
 
     #[test]
-    fn a_chat_synced_without_messages_asks_the_phone_only_on_request() {
+    fn a_chat_synced_without_messages_does_not_ask_the_phone() {
         let mut app = app();
         let (backend, mut commands, _events) = Backend::recording_with_events();
         app.backend = backend;
@@ -8656,9 +8658,6 @@ mod tests {
             history_requests(&mut commands).is_empty(),
             "opening it does not ask the phone"
         );
-        app.apply(Action::FetchOlder(chat.into()), &egui::Context::default());
-        assert_eq!(history_requests(&mut commands), [chat.to_owned()]);
-        assert!(app.conversations[chat].fetching_phone);
     }
 
     #[test]
@@ -8684,8 +8683,9 @@ mod tests {
             })
             .unwrap();
         app.handle_events();
-        assert!(app.conversations[chat].phone_silent, "the chat says so");
-        app.conversations.get_mut(chat).unwrap().complete = true;
+        let conversation = &app.conversations[chat];
+        assert!(conversation.phone_silent, "the chat says so");
+        assert!(conversation.complete, "at the top, where the note is shown");
         app.load_older(chat);
         assert!(
             history_requests(&mut commands).is_empty(),
