@@ -320,6 +320,7 @@ fn main() -> eframe::Result<()> {
                     }
                     Ok(Box::new(Shell {
                         app,
+                        ctx: cc.egui_ctx.clone(),
                         window_recovery_checked: false,
                         update_receipt: receipt,
                         #[cfg(target_os = "windows")]
@@ -440,6 +441,37 @@ fn native_options(demo_persistence: Option<std::path::PathBuf>) -> eframe::Nativ
     }
 }
 
+/// The window geometry eframe saves under this key (`egui_winit::WindowSettings`).
+const SAVED_WINDOW_KEY: &str = "window";
+
+/// The fields of `egui_winit::WindowSettings`, which eframe does not export.
+#[derive(Debug, Default, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(default)]
+struct SavedWindow {
+    inner_position_pixels: Option<egui::Pos2>,
+    outer_position_pixels: Option<egui::Pos2>,
+    fullscreen: bool,
+    maximized: bool,
+    inner_size_points: Option<egui::Vec2>,
+}
+
+/// eframe saves the window's size in egui points, which the zoom enlarges,
+/// but makes the next window before ZapFast sets the zoom again, so at 120%
+/// every start opened the window a sixth smaller than it was left. The size is
+/// saved without the zoom instead: the one the next window starts with.
+fn unzoom_saved_window(storage: &mut dyn eframe::Storage, zoom: f32) {
+    if zoom == 1.0 || !zoom.is_finite() || zoom <= 0.0 {
+        return;
+    }
+    let Some(mut window) = eframe::get_value::<SavedWindow>(storage, SAVED_WINDOW_KEY) else {
+        return;
+    };
+    if let Some(size) = &mut window.inner_size_points {
+        *size *= zoom;
+        eframe::set_value(storage, SAVED_WINDOW_KEY, &window);
+    }
+}
+
 /// eframe adapter holding the long-lived [`app::App`] for one window; it goes
 /// back to the shell when the window closes.
 struct Shell {
@@ -447,6 +479,8 @@ struct Shell {
     window_recovery_checked: bool,
     update_receipt: Option<fastframe_update::Receipt>,
     app: fastframe_shell::Held<app::App>,
+    /// This window's context, whose zoom the saved size leaves out.
+    ctx: egui::Context,
     /// This window's unread overlay on its taskbar button.
     #[cfg(target_os = "windows")]
     taskbar: zapfast::notify::Taskbar,
@@ -525,6 +559,11 @@ impl eframe::App for Shell {
     /// position are still persisted.
     fn persist_egui_memory(&self) -> bool {
         false
+    }
+
+    /// Runs after eframe has put the window's geometry in `storage`.
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        unzoom_saved_window(storage, self.ctx.zoom_factor());
     }
 
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
@@ -692,6 +731,76 @@ mod tests {
             ])
             .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod saved_window_tests {
+    use super::*;
+    use eframe::Storage as _;
+
+    #[derive(Default)]
+    struct Memory(std::collections::HashMap<String, String>);
+
+    impl eframe::Storage for Memory {
+        fn get_string(&self, key: &str) -> Option<String> {
+            self.0.get(key).cloned()
+        }
+        fn set_string(&mut self, key: &str, value: String) {
+            self.0.insert(key.to_owned(), value);
+        }
+        fn remove_string(&mut self, key: &str) {
+            self.0.remove(key);
+        }
+        fn flush(&mut self) {}
+    }
+
+    /// What eframe wrote for a window left at 1079 by 958 points at 120% on
+    /// Wayland, where there is no position.
+    const SAVED: &str = "(inner_position_pixels:None,outer_position_pixels:None,fullscreen:false,maximized:false,inner_size_points:Some((x:899.1666,y:798.3333)))";
+
+    #[test]
+    fn the_saved_size_leaves_the_zoom_out() {
+        let mut storage = Memory::default();
+        storage.set_string(SAVED_WINDOW_KEY, SAVED.to_owned());
+        unzoom_saved_window(&mut storage, 1.2);
+        let saved = storage.get_string(SAVED_WINDOW_KEY).unwrap();
+        assert!(
+            saved.starts_with("(inner_position_pixels:None,outer_position_pixels:None,fullscreen:false,maximized:false,inner_size_points:Some((x:1079."),
+            "{saved}"
+        );
+        let window: SavedWindow = eframe::get_value(&storage, SAVED_WINDOW_KEY).unwrap();
+        let size = window.inner_size_points.unwrap();
+        assert!((size.x - 1079.0).abs() < 0.01 && (size.y - 958.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn positions_and_an_unzoomed_window_stay_as_saved() {
+        let mut storage = Memory::default();
+        let window = SavedWindow {
+            outer_position_pixels: Some(egui::pos2(1920.0, 40.0)),
+            maximized: true,
+            inner_size_points: Some(egui::vec2(800.0, 600.0)),
+            ..Default::default()
+        };
+        eframe::set_value(&mut storage, SAVED_WINDOW_KEY, &window);
+        unzoom_saved_window(&mut storage, 1.0);
+        assert_eq!(
+            eframe::get_value::<SavedWindow>(&storage, SAVED_WINDOW_KEY).unwrap(),
+            window
+        );
+        unzoom_saved_window(&mut storage, 1.5);
+        let zoomed: SavedWindow = eframe::get_value(&storage, SAVED_WINDOW_KEY).unwrap();
+        assert_eq!(zoomed.outer_position_pixels, window.outer_position_pixels);
+        assert!(zoomed.maximized);
+        assert_eq!(zoomed.inner_size_points, Some(egui::vec2(1200.0, 900.0)));
+    }
+
+    #[test]
+    fn nothing_saved_is_left_alone() {
+        let mut storage = Memory::default();
+        unzoom_saved_window(&mut storage, 1.2);
+        assert!(storage.0.is_empty());
     }
 }
 
