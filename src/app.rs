@@ -5458,6 +5458,16 @@ impl App {
                     // Windows, so restore it first.
                     ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    // Wayland ignores both. winit asks for attention there
+                    // with an xdg-activation token, which the compositor
+                    // (KWin among them) takes as a request to restore and
+                    // raise the window.
+                    #[cfg(target_os = "linux")]
+                    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+                            egui::UserAttentionType::Informational,
+                        ));
+                    }
                 }
             }
             Action::HideWindow => {
