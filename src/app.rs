@@ -567,6 +567,14 @@ pub struct App {
     call_repaint: bool,
     /// Whether ZapFast starts at login, when this installation supports it.
     pub start_with_system: Option<bool>,
+    /// Whether ZapFast is the desktop's app for WhatsApp links, when this
+    /// installation can register for them.
+    pub whatsapp_links: Option<bool>,
+    /// A WhatsApp link that arrived before the connection could look its
+    /// number up.
+    pending_wa_link: Option<crate::wa_link::WaLink>,
+    /// Text a WhatsApp link brought for its chat's composer.
+    wa_link_text: Option<(ChatId, String)>,
     /// Cross-thread window repaint handle.
     waker: Waker,
     tray: Option<fastframe_tray::Tray>,
@@ -800,6 +808,16 @@ impl App {
                 log::warn!("could not update the login item: {error}");
             }
             app.start_with_system = Some(crate::autostart::enabled());
+        }
+        if crate::wa_link::handler::supported() {
+            // Takes the links back from another app, and follows a moved
+            // executable.
+            if app.settings.open_whatsapp_links
+                && let Err(error) = crate::wa_link::handler::set(true)
+            {
+                log::warn!("could not register for WhatsApp links: {error}");
+            }
+            app.whatsapp_links = Some(crate::wa_link::handler::registered());
         }
         app
     }
@@ -1040,6 +1058,9 @@ impl App {
             call_notified: None,
             call_repaint: false,
             start_with_system: None,
+            whatsapp_links: None,
+            pending_wa_link: None,
+            wa_link_text: None,
             waker,
             tray: None,
             window_hidden: false,
@@ -1120,8 +1141,56 @@ impl App {
         for command in commands {
             match command {
                 ControlCommand::Show => self.actions.push(Action::ShowWindow),
+                ControlCommand::Open(link) => {
+                    self.actions.push(Action::ShowWindow);
+                    if let Some(link) = crate::wa_link::parse(&link) {
+                        self.open_wa_link(link);
+                    }
+                }
                 ControlCommand::ReloadThemes => self.actions.push(Action::ReloadThemes),
                 ControlCommand::Ping => {}
+            }
+        }
+        if matches!(self.link, LinkStatus::Connected)
+            && let Some(link) = self.pending_wa_link.take()
+        {
+            self.open_wa_link(link);
+        }
+    }
+
+    /// Opens a WhatsApp link's chat, with its text in the composer, or its
+    /// group invite. A number without a chat here is first checked with
+    /// WhatsApp, which needs the connection, so the link waits for it.
+    fn open_wa_link(&mut self, link: crate::wa_link::WaLink) {
+        match link {
+            crate::wa_link::WaLink::Invite(code) => {
+                self.invite = Some(crate::model::GroupInvite {
+                    code: code.clone(),
+                    state: crate::model::InviteState::Loading,
+                });
+                self.dialog = Some(Dialog::JoinGroup);
+                self.backend.send(Command::PreviewInvite(code));
+            }
+            crate::wa_link::WaLink::Chat { phone, text } => {
+                let id = format!("{phone}@s.whatsapp.net");
+                if self.me.as_deref() == Some(id.as_str()) {
+                    self.wa_link_text = text.map(|text| (id, text));
+                    self.actions.push(Action::MessageYourself);
+                } else if let Some(chat) = self.chat(&id) {
+                    let name = self.chat_title(chat);
+                    self.wa_link_text = text.map(|text| (id.clone(), text));
+                    self.actions.push(Action::StartChat { id, name });
+                } else if matches!(self.link, LinkStatus::Connected) {
+                    self.wa_link_text = text.map(|text| (id, text));
+                    self.backend.send(Command::NewContact {
+                        phone,
+                        full_name: None,
+                        first_name: None,
+                        to_phone: false,
+                    });
+                } else {
+                    self.pending_wa_link = Some(crate::wa_link::WaLink::Chat { phone, text });
+                }
             }
         }
     }
@@ -3820,8 +3889,9 @@ impl App {
                         name,
                     });
                 }
-                self.open_chat(id);
+                self.open_chat(id.clone());
                 self.dialog = None;
+                self.take_wa_link_text(&id);
             }
             Action::MessageYourself => {
                 if let Some(id) = self.me.clone() {
@@ -4086,13 +4156,8 @@ impl App {
                 }
             }
             Action::OpenUrl(url) => {
-                if let Some(code) = crate::safety::group_invite_code(&url) {
-                    self.invite = Some(crate::model::GroupInvite {
-                        code: code.clone(),
-                        state: crate::model::InviteState::Loading,
-                    });
-                    self.dialog = Some(Dialog::JoinGroup);
-                    self.backend.send(Command::PreviewInvite(code));
+                if let Some(link) = crate::wa_link::parse(&url) {
+                    self.open_wa_link(link);
                 } else if let Some(url) = crate::safety::external_url(&url) {
                     ctx.open_url(egui::OpenUrl::new_tab(url));
                 } else {
@@ -5331,6 +5396,17 @@ impl App {
                     ));
                 }
             }
+            Action::SetWhatsAppLinks(enabled) => {
+                self.settings.open_whatsapp_links = enabled;
+                self.mark_settings_dirty();
+                if let Err(error) = crate::wa_link::handler::set(enabled) {
+                    self.toast_error(format!(
+                        "{}: {error}",
+                        tr("Could not change the app for WhatsApp links")
+                    ));
+                }
+                self.whatsapp_links = Some(crate::wa_link::handler::registered());
+            }
             Action::SetStartWithSystem(enabled) => {
                 match crate::autostart::set(enabled, self.settings.start_minimized) {
                     Ok(()) => self.start_with_system = Some(crate::autostart::enabled()),
@@ -6083,6 +6159,24 @@ impl App {
 
     /// Stores the open chat's unsent text, which otherwise only moves into
     /// the archive when another chat opens.
+    /// Puts the text a WhatsApp link brought into its chat's composer, once
+    /// that chat is the open one, after any draft already there.
+    fn take_wa_link_text(&mut self, chat: &str) {
+        let Some((_, text)) = self.wa_link_text.take_if(|(id, _)| id == chat) else {
+            return;
+        };
+        if self.open_chat.as_deref() != Some(chat) || self.editing.is_some() {
+            return;
+        }
+        if self.composer.trim().is_empty() {
+            self.composer = text;
+        } else if !self.composer.contains(&text) {
+            self.composer.push('\n');
+            self.composer.push_str(&text);
+        }
+        self.focus_composer = true;
+    }
+
     fn flush_open_draft(&self) {
         if let Some(chat) = self.open_chat.as_deref()
             && self.editing.is_none()

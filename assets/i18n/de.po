@@ -4591,6 +4591,18 @@ msgstr "Code für gesperrte Chats"
 msgid "Unknown caller"
 msgstr "Unbekannte Anrufer stummschalten"
 
+#: src/ui/settings.rs:752
+msgid "Open WhatsApp links"
+msgstr ""
+
+#: src/ui/settings.rs:755
+msgid "wa.me and api.whatsapp.com links open their chat in ZapFast."
+msgstr ""
+
+#: src/app.rs:5405
+msgid "Could not change the app for WhatsApp links"
+msgstr ""
+
 #, fuzzy
 #~ msgid "Back to the chat"
 #~ msgstr "Dieses Pack in den Chat senden"

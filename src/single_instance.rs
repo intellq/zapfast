@@ -29,9 +29,12 @@ const LEGACY_PORT: u16 = 47_119;
 /// older copy before migrating its session files.
 const PREFIX: &str = "fastsapp:";
 const OK_REPLY: &str = "fastsapp:ok";
+/// Verb that carries a WhatsApp link after it: `open whatsapp://send?…`.
+pub const OPEN: &str = "open ";
 
-/// Longest request accepted, token included.
-const REQUEST_LIMIT: usize = 256;
+/// Longest request accepted, token included. A WhatsApp link can carry a
+/// message for the composer.
+const REQUEST_LIMIT: usize = 16 * 1024;
 /// Time a client gets to send its whole request. Requests are served one at
 /// a time, so this bounds how long a stray connection holds up the others.
 const REQUEST_TIME: Duration = Duration::from_secs(1);
@@ -50,10 +53,12 @@ pub enum Outcome {
 }
 
 /// Request from another launch.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ControlCommand {
     /// Shows or creates the window.
     Show,
+    /// Opens a WhatsApp link, such as `whatsapp://send?phone=…`, in the window.
+    Open(String),
     /// Reload local theme files without opening the window.
     ReloadThemes,
     /// Confirms an instance is running and changes nothing.
@@ -374,7 +379,10 @@ fn parse(line: &str) -> Option<ControlCommand> {
         "show" => Some(ControlCommand::Show),
         "reload-themes" => Some(ControlCommand::ReloadThemes),
         "ping" => Some(ControlCommand::Ping),
-        _ => None,
+        verb => verb
+            .strip_prefix(OPEN)
+            .filter(|link| crate::wa_link::parse(link).is_some())
+            .map(|link| ControlCommand::Open(link.to_owned())),
     }
 }
 
@@ -419,6 +427,18 @@ mod tests {
         assert_eq!(parse("GET / HTTP/1.1"), None);
         assert_eq!(parse("fastsapp:frobnicate"), None);
         assert_eq!(parse(""), None);
+    }
+
+    #[test]
+    fn only_whatsapp_links_are_opened() {
+        let link = "whatsapp://send?phone=559492777990&text=oi";
+        assert_eq!(
+            parse(&format!("fastsapp:open {link}\n")),
+            Some(ControlCommand::Open(link.to_owned()))
+        );
+        assert_eq!(parse("fastsapp:open https://example.com/"), None);
+        assert_eq!(parse("fastsapp:open file:///etc/passwd"), None);
+        assert_eq!(parse("fastsapp:open "), None);
     }
 
     fn dir(name: &str) -> std::path::PathBuf {

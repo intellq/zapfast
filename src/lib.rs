@@ -43,4 +43,5 @@ pub mod updates;
 pub mod util;
 pub mod video;
 pub mod voice;
+pub mod wa_link;
 pub mod wallpaper;

@@ -49,7 +49,12 @@ fi
 rm -f "$bin_dir/zapfast" "$bin_dir/.zapfast.new"
 rm -rf "$bin_dir"/.zapfast-update-*
 rm -f "$data_dir/icons/hicolor/scalable/apps/zapfast.svg"
-rm -f "$data_dir/applications/zapfast.desktop"
+rm -f "$data_dir/applications/zapfast.desktop" "$data_dir/applications/zapfast-links.desktop"
+# The WhatsApp link default, only while it still names ZapFast's entry.
+mimeapps=$config_dir/mimeapps.list
+if grep -qs '^[[:space:]]*x-scheme-handler/whatsapp[[:space:]]*=[[:space:]]*zapfast-links.desktop' "$mimeapps"; then
+  sed -i '/^[[:space:]]*x-scheme-handler\/whatsapp[[:space:]]*=[[:space:]]*zapfast-links\.desktop/d' "$mimeapps"
+fi
 rm -f "$config_dir/autostart/zapfast.desktop"
 desktop_dir=$(xdg-user-dir DESKTOP 2>/dev/null || true)
 if [[ -z $desktop_dir || $desktop_dir == "$HOME" ]]; then

@@ -1255,7 +1255,8 @@ msgstr ""
 
 #: src/ui/dialogs.rs:762
 msgid "This is an unofficial client. See WhatsApp's terms of service."
-msgstr "Este é um cliente não oficial. Consulte os termos de serviço do WhatsApp."
+msgstr ""
+"Este é um cliente não oficial. Consulte os termos de serviço do WhatsApp."
 
 #: src/ui/dialogs.rs:769 src/ui/settings.rs:921 src/ui/settings.rs:1694
 msgid "Source code"
@@ -4043,8 +4044,7 @@ msgstr "Aguardando um código do WhatsApp…"
 
 #: src/ui/login.rs:144
 msgid "Unofficial client. See WhatsApp's terms of service."
-msgstr ""
-"Cliente não oficial. Consulte os termos de serviço do WhatsApp."
+msgstr "Cliente não oficial. Consulte os termos de serviço do WhatsApp."
 
 #: src/ui/login.rs:168
 msgid "Link this computer"
@@ -4466,6 +4466,18 @@ msgstr "Conversa trancada"
 #: src/app.rs:1499
 msgid "Unknown caller"
 msgstr "Chamador desconhecido"
+
+#: src/ui/settings.rs:752
+msgid "Open WhatsApp links"
+msgstr "Abrir links do WhatsApp"
+
+#: src/ui/settings.rs:755
+msgid "wa.me and api.whatsapp.com links open their chat in ZapFast."
+msgstr "Links wa.me e api.whatsapp.com abrem a conversa no ZapFast."
+
+#: src/app.rs:5405
+msgid "Could not change the app for WhatsApp links"
+msgstr "Não foi possível mudar o app dos links do WhatsApp"
 
 #~ msgid "Jump to the newest message"
 #~ msgstr "Ir para a mensagem mais recente"

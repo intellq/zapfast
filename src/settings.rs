@@ -396,6 +396,9 @@ pub struct Settings {
     pub keep_running_in_background: bool,
     /// Start at login with only the tray icon, without a window.
     pub start_minimized: bool,
+    /// Keep ZapFast the desktop's app for WhatsApp links (`whatsapp://`,
+    /// which `wa.me` pages open), taking them back at every start.
+    pub open_whatsapp_links: bool,
     /// Desktop notifications while away from the chat.
     pub notifications: bool,
     /// Sound for new messages, in one-to-one chats and groups alike.
@@ -484,6 +487,7 @@ impl Default for Settings {
             giphy_key: String::new(),
             keep_running_in_background: true,
             start_minimized: false,
+            open_whatsapp_links: true,
             notifications: true,
             message_sound: NotificationSound::Receive,
             mention_sound: NotificationSound::Alert,

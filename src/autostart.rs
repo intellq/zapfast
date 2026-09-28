@@ -45,11 +45,14 @@ fn arguments(minimized: bool) -> &'static str {
 
 /// The file to start: an AppImage runs from a temporary mount, so its own
 /// path is the stable one.
-fn executable() -> Option<PathBuf> {
+pub(crate) fn executable() -> Option<PathBuf> {
     std::env::var_os("APPIMAGE")
         .map(PathBuf::from)
         .or_else(|| std::env::current_exe().ok())
 }
+
+#[cfg(target_os = "linux")]
+pub(crate) use platform::exec_quote;
 
 #[cfg(target_os = "linux")]
 mod platform {
@@ -102,7 +105,7 @@ mod platform {
     }
 
     /// Quotes a path for a desktop entry's `Exec` key.
-    fn exec_quote(path: &str) -> String {
+    pub(crate) fn exec_quote(path: &str) -> String {
         let mut quoted = String::from("\"");
         for character in path.chars() {
             if matches!(character, '"' | '`' | '$' | '\\') {

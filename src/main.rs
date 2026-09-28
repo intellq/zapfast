@@ -12,6 +12,10 @@ use clap::Parser;
 struct Cli {
     #[command(subcommand)]
     command: Option<Control>,
+    /// A WhatsApp link to open, such as `https://wa.me/5511999999999` or
+    /// `whatsapp://send?phone=5511999999999`, as the desktop hands it over.
+    #[arg(value_name = "LINK")]
+    link: Option<String>,
     /// Log more from the WhatsApp library.
     #[arg(short, long)]
     verbose: bool,
@@ -147,6 +151,14 @@ fn main() -> eframe::Result<()> {
         }
         return Ok(());
     }
+    // Only a WhatsApp link is taken; anything else starts ZapFast as usual.
+    let link = cli.link.as_deref().map(str::trim).and_then(|link| {
+        let known = zapfast::wa_link::parse(link).is_some();
+        if !known {
+            eprintln!("Not a WhatsApp link ZapFast opens: {link}");
+        }
+        known.then(|| link.to_owned())
+    });
     let waker = backend::Waker::default();
     #[cfg(feature = "demo")]
     let demo = cli.demo || cli.demo_shot.is_some() || cli.demo_tour;
@@ -157,9 +169,17 @@ fn main() -> eframe::Result<()> {
         None
     } else {
         // A hidden start must not surface a copy that is already running.
-        let verb = if cli.start_hidden { "ping" } else { "show" };
-        match single_instance::acquire(&discovered.runtime, &waker, verb) {
+        let verb = match &link {
+            Some(link) => format!("{}{link}", single_instance::OPEN),
+            None if cli.start_hidden => "ping".to_owned(),
+            None => "show".to_owned(),
+        };
+        match single_instance::acquire(&discovered.runtime, &waker, &verb) {
             single_instance::Outcome::Only(guard) => Some(guard),
+            single_instance::Outcome::Surfaced if link.is_some() => {
+                eprintln!("ZapFast is already running; asked it to open the link");
+                return Ok(());
+            }
             single_instance::Outcome::Surfaced if cli.start_hidden => {
                 eprintln!("ZapFast is already running");
                 return Ok(());
@@ -231,6 +251,15 @@ fn main() -> eframe::Result<()> {
         app.toast_error(error);
     }
     if let Some(guard) = &instance {
+        // The link that started ZapFast is opened like one a later launch
+        // hands over.
+        if let Some(link) = link.clone() {
+            guard
+                .commands()
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(single_instance::ControlCommand::Open(link));
+        }
         app.set_remote_control(guard);
     }
     #[cfg(feature = "demo")]
@@ -256,7 +285,8 @@ fn main() -> eframe::Result<()> {
     // The link, archive, and tray outlive windows. The shell recreates a
     // window when the tray, a notification, or another launch requests one;
     // without a tray a hidden start shows the window (App::start_hidden).
-    let start_hidden = cli.start_hidden && start_minimized && !demo && update_receipt.is_none();
+    let start_hidden =
+        cli.start_hidden && start_minimized && !demo && update_receipt.is_none() && link.is_none();
     let result = fastframe_shell::Shell::new(app, &waker)
         .start_hidden(start_hidden)
         .idle(fastframe_tray::idle)

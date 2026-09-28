@@ -4520,6 +4520,18 @@ msgstr "已锁定聊天的密码"
 msgid "Unknown caller"
 msgstr "静音未知来电"
 
+#: src/ui/settings.rs:752
+msgid "Open WhatsApp links"
+msgstr ""
+
+#: src/ui/settings.rs:755
+msgid "wa.me and api.whatsapp.com links open their chat in ZapFast."
+msgstr ""
+
+#: src/app.rs:5405
+msgid "Could not change the app for WhatsApp links"
+msgstr ""
+
 #, fuzzy
 #~ msgid "Back to the chat"
 #~ msgstr "把这个贴图包发送到聊天"

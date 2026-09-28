@@ -1677,6 +1677,8 @@ pub enum Action {
     SetStartWithSystem(bool),
     /// Whether the login entry starts ZapFast in the tray, without a window.
     SetStartMinimized(bool),
+    /// Makes ZapFast the desktop's app for WhatsApp links, or gives them back.
+    SetWhatsAppLinks(bool),
     /// Sets the sound for mentions and replies to us (`true`) or for
     /// other new messages.
     SetNotificationSound {

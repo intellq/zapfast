@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Installs ZapFast from the Linux release download for the current user, with
 # no root: the binary in the user's bin folder, the icon, a launcher entry in
-# the application menu and a shortcut on the desktop. ZapFast updates itself
+# the application menu, a shortcut on the desktop, and ZapFast as the app for
+# WhatsApp links. ZapFast updates itself
 # there (vendor/fastframe-update/VENDORED.md). Running it again installs the
 # version it came with over the current one.
 #
@@ -15,7 +16,7 @@ for argument in "$@"; do
   case "$argument" in
     --no-desktop-shortcut) desktop_shortcut=no ;;
     -h | --help)
-      sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *)
@@ -45,6 +46,11 @@ if [[ ${XDG_DATA_HOME:-} == /* ]]; then
 else
   data_dir=$HOME/.local/share
 fi
+if [[ ${XDG_CONFIG_HOME:-} == /* ]]; then
+  config_dir=$XDG_CONFIG_HOME
+else
+  config_dir=$HOME/.config
+fi
 apps_dir=$data_dir/applications
 icons_dir=$data_dir/icons/hicolor/scalable/apps
 installed=$bin_dir/zapfast
@@ -62,27 +68,77 @@ fi
 # The launcher names the binary by its full path, so it works before the
 # session has the bin folder on PATH. Quoted and escaped as a Desktop Entry's
 # Exec key wants (the rules of src/autostart.rs and install-user.sh).
-exec_line() {
-  EXEC_PATH="$installed" awk '
-    function quote(path,   out, i, c) {
-      out = "\""
-      for (i = 1; i <= length(path); i++) {
-        c = substr(path, i, 1)
-        if (c == "\"" || c == "`" || c == "$" || c == "\\") out = out "\\"
-        if (c == "%") out = out "%"
-        out = out c
-      }
-      return out "\""
+exec_quoted() {
+  EXEC_PATH="$installed" awk 'BEGIN {
+    path = ENVIRON["EXEC_PATH"]
+    out = "\""
+    for (i = 1; i <= length(path); i++) {
+      c = substr(path, i, 1)
+      if (c == "\"" || c == "`" || c == "$" || c == "\\") out = out "\\"
+      if (c == "%") out = out "%"
+      out = out c
     }
-    /^Exec=/ { print "Exec=" quote(ENVIRON["EXEC_PATH"]); next }
+    print out "\""
+  }'
+}
+exec_line() {
+  EXEC_QUOTED=$(exec_quoted) awk '
+    /^Exec=/ { print "Exec=" ENVIRON["EXEC_QUOTED"]; next }
     { print }
   ' "$here/zapfast.desktop"
 }
 mkdir -p "$apps_dir"
 exec_line > "$apps_dir/zapfast.desktop"
+
+# WhatsApp links: the whatsapp:// scheme, which the wa.me and
+# api.whatsapp.com pages open, goes to ZapFast through a hidden entry of its
+# own. The same entry and default ZapFast writes itself while "Open WhatsApp
+# links" is on (src/wa_link.rs), so the two never disagree.
+cat > "$apps_dir/zapfast-links.desktop" <<ENTRY
+[Desktop Entry]
+Type=Application
+Name=ZapFast
+Comment=Opens WhatsApp links in ZapFast
+Comment[pt_BR]=Abre links do WhatsApp no ZapFast
+Exec=$(exec_quoted) %u
+Icon=zapfast
+Terminal=false
+NoDisplay=true
+MimeType=x-scheme-handler/whatsapp;
+ENTRY
+mimeapps=$config_dir/mimeapps.list
+mkdir -p "$config_dir"
+touch "$mimeapps"
+awk '
+  BEGIN { line = "x-scheme-handler/whatsapp=zapfast-links.desktop;" }
+  /^[[:space:]]*\[/ {
+    section = $0; gsub(/^[[:space:]]+|[[:space:]]+$/, "", section)
+    defaults = (section == "[Default Applications]")
+    print
+    if (defaults && !placed) { print line; placed = 1 }
+    next
+  }
+  defaults && /^[[:space:]]*x-scheme-handler\/whatsapp[[:space:]]*=/ { next }
+  { print; last = $0 }
+  END {
+    if (!placed) {
+      if (NR > 0 && last != "") print ""
+      print "[Default Applications]"
+      print line
+    }
+  }
+' "$mimeapps" > "$mimeapps.zapfast" && mv -f "$mimeapps.zapfast" "$mimeapps"
+
 if command -v update-desktop-database >/dev/null 2>&1; then
   update-desktop-database "$apps_dir" 2>/dev/null || true
 fi
+# KDE apps see a new entry once their service cache is rebuilt.
+for sycoca in kbuildsycoca6 kbuildsycoca5; do
+  if command -v "$sycoca" >/dev/null 2>&1; then
+    "$sycoca" >/dev/null 2>&1 || true
+    break
+  fi
+done
 
 # The desktop folder has a translated name ("Área de Trabalho"), which
 # xdg-user-dir knows.
@@ -130,6 +186,7 @@ esac
 
 echo "ZapFast instalado em $installed"
 echo "Atalho no menu de aplicativos: $apps_dir/zapfast.desktop"
+echo "Links do WhatsApp (wa.me, api.whatsapp.com, whatsapp://) abrem no ZapFast."
 if [[ $desktop_shortcut == yes && -n ${desktop_dir:-} && -d ${desktop_dir:-/nonexistent} ]]; then
   echo "Atalho na área de trabalho: $desktop_dir/zapfast.desktop"
 fi

@@ -86,5 +86,14 @@ Type: files; Name: "{autodesktop}\FastsApp.lnk"
 Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExeName}"; AppUserModelID: "me.paolino.zapfast"
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: desktopicon; AppUserModelID: "me.paolino.zapfast"
 
+[Registry]
+; ZapFast opens WhatsApp links: the whatsapp:// scheme, which the wa.me and
+; api.whatsapp.com pages open. The same values ZapFast writes itself while
+; "Open WhatsApp links" is on (src/wa_link.rs); uninstalling removes them.
+Root: HKCU; Subkey: "Software\Classes\whatsapp"; ValueType: string; ValueName: ""; ValueData: "URL:WhatsApp"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\whatsapp"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""
+Root: HKCU; Subkey: "Software\Classes\whatsapp\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExeName}"",0"
+Root: HKCU; Subkey: "Software\Classes\whatsapp\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExeName}"" ""%1"""
+
 [Run]
 Filename: "{app}\{#AppExeName}"; Description: "Launch {#AppName}"; Flags: nowait postinstall skipifsilent

@@ -746,6 +746,36 @@ fn sections(app: &App) -> Vec<Section> {
         });
         system.indent_last();
     }
+    if app.whatsapp_links.is_some() {
+        // Registers with the desktop, so it is not a plain setting.
+        system.row_with_width(
+            translated(locale, "Open WhatsApp links"),
+            translated(
+                locale,
+                "wa.me and api.whatsapp.com links open their chat in ZapFast.",
+            ),
+            56.0,
+            move |ui, app| {
+                let Some(mut enabled) = app.whatsapp_links else {
+                    return;
+                };
+                let response = widgets::switch(ui, &palette, &mut enabled);
+                theme::reveal_focus(&response);
+                let label = crate::i18n::gettext(app.locale, "Open WhatsApp links");
+                response.widget_info(|| {
+                    egui::WidgetInfo::selected(
+                        egui::WidgetType::Checkbox,
+                        ui.is_enabled(),
+                        enabled,
+                        label.as_ref(),
+                    )
+                });
+                if response.changed() {
+                    app.actions.push(Action::SetWhatsAppLinks(enabled));
+                }
+            },
+        );
+    }
     system.toggle(
         translated(locale, "Check for updates"),
         translated(
