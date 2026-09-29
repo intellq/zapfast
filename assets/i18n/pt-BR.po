@@ -4495,7 +4495,8 @@ msgstr "Não foi possível mudar o app dos links do WhatsApp"
 
 #: src/ui/call.rs
 msgid "The call window stays above other windows. Click to stop."
-msgstr "A janela da chamada fica acima das outras janelas. Clique para desativar."
+msgstr ""
+"A janela da chamada fica acima das outras janelas. Clique para desativar."
 
 #: src/ui/call.rs
 msgid "Keep the call window above other windows"
@@ -4623,15 +4624,20 @@ msgstr "Mostrar o botão de transcrição"
 
 #: src/transcribe.rs
 msgid "On each voice message. The message menu offers it either way."
-msgstr "Em cada áudio. O menu da mensagem oferece a transcrição de qualquer forma."
+msgstr ""
+"Em cada áudio. O menu da mensagem oferece a transcrição de qualquer forma."
 
 #: src/transcribe.rs
 msgid "Model"
 msgstr "Modelo"
 
 #: src/transcribe.rs
-msgid "Transcription runs on this computer, with Whisper. The audio never leaves it; only the model is downloaded, once."
-msgstr "A transcrição roda neste computador, com o Whisper. O áudio não sai dele; só o modelo é baixado, uma vez."
+msgid ""
+"Transcription runs on this computer, with Whisper. The audio never leaves "
+"it; only the model is downloaded, once."
+msgstr ""
+"A transcrição roda neste computador, com o Whisper. O áudio não sai dele; só "
+"o modelo é baixado, uma vez."
 
 #: src/transcribe.rs
 msgid "recommended"
@@ -4671,7 +4677,8 @@ msgstr "Não foi possível bloquear este contato. Tente de novo daqui a pouco."
 
 #: src/app.rs
 msgid "Could not unblock this contact. Try again in a moment."
-msgstr "Não foi possível desbloquear este contato. Tente de novo daqui a pouco."
+msgstr ""
+"Não foi possível desbloquear este contato. Tente de novo daqui a pouco."
 
 #: src/app.rs
 msgid "Connect to WhatsApp to block or unblock contacts"
@@ -4683,8 +4690,12 @@ msgid "Block {name}?"
 msgstr "Bloquear {name}?"
 
 #: src/ui/dialogs.rs
-msgid "Blocked contacts cannot call you or send you messages. This contact will not be told."
-msgstr "Contatos bloqueados não podem ligar nem enviar mensagens para você. Este contato não será avisado."
+msgid ""
+"Blocked contacts cannot call you or send you messages. This contact will not "
+"be told."
+msgstr ""
+"Contatos bloqueados não podem ligar nem enviar mensagens para você. Este "
+"contato não será avisado."
 
 #: src/ui/dialogs.rs
 msgid "Block"
@@ -4716,7 +4727,9 @@ msgstr "Conecte-se ao WhatsApp para ver os contatos que você bloqueou."
 
 #: src/ui/settings.rs
 msgid "Nobody. Block a contact from its chat menu or its info."
-msgstr "Ninguém. Bloqueie um contato pelo menu da conversa ou pelas informações do contato."
+msgstr ""
+"Ninguém. Bloqueie um contato pelo menu da conversa ou pelas informações do "
+"contato."
 
 #: src/ui/settings.rs
 msgid "Blocked: {count}. They cannot call you or send you messages."
@@ -4729,6 +4742,194 @@ msgstr "Ocultar"
 #: src/ui/settings.rs
 msgid "Show"
 msgstr "Mostrar"
+
+#: src/util.rs:283
+msgid "last seen today at {time}"
+msgstr "visto por último hoje às {time}"
+
+#: src/util.rs:284
+msgid "last seen yesterday at {time}"
+msgstr "visto por último ontem às {time}"
+
+#: src/util.rs:292
+msgid "last seen {weekday} at {time}"
+msgstr "visto por último {weekday} às {time}"
+
+#: src/util.rs:296
+msgid "last seen {date}"
+msgstr "visto por último em {date}"
+
+#: src/ui/chats.rs:1064
+msgid "Draft:"
+msgstr "Rascunho:"
+
+#: src/ui/conversation.rs:4747
+msgid "View once photo. For your privacy, it opens only on your phone."
+msgstr ""
+"Foto de visualização única. Para sua privacidade, ela só abre no seu celular."
+
+#: src/ui/conversation.rs:4751
+msgid "View once video. For your privacy, it opens only on your phone."
+msgstr ""
+"Vídeo de visualização única. Para sua privacidade, ele só abre no seu "
+"celular."
+
+#: src/ui/conversation.rs:4755
+msgid "View once voice message. For your privacy, it opens only on your phone."
+msgstr ""
+"Mensagem de voz de reprodução única. Para sua privacidade, ela só abre no "
+"seu celular."
+
+#: src/ui/conversation.rs:4759
+msgid "View once audio. For your privacy, it opens only on your phone."
+msgstr ""
+"Áudio de reprodução única. Para sua privacidade, ele só abre no seu celular."
+
+#: src/ui/settings.rs:754 src/ui/settings.rs:781
+msgid "App lock"
+msgstr ""
+
+#: src/ui/settings.rs:757
+msgid ""
+"Asks for a password at start and after a while unused. It keeps people using "
+"this computer out of your chats and encrypts nothing more. A forgotten "
+"password means unlinking."
+msgstr ""
+
+#: src/ui/settings.rs:764
+msgid "Turn off…"
+msgstr ""
+
+#: src/ui/settings.rs:765
+#, fuzzy
+msgid "Change password…"
+msgstr "Alterar…"
+
+#: src/ui/settings.rs:768
+msgid "Set password…"
+msgstr ""
+
+#: src/ui/settings.rs:782 src/ui/settings.rs:789
+#, fuzzy
+msgid "Lock after"
+msgstr "Trancadas"
+
+#: src/ui/settings.rs:792
+msgid ""
+"Time without using ZapFast, also counted while it is in the tray. "
+"Ctrl+Shift+L locks it at once."
+msgstr ""
+
+#: src/ui/settings.rs:834
+msgid "Set an app lock password"
+msgstr ""
+
+#: src/ui/settings.rs:835
+msgid "Change the app lock password"
+msgstr ""
+
+#: src/ui/settings.rs:836
+msgid "Turn off the app lock"
+msgstr ""
+
+#: src/ui/settings.rs:846
+msgid "Current password"
+msgstr ""
+
+#: src/ui/settings.rs:853
+msgid "New password, at least {count} characters"
+msgstr ""
+
+#: src/ui/settings.rs:858
+msgid "Type the new password again"
+msgstr ""
+
+#: src/ui/settings.rs:882
+msgid "The password needs at least {count} characters."
+msgstr ""
+
+#: src/ui/settings.rs:884
+msgid "The two new passwords are different."
+msgstr ""
+
+#: src/ui/settings.rs:885 src/ui/lock.rs:85
+msgid "Wrong password. Try again."
+msgstr ""
+
+#: src/ui/settings.rs:892
+msgid "Turn on"
+msgstr ""
+
+#: src/ui/settings.rs:893
+#, fuzzy
+msgid "Change password"
+msgstr "Alterar foto"
+
+#: src/ui/settings.rs:894
+msgid "Turn off"
+msgstr ""
+
+#: src/app.rs:5247
+msgid "App lock password saved"
+msgstr ""
+
+#: src/app.rs:5255
+msgid "App lock turned off"
+msgstr ""
+
+#: src/ui/lock.rs:17
+msgid "ZapFast is locked"
+msgstr ""
+
+#: src/ui/lock.rs:23
+#, fuzzy
+msgid "Unlinking this computer…"
+msgstr "Desconectar este computador"
+
+#: src/ui/lock.rs:52
+msgid "Enter your password to unlock."
+msgstr ""
+
+#: src/ui/lock.rs:66
+msgid "Password"
+msgstr ""
+
+#: src/ui/lock.rs:76
+msgid "Too many wrong passwords. Try again in {seconds} s."
+msgstr ""
+
+#: src/ui/lock.rs:97
+msgid "Unlock"
+msgstr ""
+
+#: src/ui/lock.rs:108
+#, fuzzy
+msgid "Forgot password? Unlink this computer"
+msgstr "Desconectar este computador"
+
+#: src/ui/lock.rs:131
+msgid ""
+"Without the password, the only way back in is to unlink. This removes the "
+"device from WhatsApp, deletes the chats stored here, and turns the app lock "
+"off. You can link again with a new code."
+msgstr ""
+
+#: src/notify.rs:253
+#, fuzzy
+msgid "New message"
+msgstr "Digite uma mensagem"
+
+#: src/settings.rs:317
+msgid "After 1 minute"
+msgstr ""
+
+#: src/settings.rs:318
+msgid "After 15 minutes"
+msgstr ""
+
+#: src/settings.rs:319
+msgid "After 1 hour"
+msgstr ""
 
 #~ msgid "Jump to the newest message"
 #~ msgstr "Ir para a mensagem mais recente"
