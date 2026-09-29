@@ -3637,26 +3637,10 @@ fn bubble_frame(
                     actions.push(Action::ShowDialog(Dialog::ChatInfo(message.sender.clone())));
                 }
             }
-            if message.forwarded {
-                mirrored_row(
-                    ui,
-                    own,
-                    |ui| {
-                        theme::icon(ui, Icon::Forward, 14.0, palette.dim);
-                    },
-                    |ui| {
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(tr("Forwarded"))
-                                    .font(theme::regular(12.5))
-                                    .italics()
-                                    .color(palette.dim),
-                            )
-                            .selectable(false),
-                        );
-                    },
-                );
-            }
+            // Reserve the label's line now and paint it once the contents
+            // are measured, at their start: an own bubble lays out from the
+            // right, and its width is known only then.
+            let forwarded = message.forwarded.then(|| forwarded_label(ui, &palette));
             // Cards share the bubble's settled width: at least CARD_WIDTH and
             // no more than the cap. Text spans that width and stays left-aligned.
             // Bubbles without cards use the natural text width.
@@ -3691,6 +3675,13 @@ fn bubble_frame(
             } = &message.content
             {
                 interactive_buttons(ui, view, message, card, settled.unwrap_or(cap), actions);
+            }
+            if let Some((reserved, galley)) = forwarded {
+                let at = pos2(ui.min_rect().left(), reserved.top());
+                let painted = paint_forwarded_label(ui, &palette, at, galley);
+                ui.ctx().data_mut(|data| {
+                    data.insert_temp(bubble_id.with("forwarded"), painted);
+                });
             }
         });
     if fill != Color32::TRANSPARENT && ui.is_rect_visible(inner.response.rect) {
@@ -4160,6 +4151,70 @@ fn mirrored_row(
             second(ui);
         }
     });
+}
+
+/// Size of the forwarded label's arrow.
+const FORWARDED_ICON: f32 = 14.0;
+/// Gap between the forwarded label's arrow and its word.
+const FORWARDED_GAP: f32 = 4.0;
+/// Height of the forwarded label's line: its word's height, without the
+/// taller line an icon and a label in a row would take.
+const FORWARDED_HEIGHT: f32 = 15.0;
+
+/// Reserves the line for a forwarded message's label at the top of its
+/// bubble and returns that space with the laid-out word, for
+/// [`paint_forwarded_label`] once the bubble's contents are measured.
+fn forwarded_label(ui: &mut egui::Ui, palette: &Palette) -> (Rect, std::sync::Arc<egui::Galley>) {
+    let mut job = egui::text::LayoutJob::default();
+    job.append(
+        "Forwarded",
+        0.0,
+        egui::TextFormat {
+            font_id: theme::regular(12.5),
+            color: palette.dim,
+            italics: true,
+            ..Default::default()
+        },
+    );
+    let galley = ui.painter().layout_job(job);
+    let width = FORWARDED_ICON + FORWARDED_GAP + galley.size().x;
+    let (reserved, response) =
+        ui.allocate_exact_size(vec2(width, FORWARDED_HEIGHT), Sense::hover());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, "Forwarded"));
+    // Sit closer to what follows than the bubble's usual spacing.
+    ui.add_space(-1.0);
+    (reserved, galley)
+}
+
+/// Paints a forwarded label with its left edge at `at`, as WhatsApp does:
+/// at the start of the bubble on either side. Returns where it went.
+fn paint_forwarded_label(
+    ui: &egui::Ui,
+    palette: &Palette,
+    at: egui::Pos2,
+    galley: std::sync::Arc<egui::Galley>,
+) -> Rect {
+    let rect = Rect::from_min_size(
+        at,
+        vec2(
+            FORWARDED_ICON + FORWARDED_GAP + galley.size().x,
+            FORWARDED_HEIGHT,
+        ),
+    );
+    let icon = Rect::from_min_size(
+        pos2(rect.left(), rect.center().y - FORWARDED_ICON / 2.0),
+        Vec2::splat(FORWARDED_ICON),
+    );
+    theme::paint_icon(ui, Icon::Forward, icon, FORWARDED_ICON, palette.dim);
+    ui.painter().galley(
+        pos2(
+            icon.right() + FORWARDED_GAP,
+            rect.center().y - galley.size().y / 2.0,
+        ),
+        galley,
+        palette.dim,
+    );
+    rect
 }
 
 /// Width of the message footer.

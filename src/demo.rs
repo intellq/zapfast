@@ -11131,6 +11131,34 @@ mod call_surface_tests {
         (app, ctx)
     }
 
+    /// "Forwarded" sits at the start of the bubble, just under its top, on
+    /// incoming and own messages alike (#250).
+    #[test]
+    fn the_forwarded_label_starts_at_the_bubble_start_on_both_sides() {
+        let (_app, ctx) = photos();
+        let chat = SAMPLES[0].id;
+        for id in ["photos-forwarded-in", "photos-forwarded-out", "photos-in"] {
+            let bubble = crate::ui::conversation::bubble_id(chat, id);
+            let frame = rect(&ctx, bubble.with("rect")).expect("the bubble was drawn");
+            let label = rect(&ctx, bubble.with("forwarded")).expect("the label was drawn");
+            assert!(
+                (label.left() - (frame.left() + 10.0)).abs() < 0.5,
+                "{id}: the label starts at the bubble's start ({label:?} in {frame:?})"
+            );
+            assert!(
+                label.top() - frame.top() <= 7.0,
+                "{id}: the label sits just under the bubble's top ({label:?} in {frame:?})"
+            );
+        }
+        let bubble = crate::ui::conversation::bubble_id(chat, "photos-in");
+        let label = rect(&ctx, bubble.with("forwarded")).unwrap();
+        let picture = rect(&ctx, bubble.with("picture")).expect("the picture was drawn");
+        assert!(
+            picture.top() - label.bottom() <= 3.5,
+            "the picture follows the label closely ({label:?}, {picture:?})"
+        );
+    }
+
     /// A picture without a caption carries its time and ticks over its
     /// bottom corner, and its bubble closes just under it; with a caption
     /// they stay on the caption's line below the picture (#251).
