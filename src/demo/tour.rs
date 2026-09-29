@@ -114,6 +114,8 @@ fn common_setup(app: &mut App) {
     assert!(app.backend.is_offline(), "a tour requires an offline app");
     app.settings.theme = ThemeChoice::Dark;
     app.settings.keep_running_in_background = false;
+    // The tours type :shortcodes, which turn into emoji only when asked for.
+    app.settings.emoji_shortcuts = true;
     app.page = Page::Chats;
     app.dialog = None;
     app.picker = None;

@@ -846,7 +846,7 @@ mod tests {
         player.set_speed(f32::INFINITY);
         assert_eq!(player.speed(), 1.0);
         player.set_speed(50.0);
-        assert_eq!(player.speed(), 2.0);
+        assert_eq!(player.speed(), SPEEDS[SPEEDS.len() - 1]);
         player.set_speed(-3.0);
         assert_eq!(player.speed(), 1.0);
     }

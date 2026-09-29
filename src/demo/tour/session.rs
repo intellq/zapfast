@@ -9,6 +9,11 @@ use crate::{
 pub fn respond(app: &mut App) {
     for command in app.backend.take_demo_commands() {
         match command {
+            // Messages not yet forwarded on: WhatsApp's own limits.
+            Command::InspectForward {
+                from_chat,
+                messages,
+            } => app.forward_inspected(from_chat, messages, Some((5, 5))),
             Command::CreatePoll { chat, draft } => {
                 let state = crate::model::PollState {
                     selectable: draft.selectable(),

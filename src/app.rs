@@ -2206,6 +2206,29 @@ impl App {
             .unwrap_or_default()
     }
 
+    /// Opens the forward dialog once the backend has looked at the messages
+    /// asked to be forwarded, with how many chats and groups they may go to.
+    pub(crate) fn forward_inspected(
+        &mut self,
+        from_chat: ChatId,
+        messages: Vec<String>,
+        limits: Option<(usize, usize)>,
+    ) {
+        if self.pending_forward.as_ref() != Some(&(from_chat.clone(), messages.clone())) {
+            return;
+        }
+        self.pending_forward = None;
+        if let Some((max_chats, max_groups)) = limits {
+            self.forward_max_chats = max_chats;
+            self.forward_max_groups = max_groups;
+            self.forward_targets.clear();
+            self.dialog = Some(Dialog::Forward {
+                chat: from_chat,
+                messages,
+            });
+        }
+    }
+
     fn handle_events(&mut self) {
         for event in self.backend.poll() {
             match event {
@@ -2213,21 +2236,7 @@ impl App {
                     from_chat,
                     messages,
                     limits,
-                } => {
-                    if self.pending_forward.as_ref() == Some(&(from_chat.clone(), messages.clone()))
-                    {
-                        self.pending_forward = None;
-                        if let Some((max_chats, max_groups)) = limits {
-                            self.forward_max_chats = max_chats;
-                            self.forward_max_groups = max_groups;
-                            self.forward_targets.clear();
-                            self.dialog = Some(Dialog::Forward {
-                                chat: from_chat,
-                                messages,
-                            });
-                        }
-                    }
-                }
+                } => self.forward_inspected(from_chat, messages, limits),
                 Event::Link(status) => self.handle_link(status),
                 Event::Me {
                     id,
