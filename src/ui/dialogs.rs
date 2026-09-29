@@ -606,12 +606,7 @@ fn forward(app: &mut App, ui: &mut egui::Ui, from_chat: &str, messages: &[String
                     pos2(rect.right() - 19.0, rect.center().y),
                     vec2(24.0, 24.0),
                 );
-                let mut checked = selected;
-                let checkbox_response = ui
-                    .add_enabled_ui(enabled, |ui| {
-                        ui.put(checkbox, egui::Checkbox::without_text(&mut checked))
-                    })
-                    .inner;
+                let checkbox_response = choice_circle(ui, checkbox, selected, enabled, &title);
                 if enabled
                     && (response
                         .on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -668,6 +663,62 @@ fn forward(app: &mut App, ui: &mut egui::Ui, from_chat: &str, messages: &[String
             }
         });
     });
+}
+
+/// The round tick box beside a chat to forward to: light with a dark rim and
+/// a dark tick in every theme, so it reads on light and dark dialogs alike.
+fn choice_circle(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    checked: bool,
+    enabled: bool,
+    label: &str,
+) -> egui::Response {
+    const FILL: egui::Color32 = egui::Color32::from_rgb(0xf7, 0xf8, 0xfa);
+    const RIM: egui::Color32 = egui::Color32::from_rgb(0x54, 0x65, 0x6f);
+    const RIM_HOVER: egui::Color32 = egui::Color32::from_rgb(0x3b, 0x4a, 0x54);
+    const TICK: egui::Color32 = egui::Color32::from_rgb(0x11, 0x1b, 0x21);
+    let sense = if enabled {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
+    let response = ui.allocate_rect(rect, sense);
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, enabled, checked, label)
+    });
+    if ui.is_rect_visible(rect) {
+        let fade = |color: egui::Color32| {
+            if enabled {
+                color
+            } else {
+                color.gamma_multiply(0.4)
+            }
+        };
+        let center = rect.center();
+        let radius = 10.0;
+        let rim = if enabled && response.hovered() {
+            RIM_HOVER
+        } else {
+            RIM
+        };
+        let painter = ui.painter();
+        painter.circle(center, radius, fade(FILL), Stroke::new(1.5, fade(rim)));
+        if checked {
+            painter.add(egui::Shape::line(
+                vec![
+                    center + vec2(-4.5, 0.2),
+                    center + vec2(-1.3, 3.4),
+                    center + vec2(4.8, -3.4),
+                ],
+                Stroke::new(2.0, fade(TICK)),
+            ));
+        }
+        if response.has_focus() {
+            painter.circle_stroke(center, radius + 3.0, ui.visuals().selection.stroke);
+        }
+    }
+    response
 }
 
 fn forwardable(chat: &crate::model::Chat) -> bool {
