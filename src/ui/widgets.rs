@@ -902,7 +902,7 @@ pub enum Side {
 /// Corner radius of a message bubble.
 pub const BUBBLE_RADIUS: u8 = 10;
 /// How far a bubble's tail reaches out from its side, and down from its top.
-const TAIL_WIDTH: f32 = 8.0;
+pub const TAIL_WIDTH: f32 = 8.0;
 const TAIL_HEIGHT: f32 = 11.0;
 
 /// The corners of a message bubble: the one its tail leaves is square.
