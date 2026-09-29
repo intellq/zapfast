@@ -6427,9 +6427,15 @@ impl App {
             self.scroll_history.clear();
             self.scroll_last_event = None;
         }
-        let quiet = self
-            .scroll_last_event
-            .is_some_and(|at| now.duration_since(at).as_secs_f32() > 0.15);
+        // A pass that is redone (a discarded pass, such as the transcript's
+        // after rows above it were measured) gets no input events. That is
+        // not a pause in the gesture, even when the first pass took longer
+        // than the pause, and the frame's glide step was already taken.
+        let first_pass = ctx.current_pass_index() == 0;
+        let quiet = first_pass
+            && self
+                .scroll_last_event
+                .is_some_and(|at| now.duration_since(at).as_secs_f32() > 0.15);
         if ended || quiet {
             let mut velocity = self.scroll_history.velocity().unwrap_or(egui::Vec2::ZERO);
             if let Some((axis, _)) = self.scroll_lock {
@@ -6444,7 +6450,7 @@ impl App {
             self.scroll_last_event = None;
         }
         if let Some(velocity) = self.glide {
-            if raw == egui::Vec2::ZERO {
+            if raw == egui::Vec2::ZERO && first_pass {
                 let dt = ctx.input(|input| input.stable_dt).clamp(0.001, 0.05);
                 ctx.input_mut(|input| input.smooth_scroll_delta += velocity * dt);
                 let slower = velocity * (-dt / GLIDE_DECAY).exp();
@@ -6802,6 +6808,53 @@ mod tests {
     fn app() -> App {
         let root = std::env::temp_dir().join(format!("zapfast-app-{}", std::process::id()));
         App::headless(AppDirs::under(&root), Settings::default()).0
+    }
+
+    /// egui redoes a discarded pass without the frame's input events. However
+    /// long the first pass took, that is no pause in a trackpad gesture: the
+    /// redone pass must not end it and glide on top of the scroll.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_redone_pass_does_not_end_a_trackpad_gesture() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        for frame in 0..4 {
+            let events = (0..50)
+                .map(|_| egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, 3.0),
+                    modifiers: egui::Modifiers::NONE,
+                    phase: egui::TouchPhase::Move,
+                })
+                .collect();
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    let ctx = ui.ctx().clone();
+                    let redone = ctx.current_pass_index() > 0;
+                    if frame == 3 && !redone {
+                        ctx.request_discard("measured rows above the view");
+                    }
+                    if redone {
+                        // As if the first pass had taken a second.
+                        app.scroll_last_event = app
+                            .scroll_last_event
+                            .and_then(|at| at.checked_sub(Duration::from_secs(1)));
+                    }
+                    app.lock_scroll_axis(&ctx);
+                    if redone {
+                        let delta = ctx.input(|input| input.smooth_scroll_delta.y);
+                        assert_eq!(delta, 0.0, "the redone pass scrolls again");
+                    }
+                },
+            );
+            output.textures_delta.clear();
+        }
+        assert!(app.glide.is_none(), "the gesture glides while it goes on");
+        assert!(app.scroll_last_event.is_some(), "the gesture goes on");
     }
 
     /// A chat that is gone or emptied takes its confirmation with it: a modal
