@@ -440,13 +440,7 @@ fn subtitle(app: &App, chat: &Chat) -> (String, Color32) {
             return (tr("online").to_owned(), palette.accent);
         }
         if let Some(seen) = presence.last_seen {
-            return (
-                tr("last seen {time}").replace(
-                    "{time}",
-                    &crate::util::chat_stamp(app.locale, seen).to_lowercase(),
-                ),
-                palette.secondary,
-            );
+            return (crate::util::last_seen(app.locale, seen), palette.secondary);
         }
     }
     match chat.phone() {

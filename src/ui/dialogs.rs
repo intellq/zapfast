@@ -1910,10 +1910,7 @@ fn chat_info(app: &mut App, ui: &mut egui::Ui, id: &str) {
             let status = if presence.online {
                 tr("online").to_owned()
             } else if let Some(seen) = presence.last_seen {
-                tr("last seen {time}").replace(
-                    "{time}",
-                    &crate::util::chat_stamp(app.locale, seen).to_lowercase(),
-                )
+                crate::util::last_seen(app.locale, seen)
             } else {
                 String::new()
             };
