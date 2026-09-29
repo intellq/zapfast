@@ -4699,7 +4699,8 @@ mod tests {
         assert_eq!(app.composer, "draft");
 
         let (photo, _) = sample_files(&app);
-        app.actions.push(crate::model::Action::PreviewImage(photo));
+        app.actions
+            .push(crate::model::Action::PreviewImage(photo.clone()));
         // Enter in the very frame the preview opens, before egui knows about
         // the modal layer.
         frame_with(
@@ -4710,6 +4711,8 @@ mod tests {
         render(&mut app, &ctx);
         assert_eq!(app.composer, "draft", "Enter must not send the draft");
         assert!(app.image_preview.is_some());
+        // The controls appear once the picture has loaded, off the thread.
+        wait_for_picture(&mut app, &ctx, &photo);
 
         frame_with(
             &mut app,
@@ -4784,8 +4787,17 @@ mod tests {
         app.attach(ctx);
         render(app, ctx);
         let (photo, _) = sample_files(app);
-        let uri = crate::util::image_uri(&photo);
-        app.actions.push(crate::model::Action::PreviewImage(photo));
+        app.actions
+            .push(crate::model::Action::PreviewImage(photo.clone()));
+        wait_for_picture(app, ctx, &photo);
+        app.image_preview.as_ref().unwrap().scale()
+    }
+
+    /// Renders until egui has loaded `photo`, which it decodes off the
+    /// thread: until then the preview shows a spinner and none of its
+    /// controls, so a test that presses a key sooner fails at random.
+    fn wait_for_picture(app: &mut App, ctx: &egui::Context, photo: &std::path::Path) {
+        let uri = crate::util::image_uri(photo);
         for _ in 0..200 {
             render(app, ctx);
             if matches!(
@@ -4801,7 +4813,6 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         render(app, ctx);
-        app.image_preview.as_ref().unwrap().scale()
     }
 
     /// Runs one frame and returns where the preview drew its picture.
