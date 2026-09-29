@@ -145,22 +145,6 @@ pub struct Chat {
     pub blocked: bool,
 }
 
-/// Test chats that have had a message, so the chat list shows them
-/// (see `App::listed`).
-#[cfg(test)]
-pub fn speak_in(chats: &mut [Chat]) {
-    for chat in chats.iter_mut().filter(|chat| chat.last.is_none()) {
-        chat.last = Some(LastMessage {
-            from_me: false,
-            sender: chat.id.clone(),
-            sender_name: None,
-            summary: "Hi".into(),
-            full: "Hi".into(),
-            status: Delivery::None,
-        });
-    }
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub struct LastMessage {
     pub from_me: bool,

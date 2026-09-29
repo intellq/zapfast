@@ -641,7 +641,6 @@ mod tests {
             .collect();
         for (index, id) in ids.iter().enumerate() {
             let mut chat = Chat::new(id.clone(), format!("Chat {index:02}"));
-            crate::model::speak_in(std::slice::from_mut(&mut chat));
             chat.last_activity = 100 - index as i64;
             app.chats.push(chat);
         }
