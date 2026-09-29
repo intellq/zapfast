@@ -1029,6 +1029,8 @@ fn quote_sample(app: &mut App) {
     if let Some(index) = quoted {
         let original = &conversation.messages[index];
         let (sender, sender_name) = (original.sender.clone(), original.sender_name.clone());
+        // The quoted reply mentions Jonas, so the quote names him too.
+        let (summary, mentions) = (original.summary(), original.mentions.clone());
         let mut reply = message(
             group,
             "quote-own",
@@ -1040,8 +1042,8 @@ fn quote_sample(app: &mut App) {
             id: "group-reply".into(),
             sender,
             sender_name,
-            summary: "will do, front row".into(),
-            mentions: Vec::new(),
+            summary,
+            mentions,
         });
         conversation.messages.insert(index + 1, reply);
     }
@@ -8504,6 +8506,52 @@ mod tests {
         assert_eq!(app.open_chat.as_deref(), Some(next.as_str()));
         render(&mut app, &ctx);
         assert!(ctx.memory(|memory| memory.has_focus(egui::Id::new("composer-text"))));
+    }
+
+    #[test]
+    fn a_quote_names_the_people_its_text_mentions() {
+        let mut app = app();
+        apply_flags(&mut app, Some("quotes"));
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        let mut shapes = Vec::new();
+        for _ in 0..3 {
+            shapes = frame_sized(&mut app, &ctx, 780.0, Vec::new());
+        }
+        let quote = app.conversations[SAMPLES[1].id]
+            .messages
+            .iter()
+            .find(|row| row.id == "quote-own")
+            .and_then(|row| row.quoted.clone())
+            .expect("a quote");
+        let mention = quote.mentions.first().expect("the quote mentions Jonas");
+        assert!(quote.summary.contains(&format!("@{}", mention.user)));
+        let named = format!("@{} will do", app.mention_name(&mention.id));
+        fn texts(shape: &egui::Shape, out: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Text(text) => out.push(text.galley.text().to_owned()),
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| texts(shape, out)),
+                _ => {}
+            }
+        }
+        let mut drawn = Vec::new();
+        for clipped in &shapes {
+            texts(&clipped.shape, &mut drawn);
+        }
+        let quotes: Vec<_> = drawn
+            .iter()
+            .filter(|text| text.contains("will do"))
+            .collect();
+        assert!(
+            quotes.iter().any(|text| text.starts_with(&named)),
+            "{named:?} not among {quotes:?}"
+        );
+        assert!(
+            quotes
+                .iter()
+                .all(|text| !text.contains(&format!("@{}", mention.user))),
+            "a raw number is drawn: {quotes:?}"
+        );
     }
 
     #[test]

@@ -3384,7 +3384,7 @@ fn transcript_row(
             .sender_name
             .clone()
             .unwrap_or_else(|| (view.names_or)(&quoted.sender, None));
-        let summary = quoted.summary.clone();
+        let summary = markup::plain(&quoted.summary, &quote_mentions(view, quoted));
         let short: String = summary.chars().take(48).collect();
         let cut = if summary.chars().count() > 48 {
             "…"

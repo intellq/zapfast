@@ -3790,13 +3790,8 @@ impl Worker {
                 )
             })
             .unwrap_or_default();
-        // Recover quote mentions from `@user` tokens when metadata is missing.
         let summary = self.pn_tokens(&summary);
-        let mentions = if listed.is_empty() {
-            self.mention_tokens(&summary)
-        } else {
-            listed
-        };
+        let mentions = self.quote_mentions(&summary, listed);
         Some(Quoted {
             sender_name: self.name_for(&sender),
             id,
@@ -3804,6 +3799,28 @@ impl Worker {
             summary,
             mentions,
         })
+    }
+
+    /// Matches a quote's mentions to its summary, whose privacy-id tokens
+    /// `pn_tokens` turned into phone numbers: a mention listed under its
+    /// privacy id would otherwise no longer find its token, and the quote
+    /// would show the bare number. Without metadata (WhatsApp often strips
+    /// the quoted message's context), mentions come from the `@user` tokens.
+    fn quote_mentions(&self, summary: &str, listed: Vec<MentionRef>) -> Vec<MentionRef> {
+        if listed.is_empty() {
+            return self.mention_tokens(summary);
+        }
+        listed
+            .into_iter()
+            .map(|mention| MentionRef {
+                user: self
+                    .lid_to_pn
+                    .get(&mention.user)
+                    .cloned()
+                    .unwrap_or(mention.user),
+                id: self.canonical_str(&mention.id),
+            })
+            .collect()
     }
 
     /// Replaces known privacy ids in `@user` tokens with phone-number ids.
@@ -6653,12 +6670,8 @@ impl Worker {
             }
             quoted.sender = sender;
             quoted.summary = self.pn_tokens(&quoted.summary);
-            for mention in &mut quoted.mentions {
-                mention.id = self.canonical_str(&mention.id);
-            }
-            if quoted.mentions.is_empty() {
-                quoted.mentions = self.mention_tokens(&quoted.summary);
-            }
+            quoted.mentions =
+                self.quote_mentions(&quoted.summary, std::mem::take(&mut quoted.mentions));
         }
         for mention in &mut message.mentions {
             mention.id = self.canonical_str(&mention.id);
@@ -10107,6 +10120,100 @@ mod tests {
         let quoted = message.quoted.expect("quote");
         assert_eq!(quoted.sender, SENDER);
         assert_eq!(quoted.sender_name.as_deref(), Some("~Archived Sender"));
+    }
+
+    /// A group reply quoting a photo whose caption mentions a member by
+    /// privacy id, as WhatsApp sends it in a group that uses them.
+    fn reply_quoting_a_lid_mention(listed: bool) -> wa::Message {
+        use whatsapp_rust::prelude::MessageField;
+        let quoted = wa::Message {
+            image_message: MessageField::some(wa::message::ImageMessage {
+                caption: Some("@987654321012345 looks sharp".into()),
+                context_info: if listed {
+                    MessageField::some(wa::ContextInfo {
+                        mentioned_jid: vec!["987654321012345@lid".into()],
+                        ..Default::default()
+                    })
+                } else {
+                    MessageField::none()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        outgoing_text(
+            "agreed".into(),
+            Some(wa::ContextInfo {
+                stanza_id: Some("photo".into()),
+                participant: Some("15550002222@s.whatsapp.net".into()),
+                quoted_message: MessageField::some(quoted),
+                ..Default::default()
+            }),
+            &[],
+        )
+    }
+
+    #[test]
+    fn quoted_privacy_id_mentions_follow_the_summary_to_the_phone_number() {
+        const LID: &str = "987654321012345";
+        const PN: &str = "15550003333";
+        for listed in [true, false] {
+            let (mut worker, _events, _inbox, _wa) = receipt_tests::worker();
+            worker.lid_to_pn.insert(LID.into(), PN.into());
+            let quoted = worker
+                .quoted_of(&reply_quoting_a_lid_mention(listed))
+                .expect("quote");
+            assert_eq!(quoted.summary, format!("Photo: @{PN} looks sharp"));
+            assert_eq!(
+                quoted.mentions,
+                vec![MentionRef {
+                    user: PN.into(),
+                    id: format!("{PN}@s.whatsapp.net"),
+                }],
+                "listed: {listed}"
+            );
+            let named = crate::markup::plain(
+                &quoted.summary,
+                &[crate::markup::Mention {
+                    user: quoted.mentions[0].user.clone(),
+                    name: "Mira".into(),
+                }],
+            );
+            assert_eq!(named, "Photo: @Mira looks sharp");
+        }
+    }
+
+    #[test]
+    fn polish_matches_archived_privacy_id_quote_mentions_to_the_summary() {
+        const LID: &str = "987654321012345";
+        const PN: &str = "15550003333";
+        let (mut worker, _events, _inbox, _wa) = receipt_tests::worker();
+        let mut message = message_quoting("15550002222@s.whatsapp.net", None);
+        if let Some(quoted) = message.quoted.as_mut() {
+            quoted.summary = format!("Photo: @{LID} looks sharp");
+            quoted.mentions = vec![MentionRef {
+                user: LID.into(),
+                id: format!("{LID}@lid"),
+            }];
+        }
+
+        // Before the mapping is known the privacy id still matches itself.
+        worker.polish(&mut message);
+        let quoted = message.quoted.as_ref().expect("quote");
+        assert_eq!(quoted.mentions[0].user, LID);
+        assert!(quoted.summary.contains(&format!("@{LID}")));
+
+        worker.lid_to_pn.insert(LID.into(), PN.into());
+        worker.polish(&mut message);
+        let quoted = message.quoted.expect("quote");
+        assert_eq!(quoted.summary, format!("Photo: @{PN} looks sharp"));
+        assert_eq!(
+            quoted.mentions,
+            vec![MentionRef {
+                user: PN.into(),
+                id: format!("{PN}@s.whatsapp.net"),
+            }]
+        );
     }
 
     #[test]
