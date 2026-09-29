@@ -666,7 +666,9 @@ de sincronizar a exclusão "para mim" com o celular é uma extensão deste fork.
 - **Send attachments with captions.** Paste a picture, drop files, or choose
   **Send files** from the plus menu. They stay in the composer until you send them or press Escape.
   Pasting a picture uses its image data without adding the source URL or HTML
-  to your caption. Text-only clipboard contents still paste as text.
+  to your caption. Files copied in Finder, Explorer, or a Linux file manager
+  paste as the files themselves, not their icons. Text-only clipboard contents
+  still paste as text.
   MP3, M4A, AAC, and OGG files go as audio messages; other audio, such as
   WAV or FLAC, goes as a document so the recipient gets the original file.
 - **Mute chats** for eight hours, one week, or indefinitely. The setting also

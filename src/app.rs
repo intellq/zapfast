@@ -6305,13 +6305,14 @@ impl App {
         if !dropped.is_empty() {
             self.actions.push(Action::SendFiles(dropped));
         }
-        self.take_image_paste(ctx, clipboard_image);
+        self.take_clipboard_paste(ctx, || clipboard_contents(clipboard_files, clipboard_image));
     }
 
-    fn take_image_paste(
+    /// Stages pasted files or a pasted picture for the open chat.
+    fn take_clipboard_paste(
         &mut self,
         ctx: &egui::Context,
-        read_image: impl FnOnce() -> Option<(usize, usize, Vec<u8>)>,
+        read_clipboard: impl FnOnce() -> Option<ClipboardPaste>,
     ) {
         let (paste, text, released, focused, command) = ctx.input(|input| {
             (
@@ -6365,7 +6366,7 @@ impl App {
             // A menu paste has no key release to wait for.
             self.paste_before_release = command;
         }
-        // Handle image paste only when the composer or no field has focus.
+        // Handle file and image paste only when the composer or no field has focus.
         let composing = ctx.memory(|memory| {
             memory.has_focus(egui::Id::new("composer-text")) || memory.focused().is_none()
         });
@@ -6379,19 +6380,27 @@ impl App {
                 .as_deref()
                 .and_then(|id| self.chat(id))
                 .is_some_and(Chat::can_send)
-            && let Some((width, height, rgba)) = read_image()
+            && let Some(contents) = read_clipboard()
         {
-            // A browser can offer both pixels and its source URL. Consume the
-            // text before the composer sees it, keeping any existing caption.
+            // A browser can offer both pixels and its source URL, and a file
+            // manager both paths and their text. Consume the text before the
+            // composer sees it, keeping any existing caption.
             ctx.input_mut(|input| {
                 input
                     .events
                     .retain(|event| !matches!(event, egui::Event::Paste(_)))
             });
-            self.actions.push(Action::PasteImage {
-                width,
-                height,
-                rgba,
+            self.actions.push(match contents {
+                ClipboardPaste::Files(paths) => Action::SendFiles(paths),
+                ClipboardPaste::Image {
+                    width,
+                    height,
+                    rgba,
+                } => Action::PasteImage {
+                    width,
+                    height,
+                    rgba,
+                },
             });
         }
     }
@@ -6733,6 +6742,54 @@ pub fn primary_selection() -> Option<String> {
 /// How long after Ctrl comes up a V release still counts as Ctrl+V, in
 /// seconds.
 const CTRL_V_GRACE: f64 = 0.8;
+
+/// What a paste into the composer stages.
+#[derive(Debug)]
+enum ClipboardPaste {
+    /// Files copied in a file manager, staged like dropped files.
+    Files(Vec<PathBuf>),
+    /// Picture data as width, height, and straight-alpha RGBA.
+    Image {
+        width: usize,
+        height: usize,
+        rgba: Vec<u8>,
+    },
+}
+
+/// Prefers the clipboard's file list over its picture: Finder, Explorer and
+/// Linux file managers offer the file's icon as an image alongside the path,
+/// so a copied PDF or ZIP would otherwise arrive as its icon (#285).
+fn clipboard_contents(
+    read_files: impl FnOnce() -> Option<Vec<PathBuf>>,
+    read_image: impl FnOnce() -> Option<(usize, usize, Vec<u8>)>,
+) -> Option<ClipboardPaste> {
+    let files: Vec<PathBuf> = read_files()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|path| {
+            // text/uri-list lines end in CRLF, and arboard splits only on LF.
+            let path = match path.to_str() {
+                Some(text) if text.ends_with('\r') => PathBuf::from(text.trim_end_matches('\r')),
+                _ => path,
+            };
+            path.exists().then_some(path)
+        })
+        .collect();
+    if !files.is_empty() {
+        return Some(ClipboardPaste::Files(files));
+    }
+    read_image().map(|(width, height, rgba)| ClipboardPaste::Image {
+        width,
+        height,
+        rgba,
+    })
+}
+
+/// Files copied to the clipboard by a file manager.
+fn clipboard_files() -> Option<Vec<PathBuf>> {
+    let mut clipboard = arboard::Clipboard::new().ok()?;
+    clipboard.get().file_list().ok()
+}
 
 /// Clipboard image as width, height, and straight-alpha RGBA.
 fn clipboard_image() -> Option<(usize, usize, Vec<u8>)> {
@@ -7198,10 +7255,23 @@ mod tests {
     fn clipboard_frame(
         app: &mut App,
         ctx: &egui::Context,
-        mut events: Vec<egui::Event>,
+        events: Vec<egui::Event>,
         image: bool,
     ) -> usize {
+        clipboard_frame_with_files(app, ctx, events, None, image).0
+    }
+
+    /// Runs a frame whose clipboard holds `files` and, if `image`, a picture.
+    /// Returns how often the clipboard and its picture were read.
+    fn clipboard_frame_with_files(
+        app: &mut App,
+        ctx: &egui::Context,
+        mut events: Vec<egui::Event>,
+        files: Option<Vec<PathBuf>>,
+        image: bool,
+    ) -> (usize, usize) {
         let mut reads = 0;
+        let mut image_reads = 0;
         events.insert(0, egui::Event::ModifiersChanged(egui::Modifiers::COMMAND));
         let mut output = ctx.run_ui(
             egui::RawInput {
@@ -7209,9 +7279,15 @@ mod tests {
                 ..Default::default()
             },
             |ui| {
-                app.take_image_paste(ui.ctx(), || {
+                app.take_clipboard_paste(ui.ctx(), || {
                     reads += 1;
-                    image.then(|| (2, 2, vec![200; 16]))
+                    clipboard_contents(
+                        || files.clone(),
+                        || {
+                            image_reads += 1;
+                            image.then(|| (2, 2, vec![200; 16]))
+                        },
+                    )
                 });
                 ui.add(
                     egui::TextEdit::singleline(&mut app.composer)
@@ -7221,7 +7297,7 @@ mod tests {
             },
         );
         output.textures_delta.clear();
-        reads
+        (reads, image_reads)
     }
 
     fn clipboard_app() -> (App, egui::Context) {
@@ -7276,7 +7352,13 @@ mod tests {
                 ..Default::default()
             },
             |ui| {
-                app.take_image_paste(ui.ctx(), || Some((2, 2, vec![200; 16])));
+                app.take_clipboard_paste(ui.ctx(), || {
+                    Some(ClipboardPaste::Image {
+                        width: 2,
+                        height: 2,
+                        rgba: vec![200; 16],
+                    })
+                });
                 app.apply_actions(ui.ctx());
             },
         );
@@ -7321,6 +7403,57 @@ mod tests {
             "a clipboard change before release must not stage an unrelated image"
         );
         assert!(app.pending.is_empty());
+    }
+
+    #[test]
+    fn a_copied_file_stages_the_file_and_not_its_icon() {
+        let directory = tempfile::tempdir().unwrap();
+        let pdf = directory.path().join("fixture.pdf");
+        let zip = directory.path().join("fixture archive.zip");
+        std::fs::write(&pdf, b"%PDF-fixture").unwrap();
+        std::fs::write(&zip, b"PK-fixture").unwrap();
+        let (mut app, ctx) = clipboard_app();
+        // Finder offers the path, the file name as text, and an icon picture.
+        let (reads, image_reads) = clipboard_frame_with_files(
+            &mut app,
+            &ctx,
+            vec![egui::Event::Paste("fixture.pdf".into()), paste_release()],
+            Some(vec![pdf.clone(), zip.clone()]),
+            true,
+        );
+        assert_eq!(reads, 1);
+        assert_eq!(image_reads, 0, "the icon picture is never read");
+        assert!(matches!(
+            app.pending.as_slice(),
+            [Pending::File(first), Pending::File(second)] if *first == pdf && *second == zip
+        ));
+        assert_eq!(app.composer, "caption", "the file name is not pasted");
+    }
+
+    #[test]
+    fn a_uri_list_line_ending_does_not_hide_the_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("fixture.zip");
+        std::fs::write(&file, b"PK-fixture").unwrap();
+        let mut listed = file.clone().into_os_string();
+        listed.push("\r");
+        let contents = clipboard_contents(|| Some(vec![PathBuf::from(listed)]), || None);
+        assert!(matches!(contents, Some(ClipboardPaste::Files(paths)) if paths == [file]));
+    }
+
+    #[test]
+    fn a_missing_copied_file_falls_back_to_the_picture() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, ctx) = clipboard_app();
+        let (_, image_reads) = clipboard_frame_with_files(
+            &mut app,
+            &ctx,
+            vec![paste_release()],
+            Some(vec![directory.path().join("gone.pdf")]),
+            true,
+        );
+        assert_eq!(image_reads, 1);
+        assert!(matches!(app.pending.as_slice(), [Pending::Picture { .. }]));
     }
 
     #[test]
