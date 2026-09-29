@@ -742,7 +742,8 @@ de sincronizar a exclusão "para mim" com o celular é uma extensão deste fork.
   it ZapFast says so instead of crashing.
 - **Send messages.** Press Enter to send text and Shift+Enter for a new line.
   You can swap these keys in Settings. The composer is focused when you open
-  or return to a conversation; invoking search keeps focus in search, and
+  or return to a conversation, and clicking empty conversation space returns
+  focus to it; invoking search keeps focus in search, and
   Escape clears search and returns to the composer; another Escape closes the
   chat and saves your text draft. Drafts are kept in the encrypted archive, so
   unsent text survives closing ZapFast and restarting. Open menus, dialogs, and unfinished actions

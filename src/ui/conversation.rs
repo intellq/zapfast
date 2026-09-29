@@ -2249,6 +2249,15 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                     egui::style::ScrollAnimation::none(),
                 );
             }
+            // Keep ordinary conversation-space clicks useful: after reading,
+            // the next keystroke should go straight to the composer. Register
+            // this before the message controls so text, links, media, and
+            // selection interactions remain in front of the background.
+            let background = ui.interact(
+                viewport,
+                ui.id().with(("message-background", &chat.id)),
+                Sense::click(),
+            );
             // Only a drag that has moved past a click, such as selecting
             // text, scrolls; a click near an edge does not.
             let held_inside = ui.input(|input| {
@@ -2522,6 +2531,9 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                         pinned = true;
                     }
                 });
+            if background.clicked() {
+                actions.push(Action::FocusComposer);
+            }
             // A keyboard PgUp/PgDn/Home/End scroll moves by the next slice of
             // its eased distance each frame, as an instant scroll: relative
             // steps compose with the row-height compensation below, and
@@ -3136,6 +3148,9 @@ fn bubble(
     if let Some(rect) = previous {
         let strip = Rect::from_x_y_ranges(ui.max_rect().x_range(), rect.y_range());
         let strip = ui.interact(strip, id.with("row"), Sense::CLICK);
+        if strip.clicked() {
+            actions.push(Action::FocusComposer);
+        }
         reply_on_double_click(&strip, message, actions);
     }
     let mut response = None;
