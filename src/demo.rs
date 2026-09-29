@@ -2300,6 +2300,59 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
                 app.emoji_selected = 0;
                 app.focus_composer = true;
             }
+            // The strips above the composer: a reply, an edit, and a voice
+            // message WhatsApp refused.
+            "reply" => {
+                app.open_chat = Some(SAMPLES[0].id.to_owned());
+                app.reply_to = Some("ada-photo".into());
+                app.focus_composer = true;
+            }
+            "edit" => {
+                let chat = SAMPLES[0].id;
+                app.open_chat = Some(chat.to_owned());
+                let own =
+                    app.conversations.get(chat).and_then(|conversation| {
+                        conversation.messages.iter().rev().find_map(|message| {
+                            match &message.content {
+                                Content::Text { text, .. } if message.from_me => {
+                                    Some((message.id.clone(), text.clone()))
+                                }
+                                _ => None,
+                            }
+                        })
+                    });
+                if let Some((id, text)) = own {
+                    app.composer = text;
+                    app.editing = Some(id);
+                }
+                app.focus_composer = true;
+            }
+            // Reading back through the first chat, away from its end: the
+            // button back to the newest message shows.
+            "scrolled" => {
+                let chat = SAMPLES[0].id;
+                app.open_chat = Some(chat.to_owned());
+                app.scroll_to_bottom = false;
+                app.at_bottom = false;
+                app.scroll_anchor = app
+                    .conversations
+                    .get(chat)
+                    .and_then(|conversation| conversation.messages.get(4))
+                    .map(|message| message.id.clone());
+            }
+            // The group photo with its reactions, and the day above it.
+            "reactions" => {
+                app.open_chat = Some(SAMPLES[1].id.to_owned());
+                app.scroll_to_bottom = false;
+                app.at_bottom = false;
+                app.scroll_anchor = Some("group-photo".into());
+            }
+            "unsent-voice" => {
+                let chat = SAMPLES[0].id;
+                app.open_chat = Some(chat.to_owned());
+                app.unsent_voice =
+                    Some((chat.to_owned(), vec![0.0; crate::voice::RATE as usize * 6]));
+            }
             // Show two simultaneous group typers.
             "typers" => {
                 let group = SAMPLES[1].id;
@@ -4167,6 +4220,11 @@ mod tests {
             "composer-tools",
             "mention",
             "emoji-complete",
+            "reply",
+            "edit",
+            "unsent-voice",
+            "scrolled",
+            "reactions",
             "typers",
             "nosidebar",
             "wide",
