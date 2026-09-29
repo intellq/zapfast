@@ -489,6 +489,7 @@ pub fn populate(app: &mut App) {
             Contact {
                 id: id.to_owned(),
                 full_name: Some(name.to_owned()),
+                first_name: None,
                 push_name: None,
             },
         );
@@ -499,6 +500,7 @@ pub fn populate(app: &mut App) {
         Contact {
             id: "12025550137@s.whatsapp.net".to_owned(),
             full_name: Some("Dorothy Vaughan".to_owned()),
+            first_name: None,
             push_name: None,
         },
     );
@@ -1685,6 +1687,7 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
                         Contact {
                             id: id.clone(),
                             full_name: Some((*name).to_owned()),
+                            first_name: None,
                             push_name: None,
                         },
                     );
@@ -8528,6 +8531,7 @@ mod tests {
             Contact {
                 id: sender.into(),
                 full_name: Some("Alex Fixture".into()),
+                first_name: None,
                 push_name: None,
             },
         );

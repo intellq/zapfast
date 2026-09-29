@@ -946,6 +946,10 @@ pub struct DecodedImage {
 pub struct Contact {
     pub id: String,
     pub full_name: Option<String>,
+    /// The first name saved with `full_name`, which WhatsApp shows where
+    /// space is short, as in a group's member line. It may hold several
+    /// words; only a contact saved with a separate first name has one.
+    pub first_name: Option<String>,
     pub push_name: Option<String>,
 }
 
@@ -955,6 +959,15 @@ impl Contact {
             .as_deref()
             .filter(|name| !name.is_empty())
             .or(self.push_name.as_deref().filter(|name| !name.is_empty()))
+    }
+
+    /// The saved first name, when the address-book entry has one.
+    pub fn first_name(&self) -> Option<&str> {
+        self.full_name.as_deref().filter(|name| !name.is_empty())?;
+        self.first_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
     }
 
     /// WhatsApp display name: address-book name or `~`-prefixed push name.
@@ -2163,12 +2176,14 @@ mod tests {
         let saved = Contact {
             id: "1".into(),
             full_name: Some("Ada".into()),
+            first_name: None,
             push_name: Some("ada l".into()),
         };
         assert_eq!(saved.label().as_deref(), Some("Ada"));
         let stranger = Contact {
             id: "2".into(),
             full_name: None,
+            first_name: None,
             push_name: Some("Bob".into()),
         };
         assert_eq!(stranger.label().as_deref(), Some("~Bob"));

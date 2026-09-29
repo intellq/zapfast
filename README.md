@@ -547,8 +547,10 @@ de sincronizar a exclusão "para mim" com o celular é uma extensão deste fork.
   new messages. Like on the phone, you can pin up to three chats. Chat and contact name searches ignore accents, so `Angel`
   finds `Ángel`.
   The filters stay on one row and scroll horizontally in narrow sidebars.
-  Unnamed groups use a shared participant summary for their title and subtitle;
-  repeated first names appear as `Andrea ×3`, with your own entry shown as `You`.
+  Unnamed groups use a shared participant summary for their title and subtitle.
+  It names each saved contact by its whole first name as saved on the phone (the
+  full name when none was saved), repeated names appear as `Andrea ×3`, and your
+  own entry is shown as `You`.
   Incomplete group metadata preserves known names and retries with backoff;
   an empty cached subject remains eligible for recovery.
   Typing indicators show other participants, excluding your own linked devices.

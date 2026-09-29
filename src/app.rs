@@ -1916,8 +1916,10 @@ impl App {
             if name.starts_with('+') || name == tr("Unknown") {
                 numbers.push(name);
             } else {
-                let name = name.trim_start_matches('~');
-                names.push(name.split_whitespace().next().unwrap_or(name).to_owned());
+                // The saved first name, as WhatsApp shows here, whole: it can
+                // hold several words. Without one, the whole name.
+                let first = self.contacts.get(id).and_then(Contact::first_name);
+                names.push(first.unwrap_or(name.trim_start_matches('~')).to_owned());
             }
         }
         names.sort_by_key(|name| name.to_lowercase());
@@ -9794,6 +9796,7 @@ mod tests {
         let contact = |id: &str, name: &str| crate::model::Contact {
             id: id.into(),
             full_name: Some(name.into()),
+            first_name: None,
             push_name: None,
         };
         // Exclude contacts that already have chats.
@@ -10543,6 +10546,7 @@ mod tests {
         let contact = Contact {
             id: "2@s.whatsapp.net".into(),
             full_name: Some("A\u{301}ngel".into()),
+            first_name: None,
             push_name: None,
         };
         app.contacts.insert(contact.id.clone(), contact);
@@ -10738,6 +10742,7 @@ mod tests {
             Contact {
                 id: "1@s.whatsapp.net".into(),
                 full_name: Some("Ada".into()),
+                first_name: None,
                 push_name: None,
             },
         );
@@ -10752,6 +10757,7 @@ mod tests {
             Contact {
                 id: "42@lid".into(),
                 full_name: None,
+                first_name: None,
                 push_name: Some("Bob".into()),
             },
         );
@@ -11063,6 +11069,7 @@ mod name_tests {
             Contact {
                 id: "1@s.whatsapp.net".into(),
                 full_name: Some("Ada Lovelace".into()),
+                first_name: None,
                 push_name: Some("Ada".into()),
             },
         );
@@ -11071,10 +11078,42 @@ mod name_tests {
             Contact {
                 id: "2@s.whatsapp.net".into(),
                 full_name: None,
+                first_name: None,
                 push_name: Some("Bob".into()),
             },
         );
         app
+    }
+
+    #[test]
+    fn group_members_go_by_their_whole_saved_first_name() {
+        let mut app = app();
+        let mut chat = Chat::new("fixture@g.us".into(), "Group".into());
+        for (index, full_name, first_name) in [
+            (0, "My Dih", Some("My Dih")),
+            (1, "Grace Hopper", Some("Grace")),
+            (2, "Mary Ann Evans", None),
+            (3, "Stray Name", Some("")),
+        ] {
+            let id = format!("1555000001{index}@s.whatsapp.net");
+            app.contacts.insert(
+                id.clone(),
+                Contact {
+                    id: id.clone(),
+                    full_name: Some(full_name.into()),
+                    first_name: first_name.map(Into::into),
+                    push_name: None,
+                },
+            );
+            chat.participants.push(id);
+        }
+        // A profile name is not split either.
+        chat.participants.push("2@s.whatsapp.net".into());
+        app.contacts.get_mut("2@s.whatsapp.net").unwrap().push_name = Some("Bob Builder".into());
+        assert_eq!(
+            app.participant_names(&chat),
+            "Bob Builder, Grace, Mary Ann Evans, My Dih, Stray Name"
+        );
     }
 
     #[test]
@@ -11096,6 +11135,7 @@ mod name_tests {
                 Contact {
                     id: id.clone(),
                     full_name: Some((*name).into()),
+                    first_name: name.split(' ').next().map(Into::into),
                     push_name: Some((*name).into()),
                 },
             );
