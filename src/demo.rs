@@ -5589,6 +5589,29 @@ mod tests {
     }
 
     #[test]
+    fn the_emoji_tabs_follow_the_category_scrolled_into_view() {
+        let mut app = app();
+        apply_flags(&mut app, Some("picker"));
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let shown = |ctx: &egui::Context| {
+            ctx.data(|data| {
+                data.get_temp::<Option<&'static str>>(egui::Id::new((
+                    "emoji-visible",
+                    "emoji-grid",
+                )))
+            })
+            .flatten()
+        };
+        for category in ["Animals & Nature", "Flags", "People & Body"] {
+            app.emoji_jump = Some(category);
+            render(&mut app, &ctx);
+            assert_eq!(shown(&ctx), Some(category), "scrolled to {category}");
+        }
+    }
+
+    #[test]
     fn a_reaction_picker_choice_uses_the_same_react_path() {
         let mut app = app();
         app.backend.record_demo_commands();

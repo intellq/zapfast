@@ -774,7 +774,8 @@ fn emoji_grid(
     }
     // `show_rows` must use the same zero spacing as the grid.
     ui.spacing_mut().item_spacing = Vec2::ZERO;
-    let scroll_id = ui.make_persistent_id(scroll_salt);
+    // The id the scroll area derives from its salt, to read its offset.
+    let scroll_id = ui.make_persistent_id(egui::IdSalt::new(scroll_salt));
     let mut grid = egui::ScrollArea::vertical()
         .id_salt(scroll_salt)
         .auto_shrink([false, false]);
@@ -807,21 +808,7 @@ fn emoji_grid(
         };
         grid = grid.vertical_scroll_offset(target.max(0.0));
     }
-    let offset =
-        egui::scroll_area::State::load(ui.ctx(), scroll_id).map_or(0.0, |state| state.offset.y);
-    let visible_index = (offset / row_height).floor() as usize;
-    let visible_label = rows
-        .iter()
-        .take(visible_index.saturating_add(1).min(rows.len()))
-        .rev()
-        .find_map(|row| match row {
-            Row::Header(label) => Some(*label),
-            Row::Emoji { .. } => None,
-        });
-    ui.ctx().data_mut(|data| {
-        data.insert_temp(egui::Id::new(("emoji-visible", scroll_salt)), visible_label);
-    });
-    grid.show_rows(ui, row_height, rows.len(), |ui, range| {
+    let output = grid.show_rows(ui, row_height, rows.len(), |ui, range| {
         for row in &rows[range] {
             match row {
                 Row::Header(label) => {
@@ -916,7 +903,24 @@ fn emoji_grid(
             }
         }
     });
+    // This frame's offset, so the tabs drawn next follow the scroll at once.
+    let visible_label = header_at(&rows, output.state.offset.y, row_height);
+    ui.ctx().data_mut(|data| {
+        data.insert_temp(egui::Id::new(("emoji-visible", scroll_salt)), visible_label);
+    });
     picked
+}
+
+/// The section whose rows are at the top of the grid scrolled by `offset`.
+fn header_at(rows: &[Row], offset: f32, row_height: f32) -> Option<&'static str> {
+    let top = (offset.max(0.0) / row_height).floor() as usize;
+    rows.iter()
+        .take(top.saturating_add(1).min(rows.len()))
+        .rev()
+        .find_map(|row| match row {
+            Row::Header(label) => Some(*label),
+            Row::Emoji { .. } => None,
+        })
 }
 
 #[cfg(test)]
@@ -958,6 +962,26 @@ mod emoji_tests {
             .copied()
             .collect();
         assert!(found.contains(&"🦀"), "{found:?}");
+    }
+
+    #[test]
+    fn the_section_at_the_top_of_the_grid_names_the_scrolled_category() {
+        let rows = rows_for("", &[], 8, "Recent");
+        let people = header_row(&rows, "People & Body").unwrap();
+        assert_eq!(header_at(&rows, 0.0, CELL), Some("Smileys & Emotion"));
+        assert_eq!(
+            header_at(&rows, people as f32 * CELL - 1.0, CELL),
+            Some("Smileys & Emotion")
+        );
+        assert_eq!(
+            header_at(&rows, people as f32 * CELL, CELL),
+            Some("People & Body")
+        );
+        assert_eq!(
+            header_at(&rows, (people + 3) as f32 * CELL, CELL),
+            Some("People & Body")
+        );
+        assert_eq!(header_at(&rows, 1.0e9, CELL), Some("Flags"));
     }
 
     #[test]
