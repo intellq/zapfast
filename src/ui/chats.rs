@@ -1637,6 +1637,7 @@ mod tests {
         for index in 0..24 {
             let id = format!("49170000{index:04}@s.whatsapp.net");
             let mut chat = Chat::new(id.clone(), format!("Chat {index:02}"));
+            crate::model::speak_in(std::slice::from_mut(&mut chat));
             chat.last_activity = 100 - i64::from(index);
             if index == 0 {
                 first.clone_from(&id);
@@ -1746,6 +1747,7 @@ mod tests {
         for index in 0..count {
             let id = format!("49170000{index:04}@s.whatsapp.net");
             let mut chat = Chat::new(id.clone(), format!("Chat {index:03}"));
+            crate::model::speak_in(std::slice::from_mut(&mut chat));
             chat.last_activity = 10_000 - index as i64;
             app.chats.push(chat);
             ids.push(id);

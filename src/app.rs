@@ -1997,6 +1997,7 @@ impl App {
             .chats
             .iter()
             .filter(|chat| chat.locked == locked)
+            .filter(|chat| self.listed(chat))
             .filter(|chat| locked || chat.archived == self.show_archived || !needle.is_empty())
             .filter(|chat| match &self.label_filter {
                 // A label lists every chat wearing it, channels included,
@@ -2040,7 +2041,36 @@ impl App {
         chats
     }
 
-    /// Matching individual contacts without an existing chat, sorted by name.
+    /// Whether the chat list shows `chat`. History and app state bring rows
+    /// for people met only in groups, for chats deleted long ago and for
+    /// groups the reader left, that keep their settings for when a message
+    /// comes. Such a row stays out of the list unless it has a message, a
+    /// name to go by, or the reader pinned, marked, labelled, drafted in or
+    /// opened it. A person is named by a saved or profile name, not just a
+    /// number; a group by its subject.
+    pub fn listed(&self, chat: &Chat) -> bool {
+        let kept = chat.last.is_some()
+            || self.me.as_deref() == Some(chat.id.as_str())
+            || chat.pinned
+            || chat.favorite
+            || chat.marked_unread
+            || chat.unread > 0
+            || !chat.labels.is_empty()
+            || self.open_chat.as_deref() == Some(chat.id.as_str())
+            || self
+                .drafts
+                .get(&chat.id)
+                .is_some_and(|draft| !draft.trim().is_empty());
+        kept || match chat.kind {
+            crate::model::ChatKind::Direct => self.known_name(&chat.id, None).is_some(),
+            crate::model::ChatKind::Group => {
+                chat.group_subject_known || !matches!(chat.name.trim(), "" | "Group")
+            }
+            _ => true,
+        }
+    }
+
+    /// Matching individual contacts without a listed chat, sorted by name.
     pub fn matching_contacts(&self) -> Vec<&Contact> {
         let needle = crate::util::search_key(self.search.trim());
         if needle.is_empty() {
@@ -2051,7 +2081,12 @@ impl App {
             .values()
             .filter(|contact| crate::model::phone_of(&contact.id).is_some())
             .filter(|contact| self.me.as_deref() != Some(contact.id.as_str()))
-            .filter(|contact| !self.chats.iter().any(|chat| chat.id == contact.id))
+            .filter(|contact| {
+                !self
+                    .chats
+                    .iter()
+                    .any(|chat| chat.id == contact.id && self.listed(chat))
+            })
             .filter(|contact| {
                 contact
                     .display_name()
@@ -2080,7 +2115,7 @@ impl App {
     pub fn archived_count(&self) -> usize {
         self.chats
             .iter()
-            .filter(|chat| chat.archived && !chat.locked)
+            .filter(|chat| chat.archived && !chat.locked && self.listed(chat))
             .count()
     }
 
@@ -7587,6 +7622,7 @@ mod tests {
             .collect();
         assert_eq!(listed, vec!["1@s.whatsapp.net".to_owned()]);
         app.label_filter = None;
+        crate::model::speak_in(&mut app.chats);
         assert_eq!(
             app.visible_chats().len(),
             2,
@@ -9782,6 +9818,7 @@ mod tests {
             contact("490000000000@s.whatsapp.net", "Adah Me"),
         );
         app.search = "ad".into();
+        crate::model::speak_in(&mut app.chats);
         let names: Vec<&str> = app
             .matching_contacts()
             .iter()
@@ -9869,6 +9906,77 @@ mod tests {
     }
 
     #[test]
+    fn people_never_talked_to_are_not_listed_but_can_be_found() {
+        let mut app = app();
+        let chat = |id: &str| Chat::new(id.into(), String::new());
+        let mut talked = chat("1@s.whatsapp.net");
+        crate::model::speak_in(std::slice::from_mut(&mut talked));
+        let mut pinned = chat("3@s.whatsapp.net");
+        pinned.pinned = true;
+        let mut archived = chat("6@s.whatsapp.net");
+        archived.archived = true;
+        app.chats = vec![
+            talked,
+            // Met in a group, never written to: history and app state bring these.
+            chat("2@s.whatsapp.net"),
+            chat("99@lid"),
+            pinned,
+            chat("4@s.whatsapp.net"),
+            // A group with no subject and no message: one the reader left.
+            chat("5@g.us"),
+            Chat::new("7@g.us".into(), "Weekend".into()),
+            // Named by a saved contact: a real chat whose messages come on opening.
+            chat("8@s.whatsapp.net"),
+            archived,
+        ];
+        app.contacts.insert(
+            "8@s.whatsapp.net".into(),
+            Contact {
+                id: "8@s.whatsapp.net".into(),
+                full_name: Some("Hopper".into()),
+                push_name: None,
+            },
+        );
+        app.drafts.insert("4@s.whatsapp.net".into(), "draft".into());
+        let listed = |app: &App| -> Vec<String> {
+            app.visible_chats()
+                .iter()
+                .map(|chat| chat.id.clone())
+                .collect()
+        };
+        let mut ids = listed(&app);
+        ids.sort();
+        assert_eq!(
+            ids,
+            [
+                "1@s.whatsapp.net",
+                "3@s.whatsapp.net",
+                "4@s.whatsapp.net",
+                "7@g.us",
+                "8@s.whatsapp.net"
+            ]
+        );
+        assert_eq!(app.archived_count(), 0);
+        // Opened from the contacts, the chat shows while it is open.
+        app.open_chat = Some("2@s.whatsapp.net".into());
+        assert!(listed(&app).contains(&"2@s.whatsapp.net".to_owned()));
+        app.open_chat = None;
+        // Once the person has a name, the chat is listed.
+        app.contacts.insert(
+            "2@s.whatsapp.net".into(),
+            Contact {
+                id: "2@s.whatsapp.net".into(),
+                full_name: Some("Grace".into()),
+                push_name: None,
+            },
+        );
+        assert!(listed(&app).contains(&"2@s.whatsapp.net".to_owned()));
+        // Nobody with a chat is offered twice among the contacts.
+        app.search = "grace".into();
+        assert!(app.matching_contacts().is_empty());
+    }
+
+    #[test]
     fn visible_chats_pin_first_and_filter() {
         let mut app = app();
         let mut a = Chat::new("1@s.whatsapp.net".into(), "Ada".into());
@@ -9881,6 +9989,7 @@ mod tests {
         let mut d = Chat::new("4@s.whatsapp.net".into(), "Dee".into());
         d.archived = true;
         app.chats = vec![b, a, c, d];
+        crate::model::speak_in(&mut app.chats);
         let names: Vec<&str> = app
             .visible_chats()
             .iter()
@@ -9922,6 +10031,7 @@ mod tests {
             .collect();
         assert_eq!(names, ["Cy", "Bob", "Ada"]);
         app.chat_filter = ChatFilter::All;
+        crate::model::speak_in(&mut app.chats);
         let names: Vec<&str> = app
             .visible_chats()
             .iter()
@@ -9957,6 +10067,7 @@ mod tests {
                 .map(|chat| chat.name.clone())
                 .collect()
         };
+        crate::model::speak_in(&mut app.chats);
         assert_eq!(
             names(&app),
             ["Ada", "Bob", "Club"],
@@ -10001,6 +10112,7 @@ mod tests {
             app.open_chat(id);
             app.chats[index].unread = 0;
         }
+        crate::model::speak_in(&mut app.chats);
         assert_eq!(app.visible_chats().len(), 2, "both still listed once read");
         // Choosing a filter again forgets the kept chats.
         app.apply(Action::SetChatFilter(ChatFilter::Unread), &ctx);
@@ -10110,6 +10222,7 @@ mod tests {
             app.chat_title(&app.chats[0].clone()),
             "Carmine Paolino (You)"
         );
+        crate::model::speak_in(&mut app.chats);
         for search in ["carmine", "you", "5550000"] {
             app.search = search.into();
             let ids: Vec<&str> = app
@@ -10435,6 +10548,7 @@ mod tests {
         app.contacts.insert(contact.id.clone(), contact);
         for query in ["angel", "ÁNGEL", "A\u{301}ngel"] {
             app.search = query.into();
+            crate::model::speak_in(&mut app.chats);
             assert_eq!(app.visible_chats().len(), 1, "{query}");
             assert_eq!(app.matching_contacts().len(), 1, "{query}");
         }

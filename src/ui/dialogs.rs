@@ -513,6 +513,15 @@ fn forward(app: &mut App, ui: &mut egui::Ui, from_chat: &str, messages: &[String
         .chats
         .iter()
         .filter(|chat| forwardable(chat))
+        // An empty chat is offered only for someone with a name, not the
+        // bare numbers of people met in groups.
+        .filter(|chat| {
+            app.listed(chat)
+                || app
+                    .contacts
+                    .get(&chat.id)
+                    .is_some_and(|contact| contact.display_name().is_some())
+        })
         .filter(|chat| {
             needle.is_empty()
                 || crate::util::search_key(&app.chat_title(chat)).contains(&needle)
