@@ -2029,9 +2029,16 @@ impl App {
                 numbers.push(name);
             } else {
                 // The saved first name, as WhatsApp shows here, whole: it can
-                // hold several words. Without one, the whole name.
+                // hold several words. Without one (a profile name, or a
+                // contact synced before first names were kept), the first
+                // word, so the line stays short.
                 let first = self.contacts.get(id).and_then(Contact::first_name);
-                names.push(first.unwrap_or(name.trim_start_matches('~')).to_owned());
+                let name = name.trim_start_matches('~');
+                names.push(
+                    first
+                        .unwrap_or_else(|| name.split_whitespace().next().unwrap_or(name))
+                        .to_owned(),
+                );
             }
         }
         names.sort_by_key(|name| name.to_lowercase());
@@ -11316,12 +11323,13 @@ mod name_tests {
             );
             chat.participants.push(id);
         }
-        // A profile name is not split either.
+        // Without a saved first name (a profile name, or a contact synced
+        // before first names were kept) the line keeps the first word.
         chat.participants.push("2@s.whatsapp.net".into());
         app.contacts.get_mut("2@s.whatsapp.net").unwrap().push_name = Some("Bob Builder".into());
         assert_eq!(
             app.participant_names(&chat),
-            "Bob Builder, Grace, Mary Ann Evans, My Dih, Stray Name"
+            "Bob, Grace, Mary, My Dih, Stray"
         );
     }
 
