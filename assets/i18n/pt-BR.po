@@ -4586,8 +4586,8 @@ msgid "Waiting for another transcription…"
 msgstr "Aguardando outra transcrição…"
 
 #: src/transcribe.rs
-msgid "Transcribing on this computer…"
-msgstr "Transcrevendo neste computador…"
+msgid "Transcribing…"
+msgstr "Transcrevendo…"
 
 #: src/transcribe.rs
 msgid "Transcript"

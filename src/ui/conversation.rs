@@ -7742,7 +7742,7 @@ fn transcription_status(
                     }
                     _ => {
                         theme::spinner(ui, 13.0, palette.accent);
-                        tr("Transcribing on this computer…")
+                        tr("Transcribing…")
                     }
                 };
                 theme::text(ui, label, theme::regular(12.5), palette.text);

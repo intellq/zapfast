@@ -4422,7 +4422,7 @@ msgid "Waiting for another transcription…"
 msgstr ""
 
 #: src/transcribe.rs
-msgid "Transcribing on this computer…"
+msgid "Transcribing…"
 msgstr ""
 
 #: src/transcribe.rs
