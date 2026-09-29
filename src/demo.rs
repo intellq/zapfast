@@ -9741,6 +9741,85 @@ mod tests {
         render(&mut app, &ctx);
         assert!(app.reply_to.is_none());
     }
+
+    /// Where the chat list's right edge is: the first chat row spans the
+    /// list's width.
+    fn chat_list_right(ctx: &egui::Context) -> f32 {
+        ctx.data(|data| data.get_temp::<egui::Rect>(crate::ui::chats::chat_row_id(sample_ids()[0])))
+            .expect("the first chat is listed")
+            .right()
+    }
+
+    /// Drags from `from` through each x in `path` at one height, returning
+    /// the chat list's right edge after every step, and releases.
+    fn drag_list_edge(app: &mut App, ctx: &egui::Context, from: f32, path: &[f32]) -> Vec<f32> {
+        let y = 400.0;
+        let press = |x: f32, pressed| egui::Event::PointerButton {
+            pos: egui::pos2(x, y),
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame_with(
+            app,
+            ctx,
+            vec![egui::Event::PointerMoved(egui::pos2(from, y))],
+        );
+        frame_with(app, ctx, vec![press(from, true)]);
+        let mut edges = Vec::new();
+        for &x in path {
+            frame_with(app, ctx, vec![egui::Event::PointerMoved(egui::pos2(x, y))]);
+            edges.push(chat_list_right(ctx));
+        }
+        let last = path.last().copied().unwrap_or(from);
+        frame_with(app, ctx, vec![press(last, false)]);
+        render(app, ctx);
+        edges
+    }
+
+    /// #239: a chat list dragged out past its widest follows the pointer
+    /// back in the same drag, instead of sticking at its widest.
+    #[test]
+    fn the_chat_list_shrinks_back_from_its_widest() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let edge = chat_list_right(&ctx);
+        let out = (1..=30).map(|step| edge + 10.0 * step as f32);
+        let back = (1..=40).map(|step| edge + 300.0 - 5.0 * step as f32);
+        let path: Vec<f32> = out.chain(back).collect();
+        let edges = drag_list_edge(&mut app, &ctx, edge, &path);
+        let end = *path.last().expect("a path");
+        assert!(
+            (chat_list_right(&ctx) - end).abs() < 12.0,
+            "the list stopped at {} with the pointer at {end}: {edges:?}",
+            chat_list_right(&ctx)
+        );
+    }
+
+    /// #239: a drag to the left, taken on the conversation's side of the
+    /// list's edge, narrows the list and never widens it.
+    #[test]
+    fn dragging_the_chat_list_edge_left_never_widens_it() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let start = chat_list_right(&ctx) + 2.0;
+        let path: Vec<f32> = (1..=6).map(|step| start - 5.0 * step as f32).collect();
+        let edges = drag_list_edge(&mut app, &ctx, start, &path);
+        assert!(
+            edges.iter().all(|&edge| edge < start),
+            "dragging left widened the list: {edges:?}"
+        );
+        assert!(
+            (chat_list_right(&ctx) - (start - 30.0)).abs() < 12.0,
+            "the list stopped at {} instead of {}: {edges:?}",
+            chat_list_right(&ctx),
+            start - 30.0
+        );
+    }
 }
 
 /// A long transcript lays out only the rows near the screen.
