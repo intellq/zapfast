@@ -10019,19 +10019,33 @@ mod long_chat_tests {
         frame(&mut app, &ctx, wheel(150.0));
         let mut before = painted_rows(&frame(&mut app, &ctx, wheel(150.0)));
         let mut step = None;
-        for _ in 0..60 {
+        for n in 0..60 {
             let after = painted_rows(&frame(&mut app, &ctx, wheel(150.0)));
             let moves: Vec<f32> = before
                 .iter()
                 .filter_map(|(row, y)| Some(after.get(row)? - y))
                 .collect();
             assert!(!moves.is_empty(), "some row stays on screen");
-            let step = *step.get_or_insert(moves[0]);
-            assert!(step > 100.0, "the view scrolls up: {step}");
-            for moved in moves {
+            // Whatever the frame moved by, every row on screen took it: a row
+            // measured for the first time moves the rows below it and nothing
+            // else, so it would stand out here.
+            for moved in &moves {
                 assert!(
-                    (moved - step).abs() < 1.0,
-                    "a row moved {moved} where the scroll moves {step}"
+                    (moved - moves[0]).abs() < 1.0,
+                    "a row moved {moved} where the frame moves {}",
+                    moves[0]
+                );
+            }
+            // The delta that accumulated while the view was still held at the
+            // end lands in one frame, so the first frame's step is not the
+            // wheel's. Every frame after it is, and it does not change.
+            if n > 0 {
+                let step = *step.get_or_insert(moves[0]);
+                assert!(step > 100.0, "the view scrolls up: {step}");
+                assert!(
+                    (moves[0] - step).abs() < 1.0,
+                    "a frame moved {} where the scroll moves {step}",
+                    moves[0]
                 );
             }
             before = after;
