@@ -1078,8 +1078,11 @@ can decrypt the existing archive. If the original key cannot come back,
 **Start over…** on that screen renames the unreadable archive to
 `archive-unreadable-<date>.db` beside it, forgets the linked session, and
 shows the linking screen: linking again brings recent history back from your
-phone. Remove the old ZapFast entry under Linked devices on the phone
-afterwards. For help, report the OS, app version, whether
+phone. If the saved key has an invalid length, ZapFast replaces it only after
+the unreadable archive has been moved aside; retrying leaves it unchanged while
+the archive is still present. This cannot recover a key already lost by the
+OS credential store. Remove the old ZapFast entry under Linked devices on the
+phone afterwards. For help, report the OS, app version, whether
 the profile was moved/restored, and the error text with personal paths removed.
 Never attach the archive, keys, or full logs from older releases.
 
