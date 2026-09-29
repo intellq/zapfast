@@ -16,19 +16,36 @@ fn image_uri_for_platform(path: &str, windows: bool) -> String {
     format!("file://{}{path}", if windows { "/" } else { "" })
 }
 
+/// The local time zone.
+fn zone() -> jiff::tz::TimeZone {
+    #[cfg(test)]
+    if let Some(clock) = fixed_clock::get() {
+        return clock.zone;
+    }
+    jiff::tz::TimeZone::system()
+}
+
 /// Converts a Unix timestamp to local time.
 fn zoned(unix_seconds: i64) -> Option<Zoned> {
     let timestamp = Timestamp::from_second(unix_seconds).ok()?;
-    Some(timestamp.to_zoned(jiff::tz::TimeZone::system()))
+    Some(timestamp.to_zoned(zone()))
 }
 
 /// Today's local date.
 pub fn today() -> Date {
+    #[cfg(test)]
+    if let Some(when) = fixed_clock::get().and_then(|clock| zoned(clock.now)) {
+        return when.date();
+    }
     Zoned::now().date()
 }
 
 /// Whether the system shows times on a 12-hour clock. Read once per run.
 pub fn twelve_hour_clock() -> bool {
+    #[cfg(test)]
+    if let Some(clock) = fixed_clock::get() {
+        return clock.twelve_hour;
+    }
     static TWELVE_HOUR: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *TWELVE_HOUR.get_or_init(clock_preference::twelve_hour)
 }
@@ -390,7 +407,7 @@ pub fn day_key(unix_seconds: i64) -> Option<Date> {
 
 /// Unix-second half-open range for a local calendar day.
 pub fn day_bounds(date: Date) -> Option<(i64, i64)> {
-    day_bounds_in(date, &jiff::tz::TimeZone::system())
+    day_bounds_in(date, &zone())
 }
 
 /// [`day_bounds`] in `zone`. A day starts at its first instant, so one whose
@@ -482,7 +499,49 @@ pub fn long_date(locale: Locale, date: Date) -> String {
 
 /// The current time as a Unix timestamp.
 pub fn now() -> i64 {
+    #[cfg(test)]
+    if let Some(clock) = fixed_clock::get() {
+        return clock.now;
+    }
     Timestamp::now().as_second()
+}
+
+/// A clock for tests whose layout depends on the time: the current time, the
+/// time zone, and the clock format, fixed for the calling thread until the
+/// returned guard drops. Otherwise a sample built relative to now gains a day
+/// separator or wider times depending on when and where the test runs.
+#[cfg(test)]
+pub mod fixed_clock {
+    use std::cell::RefCell;
+
+    #[derive(Clone)]
+    pub struct Clock {
+        pub now: i64,
+        pub zone: jiff::tz::TimeZone,
+        pub twelve_hour: bool,
+    }
+
+    thread_local! {
+        static CLOCK: RefCell<Option<Clock>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn get() -> Option<Clock> {
+        CLOCK.with(|clock| clock.borrow().clone())
+    }
+
+    /// Restores the thread's previous clock when dropped.
+    #[must_use]
+    pub struct Guard(Option<Clock>);
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            CLOCK.with(|clock| *clock.borrow_mut() = self.0.take());
+        }
+    }
+
+    pub fn set(clock: Clock) -> Guard {
+        Guard(CLOCK.with(|slot| slot.borrow_mut().replace(clock)))
+    }
 }
 
 /// Case- and accent-insensitive matching without changing displayed names.

@@ -10360,7 +10360,18 @@ mod long_chat_tests {
 
     /// Opens the first sample chat with `ROWS` messages of varied length, far
     /// more than a screen, spread over many days.
-    fn long_chat() -> (App, egui::Context, String) {
+    ///
+    /// The rows' heights depend on the clock: where the local days start
+    /// places the day separators, and the clock format sets each footer's
+    /// width and so where a text wraps. The time, zone, and format are fixed
+    /// until the returned guard drops, so every run lays out the same rows.
+    fn long_chat() -> (App, egui::Context, String, crate::util::fixed_clock::Guard) {
+        let clock = crate::util::fixed_clock::set(crate::util::fixed_clock::Clock {
+            // 14:00 UTC on Wednesday 11 March 2026.
+            now: 1_773_237_600,
+            zone: jiff::tz::TimeZone::UTC,
+            twelve_hour: false,
+        });
         let mut app = app();
         let ctx = egui::Context::default();
         app.attach(&ctx);
@@ -10384,7 +10395,7 @@ mod long_chat_tests {
             row.unread = 0;
         }
         app.actions.push(Action::OpenChat(chat.clone()));
-        (app, ctx, chat)
+        (app, ctx, chat, clock)
     }
 
     fn frame(
@@ -10449,7 +10460,7 @@ mod long_chat_tests {
 
     #[test]
     fn only_rows_near_the_screen_are_laid_out() {
-        let (mut app, ctx, chat) = long_chat();
+        let (mut app, ctx, chat, _clock) = long_chat();
         for _ in 0..3 {
             frame(&mut app, &ctx, Vec::new());
         }
@@ -10469,7 +10480,7 @@ mod long_chat_tests {
     /// with the scroll: the same distance for the same scroll every frame.
     #[test]
     fn scrolling_up_moves_the_rows_by_the_scroll_alone() {
-        let (mut app, ctx, _) = long_chat();
+        let (mut app, ctx, _, _clock) = long_chat();
         for _ in 0..3 {
             frame(&mut app, &ctx, Vec::new());
         }
@@ -10517,7 +10528,7 @@ mod long_chat_tests {
 
     #[test]
     fn a_jump_far_up_lands_on_the_message_and_stays_there() {
-        let (mut app, ctx, chat) = long_chat();
+        let (mut app, ctx, chat, _clock) = long_chat();
         for _ in 0..3 {
             frame(&mut app, &ctx, Vec::new());
         }
@@ -10571,7 +10582,7 @@ mod long_chat_tests {
     /// glide after they lift; a gesture that begins over the list scrolls it.
     #[test]
     fn a_scroll_stays_with_the_pane_it_began_over() {
-        let (mut app, ctx, chat) = long_chat();
+        let (mut app, ctx, chat, _clock) = long_chat();
         // Enough chats for the list to scroll.
         let template = app.chats[1].clone();
         for n in 0..60 {
