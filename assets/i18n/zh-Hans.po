@@ -4613,7 +4613,7 @@ msgid "Show transcript"
 msgstr ""
 
 #: src/transcribe.rs
-msgid "Transcribe this audio on this computer. Nothing is sent."
+msgid "Transcribe this audio"
 msgstr ""
 
 #: src/transcribe.rs

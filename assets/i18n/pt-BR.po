@@ -4570,8 +4570,8 @@ msgid "Show transcript"
 msgstr "Mostrar transcrição"
 
 #: src/transcribe.rs
-msgid "Transcribe this audio on this computer. Nothing is sent."
-msgstr "Transcrever este áudio neste computador. Nada é enviado."
+msgid "Transcribe this audio"
+msgstr "Transcrever este áudio"
 
 #: src/transcribe.rs
 msgid "{done} of {total}"

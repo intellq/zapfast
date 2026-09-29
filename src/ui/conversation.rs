@@ -7616,7 +7616,7 @@ fn transcribe_pill(ui: &mut egui::Ui, view: &View<'_>, folded: bool) -> egui::Re
     let tooltip = if folded {
         tr("Show transcript")
     } else {
-        tr("Transcribe this audio on this computer. Nothing is sent.")
+        tr("Transcribe this audio")
     };
     let (rect, response) = ui.allocate_exact_size(vec2(30.0, 18.0), Sense::click());
     response.widget_info(|| {
