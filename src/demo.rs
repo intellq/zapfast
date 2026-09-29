@@ -7563,6 +7563,153 @@ mod tests {
         assert!(!copied.trim().is_empty(), "{copied:?}");
     }
 
+    /// Seeding a selection turns on full layout for the virtualized row
+    /// list, renumbering every positional widget id under the pressed row.
+    /// The press's own row must stay addressable or egui drops the
+    /// selection it just created.
+    #[test]
+    fn message_text_selects_with_virtualized_rows() {
+        let mut app = app();
+        let chat = sample_ids()[0].to_owned();
+        // A history taller than the nearby-row margin puts the earliest
+        // messages in placeholder rows, so the first selection flips the
+        // layout mode while the drag is already under way.
+        app.conversations.get_mut(&chat).unwrap().messages = (0..400)
+            .map(|i| {
+                message(
+                    &chat,
+                    &format!("m{i:03}"),
+                    i % 3 == 0,
+                    1_700_000_000 + i64::from(i),
+                    Content::text(format!("message number {i}")),
+                )
+            })
+            .collect();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        render(&mut app, &ctx);
+        // The end-pinned list shows the newest message: press it, sweep
+        // across the text, and copy the result.
+        let key = crate::ui::conversation::bubble_id(&chat, "m399").with("body");
+        let body = ctx
+            .data(|data| data.get_temp::<egui::Rect>(key))
+            .expect("the newest message is on screen");
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1180.0, 780.0));
+        assert!(screen.contains_rect(body), "m399 body on screen: {body:?}");
+        let from = egui::pos2(body.left() + 2.0, body.center().y);
+        let to = egui::pos2(body.center().x, body.center().y);
+        let press = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let mut copied = None;
+        for events in [
+            vec![egui::Event::PointerMoved(from), press(from, true)],
+            vec![egui::Event::PointerMoved(to)],
+            vec![egui::Event::PointerMoved(to)],
+            vec![press(to, false)],
+            vec![egui::Event::Copy],
+            vec![],
+        ] {
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| {
+                let ctx = ui.ctx().clone();
+                app.background_frame(&ctx);
+                app.frame_ui(ui);
+            });
+            output.textures_delta.clear();
+            for command in output.platform_output.commands {
+                if let egui::OutputCommand::CopyText(text) = command {
+                    copied = Some(text);
+                }
+            }
+        }
+        let copied = copied.expect("the sweep put text on the clipboard");
+        assert!(copied.contains("number 39"), "{copied:?}");
+        // The sweep stays inside one short line. A selection that silently
+        // re-anchors to another row copies every row it lands across.
+        assert!(!copied.contains('\n'), "{copied:?}");
+    }
+
+    /// A sweep across messages in a long history copies each of them (#269),
+    /// and a row the list stopped laying out keeps no body rect, so the
+    /// selection tests never aim at where it used to be.
+    #[test]
+    fn a_copy_across_messages_survives_rows_skipped_above() {
+        let mut app = app();
+        let chat = sample_ids()[0].to_owned();
+        app.conversations.get_mut(&chat).unwrap().messages = (0..400)
+            .map(|i| {
+                message(
+                    &chat,
+                    &format!("m{i:03}"),
+                    i % 3 == 0,
+                    1_700_000_000 + i64::from(i),
+                    Content::text(format!("message number {i}")),
+                )
+            })
+            .collect();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        render(&mut app, &ctx);
+        let body = |id: &str| {
+            let key = crate::ui::conversation::bubble_id(&chat, id).with("body");
+            ctx.data(|data| data.get_temp::<egui::Rect>(key))
+        };
+        assert!(body("m000").is_none(), "{:?}", body("m000"));
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1180.0, 780.0));
+        let first = body("m397").expect("m397 on screen");
+        let last = body("m399").expect("m399 on screen");
+        assert!(screen.contains_rect(first) && screen.contains_rect(last));
+        let from = egui::pos2(first.left() + 2.0, first.center().y);
+        let to = last.center();
+        let press = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let mut copied = None;
+        for events in [
+            vec![egui::Event::PointerMoved(from), press(from, true)],
+            vec![egui::Event::PointerMoved(to)],
+            vec![egui::Event::PointerMoved(to)],
+            vec![press(to, false)],
+            vec![egui::Event::Copy],
+            vec![],
+        ] {
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| {
+                let ctx = ui.ctx().clone();
+                app.background_frame(&ctx);
+                app.frame_ui(ui);
+            });
+            output.textures_delta.clear();
+            for command in output.platform_output.commands {
+                if let egui::OutputCommand::CopyText(text) = command {
+                    copied = Some(text);
+                }
+            }
+        }
+        let copied = copied.expect("the sweep put text on the clipboard");
+        for number in ["number 397", "number 398", "number 39"] {
+            assert!(copied.contains(number), "{number}: {copied:?}");
+        }
+        assert_eq!(copied.matches("] ").count(), 3, "{copied:?}");
+    }
+
     #[test]
     fn a_drag_selects_short_messages_on_opposite_sides_of_the_chat() {
         let mut app = app();
