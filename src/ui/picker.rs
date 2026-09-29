@@ -883,21 +883,18 @@ fn emoji_grid(
                                     1,
                                 );
                                 line.paint(ui, rect.center() - line.size() / 2.0, palette.text);
+                                // A solid corner triangle marks the emoji
+                                // that come in skin tones, as on the phone.
                                 if tones(emoji) {
-                                    ui.painter().line_segment(
-                                        [
-                                            pos2(rect.right() - 10.0, rect.bottom() - 8.0),
-                                            pos2(rect.right() - 6.0, rect.bottom() - 4.0),
-                                        ],
-                                        Stroke::new(1.0, palette.secondary),
-                                    );
-                                    ui.painter().line_segment(
-                                        [
-                                            pos2(rect.right() - 6.0, rect.bottom() - 4.0),
+                                    ui.painter().add(egui::Shape::convex_polygon(
+                                        vec![
                                             pos2(rect.right() - 2.0, rect.bottom() - 8.0),
+                                            pos2(rect.right() - 2.0, rect.bottom() - 2.0),
+                                            pos2(rect.right() - 8.0, rect.bottom() - 2.0),
                                         ],
-                                        Stroke::new(1.0, palette.secondary),
-                                    );
+                                        palette.secondary,
+                                        Stroke::NONE,
+                                    ));
                                 }
                             }
                             if response
