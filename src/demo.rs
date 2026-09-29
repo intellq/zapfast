@@ -5739,6 +5739,68 @@ mod tests {
         assert!(app.toasts.iter().any(|toast| toast.message == "Copied"));
     }
 
+    /// A downloaded image's menu copies the picture itself, as the preview
+    /// does; one that is not downloaded yet offers no copy.
+    #[test]
+    fn the_menu_of_a_downloaded_image_copies_it() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let chat = sample_ids()[0].to_owned();
+        let path = std::path::PathBuf::from("demo/photo.jpg");
+        for downloaded in [true, false] {
+            let mut app = app();
+            app.attach(&ctx);
+            app.backend.record_demo_commands();
+            let mut photo = media("image/jpeg", 120_000, Some(800), Some(600));
+            photo.path = downloaded.then(|| path.clone());
+            app.conversations.get_mut(&chat).unwrap().messages = vec![message(
+                &chat,
+                "copy-photo",
+                false,
+                100,
+                Content::Image {
+                    caption: None,
+                    media: photo,
+                },
+            )];
+            app.open_message_menu = Some("copy-photo".into());
+            render(&mut app, &ctx);
+            let nodes = accessible_nodes(&mut app, &ctx, Vec::new());
+            let copy = nodes
+                .iter()
+                .find(|(label, _, _)| label == "Copy image")
+                .map(|(_, _, pos)| *pos);
+            assert_eq!(
+                copy.is_some(),
+                downloaded,
+                "Copy image only when downloaded"
+            );
+            let Some(pos) = copy else { continue };
+            let press = |pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            accessible_nodes(
+                &mut app,
+                &ctx,
+                vec![egui::Event::PointerMoved(pos), press(true)],
+            );
+            accessible_nodes(&mut app, &ctx, vec![press(false)]);
+            assert!(
+                app.backend
+                    .take_demo_commands()
+                    .iter()
+                    .any(|command| matches!(
+                        command,
+                        crate::backend::Command::PrepareClipboardImage(copied) if copied == &path
+                    )),
+                "the image goes to the clipboard"
+            );
+        }
+    }
+
     #[test]
     fn enter_submits_the_locked_chat_code_and_keeps_wrong_codes_locked() {
         for code in ["wrong-code", "demo-code"] {
