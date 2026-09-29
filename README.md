@@ -555,6 +555,7 @@ de sincronizar a exclusão "para mim" com o celular é uma extensão deste fork.
   an empty cached subject remains eligible for recovery.
   Typing indicators show other participants, excluding your own linked devices.
   Newsletter channels are read-only; publishing channel posts is not supported.
+  Channels show their own pictures, read from the channel's details on WhatsApp.
 - **Account privacy.** Settings, Privacy shows who can see your last seen,
   online status, profile photo, and About, who can add you to groups, your
   account read receipts, and whether unknown callers are silenced, and

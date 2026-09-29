@@ -39,6 +39,7 @@ use whatsapp_rust::{MediaRetryResult, MediaReuploadRequest};
 
 mod blocking;
 mod calls;
+mod channel_pictures;
 mod device_store;
 mod favorite_chats;
 mod interactive;
@@ -607,6 +608,7 @@ pub async fn run(
         blocklist_fetching: false,
         blocklist_again: false,
         pending_avatars: HashMap::new(),
+        channel_pictures: Default::default(),
         sticker_fetches: HashSet::new(),
         sticker_downloads: HashSet::new(),
         recent_hashes: HashMap::new(),
@@ -907,6 +909,8 @@ struct Worker {
     blocklist_again: bool,
     /// Deferred profile-picture requests and retry counts.
     pending_avatars: HashMap<(String, bool), u32>,
+    /// Followed channels' pictures, which no profile-picture lookup finds.
+    channel_pictures: channel_pictures::ChannelPictures,
     /// Active recent-sticker downloads by hash.
     sticker_fetches: HashSet<String>,
     /// Active chat-sticker downloads by chat and message id.
@@ -2475,6 +2479,15 @@ impl Worker {
                         // chat's app state, so read it from the server.
                         match followed.newsletter().list_subscribed().await {
                             Ok(list) => {
+                                let pictures = list
+                                    .iter()
+                                    .map(|channel| {
+                                        (
+                                            channel.jid.to_string(),
+                                            super::ChannelPicture::of(channel),
+                                        )
+                                    })
+                                    .collect();
                                 let mutes = list
                                     .into_iter()
                                     .filter_map(|channel| {
@@ -2482,8 +2495,12 @@ impl Worker {
                                     })
                                     .collect();
                                 let _ = channels.send(Command::ChannelMutes(mutes));
+                                let _ = channels.send(Command::ChannelPictures(Some(pictures)));
                             }
-                            Err(error) => log::debug!("followed channels not listed: {error}"),
+                            Err(error) => {
+                                log::debug!("followed channels not listed: {error}");
+                                let _ = channels.send(Command::ChannelPictures(None));
+                            }
                         }
                     });
                     tokio::spawn(async move {
@@ -5707,6 +5724,7 @@ impl Worker {
                     }
                 }
             }
+            Command::ChannelPictures(list) => self.channel_pictures_listed(list),
             Command::SetFavorite(chat, favorite) => self.set_favorite_chat(&chat, favorite),
             Command::FavoritesSent {
                 through,
@@ -7109,6 +7127,10 @@ impl Worker {
             self.emit(Event::Avatar { id, full, path });
             return;
         }
+        if id.ends_with("@newsletter") {
+            self.fetch_channel_avatar(id, full);
+            return;
+        }
         // Try both of our ids for our profile picture.
         let candidates: Vec<Jid> = if self.is_me(&id) || id == self.me() {
             [self.me_pn.clone(), self.me_lid.clone()]
@@ -7163,25 +7185,7 @@ impl Worker {
                         Ok(None)
                     };
                 };
-                let url = picture.url;
-                let bytes = tokio::task::spawn_blocking(move || {
-                    crate::proxy::agent()
-                        .get(&url)
-                        .call()
-                        .and_then(|mut response| response.body_mut().read_to_vec())
-                        .map_err(|error| error.to_string())
-                })
-                .await
-                .map_err(|error| error.to_string())??;
-                if let Some(parent) = path.parent() {
-                    tokio::fs::create_dir_all(parent)
-                        .await
-                        .map_err(|error| error.to_string())?;
-                }
-                tokio::fs::write(&path, &bytes)
-                    .await
-                    .map_err(|error| error.to_string())?;
-                Ok::<Option<PathBuf>, String>(Some(path.clone()))
+                download_avatar(picture.url, path).await.map(Some)
             }
             .await;
             match fetched {
@@ -8820,6 +8824,28 @@ fn encode_jpeg(image: &image::DynamicImage, quality: u8) -> Result<Vec<u8>, Stri
         .encode_image(&image.to_rgb8())
         .map_err(|error| error.to_string())?;
     Ok(bytes)
+}
+
+/// Downloads a picture through the proxy settings into the avatar cache.
+async fn download_avatar(url: String, path: PathBuf) -> Result<PathBuf, String> {
+    let bytes = tokio::task::spawn_blocking(move || {
+        crate::proxy::agent()
+            .get(&url)
+            .call()
+            .and_then(|mut response| response.body_mut().read_to_vec())
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    tokio::fs::write(&path, &bytes)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(path)
 }
 
 /// Crops a picture file to a centred square and encodes it at the size
@@ -12726,6 +12752,7 @@ mod receipt_tests {
             blocklist_fetching: false,
             blocklist_again: false,
             pending_avatars: HashMap::new(),
+            channel_pictures: Default::default(),
             sticker_fetches: HashSet::new(),
             sticker_downloads: HashSet::new(),
             recent_hashes: HashMap::new(),

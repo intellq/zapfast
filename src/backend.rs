@@ -785,6 +785,9 @@ pub enum Command {
     /// Internal: phone numbers the protocol library knows for privacy ids (bare user parts, the
     /// privacy id first) that the archive had none for.
     LidsFound(Vec<(String, String)>),
+    /// Internal: the pictures of followed channels, or `None` when the list
+    /// could not be read.
+    ChannelPictures(Option<Vec<(ChatId, ChannelPicture)>>),
     /// Looks up the group behind an invite code without joining.
     PreviewInvite(String),
     /// Joins the group behind an invite code.
@@ -1081,6 +1084,17 @@ pub enum GroupEdit {
     Name(String),
     /// A new photo, or none.
     Picture { removed: bool },
+}
+
+/// Where a channel's picture lives on WhatsApp's media servers, as the
+/// channel's metadata names it. Channels have no profile picture a contact
+/// lookup would find.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ChannelPicture {
+    /// The full-size picture's direct path.
+    pub full: Option<String>,
+    /// The small preview's direct path.
+    pub preview: Option<String>,
 }
 
 /// Why the worker refused a send.
