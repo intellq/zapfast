@@ -7000,6 +7000,7 @@ mod tests {
                 id: id.into(),
                 full_name: Some("Ada".into()),
                 push_name: None,
+                first_name: None,
             },
         );
         assert_eq!(app.call_name(id), "Ada");
@@ -7019,6 +7020,7 @@ mod tests {
                 id: id.into(),
                 full_name: Some("Ada".into()),
                 push_name: None,
+                first_name: None,
             },
         );
         assert!(app.chat_is_private(id));
@@ -10224,6 +10226,7 @@ mod tests {
                 id: "8@s.whatsapp.net".into(),
                 full_name: Some("Hopper".into()),
                 push_name: None,
+                first_name: None,
             },
         );
         app.drafts.insert("4@s.whatsapp.net".into(), "draft".into());
@@ -10257,6 +10260,7 @@ mod tests {
                 id: "2@s.whatsapp.net".into(),
                 full_name: Some("Grace".into()),
                 push_name: None,
+                first_name: None,
             },
         );
         assert!(listed(&app).contains(&"2@s.whatsapp.net".to_owned()));
