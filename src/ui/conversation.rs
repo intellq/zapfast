@@ -3605,12 +3605,15 @@ fn bubble_frame(
     } else {
         widgets::Side::Left
     });
+    // A picture without a caption carries its time over its corner, so
+    // the bubble closes under it as evenly as it opens above it.
+    let over_picture = time_over_picture(message);
     let inner = Frame::new()
         .inner_margin(Margin {
             left: 10,
             right: 10,
             top: 6,
-            bottom: 5,
+            bottom: if over_picture { 6 } else { 5 },
         })
         .show(ui, |ui| {
             ui.set_max_width(max_width);
@@ -3669,7 +3672,11 @@ fn bubble_frame(
                 }
                 None => content(ui, view, message, cap, reserve, actions),
             };
-            footer(ui, &palette, message, slot);
+            if over_picture && let Some(picture) = slot {
+                footer_over_picture(ui, &palette, message, picture);
+            } else {
+                footer(ui, &palette, message, slot);
+            }
             if matches!(message.content, Content::Poll { .. }) {
                 super::polls::results_button(
                     ui,
@@ -4188,6 +4195,82 @@ fn footer_width(ui: &egui::Ui, message: &Message) -> f32 {
     time + edited + not_sent + if message.from_me { 19.0 } else { 0.0 }
 }
 
+/// Whether the message's time and ticks sit over its picture rather than
+/// on a line of their own: a picture without a caption, as in WhatsApp.
+fn time_over_picture(message: &Message) -> bool {
+    matches!(message.content, Content::Image { caption: None, .. })
+}
+
+/// Space between a picture's edges and the time drawn over it: the scrim
+/// around the time keeps a few points clear of the rounded corner.
+const OVER_PICTURE_INSET: Vec2 = vec2(10.0, 6.0);
+
+/// Paints the time and ticks over the bottom corner of a picture without a
+/// caption, in white on a soft dark scrim so they read on any picture.
+fn footer_over_picture(ui: &mut egui::Ui, palette: &Palette, message: &Message, picture: Rect) {
+    let font = theme::regular(11.0);
+    let time =
+        ui.painter()
+            .layout_no_wrap(crate::util::clock(message.timestamp), font, Color32::WHITE);
+    let failed = not_sent(message).then(|| {
+        ui.painter()
+            .layout_no_wrap(NOT_SENT.to_owned(), theme::medium(11.0), Color32::WHITE)
+    });
+    let tick_width = if message.from_me { 19.0 } else { 0.0 };
+    let width =
+        time.size().x + failed.as_ref().map_or(0.0, |galley| galley.size().x + 6.0) + tick_width;
+    let row = Rect::from_min_max(
+        pos2(
+            picture.right() - OVER_PICTURE_INSET.x - width,
+            picture.bottom() - OVER_PICTURE_INSET.y - 15.0,
+        ),
+        picture.right_bottom() - OVER_PICTURE_INSET,
+    );
+    if ui.is_rect_visible(picture) {
+        let scrim = row.expand2(vec2(6.0, 2.0)).intersect(picture);
+        ui.painter()
+            .rect_filled(scrim, scrim.height() / 2.0, Color32::from_black_alpha(110));
+    }
+    let mut x = row.right();
+    if message.from_me {
+        let ticks = Rect::from_center_size(pos2(x - 7.5, row.center().y), Vec2::splat(15.0));
+        widgets::ticks_in(ui, palette, ticks, message.status, Color32::WHITE);
+        x -= tick_width;
+    }
+    x -= time.size().x;
+    ui.painter().galley(
+        pos2(x, row.center().y - time.size().y / 2.0),
+        time,
+        Color32::WHITE,
+    );
+    if let Some(failed) = failed {
+        x -= failed.size().x + 6.0;
+        let label = Rect::from_min_size(
+            pos2(x, row.center().y - failed.size().y / 2.0),
+            failed.size(),
+        );
+        ui.painter().galley(label.min, failed, Color32::WHITE);
+        let status = Rect::from_min_max(label.min, pos2(row.right(), label.max.y));
+        let response = ui.interact(
+            status,
+            ui.id().with(("not-sent", &message.id)),
+            Sense::hover(),
+        );
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Label, true, NOT_SENT_HINT)
+        });
+        response.on_hover_text(NOT_SENT_HINT);
+    }
+    ui.ctx().data_mut(|data| {
+        data.insert_temp(footer_id(&message.chat, &message.id), row);
+    });
+}
+
+/// Where a message's time and ticks were drawn, for layout tests.
+pub fn footer_id(chat: &str, message: &str) -> egui::Id {
+    bubble_id(chat, message).with("footer")
+}
+
 fn not_sent(message: &Message) -> bool {
     message.from_me && message.status == Delivery::Failed
 }
@@ -4224,6 +4307,12 @@ fn footer(ui: &mut egui::Ui, palette: &Palette, message: &Message, slot: Option<
             rect
         }
     };
+    ui.ctx().data_mut(|data| {
+        data.insert_temp(
+            footer_id(&message.chat, &message.id),
+            Rect::from_min_max(pos2(rect.right() - width, rect.top()), rect.max),
+        );
+    });
     let mut x = rect.right();
     if message.from_me {
         let ticks = Rect::from_center_size(pos2(x - 7.5, rect.center().y), Vec2::splat(15.0));
@@ -4861,7 +4950,15 @@ fn content(
         }
         Content::Image { caption, media } => {
             let drawn = picture(ui, view, message, media, width, None, actions);
-            caption.as_ref().and_then(|caption| {
+            ui.ctx().data_mut(|data| {
+                data.insert_temp(bubble_id(&view.chat.id, &message.id).with("picture"), drawn);
+            });
+            let Some(caption) = caption else {
+                // The time and ticks go over the picture's corner.
+                return Some(drawn);
+            };
+            let drawn = drawn.width();
+            {
                 // Wrap the caption to the settled image or quote width.
                 let wrap = if message.quoted.is_some() {
                     width.max(drawn)
@@ -4878,7 +4975,7 @@ fn content(
                     Some(wrap),
                     actions,
                 )
-            })
+            }
         }
         Content::Sticker { media, animated } => {
             picture(ui, view, message, media, width, Some(*animated), actions);
@@ -6163,7 +6260,7 @@ fn picture(
     width: f32,
     sticker: Option<bool>,
     actions: &mut Vec<Action>,
-) -> f32 {
+) -> Rect {
     let palette = view.palette;
     let (max_width, max_height) = match sticker {
         Some(_) => (STICKER_SIDE, STICKER_SIDE),
@@ -6198,7 +6295,7 @@ fn picture(
             {
                 actions.push(Action::OpenFile(path.clone()));
             }
-            return size.x;
+            return rect;
         }
         // A row that is off screen only reserves its space. Loading the image
         // decodes it and uploads a texture, so it waits until it is scrolled
@@ -6220,8 +6317,7 @@ fn picture(
         let reserved = drawn.map_or_else(|| frame_size(media, None, max_width, max_height), fit);
         let position = ui.next_widget_position();
         if !ui.is_rect_visible(Rect::from_min_size(position, reserved)) {
-            ui.allocate_exact_size(reserved, Sense::hover());
-            return reserved.x;
+            return ui.allocate_exact_size(reserved, Sense::hover()).0;
         }
         let image = widgets::file_image(ui, path);
         return match image.load_for_size(ui.ctx(), vec2(max_width, max_height)) {
@@ -6237,7 +6333,7 @@ fn picture(
                         .corner_radius(if sticker.is_some() { 0.0 } else { 6.0 })
                         .sense(Sense::click()),
                 );
-                let drawn_rect = response.rect;
+                let rect = response.rect;
                 if response
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
                     .clicked()
@@ -6253,9 +6349,9 @@ fn picture(
                     actions.push(action);
                 }
                 if sticker.is_none() {
-                    sending_overlay(ui, view, message, drawn_rect, actions);
+                    sending_overlay(ui, view, message, rect, actions);
                 }
-                size.x
+                rect
             }
             Ok(egui::load::TexturePoll::Pending { .. }) => {
                 // A picture released while away loads again at its old size.
@@ -6269,7 +6365,7 @@ fn picture(
                     ui.painter().rect_filled(rect, 6.0, palette.surface);
                     theme::paint_spinner(ui, rect, 22.0, palette.accent);
                 }
-                size.x
+                rect
             }
             Err(_) => {
                 let size = if sticker.is_some() {
@@ -6292,7 +6388,7 @@ fn picture(
                 if response.clicked() {
                     actions.push(Action::OpenFile(path.clone()));
                 }
-                size.x
+                rect
             }
         };
     }
@@ -6384,7 +6480,7 @@ fn picture(
             message: message.id.clone(),
         });
     }
-    size.x
+    rect
 }
 
 /// Whether an own attachment or voice message is being prepared, uploaded

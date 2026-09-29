@@ -1520,6 +1520,69 @@ fn message_info_sample(app: &mut App, recorded: bool) {
 /// A three-second H.264 and AAC clip, the same one the video tests decode.
 const DEMO_VIDEO: &[u8] = include_bytes!("../tests/fixtures/video/sample.mp4");
 
+/// Pictures with and without captions, forwarded or not, from both sides,
+/// so the forwarded label and the time over a picture can be checked.
+fn photos_sample(app: &mut App) {
+    let id = SAMPLES[0].id;
+    let now = crate::util::now();
+    let dir = app.dirs.media_cache_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let wide = dir.join("demo-photo-wide.jpg");
+    if !wide.exists() {
+        // Light towards the bottom, where the time sits over it.
+        let (width, height) = (1200u32, 800u32);
+        let image = image::RgbImage::from_fn(width, height, |x, y| {
+            let t = y as f32 / height as f32;
+            let hue = 30.0 + 20.0 * x as f32 / width as f32;
+            image::Rgb(crate::theme::hsl_rgb(hue, 0.55, 0.45 + 0.45 * t))
+        });
+        let _ = image.save(&wide);
+    }
+    let photo = |caption: Option<&str>| {
+        let mut media = media("image/jpeg", 312_400, Some(1200), Some(800));
+        media.path = Some(wide.clone());
+        Content::Image {
+            caption: caption.map(str::to_owned),
+            media,
+        }
+    };
+    let mut rows = vec![
+        message(
+            id,
+            "photos-caption",
+            true,
+            0,
+            photo(Some("The workshop, from the gallery")),
+        ),
+        message(id, "photos-in", false, 0, photo(None)),
+        message(id, "photos-out", true, 0, photo(None)),
+        message(
+            id,
+            "photos-forwarded-in",
+            false,
+            0,
+            Content::text("Minutes from Tuesday, as promised"),
+        ),
+        message(
+            id,
+            "photos-forwarded-out",
+            true,
+            0,
+            Content::text("Passing this along"),
+        ),
+    ];
+    for (index, row) in rows.iter_mut().enumerate() {
+        row.timestamp = now - 600 + index as i64 * 100;
+        row.forwarded = matches!(
+            row.id.as_str(),
+            "photos-forwarded-in" | "photos-forwarded-out" | "photos-in"
+        );
+    }
+    app.conversations.entry(id.into()).or_default().messages = rows;
+    app.open_chat = Some(id.into());
+    app.scroll_to_bottom = true;
+}
+
 /// Replaces the first chat with videos: a downloaded one, a round video
 /// message of our own, and one still on WhatsApp's servers. `play` starts
 /// one of them.
@@ -1674,6 +1737,7 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
             "poll-empty" => poll_sample(app, false, false),
             "poll-voted" => poll_sample(app, true, false),
             "poll-results" => poll_sample(app, true, true),
+            "photos" => photos_sample(app),
             "drafts" => {
                 // Unsent text in two chats besides the open one, whose
                 // draft is in the composer.
@@ -11052,6 +11116,64 @@ mod call_surface_tests {
             shapes = output.shapes;
         }
         shapes
+    }
+
+    fn rect(ctx: &egui::Context, id: egui::Id) -> Option<egui::Rect> {
+        ctx.data(|data| data.get_temp::<egui::Rect>(id))
+    }
+
+    fn photos() -> (App, egui::Context) {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        apply_flags(&mut app, Some("photos"));
+        frames(&mut app, &ctx, egui::vec2(1180.0, 1400.0));
+        (app, ctx)
+    }
+
+    /// A picture without a caption carries its time and ticks over its
+    /// bottom corner, and its bubble closes just under it; with a caption
+    /// they stay on the caption's line below the picture (#251).
+    #[test]
+    fn a_picture_without_a_caption_carries_its_time_over_its_corner() {
+        let (_app, ctx) = photos();
+        let chat = SAMPLES[0].id;
+        for id in ["photos-in", "photos-out"] {
+            let bubble = crate::ui::conversation::bubble_id(chat, id);
+            let frame = rect(&ctx, bubble.with("rect")).expect("the bubble was drawn");
+            let picture = rect(&ctx, bubble.with("picture")).expect("the picture was drawn");
+            let footer = rect(&ctx, crate::ui::conversation::footer_id(chat, id))
+                .expect("the time was drawn");
+            assert!(
+                picture.contains_rect(footer),
+                "{id}: the time is over the picture ({footer:?} in {picture:?})"
+            );
+            assert!(
+                picture.right() - footer.right() <= 12.0
+                    && picture.bottom() - footer.bottom() <= 8.0,
+                "{id}: the time sits in the picture's bottom corner ({footer:?} in {picture:?})"
+            );
+            assert!(
+                frame.bottom() - picture.bottom() <= 7.0,
+                "{id}: no strip under the picture ({picture:?} in {frame:?})"
+            );
+            assert!(
+                (frame.left() + 10.0 - picture.left()).abs() < 0.5
+                    && (frame.right() - 10.0 - picture.right()).abs() < 0.5,
+                "{id}: the bubble wraps the picture ({picture:?} in {frame:?})"
+            );
+        }
+        let bubble = crate::ui::conversation::bubble_id(chat, "photos-caption");
+        let picture = rect(&ctx, bubble.with("picture")).expect("the captioned picture");
+        let footer = rect(
+            &ctx,
+            crate::ui::conversation::footer_id(chat, "photos-caption"),
+        )
+        .expect("the captioned picture's time");
+        assert!(
+            footer.top() >= picture.bottom(),
+            "with a caption the time stays below the picture ({footer:?}, {picture:?})"
+        );
     }
 
     /// A chat with unsent text shows it in its row, after an accent
