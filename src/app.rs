@@ -1938,8 +1938,16 @@ impl App {
             Content::Text { text, .. } | Content::Interactive { text, .. } => {
                 crate::markup::plain(text, &self.mention_list(message))
             }
-            _ => self.resolve_mention_tokens(&message.summary()),
+            _ => self.preview_line(&message.summary(), message),
         }
+    }
+
+    /// Plain text taken from `message` (a caption summary, a matched line)
+    /// with its mentions named as its body names them, including privacy-id
+    /// mentions the contact list cannot resolve on its own; any other
+    /// `@number` token of a known person is named too.
+    pub fn preview_line(&self, text: &str, message: &Message) -> String {
+        self.resolve_mention_tokens(&crate::markup::plain(text, &self.mention_list(message)))
     }
 
     /// Whether a direct chat uses a saved address-book name.
@@ -11358,5 +11366,32 @@ mod name_tests {
             thumbnail: None,
         };
         assert_eq!(app.message_text(&message), "ciao @Carmine");
+
+        // A caption mentioning a privacy id is named through the message's
+        // mentions, which carry the canonical id, in notifications and
+        // search results alike.
+        let photo = Message {
+            content: Content::Image {
+                caption: Some("@987654321012345 looks sharp".into()),
+                media: Media {
+                    mime: "image/jpeg".into(),
+                    size: 100,
+                    width: None,
+                    height: None,
+                    path: None,
+                    state: MediaState::Idle,
+                },
+            },
+            mentions: vec![MentionRef {
+                user: "987654321012345".into(),
+                id: "15550001111@s.whatsapp.net".into(),
+            }],
+            ..message
+        };
+        assert_eq!(app.message_text(&photo), "Photo: @Carmine looks sharp");
+        assert_eq!(
+            app.preview_line("@987654321012345 looks sharp", &photo),
+            "@Carmine looks sharp"
+        );
     }
 }

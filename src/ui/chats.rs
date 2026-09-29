@@ -774,7 +774,7 @@ fn hit_row(app: &mut App, ui: &mut egui::Ui, hit: &Message) {
         }
         let words = widgets::line(
             ui,
-            &crate::markup::plain(&app.resolve_mention_tokens(&hit.summary()), &[]),
+            &app.preview_line(&hit.summary(), hit),
             theme::regular(13.0),
             palette.dim,
             (right - x).max(0.0),
