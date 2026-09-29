@@ -1529,6 +1529,9 @@ pub enum Action {
     FitImage,
     CloseImagePreview,
     OpenFile(PathBuf),
+    /// Opens ZapFast's log, or shows it in its folder when no application
+    /// takes it, and says so when neither works.
+    OpenLog(PathBuf),
     OpenFolder(PathBuf),
     /// Saves a copy of a downloaded attachment where the person chooses.
     SaveAttachmentAs {

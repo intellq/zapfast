@@ -4433,6 +4433,7 @@ impl App {
                     }
                 }
             }
+            Action::OpenLog(path) => self.backend.send(Command::OpenLog(path)),
             Action::SaveAttachmentAs { path, name } => {
                 self.backend
                     .send(Command::SaveAttachmentAs { source: path, name });

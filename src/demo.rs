@@ -5814,6 +5814,29 @@ mod tests {
         assert!(app.toasts.iter().any(|toast| toast.message == "Copied"));
     }
 
+    /// Opening the log hands it to the worker, which waits to see it open or
+    /// shows it in its folder, instead of the fire-and-forget attachment path
+    /// that opened nothing on Linux desktops without a handler for it.
+    #[test]
+    fn opening_the_log_goes_through_the_checked_opener() {
+        let ctx = egui::Context::default();
+        let mut app = app();
+        app.attach(&ctx);
+        app.backend.record_demo_commands();
+        let log = app.dirs.log_file();
+        app.actions.push(crate::model::Action::OpenLog(log.clone()));
+        render(&mut app, &ctx);
+        assert!(
+            app.backend
+                .take_demo_commands()
+                .iter()
+                .any(|command| matches!(
+                    command,
+                    crate::backend::Command::OpenLog(path) if path == &log
+                ))
+        );
+    }
+
     /// A downloaded image's menu copies the picture itself, as the preview
     /// does; one that is not downloaded yet offers no copy.
     #[test]
