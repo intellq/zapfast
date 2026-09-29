@@ -669,23 +669,37 @@ fn snippet(line: &str, query: &str) -> (String, Option<Range<usize>>) {
     (format!("…{kept}"), Some(found))
 }
 
-/// Where `needle` first appears in `text`, compared in lower case, as a
-/// byte range of `text`. Lowercasing can change a letter's length, so the
-/// comparison walks `text` instead of searching a lowercased copy.
+/// Where `needle` first appears in `text`, compared as the search compares
+/// ([`crate::util::search_key`]: no case, no accents), as a byte range of
+/// `text`. Folding can change a letter's length, so the comparison walks
+/// `text` instead of searching a folded copy.
 fn find_ignoring_case(text: &str, needle: &str) -> Option<Range<usize>> {
-    let needle = needle.trim().to_lowercase();
+    let needle = crate::util::search_key(needle.trim());
     if needle.is_empty() {
         return None;
     }
-    for (start, _) in text.char_indices() {
-        let mut lowered = String::new();
+    let fold = |letter: char| crate::util::search_key(letter.encode_utf8(&mut [0; 4]));
+    for (start, first) in text.char_indices() {
+        // A combining accent belongs to the letter before it.
+        if fold(first).is_empty() {
+            continue;
+        }
+        let mut folded = String::new();
         for (offset, letter) in text[start..].char_indices() {
-            lowered.extend(letter.to_lowercase());
-            if !needle.starts_with(&lowered) {
+            folded.push_str(&fold(letter));
+            if !needle.starts_with(&folded) {
                 break;
             }
-            if lowered.len() == needle.len() {
-                return Some(start..start + offset + letter.len_utf8());
+            if folded.len() == needle.len() {
+                // Take the accents that follow the last letter along.
+                let mut end = start + offset + letter.len_utf8();
+                for mark in text[end..].chars() {
+                    if !fold(mark).is_empty() {
+                        break;
+                    }
+                    end += mark.len_utf8();
+                }
+                return Some(start..end);
             }
         }
     }
@@ -754,6 +768,9 @@ mod tests {
         assert_eq!(find_ignoring_case("İstanbul", "i\u{307}s"), Some(0..3));
         assert_eq!(find_ignoring_case("مرحبا بالعالم", "بالعالم"), Some(11..25));
         assert_eq!(find_ignoring_case("nothing here", "engine"), None);
+        // Accents are ignored both ways, precomposed or combining.
+        assert_eq!(find_ignoring_case("Falei com Délio", "delio"), Some(10..16));
+        assert_eq!(find_ignoring_case("cafe\u{301} ok", "CAFÉ"), Some(0..6));
         assert_eq!(find_ignoring_case("anything", "  "), None);
     }
 

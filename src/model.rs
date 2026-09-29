@@ -655,14 +655,14 @@ impl Content {
     /// The first line of the text the archive search looks at that contains
     /// `query`, trimmed, or `None` when no line has it.
     pub fn text_matching(&self, query: &str) -> Option<String> {
-        let needle = query.trim().to_lowercase();
+        let needle = crate::util::search_key(query.trim());
         if needle.is_empty() {
             return None;
         }
         self.searchable_fields()
             .into_iter()
             .flat_map(str::lines)
-            .find(|line| line.to_lowercase().contains(&needle))
+            .find(|line| crate::util::search_key(line).contains(&needle))
             .map(|line| line.trim().to_owned())
     }
 

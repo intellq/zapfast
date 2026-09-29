@@ -78,7 +78,7 @@ pub fn search(library: &Library<'_>, query: &str) -> Vec<PathBuf> {
                 .iter()
                 .all(|term| term.iter().any(|emoji| emojis.contains(emoji)))
     };
-    let needle = query.to_lowercase();
+    let needle = crate::util::search_key(query);
     let mut seen = HashSet::new();
     let mut found = Vec::new();
     let everything = library
@@ -93,7 +93,7 @@ pub fn search(library: &Library<'_>, query: &str) -> Vec<PathBuf> {
         }
     }
     for pack in library.packs {
-        if pack.name.to_lowercase().contains(&needle) {
+        if crate::util::search_key(&pack.name).contains(&needle) {
             for path in &pack.stickers {
                 if seen.insert(path.clone()) {
                     found.push(path.clone());

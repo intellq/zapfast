@@ -1881,7 +1881,7 @@ impl App {
         if !chat.is_group() {
             return Vec::new();
         }
-        let needle = query.trim().to_lowercase();
+        let needle = crate::util::search_key(query.trim());
         let digits: String = query.chars().filter(char::is_ascii_digit).collect();
         self.participant_list(chat)
             .into_iter()
@@ -1892,9 +1892,7 @@ impl App {
                 if needle.is_empty() {
                     return true;
                 }
-                name.trim_start_matches('~')
-                    .to_lowercase()
-                    .contains(&needle)
+                crate::util::search_key(name.trim_start_matches('~')).contains(&needle)
                     || (!digits.is_empty()
                         && id
                             .split('@')

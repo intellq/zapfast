@@ -226,7 +226,7 @@ const SEARCH_COLUMNS: &str = "chat, id, sender, sender_name, from_me, timestamp,
 /// The lowercased text a search matches: text, captions, file names, poll
 /// questions, contact names and places, one per line.
 /// `Content::text_matching` previews from the same fields.
-const SEARCHED_TEXT: &str = "lower(
+const SEARCHED_TEXT: &str = "search_key(
     coalesce(json_extract(content, '$.text'), '') || char(10) ||
     coalesce(json_extract(content, '$.caption'), '') || char(10) ||
     coalesce(json_extract(content, '$.file_name'), '') || char(10) ||
@@ -242,8 +242,7 @@ fn search_pattern(needle: &str) -> Option<String> {
     (!needle.is_empty()).then(|| {
         format!(
             "%{}%",
-            needle
-                .to_lowercase()
+            crate::util::search_key(needle)
                 .replace('\\', "\\\\")
                 .replace('%', "\\%")
                 .replace('_', "\\_")
@@ -346,6 +345,19 @@ impl Archive {
 
     fn prepare(connection: Connection) -> Result<Self> {
         connection.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")?;
+        // SQLite's own lower() folds ASCII only; searches match as the chat
+        // list does, ignoring case and accents in every script.
+        connection.create_scalar_function(
+            "search_key",
+            1,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8
+                | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+            |context| {
+                Ok(crate::util::search_key(
+                    context.get_raw(0).as_str().unwrap_or_default(),
+                ))
+            },
+        )?;
         connection.execute_batch(SCHEMA)?;
         connection.execute_batch(labels::SCHEMA)?;
         connection.execute_batch(polls::SCHEMA)?;
@@ -1043,7 +1055,7 @@ impl Archive {
     }
 
     /// Searches visible message text, filenames, polls, contacts, and places.
-    /// ASCII matching is case-insensitive; other text follows SQLite behavior.
+    /// Matching ignores case and accents, as [`crate::util::search_key`] does.
     pub fn search_messages(&self, needle: &str, limit: usize) -> Result<Vec<Message>> {
         let sql = format!(
             "SELECT {SEARCH_COLUMNS}
@@ -1935,6 +1947,36 @@ pub(crate) mod tests {
                 .expect("day only")),
             vec!["m3".to_owned()]
         );
+    }
+
+    #[test]
+    fn search_ignores_case_and_accents() {
+        let archive = Archive::in_memory().expect("opens");
+        archive
+            .ensure_chat("1@s.whatsapp.net", "Ada")
+            .expect("chat");
+        let mut accented = message("1@s.whatsapp.net", "m1", 10, false);
+        accented.content = Content::text("Falei com o DÉLIO ontem");
+        let mut plain = message("1@s.whatsapp.net", "m2", 20, false);
+        plain.content = Content::text("Café com leite");
+        for row in [&accented, &plain] {
+            archive.insert_message(row, None).expect("insert");
+        }
+        let ids = |needle: &str| -> Vec<String> {
+            archive
+                .search_messages(needle, 10)
+                .expect("search")
+                .into_iter()
+                .map(|hit| hit.id)
+                .collect()
+        };
+        assert_eq!(ids("delio"), ["m1"]);
+        assert_eq!(ids("délio"), ["m1"]);
+        assert_eq!(ids("CAFE"), ["m2"]);
+        let in_chat = archive
+            .search_chat_messages("1@s.whatsapp.net", "cafe", None, None, 10)
+            .expect("search");
+        assert_eq!(in_chat.len(), 1);
     }
 
     #[test]

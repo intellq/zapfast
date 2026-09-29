@@ -508,14 +508,14 @@ fn forward(app: &mut App, ui: &mut egui::Ui, from_chat: &str, messages: &[String
     }
     ui.add_space(4.0);
 
-    let needle = app.forward_search.trim().to_lowercase();
+    let needle = crate::util::search_key(app.forward_search.trim());
     let mut chats: Vec<_> = app
         .chats
         .iter()
         .filter(|chat| forwardable(chat))
         .filter(|chat| {
             needle.is_empty()
-                || app.chat_title(chat).to_lowercase().contains(&needle)
+                || crate::util::search_key(&app.chat_title(chat)).contains(&needle)
                 || chat.phone().is_some_and(|phone| phone.contains(&needle))
         })
         .cloned()
