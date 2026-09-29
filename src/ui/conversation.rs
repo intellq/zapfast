@@ -5210,11 +5210,27 @@ fn content(
             );
             None
         }
-        Content::PhoneOnly { view_once, .. } => {
-            let text = if *view_once {
-                tr("View once message. For your privacy, it opens only on your phone.")
-            } else {
-                tr("This message can only be seen on your phone.")
+        Content::PhoneOnly {
+            view_once, once, ..
+        } => {
+            use crate::model::OnceMedia;
+            let text = match once {
+                Some(OnceMedia::Photo) => {
+                    tr("View once photo. For your privacy, it opens only on your phone.")
+                }
+                Some(OnceMedia::Video) => {
+                    tr("View once video. For your privacy, it opens only on your phone.")
+                }
+                Some(OnceMedia::Voice) => {
+                    tr("View once voice message. For your privacy, it opens only on your phone.")
+                }
+                Some(OnceMedia::Audio) => {
+                    tr("View once audio. For your privacy, it opens only on your phone.")
+                }
+                None if *view_once => {
+                    tr("View once message. For your privacy, it opens only on your phone.")
+                }
+                None => tr("This message can only be seen on your phone."),
             };
             mirrored_row(
                 ui,

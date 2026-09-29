@@ -785,6 +785,18 @@ pub fn populate(app: &mut App) {
             row.thumbnail = Some(sample_map());
             row
         },
+        // A photo sent to be viewed once, which opens only on the phone.
+        message(
+            ada,
+            "ada-view-once",
+            false,
+            older + 60 * 22,
+            Content::PhoneOnly {
+                view_once: true,
+                live_location: false,
+                once: Some(crate::model::OnceMedia::Photo),
+            },
+        ),
         message(ada, "ada-deleted", false, older + 60 * 25, Content::REVOKED),
     ];
     let conversation = app.conversations.get_mut(ada).expect("sample chat");
@@ -2246,6 +2258,7 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
                         Content::PhoneOnly {
                             view_once: false,
                             live_location: true,
+                            once: None,
                         },
                     ),
                 ];

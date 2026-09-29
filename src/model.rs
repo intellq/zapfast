@@ -523,7 +523,37 @@ pub enum Content {
         /// A live location, which WhatsApp shows only on the phone.
         #[serde(default)]
         live_location: bool,
+        /// What a view-once message holds, when it arrived as media this
+        /// device may not open rather than as a bare placeholder.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        once: Option<OnceMedia>,
     },
+}
+
+/// The kind of media a view-once message holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OnceMedia {
+    Photo,
+    Video,
+    Voice,
+    Audio,
+}
+
+impl OnceMedia {
+    /// The kind of view-once media `content` would be, if it is media that
+    /// can be sent to be viewed once.
+    pub fn of(content: &Content) -> Option<Self> {
+        match content {
+            Content::Image { .. } => Some(Self::Photo),
+            Content::Video { .. } => Some(Self::Video),
+            Content::Audio {
+                voice_note: true, ..
+            } => Some(Self::Voice),
+            Content::Audio { .. } => Some(Self::Audio),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -773,6 +803,15 @@ impl Content {
                 live_location: true,
                 ..
             } => tr("Live location").to_owned(),
+            Self::PhoneOnly {
+                once: Some(kind), ..
+            } => match kind {
+                OnceMedia::Photo => "View once photo",
+                OnceMedia::Video => "View once video",
+                OnceMedia::Voice => "View once voice message",
+                OnceMedia::Audio => "View once audio",
+            }
+            .to_owned(),
             Self::PhoneOnly {
                 view_once: true, ..
             } => tr("View once message").to_owned(),

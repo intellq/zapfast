@@ -822,7 +822,9 @@ de sincronizar a exclusão "para mim" com o celular é uma extensão deste fork.
   phone to upload it again. Downloads stop after two minutes with an inline
   retry error if they cannot finish; the menu disables Download while one is running.
   Cached attachment filenames use extensions of at most 16 ASCII letters, digits,
-  or hyphens; invalid or empty extensions are saved as `.bin`.
+  or hyphens; invalid or empty extensions are saved as `.bin`. A photo, video,
+  or voice message sent to be viewed once shows as a view-once placeholder:
+  WhatsApp opens it only on your phone, as it does in WhatsApp Web.
 - **Polls.** Choose **Create poll** from the plus menu beside the message
   field to create a poll with 2–12 answers. Turn off **Allow multiple
   answers** for a single-choice poll.

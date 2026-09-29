@@ -634,6 +634,7 @@ pub async fn run(
     worker.load_state();
     worker.backfill();
     worker.backfill_video_notes();
+    worker.backfill_view_once();
     worker.backfill_interactive();
     worker.relocate_media();
     if let Err(error) = worker.archive.fail_unuploaded_media() {
@@ -1489,7 +1490,7 @@ impl Worker {
                 continue;
             };
             let base = message.get_base_message();
-            let Some(mut content) = classify(base) else {
+            let Some(mut content) = classify(&message) else {
                 continue;
             };
             let Ok(Some(existing)) = self.archive.message(&chat, &id) else {
@@ -1527,6 +1528,54 @@ impl Worker {
                 "re-derived {updated} archived messages in {:.1?}",
                 started.elapsed()
             );
+            self.emit_chats();
+        }
+    }
+
+    /// Turns archived view-once media, filed as attachments that could never
+    /// download, into the view-once placeholder. Only rows without a local
+    /// file change, and only their content: an edit flag stays as it was.
+    fn backfill_view_once(&mut self) {
+        const KEY: &str = "view_once_media";
+        if self.archive.meta(KEY).ok().flatten().as_deref() == Some("1") {
+            return;
+        }
+        let rows = match self.archive.media_with_raw() {
+            Ok(rows) => rows,
+            Err(error) => {
+                log::warn!("could not read archived media: {error}");
+                return;
+            }
+        };
+        let mut updated = 0;
+        for (chat, id, raw) in rows {
+            let Ok(message) = wa::Message::decode_from_slice(&raw) else {
+                continue;
+            };
+            let Some(content @ Content::PhoneOnly { .. }) = classify(&message) else {
+                continue;
+            };
+            let Ok(Some(existing)) = self.archive.message(&chat, &id) else {
+                continue;
+            };
+            if existing
+                .content
+                .media()
+                .is_none_or(|media| media.path.is_some())
+            {
+                continue;
+            }
+            if self
+                .archive
+                .set_content(&chat, &id, &content, existing.edited)
+                .is_ok()
+            {
+                updated += 1;
+            }
+        }
+        let _ = self.archive.set_meta(KEY, "1");
+        if updated > 0 {
+            log::info!("marked {updated} archived messages as view once");
             self.emit_chats();
         }
     }
@@ -3207,7 +3256,7 @@ impl Worker {
                 }
                 Some(Type::MESSAGE_EDIT) => {
                     if let Some(edited) = protocol.edited_message.as_option()
-                        && let Some(mut content) = classify(edited.get_base_message())
+                        && let Some(mut content) = classify(edited)
                     {
                         // Preserve downloaded media when updating a caption.
                         if let Ok(Some(existing)) = self.archive.message(&chat, &target) {
@@ -3245,7 +3294,7 @@ impl Worker {
         if self.update_live_location(&chat, &sender, base, info) {
             return;
         }
-        let Some(mut content) = classify(base) else {
+        let Some(mut content) = classify(message) else {
             return;
         };
         if let Content::PhoneOnly { live_location, .. } = &mut content
@@ -3631,17 +3680,20 @@ impl Worker {
                 _ if live_location => Content::PhoneOnly {
                     view_once: false,
                     live_location: true,
+                    once: None,
                 },
                 // The phone never shares these with linked devices, so do not
                 // suggest that the message is still on its way.
                 wa_events::UnavailableType::ViewOnce => Content::PhoneOnly {
                     view_once: true,
                     live_location: false,
+                    once: None,
                 },
                 wa_events::UnavailableType::Hosted | wa_events::UnavailableType::Bot => {
                     Content::PhoneOnly {
                         view_once: false,
                         live_location: false,
+                        once: None,
                     }
                 }
                 _ => Content::Unsupported {
@@ -3783,7 +3835,7 @@ impl Worker {
             .map(|quoted| {
                 let base = quoted.get_base_message();
                 (
-                    classify(base)
+                    classify(quoted)
                         .map(|content| content.summary())
                         .unwrap_or_default(),
                     self.mentions_of(&mentioned_of(base)),
@@ -8521,8 +8573,28 @@ fn live_location_newer(share: &Message, incoming: &Content) -> bool {
     }
 }
 
-/// Converts a protocol message to visible content, or `None` for internal traffic.
-fn classify(base: &wa::Message) -> Option<Content> {
+/// Converts a protocol message to visible content, or `None` for internal
+/// traffic. Takes the whole message, wrappers included: view-once media
+/// arrives wrapped, and WhatsApp keeps it for the phone, so a linked device
+/// shows a placeholder instead of an attachment that cannot be fetched.
+fn classify(message: &wa::Message) -> Option<Content> {
+    let content = classify_base(message.get_base_message())?;
+    // Interactive messages travel in the same wrapper, so only media turns
+    // into a placeholder.
+    if message.is_view_once()
+        && let Some(kind) = crate::model::OnceMedia::of(&content)
+    {
+        return Some(Content::PhoneOnly {
+            view_once: true,
+            live_location: false,
+            once: Some(kind),
+        });
+    }
+    Some(content)
+}
+
+/// [`classify`] for a message with its wrappers already removed.
+fn classify_base(base: &wa::Message) -> Option<Content> {
     if let Some(text) = base.text_content() {
         let preview = base.extended_text_message.as_option().and_then(|extended| {
             let title = non_empty(&extended.title);
@@ -8666,6 +8738,7 @@ fn classify(base: &wa::Message) -> Option<Content> {
         return Some(Content::PhoneOnly {
             view_once: false,
             live_location: false,
+            once: None,
         });
     }
     let unsupported = |what: &str| {
@@ -9806,7 +9879,7 @@ fn parse_conversation(conversation: wa::Conversation) -> ParsedChat {
             });
             continue;
         }
-        let Some(mut content) = classify(base) else {
+        let Some(mut content) = classify(message) else {
             continue;
         };
         if matches!(content, Content::LiveLocation { .. })
@@ -9859,7 +9932,7 @@ fn parse_conversation(conversation: wa::Conversation) -> ParsedChat {
                 summary: context
                     .quoted_message
                     .as_option()
-                    .and_then(|quoted| classify(quoted.get_base_message()))
+                    .and_then(classify)
                     .map(|content| content.summary())
                     .unwrap_or_default(),
             })
@@ -10786,6 +10859,7 @@ mod tests {
                 Content::PhoneOnly {
                     view_once: false,
                     live_location: true,
+                    once: None,
                 },
                 "{id}"
             );
@@ -10863,6 +10937,7 @@ mod tests {
             Content::PhoneOnly {
                 view_once: false,
                 live_location: false,
+                once: None,
             }
         );
     }
@@ -10960,6 +11035,7 @@ mod tests {
             Content::PhoneOnly {
                 view_once: false,
                 live_location: true,
+                once: None,
             }
         );
         let (message, _) = live_position("unreadable", now, 1, 45.0, None);
@@ -11537,6 +11613,7 @@ mod tests {
                 Some(Content::PhoneOnly {
                     view_once: true,
                     live_location: false,
+                    once: None,
                 }),
             ),
             (
@@ -11545,6 +11622,7 @@ mod tests {
                 Some(Content::PhoneOnly {
                     view_once: false,
                     live_location: false,
+                    once: None,
                 }),
             ),
             ("later", wa_events::UnavailableType::Unknown, None),
@@ -11571,6 +11649,103 @@ mod tests {
                 None => assert!(matches!(stored, Content::Unsupported { .. })),
             }
         }
+    }
+
+    /// View-once media that arrives whole, in any of its wrappers or with
+    /// only the inline flag, is filed as the view-once placeholder for its
+    /// kind, never as an attachment to download. The same wrapper around an
+    /// interactive message, or around plain media, changes nothing else.
+    #[test]
+    fn view_once_media_becomes_a_placeholder_for_its_kind() {
+        use crate::model::OnceMedia;
+        let photo = || wa::message::ImageMessage {
+            mimetype: Some("image/jpeg".into()),
+            ..Default::default()
+        };
+        let wrap = |inner: wa::Message| wa::message::FutureProofMessage {
+            message: MessageField::some(inner),
+        };
+        let image = |view_once| wa::Message {
+            image_message: MessageField::some(wa::message::ImageMessage {
+                view_once,
+                ..photo()
+            }),
+            ..Default::default()
+        };
+        let placeholder = |kind| {
+            Some(Content::PhoneOnly {
+                view_once: true,
+                live_location: false,
+                once: Some(kind),
+            })
+        };
+        let wrapped = [
+            wa::Message {
+                view_once_message: MessageField::some(wrap(image(None))),
+                ..Default::default()
+            },
+            wa::Message {
+                view_once_message_v2: MessageField::some(wrap(image(Some(true)))),
+                ..Default::default()
+            },
+            wa::Message {
+                view_once_message_v2_extension: MessageField::some(wrap(image(None))),
+                ..Default::default()
+            },
+            image(Some(true)),
+        ];
+        for message in &wrapped {
+            assert_eq!(classify(message), placeholder(OnceMedia::Photo));
+        }
+        let video = wa::Message {
+            view_once_message_v2: MessageField::some(wrap(wa::Message {
+                video_message: MessageField::some(wa::message::VideoMessage {
+                    view_once: Some(true),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        assert_eq!(classify(&video), placeholder(OnceMedia::Video));
+        let audio = |ptt| wa::Message {
+            view_once_message_v2: MessageField::some(wrap(wa::Message {
+                audio_message: MessageField::some(wa::message::AudioMessage {
+                    ptt: Some(ptt),
+                    view_once: Some(true),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        assert_eq!(classify(&audio(true)), placeholder(OnceMedia::Voice));
+        assert_eq!(classify(&audio(false)), placeholder(OnceMedia::Audio));
+
+        assert!(matches!(
+            classify(&image(None)),
+            Some(Content::Image { .. })
+        ));
+        assert!(matches!(
+            classify(&image(Some(false))),
+            Some(Content::Image { .. })
+        ));
+        let buttons = wa::Message {
+            view_once_message: MessageField::some(wrap(wa::Message {
+                interactive_message: MessageField::some(wa::message::InteractiveMessage {
+                    body: MessageField::some(wa::message::interactive_message::Body {
+                        text: Some("Pick one".into()),
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        assert!(
+            !matches!(classify(&buttons), Some(Content::PhoneOnly { .. })),
+            "interactive messages share the wrapper and stay interactive"
+        );
     }
 
     #[test]
@@ -12576,6 +12751,59 @@ mod receipt_tests {
             forward_queue: None,
         };
         (worker, events_rx, inbox, wa_events)
+    }
+
+    /// View-once photos filed as attachments before they were recognised
+    /// become the placeholder; ordinary photos and any file already on disk
+    /// stay as they are.
+    #[test]
+    fn archived_view_once_media_becomes_the_placeholder() {
+        let (mut worker, _events, _commands, _wa) = worker();
+        worker.archive.ensure_chat(PEER, "Demo").unwrap();
+        let image = |view_once| wa::Message {
+            image_message: MessageField::some(wa::message::ImageMessage {
+                mimetype: Some("image/jpeg".into()),
+                view_once,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let once = image(Some(true));
+        let plain = image(None);
+        for (id, raw, path) in [
+            ("once", &once, None),
+            ("once-on-disk", &once, Some("/fixture/once.jpg")),
+            ("plain", &plain, None),
+        ] {
+            let mut message = own_message(id, 1);
+            let Some(Content::Image { mut media, caption }) = classify_base(raw.get_base_message())
+            else {
+                panic!("not an image");
+            };
+            media.path = path.map(std::path::PathBuf::from);
+            // Filed as an ordinary photo, before view once was recognised.
+            message.content = Content::Image { caption, media };
+            worker
+                .archive
+                .insert_message(&message, Some(&raw.encode_to_vec()))
+                .unwrap();
+        }
+        worker.backfill_view_once();
+        let stored = |id: &str| worker.archive.message(PEER, id).unwrap().unwrap().content;
+        assert_eq!(
+            stored("once"),
+            Content::PhoneOnly {
+                view_once: true,
+                live_location: false,
+                once: Some(crate::model::OnceMedia::Photo),
+            }
+        );
+        assert!(matches!(stored("once-on-disk"), Content::Image { .. }));
+        assert!(matches!(stored("plain"), Content::Image { .. }));
+        assert_eq!(
+            worker.archive.meta("view_once_media").unwrap().as_deref(),
+            Some("1")
+        );
     }
 
     #[test]
