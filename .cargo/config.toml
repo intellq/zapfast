@@ -1,6 +1,8 @@
 [env]
 # whisper.cpp (src/transcribe.rs): the bindings the crate ships, so building
 # needs no libclang, and a build for any x86-64 with AVX2 rather than for the
-# building machine's own processor.
+# building machine's own processor. The shipped bindings match Linux only:
+# the Windows release job deletes WHISPER_DONT_GENERATE_BINDINGS and has
+# bindgen make them.
 WHISPER_DONT_GENERATE_BINDINGS = "1"
 GGML_NATIVE = "OFF"
