@@ -2864,17 +2864,25 @@ mod tests {
                 .map(|placed| placed.rect().translate(pos.to_vec2()))
                 .reduce(|a, b| a.union(b))
                 .expect("rows");
+            let row_height = body.rows[0].row.size.y;
+            // A picture may overhang its row: Apple's cell, transparent above
+            // and below the emoji, and Segoe UI Emoji's narrower families,
+            // drawn at their full height, reach up to a tenth of a row past it.
+            let overhang = row_height * 0.1;
             // Only images inside the text are emoji; a wallpaper tile behind
             // the bubble can have its centre there too.
             let emoji: Vec<&egui::Rect> = images
                 .iter()
-                .filter(|image| body_rect.expand(1.0).contains_rect(**image))
+                .filter(|image| {
+                    body_rect
+                        .expand2(egui::vec2(1.0, overhang))
+                        .contains_rect(**image)
+                })
                 .collect();
             let placeholders = body.text().matches(crate::emoji::PLACEHOLDER).count();
             if crate::emoji::available() {
                 assert_eq!(emoji.len(), placeholders, "one bitmap per emoji");
             }
-            let row_height = body.rows[0].row.size.y;
             for image in &emoji {
                 assert!(
                     image.width().max(image.height()) >= row_height,
@@ -2894,11 +2902,7 @@ mod tests {
                         egui::vec2(glyph.advance_width, placed.row.size.y),
                     );
                     for image in &emoji {
-                        // A picture may overhang its row: Apple's cell,
-                        // transparent above and below the emoji, reaches
-                        // up to a tenth of a row past it. Only a sideways
-                        // overlap in the same line counts.
-                        let overhang = row_height * 0.1;
+                        // Only a sideways overlap in the same line counts.
                         assert!(
                             !image.shrink2(egui::vec2(0.5, overhang)).intersects(ink),
                             "emoji at {image:?} overlaps {:?} at {ink:?}",
