@@ -779,7 +779,7 @@ pub fn soft_button(
     active: bool,
 ) -> Response {
     let font = medium(13.0);
-    let color = if active { palette.window } else { palette.text };
+    let color = if active { palette.accent } else { palette.text };
     let galley = ui.painter().layout_no_wrap(label.to_string(), font, color);
     let icon_size = 15.0;
     let icon_width = if icon.is_some() { icon_size + 6.0 } else { 0.0 };
@@ -793,8 +793,9 @@ pub fn soft_button(
     focus_outline(ui, response.id, rect, rect.height() / 2.0);
     if ui.is_rect_visible(rect) {
         let hovered = response.hovered();
+        // Active as a selected filter chip is: a tint of the accent.
         let fill = if active {
-            palette.text
+            palette.accent.gamma_multiply(0.18)
         } else if hovered {
             palette.surface_hover
         } else {
