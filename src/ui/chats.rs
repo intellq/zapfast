@@ -1517,36 +1517,53 @@ fn unread_announcement(title: &str, chat: &Chat) -> String {
 /// A chat's own notification sound, overriding Settings for this chat.
 fn sound_menu(app: &mut App, ui: &mut egui::Ui, palette: &Palette, chat: &Chat) {
     use crate::settings::NotificationSound;
-    widgets::submenu(ui, palette, Icon::Volume2, tr("Notification sound"), |ui| {
-        let current = chat.notification_sound.clone();
-        for (sound, label) in [
-            (None, tr("Default")),
-            (Some(NotificationSound::Receive), "Pidgin"),
-            (Some(NotificationSound::Alert), tr("Pidgin alert")),
-            (Some(NotificationSound::System), tr("System sound")),
-            (Some(NotificationSound::None), tr("No sound")),
-        ] {
-            let checked = current == sound;
-            if widgets::menu_item(ui, palette, checked.then_some(Icon::Check), label) {
-                app.actions.push(Action::SetChatSound {
-                    chat: chat.id.clone(),
-                    sound,
-                });
+    let sounds = [
+        (None, tr("Default")),
+        (Some(NotificationSound::Receive), "Pidgin"),
+        (Some(NotificationSound::Alert), tr("Pidgin alert")),
+        (Some(NotificationSound::System), tr("System sound")),
+        (Some(NotificationSound::None), tr("No sound")),
+    ];
+    let custom = match &chat.notification_sound {
+        Some(NotificationSound::Custom(path)) => Some(path.file_name().map_or_else(
+            || tr("Custom").to_owned(),
+            |name| name.to_string_lossy().into_owned(),
+        )),
+        _ => None,
+    };
+    let entries: Vec<&str> = sounds
+        .iter()
+        .map(|(_, label)| *label)
+        .chain(custom.as_deref())
+        .chain([tr("Choose a file…")])
+        .collect();
+    widgets::submenu(
+        ui,
+        palette,
+        Icon::Volume2,
+        tr("Notification sound"),
+        &entries,
+        |ui| {
+            let current = chat.notification_sound.clone();
+            for (sound, label) in sounds {
+                let checked = current == sound;
+                if widgets::menu_item(ui, palette, checked.then_some(Icon::Check), label) {
+                    app.actions.push(Action::SetChatSound {
+                        chat: chat.id.clone(),
+                        sound,
+                    });
+                    ui.close();
+                }
+            }
+            if let Some(name) = &custom {
+                widgets::menu_item(ui, palette, Some(Icon::Check), name);
+            }
+            if widgets::menu_item(ui, palette, None, tr("Choose a file…")) {
+                app.actions.push(Action::PickChatSound(chat.id.clone()));
                 ui.close();
             }
-        }
-        if let Some(NotificationSound::Custom(path)) = &current {
-            let name = path.file_name().map_or_else(
-                || tr("Custom").to_owned(),
-                |name| name.to_string_lossy().into_owned(),
-            );
-            widgets::menu_item(ui, palette, Some(Icon::Check), &name);
-        }
-        if widgets::menu_item(ui, palette, None, tr("Choose a file…")) {
-            app.actions.push(Action::PickChatSound(chat.id.clone()));
-            ui.close();
-        }
-    });
+        },
+    );
 }
 
 #[cfg(test)]

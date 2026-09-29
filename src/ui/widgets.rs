@@ -375,14 +375,17 @@ pub fn menu_width(ui: &Ui, labels: &[&str], icons: bool) -> f32 {
 }
 
 /// A context-menu entry that opens a submenu, drawn like the plain entries
-/// beside it, with a chevron.
+/// beside it, with a chevron. The submenu is as wide as the widest of
+/// `entries` needs, not egui's default menu width.
 pub fn submenu<R>(
     ui: &mut Ui,
     palette: &Palette,
     icon: Icon,
     label: &str,
+    entries: &[&str],
     add_contents: impl FnOnce(&mut Ui) -> R,
 ) -> Option<egui::InnerResponse<R>> {
+    let submenu_width = menu_width(ui, entries, true).max(160.0);
     let width = ui.available_width();
     let (rect, response) = ui.allocate_exact_size(vec2(width, 28.0), Sense::click());
     theme::reveal_focus(&response);
@@ -427,7 +430,10 @@ pub fn submenu<R>(
             palette.text,
         );
     }
-    egui::containers::menu::SubMenu::new().show(ui, &response, add_contents)
+    egui::containers::menu::SubMenu::new().show(ui, &response, |ui| {
+        ui.set_width(submenu_width);
+        add_contents(ui)
+    })
 }
 
 pub fn menu_item(ui: &mut Ui, palette: &Palette, icon: Option<Icon>, label: &str) -> bool {
