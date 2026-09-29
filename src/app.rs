@@ -2336,6 +2336,17 @@ impl App {
             && crate::util::now() - message.timestamp <= REVOKE_WINDOW.as_secs() as i64
     }
 
+    /// A chat's unsent text on one line, for its row in the chat list. The
+    /// open chat's text is in the composer, where the reader sees it.
+    pub fn draft_preview(&self, chat: &str) -> Option<String> {
+        if self.open_chat.as_deref() == Some(chat) {
+            return None;
+        }
+        let draft = self.drafts.get(chat)?;
+        let line = draft.split_whitespace().collect::<Vec<_>>().join(" ");
+        (!line.is_empty()).then_some(line)
+    }
+
     /// Active typers in a chat as id and display name.
     pub fn typing_in(&self, chat: &str) -> Vec<(String, String)> {
         self.typing

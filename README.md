@@ -752,7 +752,8 @@ de sincronizar a exclusão "para mim" com o celular é uma extensão deste fork.
   focus to it; invoking search keeps focus in search, and
   Escape clears search and returns to the composer; another Escape closes the
   chat and saves your text draft. Drafts are kept in the encrypted archive, so
-  unsent text survives closing ZapFast and restarting. Open menus, dialogs, and unfinished actions
+  unsent text survives closing ZapFast and restarting, and the chat list shows
+  a chat's draft in its row, after "Draft:". Open menus, dialogs, and unfinished actions
   are dismissed first. Sending while reading older messages keeps your place; use the
   newest-message button or End to return to the latest message. With **Replace text with emoji** on in Settings,
   type `:name` to autocomplete an emoji without leaving the composer; it is

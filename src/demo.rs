@@ -1674,6 +1674,17 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
             "poll-empty" => poll_sample(app, false, false),
             "poll-voted" => poll_sample(app, true, false),
             "poll-results" => poll_sample(app, true, true),
+            "drafts" => {
+                // Unsent text in two chats besides the open one, whose
+                // draft is in the composer.
+                app.drafts
+                    .insert(SAMPLES[3].id.into(), "Bring the spare HDMI adapter".into());
+                app.drafts.insert(
+                    SAMPLES[2].id.into(),
+                    "Sounds good, see you at\nthe station".into(),
+                );
+                app.composer = "Still typing this one".into();
+            }
             "video" => video_sample(app, None),
             "video-playing" => video_sample(app, Some("demo-video")),
             "shared-contact" => {
@@ -11016,6 +11027,86 @@ mod call_surface_tests {
                 .collect();
         }
         labels
+    }
+
+    /// Runs frames at `size` and returns the last frame's shapes.
+    fn frames(
+        app: &mut App,
+        ctx: &egui::Context,
+        size: egui::Vec2,
+    ) -> Vec<egui::epaint::ClippedShape> {
+        let mut shapes = Vec::new();
+        for _ in 0..3 {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                    ..Default::default()
+                },
+                |ui| {
+                    let ctx = ui.ctx().clone();
+                    app.background_frame(&ctx);
+                    app.frame_ui(ui);
+                },
+            );
+            output.textures_delta.clear();
+            shapes = output.shapes;
+        }
+        shapes
+    }
+
+    /// A chat with unsent text shows it in its row, after an accent
+    /// "Draft:", while the open chat's text stays in the composer (#245).
+    #[test]
+    fn a_chat_with_a_draft_shows_it_in_the_list() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        apply_flags(&mut app, Some("drafts"));
+        let shapes = frames(&mut app, &ctx, egui::vec2(1180.0, 780.0));
+        let texts: Vec<(String, egui::Color32)> = shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) => Some((
+                    text.galley.text().to_owned(),
+                    text.galley
+                        .job
+                        .sections
+                        .first()
+                        .map_or(text.fallback_color, |section| section.format.color),
+                )),
+                _ => None,
+            })
+            .collect();
+        let labels: Vec<_> = texts
+            .iter()
+            .filter(|(text, _)| text.trim() == "Draft:")
+            .collect();
+        assert_eq!(labels.len(), 2, "two rows carry a draft: {texts:?}");
+        assert!(
+            labels.iter().all(|(_, color)| *color == app.palette.accent),
+            "the label is in the accent: {labels:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|(text, _)| text.starts_with("Sounds good, see you at")),
+            "a draft reads on one line: {texts:?}"
+        );
+        assert_eq!(
+            app.draft_preview(SAMPLES[2].id).as_deref(),
+            Some("Sounds good, see you at the station")
+        );
+        assert_eq!(
+            app.draft_preview(SAMPLES[0].id),
+            None,
+            "the open chat's text is in the composer"
+        );
+        app.drafts.insert(SAMPLES[1].id.into(), " \n ".into());
+        assert_eq!(
+            app.draft_preview(SAMPLES[1].id),
+            None,
+            "blank text is no draft"
+        );
     }
 
     #[test]
