@@ -269,6 +269,9 @@ pub async fn websocket(
         .wrap(host, stream)
         .await
         .map_err(|error| {
+            // The library's own line about this is reduced to a category, so
+            // the TLS error itself is kept here, under our own target.
+            log::warn!("TLS {via} failed: {error}");
             let what = tr("TLS {via} failed").replace("{via}", via);
             anyhow::anyhow!("{what}: {error}")
         })?;
@@ -280,6 +283,7 @@ pub async fn websocket(
         .connect_on(stream)
         .await
         .map_err(|error| {
+            log::warn!("WebSocket connect {via} failed: {error}");
             let what = tr("WebSocket connection {via} failed").replace("{via}", via);
             anyhow::anyhow!("{what}: {error}")
         })?;
