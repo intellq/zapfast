@@ -145,8 +145,10 @@ sozinho a partir das Releases do fork (não das do upstream).
   barra de pesquisa. A área de recentes mostra até três linhas, só as que
   têm emojis, sem linhas em branco, e, ao escolher outro tom do mesmo emoji,
   substitui a variante anterior em vez de duplicá-la. Nos recentes, o emoji
-  já está no tom escolhido: ele aparece sem a seta de variantes e um clique o
-  insere (ou reage com ele) imediatamente. Enquanto o seletor fica aberto, a
+  já está no tom escolhido: ele aparece sem a marca de variantes (um pequeno
+  triângulo sólido no canto inferior direito, como no celular) e um clique o
+  insere (ou reage com ele) imediatamente. Ao rolar os emojis, o ícone da
+  categoria que chega ao topo fica destacado na linha de categorias abaixo. Enquanto o seletor fica aberto, a
   ordem dos recentes não muda ao escolher um deles; a nova ordem aparece na
   próxima vez que ele for aberto.
   Cada caixa tem a sua lista: reagir atualiza só os mais usados do seletor
@@ -460,6 +462,23 @@ sozinho a partir das Releases do fork (não das do upstream).
 - **Aviso de cliente não oficial mais curto.** No cartão de abertura e no
   diálogo **Sobre**: "Cliente não oficial. Consulte os termos de serviço do
   WhatsApp."
+- **Bloqueio de contatos.** Bloqueie ou desbloqueie um contato pelo menu da
+  conversa (na lista ou no cabeçalho) ou pelas informações do contato, também
+  a partir de um participante de grupo. Bloquear pede confirmação, e o contato
+  não é avisado. A mudança vale no celular e nos outros aparelhos conectados e
+  só aparece depois que o WhatsApp a aceita; uma recusa é avisada. Numa
+  conversa bloqueada, a caixa de digitação dá lugar a "Você bloqueou este
+  contato." com **Desbloquear**, o botão de ligação some e o encaminhamento
+  mostra o contato como **Bloqueado**, sem deixar escolhê-lo. Em
+  **Configurações › Privacidade › Contatos bloqueados** fica a lista, com nome
+  e número, e um botão para desbloquear cada um. A biblioteca do protocolo não
+  avisa quando o celular muda a lista, então o ZapFast a pede ao conectar, ao
+  abrir Configurações e ao abrir uma conversa (no máximo uma vez por minuto);
+  o número de quem aparece só pelo id de privacidade (`@lid`) é buscado no
+  WhatsApp.
+- **Submenus na largura do conteúdo.** Os submenus **Som de notificação** e
+  **Etiquetas** do menu da conversa abriam com umas três vezes a largura
+  necessária; agora ficam do tamanho do item mais longo.
 
 Esta sincronização também incorpora mudanças recentes do upstream: confirmação
 antes de apagar mensagens, aba de figurinhas recebidas, recuperação de conexão
@@ -541,6 +560,18 @@ de sincronizar a exclusão "para mim" com o celular é uma extensão deste fork.
   category set to **My contacts except** shows as such; the people it excludes
   are chosen on the phone. The values are read when ZapFast connects and when
   Settings opens; without a connection they cannot be changed.
+- **Block contacts.** Block or unblock a contact from its chat menu, in the
+  list or the chat header, or from its info, including a group participant's.
+  Blocking asks first, and the contact is not told. The change applies on the
+  phone and every linked device, and shows once WhatsApp accepts it; a refusal
+  says so. A blocked chat replaces the composer with "You blocked this
+  contact." and **Unblock**, hides the call button, and the forward list shows
+  the contact as **Blocked** and does not let you choose it. Settings, Privacy,
+  **Blocked contacts** lists them by name and number, each with **Unblock**.
+  The protocol library does not report when the phone changes the list, so
+  ZapFast asks for it when it connects, when Settings opens, and when a chat
+  opens (at most once a minute); contacts listed only by privacy id (`@lid`)
+  have their number looked up on WhatsApp.
 - **Read state across devices.** Reading a chat syncs its unread badge with
   your phone and other linked devices, including when read receipts are off.
   Replies from another device clear preceding unread messages. In direct
@@ -806,7 +837,9 @@ de sincronizar a exclusão "para mim" com o celular é uma extensão deste fork.
   variant. The same choices are available when reacting to a message; the
   default yellow emoji remains an option. Recent emoji occupy up to three rows, only as many as they fill,
   and choosing another skin tone replaces the older tone of that emoji there;
-  a recent emoji is used in its tone with one click.
+  a recent emoji is used in its tone with one click. Emoji that come in skin
+  tones carry a small solid triangle in their corner, and the category tabs
+  under the grid highlight the section scrolled into view.
   Add stickers to Favorites with a
   right-click. Favorites
   sync with your phone both ways, and Recent holds only stickers you sent. Emoji autocomplete and
