@@ -3630,6 +3630,14 @@ impl App {
         self.last_keystroke = None;
     }
 
+    /// Keeps following outgoing messages only when the reader was already at
+    /// the newest edge. Sending from older history must not lose their place.
+    fn follow_outgoing(&mut self) {
+        if self.at_bottom {
+            self.scroll_to_bottom = true;
+        }
+    }
+
     fn send_text(&mut self, chat: ChatId, text: String, quoting: Option<String>) {
         let text = text.trim().to_owned();
         if text.is_empty() {
@@ -3673,8 +3681,7 @@ impl App {
             mentions,
             preview,
         });
-        self.scroll_to_bottom = true;
-        self.at_bottom = true;
+        self.follow_outgoing();
     }
 
     /// Replaces selected display-name mentions with WhatsApp's `@user`
@@ -3768,8 +3775,7 @@ impl App {
                 quoting: quoting.take(),
             });
         }
-        self.scroll_to_bottom = true;
-        self.at_bottom = true;
+        self.follow_outgoing();
     }
 
     #[allow(dead_code)]
@@ -3797,8 +3803,7 @@ impl App {
             mentions: Vec::new(),
             quoting: None,
         });
-        self.scroll_to_bottom = true;
-        self.at_bottom = true;
+        self.follow_outgoing();
     }
 
     /// Applies one call state from the backend.
@@ -4297,8 +4302,7 @@ impl App {
                         button,
                         choice,
                     });
-                    self.scroll_to_bottom = true;
-                    self.at_bottom = true;
+                    self.follow_outgoing();
                 }
             }
             Action::CreatePoll { chat, draft } => {
@@ -5072,8 +5076,7 @@ impl App {
                         quoting,
                     });
                     self.picker = None;
-                    self.scroll_to_bottom = true;
-                    self.at_bottom = true;
+                    self.follow_outgoing();
                     self.refocus_composer(ctx);
                 }
             }
@@ -5092,8 +5095,7 @@ impl App {
                     let quoting = self.reply_to.take();
                     self.backend.send(Command::SendGif { chat, gif, quoting });
                     self.picker = None;
-                    self.scroll_to_bottom = true;
-                    self.at_bottom = true;
+                    self.follow_outgoing();
                     self.refocus_composer(ctx);
                 }
             }
@@ -6165,8 +6167,7 @@ impl App {
                     samples,
                     quoting,
                 });
-                self.scroll_to_bottom = true;
-                self.at_bottom = true;
+                self.follow_outgoing();
             }
             return;
         };
@@ -9525,6 +9526,52 @@ mod tests {
         app.handle_events();
         assert_eq!(app.composer, "Newer draft");
         assert!(error_toasts(&app)[1].contains("not connected"));
+    }
+
+    #[test]
+    fn sending_a_reply_keeps_older_messages_in_view() {
+        let mut app = app();
+        let (backend, mut commands) = Backend::recording();
+        app.backend = backend;
+        let chat = "fixture@s.whatsapp.net";
+        app.open_chat = Some(chat.into());
+        app.at_bottom = false;
+        app.scroll_to_bottom = false;
+
+        app.apply(
+            Action::SendText {
+                chat: chat.into(),
+                text: "Reply fixture".into(),
+                quoting: Some("older-message".into()),
+            },
+            &egui::Context::default(),
+        );
+
+        assert!(!app.scroll_to_bottom, "the older position stays selected");
+        assert!(!app.at_bottom, "sending does not pretend the view moved");
+        assert!(
+            std::iter::from_fn(|| commands.try_recv().ok()).any(|command| matches!(
+                command,
+                Command::SendText { quoting: Some(id), .. } if id == "older-message"
+            ))
+        );
+
+        app.at_bottom = true;
+        app.scroll_to_bottom = false;
+        app.apply(
+            Action::SendText {
+                chat: chat.into(),
+                text: "Latest fixture".into(),
+                quoting: None,
+            },
+            &egui::Context::default(),
+        );
+
+        assert!(
+            app.scroll_to_bottom,
+            "a reader at the newest edge keeps following outgoing messages"
+        );
+        assert!(app.at_bottom);
     }
 
     #[test]
