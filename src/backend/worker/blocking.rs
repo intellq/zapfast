@@ -3,8 +3,13 @@
 //! nothing when the phone changes it.
 
 use super::*;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use whatsapp_rust::BlockingError;
+use whatsapp_rust::lid_pn_cache::LearningSource;
+use whatsapp_rust::wacore::iq::blocklist::GetBlocklistSpec;
+use whatsapp_rust::wacore::iq::spec::IqSpec;
+use whatsapp_rust::wacore::request::InfoQuery;
+use whatsapp_rust::wacore_binary::NodeRef;
 
 /// How long a fetched blocklist stands before opening a chat asks again.
 pub(super) const BLOCKLIST_REFRESH: Duration = Duration::from_secs(60);
@@ -31,6 +36,143 @@ async fn change_block(client: &Client, jid: &Jid, blocked: bool) -> Result<(), B
         }
         result => result,
     }
+}
+
+/// One blocked contact as the server lists it: its id, a privacy id on
+/// current accounts, and the number the server may send beside it.
+#[derive(Debug, PartialEq)]
+pub(super) struct Blocked {
+    pub(super) jid: Jid,
+    pub(super) pn: Option<Jid>,
+}
+
+/// The blocklist with the numbers the library's own query drops, and the
+/// attribute names its items carried, for the log.
+#[derive(Debug, Default)]
+pub(super) struct Blocklist {
+    pub(super) entries: Vec<Blocked>,
+    pub(super) attributes: BTreeSet<String>,
+}
+
+/// The library's blocklist query, read in full.
+struct FetchBlocklist;
+
+impl IqSpec for FetchBlocklist {
+    type Response = Blocklist;
+
+    fn build_iq(&self) -> InfoQuery<'static> {
+        GetBlocklistSpec.build_iq()
+    }
+
+    fn parse_response(&self, response: &NodeRef<'_>) -> anyhow::Result<Blocklist> {
+        Ok(match response.get_optional_child("list") {
+            Some(list) => parse_blocklist(list.get_children_by_tag("item")),
+            None => parse_blocklist(response.get_children_by_tag("item")),
+        })
+    }
+}
+
+pub(super) fn parse_blocklist<'a, 'b: 'a>(
+    items: impl Iterator<Item = &'a NodeRef<'b>>,
+) -> Blocklist {
+    let mut list = Blocklist::default();
+    for item in items {
+        list.attributes
+            .extend(item.attrs_iter().map(|(name, _)| name.to_string()));
+        let Some(jid) = item.get_attr("jid").and_then(|value| value.to_jid()) else {
+            continue;
+        };
+        let pn = item
+            .get_attr("pn_jid")
+            .and_then(|value| value.to_jid())
+            .map(|pn| pn.to_non_ad())
+            .filter(Jid::is_pn);
+        list.entries.push(Blocked {
+            jid: jid.to_non_ad(),
+            pn,
+        });
+    }
+    list
+}
+
+/// Fetches the blocklist and learns the number behind each privacy id: from
+/// the list itself, from what the library already knows, and last from the
+/// server's contact lookup. Only counts reach the log.
+async fn fetch_blocklist_numbers(
+    client: &Client,
+) -> Result<(Vec<String>, Vec<(String, String)>), &'static str> {
+    let list = client
+        .execute(FetchBlocklist)
+        .await
+        .map_err(|_| "server refused or timed out")?;
+    let mut numbers: BTreeMap<String, String> = BTreeMap::new();
+    let mut from_list = 0;
+    let mut from_library = 0;
+    let mut unresolved = Vec::new();
+    for entry in &list.entries {
+        if !entry.jid.is_lid() {
+            continue;
+        }
+        let lid = entry.jid.user.to_string();
+        if let Some(pn) = &entry.pn {
+            from_list += 1;
+            numbers.insert(lid.clone(), pn.user.to_string());
+            let _ = client
+                .add_lid_pn_mapping(&lid, &pn.user, LearningSource::BlocklistActive)
+                .await;
+        } else if let Ok(Some(pair)) = client.get_lid_pn_entry(&entry.jid).await {
+            from_library += 1;
+            numbers.insert(pair.lid.to_string(), pair.phone_number.to_string());
+        } else {
+            unresolved.push(entry.jid.clone());
+        }
+    }
+    let mut from_lookup = 0;
+    if !unresolved.is_empty()
+        && let Ok(found) = client.contacts().is_on_whatsapp(&unresolved).await
+    {
+        for result in found {
+            let lid = [Some(&result.jid), result.lid.as_ref()]
+                .into_iter()
+                .flatten()
+                .find(|jid| jid.is_lid());
+            let pn = [Some(&result.jid), result.pn_jid.as_ref()]
+                .into_iter()
+                .flatten()
+                .find(|jid| jid.is_pn());
+            if let (Some(lid), Some(pn)) = (lid, pn)
+                && numbers
+                    .insert(lid.user.to_string(), pn.user.to_string())
+                    .is_none()
+            {
+                from_lookup += 1;
+                let _ = client
+                    .add_lid_pn_mapping(&lid.user, &pn.user, LearningSource::Usync)
+                    .await;
+            }
+        }
+    }
+    let lids = list
+        .entries
+        .iter()
+        .filter(|entry| entry.jid.is_lid())
+        .count();
+    log::info!(
+        "blocklist: {} entries, {} privacy ids; numbers from the list {}, known {}, looked up {}, missing {}; item attributes {:?}",
+        list.entries.len(),
+        lids,
+        from_list,
+        from_library,
+        from_lookup,
+        lids - from_list - from_library - from_lookup,
+        list.attributes
+    );
+    let ids = list
+        .entries
+        .iter()
+        .map(|entry| entry.jid.to_string())
+        .collect();
+    Ok((ids, numbers.into_iter().collect()))
 }
 
 /// What went wrong, without anything that names the contact.
@@ -84,41 +226,29 @@ impl Worker {
         self.blocklist_asked = Some(Instant::now());
         let commands = self.commands.clone();
         tokio::spawn(async move {
-            let result = match client.blocking().get_blocklist().await {
-                Ok(entries) => {
-                    let mut found = Vec::new();
-                    let mut ids = Vec::new();
-                    for entry in entries {
-                        let jid = entry.jid.to_non_ad();
-                        if jid.is_lid()
-                            && let Ok(Some(pair)) = client.get_lid_pn_entry(&jid).await
-                        {
-                            found.push((pair.lid.to_string(), pair.phone_number.to_string()));
-                        }
-                        ids.push(jid.to_string());
-                    }
+            let result = fetch_blocklist_numbers(&client)
+                .await
+                .map(|(ids, numbers)| {
                     // Before the list, so its privacy ids already name numbers.
-                    if !found.is_empty() {
-                        let _ = commands.send(Command::LidsFound(found));
+                    if !numbers.is_empty() {
+                        let _ = commands.send(Command::LidsFound(numbers));
                     }
-                    Ok(ids)
-                }
-                Err(error) => Err(failure_kind(&error)),
-            };
+                    ids
+                });
+            if let Err(kind) = result {
+                log::warn!("blocklist not fetched: {kind}");
+            }
             let _ = commands.send(Command::BlocklistFetched(result));
         });
     }
 
     pub(super) fn blocklist_fetched(&mut self, result: Result<Vec<String>, &'static str>) {
         self.blocklist_fetching = false;
-        match result {
-            Ok(ids) => {
-                log::info!("blocklist: {} contacts", ids.len());
-                let before = self.blocked_ids();
-                self.blocklist = Some(ids);
-                self.blocklist_changed(&before);
-            }
-            Err(kind) => log::warn!("blocklist not fetched: {kind}"),
+        // A failed fetch was logged where it failed; the last list stands.
+        if let Ok(ids) = result {
+            let before = self.blocked_ids();
+            self.blocklist = Some(ids);
+            self.blocklist_changed(&before);
         }
         if std::mem::take(&mut self.blocklist_again) {
             self.fetch_blocklist(true);
@@ -201,5 +331,50 @@ impl Worker {
         self.emit(Event::BlockDone { chat, blocked, ok });
         // What the server holds now, whichever way it answered.
         self.fetch_blocklist(true);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use whatsapp_rust::wacore_binary::builder::NodeBuilder;
+
+    #[test]
+    fn the_blocklist_keeps_the_number_the_server_sends_beside_a_privacy_id() {
+        let lid: Jid = "100000012345678@lid".parse().unwrap();
+        let bare: Jid = "100000099999999@lid".parse().unwrap();
+        let pn: Jid = "12025550100@s.whatsapp.net".parse().unwrap();
+        let node = NodeBuilder::new("iq")
+            .children([NodeBuilder::new("list")
+                .children([
+                    NodeBuilder::new("item")
+                        .attr("jid", lid.to_string())
+                        .attr("pn_jid", pn.to_string())
+                        .attr("t", "1704067200")
+                        .build(),
+                    NodeBuilder::new("item")
+                        .attr("jid", bare.to_string())
+                        .build(),
+                ])
+                .build()])
+            .build();
+        let list = FetchBlocklist.parse_response(&node.as_node_ref()).unwrap();
+        assert_eq!(
+            list.entries,
+            [
+                Blocked {
+                    jid: lid,
+                    pn: Some(pn)
+                },
+                Blocked {
+                    jid: bare,
+                    pn: None
+                },
+            ]
+        );
+        assert_eq!(
+            list.attributes.into_iter().collect::<Vec<_>>(),
+            ["jid", "pn_jid", "t"]
+        );
     }
 }
