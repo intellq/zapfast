@@ -2894,8 +2894,13 @@ mod tests {
                         egui::vec2(glyph.advance_width, placed.row.size.y),
                     );
                     for image in &emoji {
+                        // A picture may overhang its row: Apple's cell,
+                        // transparent above and below the emoji, reaches
+                        // up to a tenth of a row past it. Only a sideways
+                        // overlap in the same line counts.
+                        let overhang = row_height * 0.1;
                         assert!(
-                            !image.shrink(0.5).intersects(ink),
+                            !image.shrink2(egui::vec2(0.5, overhang)).intersects(ink),
                             "emoji at {image:?} overlaps {:?} at {ink:?}",
                             glyph.chr
                         );
