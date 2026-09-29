@@ -98,6 +98,18 @@ pub struct Notifications {
     pending: std::collections::HashMap<String, Vec<(u64, tokio::sync::oneshot::Sender<Stop>)>>,
     /// Order of registration, so the oldest waiting notification is released first.
     registered: u64,
+    /// What unit tests would have shown, recorded instead of shown on the
+    /// desktop. Always empty outside tests.
+    pub shown: Vec<Shown>,
+}
+
+/// A notification a unit test asked for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Shown {
+    pub title: String,
+    pub body: String,
+    pub picture: Option<PathBuf>,
+    pub sound: NotificationSound,
 }
 
 impl Notifications {
@@ -164,6 +176,15 @@ impl Notifications {
         wake: impl Fn() + Send + 'static,
     ) {
         let cancelled = self.register(&target.chat);
+        if cfg!(test) {
+            self.shown.push(Shown {
+                title,
+                body,
+                picture,
+                sound,
+            });
+            return;
+        }
         let spawned = std::thread::Builder::new()
             .name("notification".into())
             .spawn(move || {
