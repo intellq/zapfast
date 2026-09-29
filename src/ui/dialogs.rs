@@ -1292,7 +1292,10 @@ fn confirm_delete_message(
             };
             if danger_button(ui, app, confirm_label.as_ref()) {
                 app.actions.push(if for_everyone {
-                    Action::DeleteForEveryone(id.to_owned())
+                    Action::DeleteForEveryone {
+                        chat: chat.to_owned(),
+                        id: id.to_owned(),
+                    }
                 } else {
                     Action::DeleteForMe {
                         chat: chat.to_owned(),

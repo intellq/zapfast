@@ -1565,8 +1565,12 @@ pub enum Action {
     /// Loads an outgoing message into the composer for editing.
     Edit(String),
     CancelEdit,
-    /// Revokes an outgoing message for everyone.
-    DeleteForEveryone(String),
+    /// Revokes an outgoing message for everyone. The chat travels with the
+    /// message because the reader may switch chats before confirming.
+    DeleteForEveryone {
+        chat: ChatId,
+        id: String,
+    },
     /// Deletes a message locally and optionally on the phone.
     DeleteForMe {
         chat: ChatId,
