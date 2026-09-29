@@ -7348,6 +7348,65 @@ mod tests {
         }
     }
 
+    /// A finished sweep goes to the primary selection, where the platform
+    /// has one, and leaves the clipboard alone until the reader copies.
+    #[test]
+    fn a_finished_sweep_leaves_the_clipboard_alone() {
+        if !crate::transcript::HAS_PRIMARY_SELECTION {
+            return;
+        }
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        render(&mut app, &ctx);
+        let chat = sample_ids()[0].to_owned();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1180.0, 780.0));
+        let rect = ["ada-format", "ada-link", "ada-reply", "ada-tall"]
+            .iter()
+            .find_map(|id| {
+                let key = crate::ui::conversation::bubble_id(&chat, id).with("body");
+                ctx.data(|data| data.get_temp::<egui::Rect>(key))
+                    .filter(|rect| screen.contains_rect(*rect))
+            })
+            .expect("a text body on screen");
+        let from = egui::pos2(rect.left() + 2.0, rect.center().y);
+        let to = egui::pos2(rect.center().x, rect.center().y);
+        let press = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        for events in [
+            vec![egui::Event::PointerMoved(from), press(from, true)],
+            vec![egui::Event::PointerMoved(to)],
+            vec![press(to, false)],
+            vec![],
+            vec![],
+        ] {
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| {
+                let ctx = ui.ctx().clone();
+                app.background_frame(&ctx);
+                app.frame_ui(ui);
+            });
+            output.textures_delta.clear();
+            assert!(
+                !output
+                    .platform_output
+                    .commands
+                    .iter()
+                    .any(|command| matches!(command, egui::OutputCommand::CopyText(_))),
+                "the clipboard changed without a copy"
+            );
+        }
+    }
+
     /// Message text can be selected and copied.
     #[test]
     fn message_text_can_be_swept_and_copied() {

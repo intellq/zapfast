@@ -41,6 +41,10 @@ pub struct PrimaryTranscript {
     pending: bool,
     /// This frame's copy was asked for here.
     diverting: bool,
+    /// The reader copied in the frame the selection was to be asked for:
+    /// their copy stays on the clipboard, and its text also goes to the
+    /// primary selection.
+    sharing: bool,
 }
 
 /// Whether this platform has a primary selection.
@@ -60,8 +64,12 @@ impl egui::plugin::Plugin for PrimaryTranscript {
 
     fn input_hook(&mut self, _ctx: &egui::Context, input: &mut egui::RawInput) {
         if std::mem::take(&mut self.pending) {
-            input.events.push(egui::Event::Copy);
-            self.diverting = true;
+            if input.events.contains(&egui::Event::Copy) {
+                self.sharing = true;
+            } else {
+                input.events.push(egui::Event::Copy);
+                self.diverting = true;
+            }
         }
     }
 
@@ -80,7 +88,9 @@ impl egui::plugin::Plugin for PrimaryTranscript {
     }
 
     fn output_hook(&mut self, _ctx: &egui::Context, output: &mut egui::FullOutput) {
-        if !std::mem::take(&mut self.diverting) {
+        let diverting = std::mem::take(&mut self.diverting);
+        let sharing = std::mem::take(&mut self.sharing);
+        if !diverting && !sharing {
             return;
         }
         // The selection's own text comes last, after any field's.
@@ -88,7 +98,7 @@ impl egui::plugin::Plugin for PrimaryTranscript {
         output.platform_output.commands.retain(|command| {
             if let egui::OutputCommand::CopyText(copied) = command {
                 text = Some(copied.clone());
-                false
+                sharing
             } else {
                 true
             }
