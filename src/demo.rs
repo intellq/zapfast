@@ -5330,6 +5330,47 @@ mod tests {
         assert!(egui::Popup::is_id_open(&ctx, popup), "and it stays open");
     }
 
+    /// #240: a right-click in the empty strip beside a bubble opens that
+    /// message's menu, on either side of the chat.
+    #[test]
+    fn right_click_beside_a_message_opens_its_menu() {
+        let chat = sample_ids()[0].to_owned();
+        for (message, own) in [("ada-voice", false), ("ada-doc", true)] {
+            let mut app = app();
+            let ctx = egui::Context::default();
+            app.attach(&ctx);
+            for _ in 0..3 {
+                render(&mut app, &ctx);
+            }
+            let id = crate::ui::conversation::bubble_id(&chat, message);
+            let rect = ctx
+                .data(|data| data.get_temp::<egui::Rect>(id.with("rect")))
+                .unwrap_or_else(|| panic!("{message} is on screen"));
+            let beside = if own {
+                egui::pos2(rect.left() - 60.0, rect.center().y)
+            } else {
+                egui::pos2(rect.right() + 60.0, rect.center().y)
+            };
+            let button = |pressed| egui::Event::PointerButton {
+                pos: beside,
+                button: egui::PointerButton::Secondary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            frame_with(
+                &mut app,
+                &ctx,
+                vec![egui::Event::PointerMoved(beside), button(true)],
+            );
+            frame_with(&mut app, &ctx, vec![button(false)]);
+            render(&mut app, &ctx);
+            assert!(
+                egui::Popup::is_id_open(&ctx, id.with("popup")),
+                "a right-click beside {message} opens its menu"
+            );
+        }
+    }
+
     #[test]
     fn ctrl_click_selects_messages_and_shift_click_takes_the_ones_between() {
         let mut app = app();

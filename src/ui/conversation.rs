@@ -3682,10 +3682,14 @@ fn bubble_frame(
 
     reaction_affordance(ui, view, message, &bubble, actions);
     // Read right-click from input because inner widgets own their responses.
-    // Count only the part of the bubble inside the transcript's viewport: the
-    // chat header shares this layer, and a bubble scrolled under it is hidden
-    // there. Open only when no floating layer covers the chat panel.
-    let shown = bubble.rect.intersect(ui.clip_rect());
+    // The whole row counts, the empty strip beside the bubble included, as in
+    // other messaging apps (#240). Count only the part inside the transcript's
+    // viewport: the chat header shares this layer, and a bubble scrolled under
+    // it is hidden there. Open only when no floating layer covers the chat
+    // panel.
+    let viewport = ui.clip_rect();
+    let shown =
+        Rect::from_x_y_ranges(viewport.x_range(), bubble.rect.y_range()).intersect(viewport);
     let right_clicked = ui.input(|input| {
         input.pointer.secondary_clicked()
             && input
