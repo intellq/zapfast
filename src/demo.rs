@@ -10266,6 +10266,111 @@ mod long_chat_tests {
             "the message stays where it landed"
         );
     }
+
+    /// One frame of a trackpad gesture at `pos`: several small steps, which
+    /// egui applies at once, or the fingers lifting when `steps` is empty.
+    fn swipe(pos: egui::Pos2, steps: &[f32]) -> Vec<egui::Event> {
+        let wheel = |delta: f32, phase| egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, delta),
+            modifiers: egui::Modifiers::NONE,
+            phase,
+        };
+        std::iter::once(egui::Event::PointerMoved(pos))
+            .chain(if steps.is_empty() {
+                vec![wheel(0.0, egui::TouchPhase::End)]
+            } else {
+                steps
+                    .iter()
+                    .map(|&step| wheel(step, egui::TouchPhase::Move))
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// #274: a trackpad scroll that begins over the messages stays with them
+    /// when the pointer drifts over the chat list, fingers down and in the
+    /// glide after they lift; a gesture that begins over the list scrolls it.
+    #[test]
+    fn a_scroll_stays_with_the_pane_it_began_over() {
+        let (mut app, ctx, chat) = long_chat();
+        // Enough chats for the list to scroll.
+        let template = app.chats[1].clone();
+        for n in 0..60 {
+            let mut extra = template.clone();
+            extra.id = format!("39000000{n:04}@s.whatsapp.net");
+            app.chats.push(extra);
+        }
+        for _ in 0..3 {
+            frame(&mut app, &ctx, Vec::new());
+        }
+        let list = |ctx: &egui::Context| {
+            ctx.data(|data| data.get_temp::<f32>(crate::ui::chats::list_offset_id()))
+                .expect("the chat list has drawn")
+        };
+        let messages = |ctx: &egui::Context| {
+            ctx.data(|data| {
+                data.get_temp::<(f32, f32)>(crate::ui::conversation::scroll_metrics_id(&chat))
+            })
+            .expect("the message list has drawn")
+            .0
+        };
+        let over_list = egui::pos2(150.0, 400.0);
+        let over_messages = egui::pos2(700.0, 400.0);
+        let settle = |app: &mut App| {
+            for _ in 0..90 {
+                frame(app, &ctx, Vec::new());
+            }
+        };
+
+        // Down the list first, so it has room to move either way.
+        let before = list(&ctx);
+        for _ in 0..4 {
+            frame(&mut app, &ctx, swipe(over_list, &[-6.0; 6]));
+        }
+        frame(&mut app, &ctx, swipe(over_list, &[]));
+        settle(&mut app);
+        assert!(
+            list(&ctx) > before + 50.0,
+            "a swipe over the list scrolls it"
+        );
+
+        // Up the messages, then over the list with the fingers still down.
+        let list_before = list(&ctx);
+        let start = messages(&ctx);
+        for _ in 0..3 {
+            frame(&mut app, &ctx, swipe(over_messages, &[6.0; 6]));
+        }
+        let over = messages(&ctx);
+        assert!(over < start, "the swipe scrolls the messages up");
+        for _ in 0..3 {
+            frame(&mut app, &ctx, swipe(over_list, &[6.0; 6]));
+        }
+        assert!(
+            messages(&ctx) < over - 50.0,
+            "the messages keep scrolling with the pointer over the list"
+        );
+        assert_eq!(list(&ctx), list_before, "the list holds still");
+        // The fingers lift over the list; the glide stays with the messages.
+        let lifted = messages(&ctx);
+        frame(&mut app, &ctx, swipe(over_list, &[]));
+        settle(&mut app);
+        assert_eq!(list(&ctx), list_before, "the glide leaves the list alone");
+        if cfg!(target_os = "linux") {
+            assert!(messages(&ctx) < lifted, "the glide scrolls the messages");
+        }
+
+        // A new gesture over the list scrolls the list.
+        let still = messages(&ctx);
+        for _ in 0..3 {
+            frame(&mut app, &ctx, swipe(over_list, &[6.0; 6]));
+        }
+        assert!(
+            list(&ctx) < list_before,
+            "a new swipe over the list scrolls it"
+        );
+        assert_eq!(messages(&ctx), still, "and leaves the messages alone");
+    }
 }
 
 /// A picture whose file does not have the proportions its message states

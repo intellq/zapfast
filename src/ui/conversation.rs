@@ -2053,6 +2053,9 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
     // Taken up front: `names_or` below borrows the rest of `app` for the
     // whole function, so a pending scroll must come out before that.
     let pending_scroll = app.scroll_page.take();
+    // A scroll gesture that began over the messages stays with them when
+    // the pointer drifts off (#274), taken here for the same reason.
+    let carried = app.scroll_route.take(crate::app::ScrollPane::Messages);
     // An explicit jump (Ctrl+End, or the return-to-bottom button) must reach
     // the bottom even while a message bubble retains keyboard focus.
     let scroll_forced = std::mem::take(&mut app.scroll_to_bottom_forced);
@@ -2209,7 +2212,13 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                 .hover_pos()
                 .is_some_and(|pos| list.contains(pos))
     });
-    if view.anchor.is_some() || view.reaction.is_some() || wheel_over_list {
+    // The reaction bar holds the view still.
+    let carried = if view.reaction.is_some() {
+        0.0
+    } else {
+        carried
+    };
+    if view.anchor.is_some() || view.reaction.is_some() || wheel_over_list || carried != 0.0 {
         key_scroll = None;
     }
     let key_duration = ui.style().scroll_animation.duration.max;
@@ -2234,6 +2243,12 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
             // releases stick-to-bottom; setting the offset directly does not.
             let viewport = ui.clip_rect();
             *app.selection_view.lock().unwrap_or_else(|p| p.into_inner()) = Some(viewport);
+            if carried != 0.0 {
+                ui.scroll_with_delta_animation(
+                    vec2(0.0, carried),
+                    egui::style::ScrollAnimation::none(),
+                );
+            }
             // Only a drag that has moved past a click, such as selecting
             // text, scrolls; a click near an edge does not.
             let held_inside = ui.input(|input| {
@@ -2543,6 +2558,8 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                 ui.ctx().request_repaint();
             }
         });
+    app.scroll_route
+        .place(crate::app::ScrollPane::Messages, output.inner_rect);
     let at_bottom =
         output.state.offset.y + output.inner_rect.height() >= output.content_size.y - 24.0;
     ui.ctx().data_mut(|data| {

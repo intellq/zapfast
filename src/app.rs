@@ -45,6 +45,107 @@ enum ScrollAxis {
     Horizontal,
     Vertical,
 }
+
+/// A pane that scrolls on its own, which a scroll gesture stays with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScrollPane {
+    /// The chat list, or its collapsed avatar column.
+    Chats,
+    /// The open chat's messages.
+    Messages,
+}
+
+/// Keeps a scroll gesture, glide included, with the pane it began over
+/// (#274). egui scrolls whichever scroll area is under the pointer, so a
+/// gesture that drifted over the other pane moved that one instead, and so
+/// did the rest of its glide. The panes say where they are each frame; while
+/// a gesture lasts, vertical scrolling with the pointer away from its pane is
+/// taken from egui and handed to that pane, which applies it itself.
+#[derive(Default)]
+pub struct ScrollRoute {
+    /// Where each pane was drawn in the last frame.
+    placed: Vec<(ScrollPane, egui::Rect)>,
+    /// Where each pane is drawn in this frame. Behind a lock so a view can
+    /// record it while other parts of the app are borrowed.
+    placing: std::sync::Mutex<Vec<(ScrollPane, egui::Rect)>>,
+    /// The pane the gesture under way began over.
+    owner: Option<ScrollPane>,
+    /// When the gesture last had input.
+    last_input: Option<Instant>,
+    /// Whether the gesture's fingers lifted: new input starts another.
+    lifted: bool,
+    /// Scrolling taken for the owner this frame.
+    carry: Option<(ScrollPane, f32)>,
+}
+
+impl ScrollRoute {
+    /// Records where `pane` is drawn this frame.
+    pub fn place(&self, pane: ScrollPane, rect: egui::Rect) {
+        self.placing
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push((pane, rect));
+    }
+
+    /// The vertical scrolling taken for `pane` from over another place this
+    /// frame, for the pane to apply with `Ui::scroll_with_delta`.
+    pub fn take(&mut self, pane: ScrollPane) -> f32 {
+        match self.carry {
+            Some((to, delta)) if to == pane => {
+                self.carry = None;
+                delta
+            }
+            _ => 0.0,
+        }
+    }
+
+    /// Picks the gesture's pane and takes its scrolling from elsewhere.
+    /// `moved` is whether wheel input arrived this frame, `lifted` whether
+    /// the fingers left the trackpad, and `gliding` whether the app's own
+    /// glide is still adding to the scroll.
+    fn route(&mut self, ctx: &egui::Context, moved: bool, lifted: bool, gliding: bool) {
+        self.placed = std::mem::take(self.placing.get_mut().unwrap_or_else(|p| p.into_inner()));
+        self.carry = None;
+        let now = Instant::now();
+        // Floating layers, such as menus and dialogs, are no pane.
+        let under = ctx
+            .input(|input| input.pointer.hover_pos())
+            .filter(|pos| {
+                ctx.layer_id_at(*pos)
+                    .is_none_or(|layer| layer.order == egui::Order::Background)
+            })
+            .and_then(|pos| {
+                self.placed
+                    .iter()
+                    .find(|(_, rect)| rect.contains(pos))
+                    .map(|(pane, _)| *pane)
+            });
+        let recent = self
+            .last_input
+            .is_some_and(|at| now.duration_since(at) < SCROLL_GESTURE_GAP);
+        if moved {
+            if self.lifted || !recent {
+                self.owner = under;
+            }
+            self.last_input = Some(now);
+            self.lifted = false;
+        }
+        self.lifted |= lifted;
+        let settling = ctx.input(|input| input.smooth_scroll_delta != egui::Vec2::ZERO);
+        if !moved && !gliding && !settling && !recent {
+            self.owner = None;
+        }
+        let Some(owner) = self.owner else {
+            return;
+        };
+        if under != Some(owner) && self.placed.iter().any(|(pane, _)| *pane == owner) {
+            let delta = ctx.input_mut(|input| std::mem::take(&mut input.smooth_scroll_delta.y));
+            if delta != 0.0 {
+                self.carry = Some((owner, delta));
+            }
+        }
+    }
+}
 /// Delay after the last keystroke before clearing typing state.
 const COMPOSING_TIMEOUT: Duration = Duration::from_secs(4);
 /// How long an info toast stays, including its fade.
@@ -478,6 +579,8 @@ pub struct App {
     scroll_accum: egui::Vec2,
     glide: Option<egui::Vec2>,
     scroll_last_event: Option<Instant>,
+    /// Keeps a scroll gesture with the pane it began over.
+    pub scroll_route: ScrollRoute,
 
     pub page: Page,
     pub dialog: Option<Dialog>,
@@ -1024,6 +1127,7 @@ impl App {
             scroll_history: egui::util::History::new(2..16, 0.1),
             scroll_accum: egui::Vec2::ZERO,
             glide: None,
+            scroll_route: ScrollRoute::default(),
             scroll_last_event: None,
             page: Page::Chats,
             dialog: None,
@@ -6101,6 +6205,7 @@ impl App {
             }
         }
         self.lock_scroll_axis(ctx);
+        self.route_scroll(ctx);
         self.take_drops_and_pastes(ctx);
         crate::ui::show(self, ui);
         self.apply_actions(ctx);
@@ -6362,6 +6467,25 @@ impl App {
             ScrollAxis::Horizontal => input.smooth_scroll_delta.y = 0.0,
             ScrollAxis::Vertical => input.smooth_scroll_delta.x = 0.0,
         });
+    }
+
+    /// Keeps this frame's scrolling with the pane its gesture began over,
+    /// after the axis lock and glide have had their say.
+    fn route_scroll(&mut self, ctx: &egui::Context) {
+        let (moved, lifted) = ctx.input(|input| {
+            input
+                .events
+                .iter()
+                .fold((false, false), |(moved, lifted), event| match event {
+                    egui::Event::MouseWheel { delta, phase, .. } => (
+                        moved || *delta != egui::Vec2::ZERO,
+                        lifted || matches!(phase, egui::TouchPhase::End | egui::TouchPhase::Cancel),
+                    ),
+                    _ => (moved, lifted),
+                })
+        });
+        let gliding = self.glide.is_some();
+        self.scroll_route.route(ctx, moved, lifted, gliding);
     }
 
     /// Whether the latest wheel input came in points (a trackpad), which the
