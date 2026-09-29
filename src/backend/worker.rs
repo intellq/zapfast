@@ -2213,6 +2213,7 @@ impl Worker {
         self.group_info_requested.remove(&chat);
         if permanent {
             self.group_info_tries.remove(&chat);
+            self.drop_ghost_group(&chat);
             self.group_info_requested.insert(chat);
         } else {
             let tries = self.group_info_tries.entry(chat.clone()).or_insert(0);
@@ -2223,6 +2224,35 @@ impl Worker {
             } else {
                 self.group_info_requested.insert(chat);
             }
+        }
+    }
+
+    /// Forgets a group the server no longer knows for us (left, deleted, or
+    /// no access) that has no subject, no message and no mark of the
+    /// reader's: history and app state keep naming such groups, and they
+    /// would sit in the list as a bare "Group".
+    fn drop_ghost_group(&mut self, chat: &str) {
+        let Ok(Some(row)) = self.archive.chat(chat) else {
+            return;
+        };
+        let unnamed = row.name.trim().is_empty() || row.name == "Group";
+        if row.kind != ChatKind::Group
+            || row.group_subject_known
+            || !unnamed
+            || row.last.is_some()
+            || row.pinned
+            || row.favorite
+            || row.unread > 0
+            || row.marked_unread
+            || !row.labels.is_empty()
+        {
+            return;
+        }
+        if self.archive.delete_chat(chat).is_ok() {
+            log::info!("dropped a group the server no longer lists");
+            self.emit(Event::ChatRemoved {
+                chat: chat.to_owned(),
+            });
         }
     }
 
@@ -12173,6 +12203,36 @@ mod receipt_tests {
         worker.handle_failed_group("busy@g.us".to_owned(), false);
         assert_eq!(worker.group_info_retry.len(), 1);
         assert_eq!(worker.group_info_tries.get("busy@g.us"), Some(&1));
+    }
+
+    #[test]
+    fn a_group_the_server_no_longer_lists_is_dropped_only_when_bare() {
+        let (mut worker, events, _, _) = receipt_tests::worker();
+        const GHOST: &str = "1-1@g.us";
+        const NAMED: &str = "2-2@g.us";
+        const TALKED: &str = "3-3@g.us";
+        worker.archive.ensure_chat(GHOST, "Group").unwrap();
+        worker.archive.ensure_chat(NAMED, "Weekend").unwrap();
+        worker.archive.ensure_chat(TALKED, "Group").unwrap();
+        let row = Message {
+            chat: TALKED.into(),
+            ..receipt_tests::own_message("m", 100)
+        };
+        worker.archive.insert_message(&row, None).unwrap();
+        for chat in [GHOST, NAMED, TALKED] {
+            worker.handle_failed_group(chat.to_owned(), true);
+        }
+        assert!(worker.archive.chat(GHOST).unwrap().is_none());
+        assert!(worker.archive.chat(NAMED).unwrap().is_some());
+        assert!(worker.archive.chat(TALKED).unwrap().is_some());
+        let removed: Vec<String> = events
+            .try_iter()
+            .filter_map(|event| match event {
+                Event::ChatRemoved { chat } => Some(chat),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(removed, [GHOST]);
     }
 
     #[test]
