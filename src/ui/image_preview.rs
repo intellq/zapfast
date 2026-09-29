@@ -54,8 +54,6 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                     {
                         state.set_fit_scale(size.x / texture.size.x);
                     }
-                    let scroll_id =
-                        ui.make_persistent_id(egui::IdSalt::new("image-preview-scroll"));
                     let trackpad = app.scroll_from_trackpad();
                     // Read before the scroll area, which would otherwise take the
                     // wheel. The zoom itself is applied by `App` after the frame.
@@ -81,7 +79,8 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                         })
                         .inner;
                     let shown = &output.inner;
-                    // Stored after the scroll area, which clamps its offset to
+                    // Stored under the id the scroll area reads, from inside the
+                    // scope, and after it, as it clamps its offset to
                     // this frame's size; the next frame lays out the zoomed size
                     // with the pointed-at pixel still under the pointer.
                     if let Some((factor, pointer, zoomed)) = zoom {
@@ -94,7 +93,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                             pointer,
                             pointer,
                         );
-                        scroll.store(ctx, scroll_id);
+                        scroll.store(ctx, output.id);
                         app.actions.push(Action::ZoomImageBy(factor));
                     }
                     // 100% opens with the chosen point in the middle: the
@@ -111,7 +110,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                             anchor,
                             canvas / 2.0,
                         );
-                        scroll.store(ctx, scroll_id);
+                        scroll.store(ctx, output.id);
                         actions.push(Action::ImageActualSize);
                     };
                     if let Some(pos) = shown.double_click {
@@ -292,8 +291,9 @@ impl Buttons<'_> {
                 let x = picture.right() - 20.0 - (count - 1.0 - index as f32) * BUTTON_STEP;
                 let rect =
                     Rect::from_center_size(pos2(x, picture.top() + 20.0), Vec2::splat(BUTTON));
+                // Global ids: there is one preview, and the tour finds them.
                 let response = ui
-                    .interact(rect, ui.id().with(id), Sense::click())
+                    .interact(rect, egui::Id::new(id), Sense::click())
                     .on_hover_cursor(egui::CursorIcon::PointingHand);
                 response.widget_info(|| {
                     egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &hint)

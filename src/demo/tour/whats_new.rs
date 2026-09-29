@@ -165,7 +165,7 @@ pub(super) fn script() -> Vec<Cue> {
     add(15.4, Key(K::End, command(), "Ctrl + End · Latest messages"));
     add(16.2, Move(Bubble("ada-photo")));
     add(16.6, Click(left));
-    add(17.9, Move(Label("Zoom to 100%")));
+    add(17.9, Move(Widget("image-zoom")));
     add(18.3, Click(left));
     add(19.3, Key(K::Plus, Modifiers::NONE, "+ · Zoom in"));
     add(21.0, esc("Esc · Close the preview"));
