@@ -1011,14 +1011,21 @@ pub fn chip(ui: &mut Ui, palette: &Palette, label: &str) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
     if ui.is_rect_visible(rect) {
         let radius = CornerRadius::from(rect.height() / 2.0);
+        // A dark panel all but vanished on a dark chat; halfway to the
+        // incoming bubble's colour it reads as a chip without shouting.
+        let fill = if palette.dark {
+            palette.panel.lerp_to_gamma(palette.bubble_in, 0.5)
+        } else {
+            palette.panel
+        };
         ui.painter()
             .add(palette.bubble_shadow().as_shape(rect, radius));
         ui.painter().rect_filled(
             rect.translate(vec2(0.0, -theme::RAISED_EDGE)),
             radius,
-            palette.raised_edge(palette.panel),
+            palette.raised_edge(fill),
         );
-        ui.painter().rect_filled(rect, radius, palette.panel);
+        ui.painter().rect_filled(rect, radius, fill);
         ui.painter().galley(
             rect.center() - galley.size() / 2.0,
             galley,
