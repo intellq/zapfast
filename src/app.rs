@@ -4369,6 +4369,11 @@ impl App {
                 if to_chats.is_empty() || to_chats != self.forward_targets {
                     return;
                 }
+                // Forwarded to one chat, the reader goes there, as on the phone.
+                let destination = match to_chats.as_slice() {
+                    [only] if self.chat(only).is_some() => Some(only.clone()),
+                    _ => None,
+                };
                 self.backend.send(Command::Forward {
                     from_chat,
                     messages,
@@ -4378,6 +4383,9 @@ impl App {
                 self.forward_search.clear();
                 self.forward_targets.clear();
                 self.selection = None;
+                if let Some(destination) = destination {
+                    self.open_chat(destination);
+                }
             }
             Action::ToggleForwardTarget(chat) => {
                 if !matches!(self.dialog, Some(Dialog::Forward { .. })) {
@@ -7960,6 +7968,32 @@ mod tests {
         app.apply(Action::SelectMessage("second".into()), &ctx);
         app.apply(Action::ToggleSelected("second".into()), &ctx);
         assert!(app.selection.is_none());
+    }
+
+    #[test]
+    fn forwarding_to_one_chat_opens_it() {
+        let mut app = app();
+        let (backend, _commands) = Backend::recording();
+        app.backend = backend;
+        let ctx = egui::Context::default();
+        let (from, one, two) = ("1@s.whatsapp.net", "2@s.whatsapp.net", "3@s.whatsapp.net");
+        app.chats = [from, one, two]
+            .into_iter()
+            .map(|id| Chat::new(id.into(), id.into()))
+            .collect();
+        app.open_chat = Some(from.into());
+        let forward = |to: &[&str]| Action::Forward {
+            from_chat: from.into(),
+            messages: vec!["first".into()],
+            to_chats: to.iter().map(|id| (*id).into()).collect(),
+        };
+        // To several chats, the reader stays where they were.
+        app.forward_targets = vec![one.into(), two.into()];
+        app.apply(forward(&[one, two]), &ctx);
+        assert_eq!(app.open_chat.as_deref(), Some(from));
+        app.forward_targets = vec![one.into()];
+        app.apply(forward(&[one]), &ctx);
+        assert_eq!(app.open_chat.as_deref(), Some(one));
     }
 
     #[test]
