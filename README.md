@@ -31,7 +31,7 @@ Além das novidades do upstream, esta branch inclui as seguintes mudanças:
 
 As versões do fork ficam em
 [Releases](https://github.com/intellq/zapfast/releases/latest), para Linux e
-Windows x86_64. Os números seguem o upstream: as versões 0.17.1 e 0.17.2 são o
+Windows x86_64. Os números seguem o upstream: as versões 0.17.1 a 0.17.3 são o
 fork sobre o upstream 0.17.0, e depois do upstream 0.17.1 vem a 0.17.101. Os pacotes são
 assinados com a chave do fork, e o ZapFast instalado por eles se atualiza
 sozinho a partir das Releases do fork (não das do upstream).
