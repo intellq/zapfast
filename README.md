@@ -660,6 +660,9 @@ de sincronizar a exclusão "para mim" com o celular é uma extensão deste fork.
   original message is available and they have not been edited, without relinking.
   Other embedded attachments and templates containing only a
   reference to server-side text still need the phone.
+  Meta AI replies show as text, with code in monospace blocks and tables as
+  rows; their images, maps, and other media parts still need the phone, and a
+  reply made only of those shows as an unsupported message.
 - **Errors stay readable.** Confirmations such as "Copied" fade after a few
   seconds. Error messages stay above the composer until you dismiss them, and
   a button copies their text for a bug report. A repeated error replaces its
@@ -1188,7 +1191,7 @@ Use `--demo-page locked-prompt`, `locked-setup`, `new-chat`, `unnamed-group`,
 or `react-picker` for the new dialogs, shared group summaries, and reactions.
 `group-info`, `group-info-rename`, `group-info-saving`, and `group-info-locked`
 show a group's info with its name and photo editable, being renamed, saving,
-and locked to admins.
+and locked to admins. `meta-ai` shows a Meta AI reply with code and a table.
 
 The protocol dependency includes the upstream WhatsApp Business pairing fix.
 Device-store migration waits until an updated window is acknowledged, preserving

@@ -1061,6 +1061,49 @@ fn quote_sample(app: &mut App) {
     }
 }
 
+/// A chat with Meta AI: a question and a rich reply, drawn as the text the
+/// worker makes of it (#253).
+fn meta_ai_sample(app: &mut App) {
+    let id = "15550100000@s.whatsapp.net";
+    let now = crate::util::now();
+    let question = message(
+        id,
+        "meta-ai-question",
+        true,
+        now - 60,
+        Content::text("How do I reverse a string in Rust?"),
+    );
+    let mut reply = message(
+        id,
+        "meta-ai-reply",
+        false,
+        now,
+        Content::text(
+            "Collect its characters in reverse order:\n\n```\nlet reversed: String = text.chars().rev().collect();\n```\n\nMethod | Handles\nchars().rev() | Unicode scalar values\ngraphemes(true).rev() | Combined emoji and accents",
+        ),
+    );
+    reply.quoted = Some(Quoted {
+        id: "meta-ai-question".into(),
+        sender: ME.into(),
+        sender_name: None,
+        summary: "How do I reverse a string in Rust?".into(),
+        mentions: Vec::new(),
+    });
+    let mut chat = Chat::new(id.into(), "Meta AI".into());
+    chat.last_activity = now;
+    chat.last = Some(crate::model::LastMessage {
+        from_me: false,
+        sender: reply.sender.clone(),
+        sender_name: None,
+        summary: reply.summary(),
+        full: reply.content.full_summary(),
+        status: reply.status,
+    });
+    app.chats.insert(0, chat);
+    app.conversations.entry(id.into()).or_default().messages = vec![question, reply];
+    app.open_chat = Some(id.into());
+}
+
 /// A Recent shelf of animated stickers, more frames than the animation cache
 /// holds at once, for the picker's paused tiles (#165).
 fn animated_sticker_sample(app: &mut App) {
@@ -1671,6 +1714,7 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
                 )];
                 app.open_chat = Some(id.into());
             }
+            "meta-ai" => meta_ai_sample(app),
             "locked" => {
                 app.chats[0].locked = true;
                 app.open_chat = None;
@@ -4135,6 +4179,7 @@ mod tests {
             "chat-menu",
             "chat-header-menu",
             "channel",
+            "meta-ai",
             "locked",
             "locked-open",
             "locked-prompt",
