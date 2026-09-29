@@ -5445,6 +5445,62 @@ mod tests {
         assert_eq!(app.open_chat, Some(chat), "and leaves the chat open");
     }
 
+    /// #241: while selecting, a click on a message's text or beside its
+    /// bubble adds it, not only a click on the bubble's padding.
+    #[test]
+    fn while_selecting_a_click_on_the_text_or_beside_it_selects() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        for _ in 0..3 {
+            render(&mut app, &ctx);
+        }
+        let chat = sample_ids()[0].to_owned();
+        app.actions
+            .push(crate::model::Action::SelectMessage("ada-doc".into()));
+        render(&mut app, &ctx);
+        let rect = |message: &str, part: &str| {
+            let id = crate::ui::conversation::bubble_id(&chat, message).with(part);
+            ctx.data(|data| data.get_temp::<egui::Rect>(id))
+                .unwrap_or_else(|| panic!("{message} is on screen"))
+        };
+        let click = |app: &mut App, pos: egui::Pos2| {
+            let button = |pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            frame_with(
+                app,
+                &ctx,
+                vec![egui::Event::PointerMoved(pos), button(true)],
+            );
+            frame_with(app, &ctx, vec![button(false)]);
+            render(app, &ctx);
+        };
+        let selected = |app: &App| {
+            app.selection
+                .as_ref()
+                .map(|(_, ids)| ids.clone())
+                .unwrap_or_default()
+        };
+        // The middle of the text, where the body takes clicks and drags.
+        click(&mut app, rect("ada-reply", "body").center());
+        assert_eq!(selected(&app), ["ada-doc", "ada-reply"], "the text selects");
+        // The empty strip to the right of an incoming bubble.
+        let voice = rect("ada-voice", "rect");
+        click(&mut app, egui::pos2(voice.right() + 60.0, voice.center().y));
+        assert_eq!(
+            selected(&app),
+            ["ada-doc", "ada-voice", "ada-reply"],
+            "the strip beside the bubble selects"
+        );
+        // And a second click on the text leaves the message out again.
+        click(&mut app, rect("ada-reply", "body").center());
+        assert_eq!(selected(&app), ["ada-doc", "ada-voice"]);
+    }
+
     /// One frame with AccessKit on; returns (label, role, centre) per node.
     fn accessible_nodes(
         app: &mut App,

@@ -2427,7 +2427,21 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                                     egui::StrokeKind::Outside,
                                 );
                             }
-                            if response.clicked() {
+                            // While selecting, a click anywhere on the row picks
+                            // the message: its text, links and media, and the
+                            // strip beside it, not only the bubble's padding
+                            // (#241). Registered after the row, so it takes
+                            // those clicks; a drag still selects text.
+                            let row = Rect::from_x_y_ranges(
+                                ui.max_rect().x_range(),
+                                response.rect.y_range(),
+                            );
+                            let pick = ui.interact(
+                                row,
+                                bubble_id(&chat.id, &message.id).with("pick"),
+                                Sense::CLICK,
+                            );
+                            if response.clicked() || pick.clicked() {
                                 let shift = ui.input(|input| input.modifiers.shift);
                                 actions.push(if shift {
                                     Action::SelectRange(message.id.clone())
