@@ -507,6 +507,18 @@ sozinho a partir das Releases do fork (não das do upstream).
   developers.giphy.com), ou compile com `ZAPFAST_GIPHY_KEY`. Uma chave
   embutida fica legível no binário, o que aqui não é problema; a chave das
   Configurações vale no lugar dela.
+  A aba de GIFs mostra a marca "Powered by GIPHY", exigida pelo serviço. A
+  chave de teste do GIPHY vale 100 chamadas por hora, somadas entre todos que
+  usam a mesma chave embutida.
+- **Ajustes de 30/09/2026.** Reações que só diferem no tom de pele viram uma
+  só, no tom de quem reagiu (o seu, se for o caso). `↑`/`↓` rolam o histórico
+  aos poucos (com o histórico em foco ou a caixa de digitação vazia) e
+  `Ctrl+↑` edita a sua mensagem anterior, no lugar da `↑` sozinha; a janela de
+  atalhos mostra as duas. "Salvar como..." avisa só "Arquivo salvo". Links com
+  `___` (como os do X) deixam de ser tratados como formatação. "Apagar para
+  mim" e Encaminhar valem para todas as mensagens selecionadas, não só uma.
+  Clicar numa citação de mensagem antiga carrega o histórico até a mensagem e
+  vai a ela, em vez de parar num lugar errado.
 
 Vieram também do upstream, sem mudar o que o fork já fazia: selecionar
 mensagens clicando na linha, menu da mensagem a partir da faixa vazia ao lado,
@@ -1011,8 +1023,9 @@ de sincronizar a exclusão "para mim" com o celular é uma extensão deste fork.
   and Enter jumps to one; with no chat open it searches your chats, and in
   Settings it searches the settings), `Alt+↑/↓` or WhatsApp's
   `Ctrl+Shift+[`/`Ctrl+Shift+]` switches chats and
-  keeps the active chat visible in the list, `↑` in an empty input edits your
-  previous message, `PgUp`/`PgDn` scroll the open chat by about a page,
+  keeps the active chat visible in the list, `Ctrl+↑` edits your previous
+  message, `↑`/`↓` scroll the open chat a few lines (when the history has focus
+  or the input is empty), `PgUp`/`PgDn` scroll the open chat by about a page,
   `Home`/`End` jump to the top or newest message of the open chat (when the
   input is empty), `Esc` cancels the current action, `Ctrl+L` focuses the
   message input, `Ctrl+N` opens New chat, `Ctrl+B` collapses or expands the
