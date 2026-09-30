@@ -31,7 +31,7 @@ Além das novidades do upstream, esta branch inclui as seguintes mudanças:
 
 As versões do fork ficam em
 [Releases](https://github.com/intellq/zapfast/releases/latest), para Linux e
-Windows x86_64. Os números seguem o upstream: as versões 0.17.1 a 0.17.3 são o
+Windows x86_64. Os números seguem o upstream: as versões 0.17.1 a 0.17.4 são o
 fork sobre o upstream 0.17.0, e depois do upstream 0.17.1 vem a 0.17.101. Os pacotes são
 assinados com a chave do fork, e o ZapFast instalado por eles se atualiza
 sozinho a partir das Releases do fork (não das do upstream).
@@ -479,6 +479,37 @@ sozinho a partir das Releases do fork (não das do upstream).
 - **Submenus na largura do conteúdo.** Os submenus **Som de notificação** e
   **Etiquetas** do menu da conversa abriam com umas três vezes a largura
   necessária; agora ficam do tamanho do item mais longo.
+
+- **Sem contatos "Desconhecido" nem grupos fantasmas ao vincular do zero.** O
+  histórico e os ajustes de conversas (arquivar, silenciar, fixar) criam linhas
+  de gente com quem você nunca falou e de grupos sem nome. A lista, a contagem
+  de arquivadas e o encaminhar agora só mostram a conversa que tem mensagem,
+  fixação, favorito, marca, etiqueta, rascunho ou que está aberta, ou o
+  contato que tem nome; e o grupo que o servidor deixou de listar, sem nome e
+  sem nada seu, é apagado do arquivo.
+- **Encaminhar sem a legenda.** Ao encaminhar foto, vídeo ou documento com
+  legenda, o diálogo oferece **Enviar sem a legenda**; a legenda e as menções
+  dela ficam para trás, também na cópia guardada.
+- **Mensagem sua encaminhada não ganha "Encaminhada".** O que você mesmo
+  escreveu sai como mensagem nova; o que você recebeu e reenvia continua
+  marcado.
+- **Bloqueio do ZapFast** (do upstream, adaptado ao fork): senha em
+  **Configurações › Privacidade**, `Ctrl+Shift+L`, bloqueio após 1 minuto, 15
+  minutos ou 1 hora sem uso, notificações só com "Nova mensagem", ligações
+  sem nome nem foto (encerrar e silenciar valem, atender só desbloqueado) e
+  menu da bandeja com "Bloquear o ZapFast" a partir do início seguinte.
+- **GIFs.** A busca usa o GIPHY: coloque sua chave em **Configurações ›
+  Sistema › GIPHY API key** (grátis em developers.giphy.com) ou compile com
+  `ZAPFAST_GIPHY_KEY`.
+
+Vieram também do upstream, sem mudar o que o fork já fazia: selecionar
+mensagens clicando na linha, menu da mensagem a partir da faixa vazia ao lado,
+colar arquivos copiados como arquivos, copiar a imagem baixada, mensagens de
+visualização única como marcadores, "visto por último" com dia e hora, rascunho
+na lista de conversas, navegação por teclado nos resultados da busca, nomes de
+membros pelo primeiro nome salvo, tiques de entrega de mesma altura, sombras e
+botões flutuantes do visual novo, esmaecimento dos filtros cortados na lista
+e "Recomeçar" com chave de arquivo inválida.
 
 Esta sincronização também incorpora mudanças recentes do upstream: confirmação
 antes de apagar mensagens, aba de figurinhas recebidas, recuperação de conexão
