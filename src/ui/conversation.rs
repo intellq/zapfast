@@ -2732,6 +2732,16 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                 .layout(Layout::centered_and_justified(egui::Direction::LeftToRight)),
         );
         let unread = app.chat(&chat.id).map_or(0, |chat| chat.unread);
+        // It floats over the messages: a soft shadow lifts it off them.
+        child.painter().add(
+            egui::epaint::Shadow {
+                offset: [0, 3],
+                blur: 10,
+                spread: 0,
+                color: palette.lift_shadow(),
+            }
+            .as_shape(button, CornerRadius::same(20)),
+        );
         if theme::circle_button(
             &mut child,
             Icon::ArrowDown,
@@ -2755,6 +2765,23 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
             );
         }
     }
+}
+
+/// The disc behind a message's react or reply button: opaque, so the chat's
+/// wallpaper does not show through, and lifted like a bubble.
+fn floating_circle(ui: &egui::Ui, palette: &Palette, rect: Rect, hovered: bool) {
+    let radius = CornerRadius::from(rect.width() / 2.0);
+    ui.painter()
+        .add(palette.bubble_shadow().as_shape(rect, radius));
+    ui.painter().circle_filled(
+        rect.center(),
+        rect.width() / 2.0,
+        if hovered {
+            palette.surface_hover
+        } else {
+            palette.overlay
+        },
+    );
 }
 
 /// Loading state above the oldest visible message, and what the phone did
@@ -3059,15 +3086,7 @@ fn reaction_affordance(
     };
     let revealed = reaction_affordance_visible(pointer, shown, reach);
     if ui.is_rect_visible(rect) && (response.has_focus() || (uncovered && revealed)) {
-        ui.painter().circle_filled(
-            rect.center(),
-            rect.width() / 2.0,
-            if response.hovered() {
-                view.palette.surface_hover
-            } else {
-                view.palette.surface.gamma_multiply(0.72)
-            },
-        );
+        floating_circle(ui, &view.palette, rect, response.hovered());
         theme::paint_icon(
             ui,
             Icon::Smile,
@@ -3096,15 +3115,7 @@ fn reaction_affordance(
     });
     theme::reveal_focus(&reply);
     if ui.is_rect_visible(reply_rect) && (reply.has_focus() || (uncovered && revealed)) {
-        ui.painter().circle_filled(
-            reply_rect.center(),
-            reply_rect.width() / 2.0,
-            if reply.hovered() {
-                view.palette.surface_hover
-            } else {
-                view.palette.surface.gamma_multiply(0.72)
-            },
-        );
+        floating_circle(ui, &view.palette, reply_rect, reply.hovered());
         theme::paint_icon(
             ui,
             Icon::Reply,
