@@ -877,6 +877,20 @@ pub fn dialog_row_highlight(ui: &Ui, rect: Rect, color: Color32) {
     );
 }
 
+/// Fades the rightmost `width` points of `rect` into `color`, over content
+/// that scrolls on past the edge. One gradient quad.
+pub fn fade_right(ui: &Ui, rect: Rect, width: f32, color: Color32) {
+    let fade = Rect::from_min_max(pos2(rect.right() - width, rect.top()), rect.max);
+    let mut mesh = egui::Mesh::default();
+    mesh.colored_vertex(fade.left_top(), Color32::TRANSPARENT);
+    mesh.colored_vertex(fade.right_top(), color);
+    mesh.colored_vertex(fade.right_bottom(), color);
+    mesh.colored_vertex(fade.left_bottom(), Color32::TRANSPARENT);
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(0, 2, 3);
+    ui.painter().add(egui::Shape::mesh(mesh));
+}
+
 /// A soft shadow cast downward from `edge`, for a bar that content scrolls
 /// under, beneath a hairline in the palette's outline colour. One gradient
 /// quad.

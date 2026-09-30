@@ -366,6 +366,9 @@ pub fn chat_row_id(chat: &str) -> egui::Id {
 }
 
 /// Stable filter-chip id used by interaction tests.
+/// Width of the fade over the filter chips' right edge.
+const CHIP_FADE: f32 = 16.0;
+
 pub fn filter_chip_id(filter: ChatFilter) -> egui::Id {
     egui::Id::new(("chat-filter", filter as u8))
 }
@@ -378,7 +381,7 @@ fn filter_chips(app: &mut App, ui: &mut egui::Ui) {
     }
     let palette = app.palette;
     ui.add_space(8.0);
-    egui::ScrollArea::horizontal()
+    let output = egui::ScrollArea::horizontal()
         .id_salt("chat-filters")
         .animated(false)
         .auto_shrink([false, true])
@@ -480,6 +483,12 @@ fn filter_chips(app: &mut App, ui: &mut egui::Ui) {
                 ui.add_space(4.0);
             })
         });
+    // Chips cut off at the edge fade into the panel, which says the row
+    // scrolls on.
+    let hidden = output.content_size.x - output.state.offset.x - output.inner_rect.width();
+    if hidden > 0.5 {
+        widgets::fade_right(ui, output.inner_rect, CHIP_FADE, palette.panel);
+    }
     labels::chip_row(app, ui, &palette);
 }
 
