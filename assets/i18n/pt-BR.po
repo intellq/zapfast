@@ -16,6 +16,60 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 "Plural-Forms: nplurals=2; plural=(n > 1);\n"
 
+msgid "Change password…"
+msgstr "Alterar senha…"
+
+msgid "Lock after"
+msgstr "Bloquear após"
+
+msgid "Change password"
+msgstr "Alterar senha"
+
+msgid "Unlinking this computer…"
+msgstr "Desconectando este computador…"
+
+msgid "Forgot password? Unlink this computer"
+msgstr "Esqueci a senha. Desconectar este computador"
+
+msgid "New message"
+msgstr "Nova mensagem"
+
+msgid "App lock"
+msgstr "Bloqueio do ZapFast"
+
+msgid "Set an app lock password"
+msgstr "Definir a senha do bloqueio do ZapFast"
+
+msgid "Change the app lock password"
+msgstr "Alterar a senha do bloqueio do ZapFast"
+
+msgid "Turn off the app lock"
+msgstr "Desativar o bloqueio do ZapFast"
+
+msgid "App lock password saved"
+msgstr "Senha do bloqueio do ZapFast salva"
+
+msgid "App lock turned off"
+msgstr "Bloqueio do ZapFast desativado"
+
+msgid ""
+"Asks for a password at start and after a while unused. It keeps people using "
+"this computer out of your chats and encrypts nothing more. A forgotten "
+"password means unlinking."
+msgstr ""
+"Pede uma senha ao abrir e depois de um tempo sem uso. Impede que outras "
+"pessoas que usam este computador vejam suas conversas, mas não criptografa "
+"nada a mais. Se você esquecer a senha, será preciso desconectar."
+
+msgid ""
+"Without the password, the only way back in is to unlink. This removes the "
+"device from WhatsApp, deletes the chats stored here, and turns the app lock "
+"off. You can link again with a new code."
+msgstr ""
+"Sem a senha, a única forma de voltar é desconectar. Isso remove o "
+"dispositivo do WhatsApp, apaga as conversas guardadas aqui e desativa o "
+"bloqueio do ZapFast. Você poderá conectar de novo com um novo código."
+
 #: src/model.rs:74
 msgid "All"
 msgstr "Todas"
@@ -2270,6 +2324,10 @@ msgstr "Mostrar ou ocultar o ZapFast"
 #: src/app.rs
 msgid "Lock ZapFast"
 msgstr "Bloquear o ZapFast"
+
+#: src/ui/keys.rs
+msgid "Lock ZapFast (with an app lock password)"
+msgstr "Bloquear o ZapFast (com a senha do bloqueio)"
 
 #: src/app.rs:709 src/app.rs:4860 src/ui/keys.rs:391
 msgid "Quit"
@@ -4789,33 +4847,11 @@ msgid "View once audio. For your privacy, it opens only on your phone."
 msgstr ""
 "Áudio de reprodução única. Para sua privacidade, ele só abre no seu celular."
 
-msgid "App lock"
-msgstr "Bloqueio do app"
-
-msgid ""
-"Asks for a password at start and after a while unused. It keeps people using "
-"this computer out of your chats and encrypts nothing more. A forgotten "
-"password means unlinking."
-msgstr ""
-"Pede uma senha ao abrir e depois de um tempo sem uso. Impede que outras "
-"pessoas que usam este computador vejam suas conversas, mas não criptografa "
-"nada a mais. Se você esquecer a senha, será preciso desvincular."
-
 msgid "Turn off…"
 msgstr "Desativar…"
 
-#: src/ui/settings.rs:765
-#, fuzzy
-msgid "Change password…"
-msgstr "Alterar…"
-
 msgid "Set password…"
 msgstr "Definir senha…"
-
-#: src/ui/settings.rs:782 src/ui/settings.rs:789
-#, fuzzy
-msgid "Lock after"
-msgstr "Trancadas"
 
 msgid ""
 "Time without using ZapFast, also counted while it is in the tray. "
@@ -4823,15 +4859,6 @@ msgid ""
 msgstr ""
 "Tempo sem usar o ZapFast, contado também enquanto ele está na bandeja. "
 "Ctrl+Shift+L bloqueia na hora."
-
-msgid "Set an app lock password"
-msgstr "Definir a senha do bloqueio do app"
-
-msgid "Change the app lock password"
-msgstr "Alterar a senha do bloqueio do app"
-
-msgid "Turn off the app lock"
-msgstr "Desativar o bloqueio do app"
 
 msgid "Current password"
 msgstr "Senha atual"
@@ -4854,27 +4881,11 @@ msgstr "Senha incorreta. Tente novamente."
 msgid "Turn on"
 msgstr "Ativar"
 
-#: src/ui/settings.rs:893
-#, fuzzy
-msgid "Change password"
-msgstr "Alterar foto"
-
 msgid "Turn off"
 msgstr "Desativar"
 
-msgid "App lock password saved"
-msgstr "Senha do bloqueio do app salva"
-
-msgid "App lock turned off"
-msgstr "Bloqueio do app desativado"
-
 msgid "ZapFast is locked"
 msgstr "O ZapFast está bloqueado"
-
-#: src/ui/lock.rs:23
-#, fuzzy
-msgid "Unlinking this computer…"
-msgstr "Desconectar este computador"
 
 msgid "Enter your password to unlock."
 msgstr "Digite sua senha para desbloquear."
@@ -4887,25 +4898,6 @@ msgstr "Muitas senhas incorretas. Tente novamente em {seconds} s."
 
 msgid "Unlock"
 msgstr "Desbloquear"
-
-#: src/ui/lock.rs:108
-#, fuzzy
-msgid "Forgot password? Unlink this computer"
-msgstr "Desconectar este computador"
-
-msgid ""
-"Without the password, the only way back in is to unlink. This removes the "
-"device from WhatsApp, deletes the chats stored here, and turns the app lock "
-"off. You can link again with a new code."
-msgstr ""
-"Sem a senha, a única forma de voltar é desvincular. Isso remove o "
-"dispositivo do WhatsApp, apaga as conversas guardadas aqui e desativa o "
-"bloqueio do app. Você poderá vincular de novo com um novo código."
-
-#: src/notify.rs:253
-#, fuzzy
-msgid "New message"
-msgstr "Digite uma mensagem"
 
 msgid "After 1 minute"
 msgstr "Após 1 minuto"

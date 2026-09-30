@@ -1132,7 +1132,7 @@ fn app_lock_rows(app: &App, privacy: &mut Section) {
                 vec![(FormMode::Set, gettext(app.locale, "Set password…"))]
             };
             let button = ui.fonts_mut(|fonts| fonts.row_height(&theme::medium(13.0))) + 14.0;
-            let gap = ui.spacing().item_spacing.y;
+            let gap = ui.spacing().item_spacing.y + 6.0;
             let stack = button * modes.len() as f32 + gap * (modes.len() - 1) as f32;
             let text = ui
                 .data(|data| data.get_temp::<f32>(widgets::setting_row_text_height()))
@@ -1141,6 +1141,7 @@ fn app_lock_rows(app: &App, privacy: &mut Section) {
                 egui::vec2(ui.available_width(), text.max(stack)),
                 egui::Layout::top_down(egui::Align::Max),
                 |ui| {
+                    ui.spacing_mut().item_spacing.y = gap;
                     ui.add_space((text - stack).max(0.0) / 2.0);
                     for (mode, label) in modes {
                         if theme::soft_button(ui, &palette, None, &label, false).clicked() {

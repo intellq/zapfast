@@ -2326,6 +2326,10 @@ msgstr ""
 msgid "Lock ZapFast"
 msgstr "Blocca ZapFast"
 
+#: src/ui/keys.rs
+msgid "Lock ZapFast (with an app lock password)"
+msgstr ""
+
 #: src/app.rs:709 src/app.rs:4860 src/ui/keys.rs:391
 msgid "Quit"
 msgstr ""
