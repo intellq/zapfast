@@ -865,6 +865,18 @@ pub fn row_highlight(ui: &Ui, palette: &Palette, rect: Rect, color: Color32) {
     ui.painter().rect_filled(card, radius, color);
 }
 
+/// The hover behind a row in a dialog's list: flat, since the dialog itself
+/// already floats, with a bubble's corners. It stops two points short of the
+/// row above and below, leaving four between neighbours; at the sides it
+/// keeps the row's width, so the avatars sit four points inside it.
+pub fn dialog_row_highlight(ui: &Ui, rect: Rect, color: Color32) {
+    ui.painter().rect_filled(
+        rect.shrink2(vec2(0.0, 2.0)),
+        CornerRadius::same(BUBBLE_RADIUS),
+        color,
+    );
+}
+
 /// A soft shadow cast downward from `edge`, for a bar that content scrolls
 /// under, beneath a hairline in the palette's outline colour. One gradient
 /// quad.

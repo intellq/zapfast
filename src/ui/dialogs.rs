@@ -558,7 +558,7 @@ fn forward(app: &mut App, ui: &mut egui::Ui, from_chat: &str, messages: &[String
                     ui.allocate_exact_size(vec2(ui.available_width(), row_height), Sense::click());
                 if ui.is_rect_visible(rect) {
                     if response.hovered() && enabled {
-                        ui.painter().rect_filled(rect, 8.0, palette.surface_hover);
+                        super::widgets::dialog_row_highlight(ui, rect, palette.surface_hover);
                     }
                     let avatar = egui::Rect::from_center_size(
                         pos2(rect.left() + 23.0, rect.center().y),
@@ -600,11 +600,6 @@ fn forward(app: &mut App, ui: &mut egui::Ui, from_chat: &str, messages: &[String
                             palette.secondary,
                         );
                     }
-                    ui.painter().hline(
-                        (rect.left() + 50.0)..=rect.right(),
-                        rect.bottom() - 0.5,
-                        Stroke::new(1.0, palette.outline),
-                    );
                 }
                 let checkbox = egui::Rect::from_center_size(
                     pos2(rect.right() - 19.0, rect.center().y),
@@ -1981,7 +1976,7 @@ fn chat_info(app: &mut App, ui: &mut egui::Ui, id: &str) {
                     );
                     if ui.is_rect_visible(rect) {
                         if response.hovered() {
-                            ui.painter().rect_filled(rect, 6.0, palette.surface_hover);
+                            super::widgets::dialog_row_highlight(ui, rect, palette.surface_hover);
                         }
                         let picture = app.avatar(member);
                         let avatar = egui::Rect::from_center_size(

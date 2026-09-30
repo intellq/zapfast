@@ -585,10 +585,12 @@ fn hit_row(
         egui::WidgetInfo::selected(egui::WidgetType::Button, true, selected, text)
     });
     if ui.is_rect_visible(rect) {
+        // Highlighted like a chat-list row; the cards keep hits apart, so
+        // no rule runs between them.
         if selected {
-            ui.painter().rect_filled(rect, 0.0, palette.surface_active);
+            super::widgets::row_highlight(ui, &palette, rect, palette.surface_active);
         } else if response.hovered() {
-            ui.painter().rect_filled(rect, 0.0, palette.surface_hover);
+            super::widgets::row_highlight(ui, &palette, rect, palette.surface_hover);
         }
         let left = rect.left() + 16.0;
         let right = rect.right() - 16.0;
@@ -624,11 +626,6 @@ fn hit_row(
             &snippet,
             found,
             &palette,
-        );
-        ui.painter().hline(
-            left..=rect.right(),
-            rect.bottom() - 0.5,
-            Stroke::new(1.0, palette.outline),
         );
     }
     let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
