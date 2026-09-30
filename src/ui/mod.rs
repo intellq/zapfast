@@ -394,12 +394,7 @@ fn toasts(app: &mut App, ctx: &egui::Context) {
                     .stroke(Stroke::new(1.0, palette.outline))
                     .corner_radius(CornerRadius::same(theme::RADIUS))
                     .inner_margin(Margin::symmetric(14, 10))
-                    .shadow(egui::epaint::Shadow {
-                        offset: [0, 4],
-                        blur: 16,
-                        spread: 0,
-                        color: palette.shadow,
-                    })
+                    .shadow(palette.float_shadow())
                     .show(ui, |ui| {
                         // Size to the message up to a readable maximum.
                         let font = theme::medium(13.5);

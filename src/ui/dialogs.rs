@@ -17,12 +17,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         .stroke(Stroke::new(1.0, palette.outline))
         .corner_radius(CornerRadius::same(theme::RADIUS + 4))
         .inner_margin(Margin::same(22))
-        .shadow(egui::epaint::Shadow {
-            offset: [0, 12],
-            blur: 40,
-            spread: 0,
-            color: palette.shadow,
-        });
+        .shadow(palette.modal_shadow());
     let response = egui::Modal::new(egui::Id::new("dialog"))
         .frame(frame)
         .backdrop_color(palette.shadow)

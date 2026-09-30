@@ -570,12 +570,7 @@ pub fn menu_frame(palette: &Palette) -> egui::Frame {
         .stroke(Stroke::new(1.0, palette.outline))
         .corner_radius(CornerRadius::same(theme::RADIUS))
         .inner_margin(egui::Margin::same(6))
-        .shadow(egui::epaint::Shadow {
-            offset: [0, 6],
-            blur: 20,
-            spread: 0,
-            color: palette.shadow,
-        })
+        .shadow(palette.float_shadow())
 }
 
 pub fn empty_state(ui: &mut Ui, palette: &Palette, icon: Icon, title: &str, body: &str) {

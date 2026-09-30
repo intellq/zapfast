@@ -64,12 +64,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                 .stroke(Stroke::new(1.0, palette.outline))
                 .corner_radius(CornerRadius::same(theme::RADIUS + 4))
                 .inner_margin(Margin::same(FRAME_MARGIN))
-                .shadow(egui::epaint::Shadow {
-                    offset: [0, 8],
-                    blur: 28,
-                    spread: 0,
-                    color: palette.shadow,
-                })
+                .shadow(palette.float_shadow())
                 .show(ui, |ui| {
                     ui.set_width(WIDTH);
                     ui.set_height(HEIGHT);
@@ -434,12 +429,7 @@ fn reaction_picker(app: &mut App, ctx: &egui::Context) {
                         .stroke(Stroke::new(1.0, palette.outline))
                         .corner_radius(CornerRadius::same(theme::RADIUS + 4))
                         .inner_margin(Margin::same(FRAME_MARGIN))
-                        .shadow(egui::epaint::Shadow {
-                            offset: [0, 8],
-                            blur: 28,
-                            spread: 0,
-                            color: palette.shadow,
-                        })
+                        .shadow(palette.float_shadow())
                         .show(ui, |ui| {
                             ui.set_width(width);
                             ui.set_height(HEIGHT);

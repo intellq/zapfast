@@ -178,6 +178,28 @@ impl Palette {
         }
     }
 
+    /// The shadow under a surface that floats over the window for a moment:
+    /// menus, toasts, the emoji picker, and egui's own popups.
+    pub fn float_shadow(&self) -> egui::epaint::Shadow {
+        egui::epaint::Shadow {
+            offset: [0, 6],
+            blur: 20,
+            spread: 0,
+            color: self.shadow,
+        }
+    }
+
+    /// The deeper shadow under a modal surface that holds the window until
+    /// it closes: dialogs, the update dialog, and the image preview.
+    pub fn modal_shadow(&self) -> egui::epaint::Shadow {
+        egui::epaint::Shadow {
+            offset: [0, 12],
+            blur: 40,
+            spread: 0,
+            color: self.shadow,
+        }
+    }
+
     /// The palette's shadow colour, no heavier than the light theme's: a
     /// dark palette's own shadow is meant for popups and menus, and under
     /// every bubble it weighed on an otherwise flat theme.
@@ -387,18 +409,8 @@ pub fn apply(ctx: &egui::Context, palette: &Palette) {
     visuals.window_stroke = Stroke::new(1.0, palette.outline);
     visuals.window_corner_radius = CornerRadius::same(RADIUS + 2);
     visuals.menu_corner_radius = CornerRadius::same(RADIUS);
-    visuals.window_shadow = egui::epaint::Shadow {
-        offset: [0, 6],
-        blur: 24,
-        spread: 0,
-        color: palette.shadow,
-    };
-    visuals.popup_shadow = egui::epaint::Shadow {
-        offset: [0, 4],
-        blur: 16,
-        spread: 0,
-        color: palette.shadow,
-    };
+    visuals.window_shadow = palette.modal_shadow();
+    visuals.popup_shadow = palette.float_shadow();
     let corner = CornerRadius::same(RADIUS_SMALL + 2);
     for widget in [
         &mut visuals.widgets.inactive,
