@@ -249,6 +249,15 @@ pub fn play_sound(sound: NotificationSound) {
 trait ReadSeek: std::io::Read + std::io::Seek + Send + Sync {}
 impl<T: std::io::Read + std::io::Seek + Send + Sync> ReadSeek for T {}
 
+/// The title and body of a notification while the app lock is on, which
+/// name neither the chat nor the sender and carry none of the message.
+pub fn locked_lines(locale: crate::i18n::Locale) -> (String, String) {
+    (
+        "ZapFast".to_owned(),
+        crate::i18n::gettext(locale, "New message").into_owned(),
+    )
+}
+
 /// Builds the notification title and body, including the group sender.
 pub fn lines(chat_name: &str, is_group: bool, sender: &str, summary: &str) -> (String, String) {
     let body = if is_group {

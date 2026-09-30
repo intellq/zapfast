@@ -979,7 +979,8 @@ de sincronizar a exclusão "para mim" com o celular é uma extensão deste fork.
   `Home`/`End` jump to the top or newest message of the open chat (when the
   input is empty), `Esc` cancels the current action, `Ctrl+L` focuses the
   message input, `Ctrl+N` opens New chat, `Ctrl+B` collapses or expands the
-  chat list, and `?` (outside text fields) or
+  chat list, `Ctrl+Shift+L` locks ZapFast when an app lock password is set,
+  and `?` (outside text fields) or
   `Ctrl+/` opens Keyboard shortcuts (use Command instead of Ctrl on macOS).
   The × at the left of the shortcut hints
   hides the bar; bring it back with **Show shortcut hints under the message
@@ -1201,6 +1202,47 @@ The protocol dependency includes the upstream WhatsApp Business pairing fix.
 Device-store migration waits until an updated window is acknowledged, preserving
 startup rollback; an unused legacy column is retained for 0.14 compatibility.
 
+### App lock
+
+Like WhatsApp Web's screen lock, **Settings > Privacy > App lock** hides
+ZapFast behind a password. It is off until you choose **Set password…** and
+type a password of at least six characters twice. ZapFast then starts locked
+and locks again after 1 minute, 15 minutes (the default), or 1 hour without
+input in its window, a choice under **Lock after**. Time spent hidden in the
+tray counts as time without input. **Lock ZapFast** in the tray menu and
+`Ctrl+Shift+L` lock it at once. The tray entry appears from the next start
+after a password is set. **Change password…** and **Turn off…** ask for the
+current password first.
+
+While locked the window shows only the lock screen: no chats, names,
+pictures, or messages, and shortcuts, pasting, and dropped files do nothing.
+Messages keep arriving but stay unread, and their desktop notifications say
+only "New message" from ZapFast, without the chat, the sender, the text, or a
+picture, with the message sound but no per-chat or mention sound, since those
+would tell who wrote. Clicking one opens the message after you unlock.
+Locking withdraws the notifications still on the desktop on Linux. The unread
+count on the taskbar stays, since a number names no one and says nothing
+that a "New message" notification does not. Voice messages and videos stop,
+and a recording in progress is discarded.
+
+Wrong passwords make the next try wait, from one second after the third up
+to half a minute. **Forgot password? Unlink this computer** on the lock screen
+is the only way back in without it: after you confirm, it unlinks this
+computer as **Unlink this computer** does, which deletes the chats stored
+here, and the lock lifts once WhatsApp has unlinked it. Link again with a new
+code. Any unlink, including one from your phone, turns the app lock off.
+
+The app lock keeps people using this computer out of your chats. It encrypts
+nothing beyond what the archive already is, and someone who can edit your
+files can remove it from `settings.json`. ZapFast stores only a salted
+PBKDF2-HMAC-SHA256 verifier of the password (600,000 rounds), in
+`settings.json` beside the locked-chats code, because the lock screen must
+appear before the archive opens. It is independent of the locked-chats code:
+unlocking one never opens the other, and locking ZapFast closes the locked
+tab. Preview it with `--demo --demo-page app-lock` (the password is
+`demo-password`), `app-lock-wrong`, `app-lock-forgot`, `app-lock-settings`,
+or `app-lock-setup`.
+
 ### Interactive messages
 
 Business messages keep their image, formatted text, timestamp, and options
@@ -1267,7 +1309,7 @@ from the environment and honors `NO_PROXY`.
 
 | What | Linux | Notes |
 | --- | --- | --- |
-| Settings | `~/.config/zapfast/settings.json` | JSON, safe to edit |
+| Settings | `~/.config/zapfast/settings.json` | JSON, safe to edit; the app lock password and the locked-chats code are kept only as salted verifiers |
 | Device keys | `~/.local/state/zapfast/session.db` | Owned by whatsapp-rust; deleting it unlinks |
 | Messages | `~/.local/state/zapfast/archive.db` | SQLCipher-encrypted SQLite, unlocked by the OS keyring; raw messages retain attachment keys |
 | Attachments, avatars | `~/.cache/zapfast/` | Safe to delete; **Settings > Files > Change…** sends new downloads to another folder, leaving earlier ones in place |

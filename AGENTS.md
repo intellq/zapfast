@@ -257,6 +257,14 @@ protocol. These notes are for coding agents and new contributors.
   recipient. Never promote a group from one reader, apply a receipt to earlier
   messages, or infer a historical audience from current membership. History
   trusts the phone's aggregate status, not a partial `user_receipt` list.
+- The app lock (`src/app_lock.rs`, `ui/lock.rs`) is a local screen lock, not
+  encryption, and independent of the locked-chats code. Settings keep only a
+  salted PBKDF2 verifier, checked and made on a thread. While locked,
+  `ui::show` draws only the lock screen, `App::apply` drops every action
+  outside `allowed_while_locked` (a clicked notification's message waits for
+  the unlock), `window_focused` stays false so nothing is marked read, and
+  notifications say only "New message". Unlinking (`LoggedOut`) forgets the
+  password, which is how a forgotten one is recovered.
 - Private read-state writes all use the `regular_low` app-state collection.
   `backend::read_sync` permits one at a time and backs off the whole queue after
   failure; per-chat retry queues would repeatedly rebuild the same failed

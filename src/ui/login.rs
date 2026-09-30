@@ -10,6 +10,18 @@ use crate::qr::Qr;
 use crate::theme::{self, Icon};
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
+    card(app, ui, "login", "A native WhatsApp client.", body);
+}
+
+/// The centred card of the linking and lock screens: the logo, the name,
+/// a line under it, and `body`.
+pub(super) fn card(
+    app: &mut App,
+    ui: &mut egui::Ui,
+    salt: &str,
+    tagline: &str,
+    body: impl FnOnce(&mut App, &mut egui::Ui),
+) {
     let palette = app.palette;
     egui::CentralPanel::default()
         .frame(Frame::new().fill(palette.window))
@@ -20,7 +32,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             let card_width = (460.0_f32.min(rect.width() - 24.0)).max(0.0);
             // Center the card using its previous height. Its content determines
             // the next frame's height.
-            let height_id = ui.id().with("login-card-height");
+            let height_id = ui.id().with(format!("{salt}-card-height"));
             let known_height = ui
                 .ctx()
                 .data(|data| data.get_temp::<f32>(height_id))
@@ -57,12 +69,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     );
                     ui.add_space(4.0);
                     theme::text(ui, "ZapFast", theme::bold(28.0), palette.text);
-                    theme::text(
-                        ui,
-                        tr("A native WhatsApp client."),
-                        theme::regular(14.5),
-                        palette.secondary,
-                    );
+                    theme::text(ui, tagline, theme::regular(14.5), palette.secondary);
                     ui.add_space(16.0);
                     body(app, ui);
                 });
@@ -147,7 +154,7 @@ fn body(app: &mut App, ui: &mut egui::Ui) {
     );
 }
 
-fn busy(ui: &mut egui::Ui, color: egui::Color32, label: &str) {
+pub(super) fn busy(ui: &mut egui::Ui, color: egui::Color32, label: &str) {
     ui.horizontal(|ui| {
         let width = 24.0
             + 8.0

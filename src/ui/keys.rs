@@ -34,6 +34,14 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
             Action::FocusSearch,
         );
         key(Modifiers::COMMAND, Key::F, find);
+        // Before Ctrl+L, which would also match it with Shift held.
+        if app.settings.app_lock_hash.is_some() {
+            key(
+                Modifiers::COMMAND | Modifiers::SHIFT,
+                Key::L,
+                Action::LockApp,
+            );
+        }
         key(Modifiers::COMMAND, Key::K, Action::FocusSearch);
         if app.is_linked() {
             key(
@@ -383,6 +391,10 @@ pub const SHORTCUTS: &[(&str, &str)] = &[
     (
         "? / Ctrl+/",
         crate::i18n::n_("Keyboard shortcuts (? when not typing)"),
+    ),
+    (
+        "Ctrl+Shift+L",
+        crate::i18n::n_("Lock ZapFast (with an app lock password)"),
     ),
     (
         "Ctrl+W",

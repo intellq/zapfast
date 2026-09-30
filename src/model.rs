@@ -1830,6 +1830,21 @@ pub enum Action {
     PairWithPhone(String),
     /// Unlinks the device remotely and locally.
     Unlink,
+    /// Hides everything behind the app lock, when a password is set.
+    LockApp,
+    /// Tries the password typed on the lock screen.
+    UnlockApp,
+    /// Opens (`true`) or closes the lock screen's question about unlinking.
+    ForgotAppPassword(bool),
+    /// Unlinks this computer from the lock screen. The lock lifts, and its
+    /// password is forgotten, once WhatsApp has unlinked it.
+    UnlinkLockedApp,
+    /// Opens a password form in Settings, or closes it with `None`.
+    AppLockForm(Option<crate::app_lock::FormMode>),
+    /// Submits the Settings password form.
+    SubmitAppLockForm,
+    /// How long ZapFast may go unused before it locks.
+    SetAutoLock(crate::settings::AutoLock),
     Reconnect,
     /// Sets aside an archive whose key is gone and links again.
     StartOverArchive,

@@ -1690,6 +1690,12 @@ fn labels_sample(app: &mut App) {
 
 /// A synthetic dusk gradient as the wallpaper image, shown at once. The file
 /// is never written: the sample hands the decoded image over directly.
+/// Sets the demo password ("demo-password") and locks.
+fn app_lock_sample(app: &mut App) {
+    app.settings.app_lock_hash = Some(crate::app_lock::verifier("demo-password"));
+    app.lock_app();
+}
+
 fn wallpaper_image_sample(app: &mut App) {
     let (width, height) = (1600usize, 1000usize);
     let pixels = (0..height)
@@ -1801,6 +1807,36 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
                 app.open_chat = None;
             }
             "locked-setup" => app.dialog = Some(crate::model::Dialog::UnlockLockedChats),
+            // The app lock's screen, over the sample chats it hides.
+            "app-lock" => app_lock_sample(app),
+            "app-lock-wrong" => {
+                app_lock_sample(app);
+                // Enough wrong tries for an eight-second wait.
+                for _ in 0..6 {
+                    app.app_lock.unlocked(false);
+                }
+            }
+            "app-lock-forgot" => {
+                app_lock_sample(app);
+                app.app_lock.forgetting = crate::app_lock::Forgetting::Confirming;
+            }
+            // Settings with a password set and the form to change it open.
+            "app-lock-settings" => {
+                app.settings.app_lock_hash = Some(crate::app_lock::verifier("demo-password"));
+                app.page = Page::Settings;
+                app.settings_search = "app lock".into();
+                app.app_lock.form = Some(crate::app_lock::Form::new(
+                    crate::app_lock::FormMode::Change,
+                ));
+            }
+            "app-lock-setup" => {
+                app.page = Page::Settings;
+                app.settings_search = "app lock".into();
+                let mut form = crate::app_lock::Form::new(crate::app_lock::FormMode::Set);
+                form.new = "short".into();
+                form.error = Some(crate::app_lock::FormError::TooShort);
+                app.app_lock.form = Some(form);
+            }
             "new-chat" => app.dialog = Some(crate::model::Dialog::NewChat),
             "unnamed-group" => {
                 app.typing.clear();
@@ -4202,6 +4238,64 @@ mod tests {
         assert!(!labels.contains(&"admins"));
     }
 
+    /// Every label and value in the accessibility tree of one frame.
+    fn accessible_labels(app: &mut App, ctx: &egui::Context) -> Vec<String> {
+        render(app, ctx);
+        ctx.enable_accesskit();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1180.0, 780.0),
+                )),
+                ..Default::default()
+            },
+            |ui| app.frame_ui(ui),
+        );
+        output.textures_delta.clear();
+        output
+            .platform_output
+            .accesskit_update
+            .expect("accessibility tree")
+            .nodes
+            .iter()
+            .filter_map(|(_, node)| node.label().or_else(|| node.value()))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[test]
+    fn the_lock_screen_draws_no_chat_name_or_message() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        apply_flags(&mut app, Some("app-lock"));
+        let labels = accessible_labels(&mut app, &ctx);
+        assert!(labels.iter().any(|label| label == "Unlock"), "{labels:?}");
+        let leaks = |labels: &[String]| -> Vec<String> {
+            SAMPLES
+                .iter()
+                .flat_map(|sample| {
+                    std::iter::once(sample.name).chain(sample.lines.iter().map(|(_, line)| *line))
+                })
+                .filter(|private| labels.iter().any(|label| label.contains(private)))
+                .map(str::to_owned)
+                .collect()
+        };
+        assert_eq!(leaks(&labels), Vec::<String>::new());
+        assert!(
+            app.copy_rows
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .is_empty(),
+            "no message body is drawn for copying"
+        );
+        // The same app unlocked shows them, so the check above means something.
+        app.app_lock.release();
+        let labels = accessible_labels(&mut app, &ctx);
+        assert!(!leaks(&labels).is_empty());
+    }
+
     #[test]
     fn a_blocked_contact_offers_unblocking_instead_of_the_composer() {
         let mut app = app();
@@ -4259,6 +4353,11 @@ mod tests {
             "locked-open",
             "locked-prompt",
             "locked-setup",
+            "app-lock",
+            "app-lock-wrong",
+            "app-lock-forgot",
+            "app-lock-settings",
+            "app-lock-setup",
             "new-chat",
             "unnamed-group",
             "keyring",

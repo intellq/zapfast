@@ -774,6 +774,7 @@ fn sections(app: &App) -> Vec<Section> {
         ),
         |settings| &mut settings.link_previews,
     );
+    app_lock_rows(app, &mut privacy);
     // The account values live on the phone: they are shown once fetched and
     // edited only while connected with a fresh snapshot.
     let editable = app.is_connected() && app.account_privacy.editable();
@@ -1104,6 +1105,172 @@ fn sections(app: &App) -> Vec<Section> {
         files,
         about_section,
     ]
+}
+
+/// The app lock: a password, how long ZapFast may go unused, and the form
+/// that sets, changes, or removes the password.
+fn app_lock_rows(app: &App, privacy: &mut Section) {
+    use crate::app_lock::FormMode;
+    let locale = app.locale;
+    let palette = app.palette;
+    let enabled = app.settings.app_lock_hash.is_some();
+    privacy.row(
+        translated(locale, "App lock"),
+        translated(
+            locale,
+            "Asks for a password at start and after a while unused. It keeps people using this computer out of your chats and encrypts nothing more. A forgotten password means unlinking.",
+        ),
+        move |ui, app| {
+            use crate::i18n::gettext;
+            // The row lays its controls out from the right.
+            let modes = if enabled {
+                vec![
+                    (FormMode::TurnOff, gettext(app.locale, "Turn off…")),
+                    (FormMode::Change, gettext(app.locale, "Change password…")),
+                ]
+            } else {
+                vec![(FormMode::Set, gettext(app.locale, "Set password…"))]
+            };
+            for (mode, label) in modes {
+                if theme::soft_button(ui, &palette, None, &label, false).clicked() {
+                    app.actions.push(Action::AppLockForm(Some(mode)));
+                }
+            }
+        },
+    );
+    if app.app_lock.form.is_some() {
+        // Found by the same words as its row, so a search keeps them together.
+        privacy.block(
+            vec![
+                translated(locale, "App lock"),
+                translated(locale, "Lock after"),
+            ],
+            app_lock_form,
+        );
+    }
+    if enabled {
+        privacy.row(
+            translated(locale, "Lock after"),
+            keyed(translated(
+                locale,
+                "Time without using ZapFast, also counted while it is in the tray. Ctrl+Shift+L locks it at once.",
+            )),
+            move |ui, app| {
+                let selected = app.settings.app_lock_after;
+                let response = egui::ComboBox::from_id_salt("app_lock_after")
+                    .selected_text(selected.label(app.locale))
+                    .width(200.0_f32.min(ui.available_width()))
+                    .show_ui(ui, |ui| {
+                        for after in crate::settings::AutoLock::ALL {
+                            if theme_option(
+                                ui,
+                                &palette,
+                                after.label(app.locale).as_ref(),
+                                after == selected,
+                            ) {
+                                app.actions.push(Action::SetAutoLock(after));
+                            }
+                        }
+                    });
+                theme::reveal_focus(&response.response);
+            },
+        );
+    }
+}
+
+/// The password form under the app lock row. Its fields belong to the view;
+/// the passwords leave them only for the checking thread.
+fn app_lock_form(ui: &mut egui::Ui, app: &mut App) {
+    use crate::app_lock::{FormError, FormMode, MIN_PASSWORD_CHARS};
+    use crate::i18n::gettext;
+    let palette = app.palette;
+    let locale = app.locale;
+    let Some(form) = app.app_lock.form.as_mut() else {
+        return;
+    };
+    let mode = form.mode;
+    let busy = form.busy;
+    let mut submit = false;
+    ui.add_space(4.0);
+    theme::text(
+        ui,
+        match mode {
+            FormMode::Set => gettext(locale, "Set an app lock password"),
+            FormMode::Change => gettext(locale, "Change the app lock password"),
+            FormMode::TurnOff => gettext(locale, "Turn off the app lock"),
+        },
+        theme::semibold(14.0),
+        palette.text,
+    );
+    let count = MIN_PASSWORD_CHARS.to_string();
+    let mut fields: Vec<(&mut String, String, &'static str)> = Vec::new();
+    if mode != FormMode::Set {
+        fields.push((
+            &mut form.current,
+            gettext(locale, "Current password").into_owned(),
+            "app-lock-current",
+        ));
+    }
+    if mode != FormMode::TurnOff {
+        fields.push((
+            &mut form.new,
+            gettext(locale, "New password, at least {count} characters").replace("{count}", &count),
+            "app-lock-new",
+        ));
+        fields.push((
+            &mut form.confirm,
+            gettext(locale, "Type the new password again").into_owned(),
+            "app-lock-confirm",
+        ));
+    }
+    let focus_first = ui.memory(|memory| memory.focused().is_none());
+    for (index, (text, hint, id)) in fields.into_iter().enumerate() {
+        let id = egui::Id::new(id);
+        // TextEdit surrenders focus on Enter; take the key before drawing it.
+        submit |= ui.memory(|memory| memory.has_focus(id))
+            && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+        let response = ui.add_enabled(
+            !busy,
+            egui::TextEdit::singleline(text)
+                .id(id)
+                .password(true)
+                .hint_text(hint)
+                .font(theme::regular(13.0))
+                .desired_width(320.0_f32.min(ui.available_width())),
+        );
+        if index == 0 && focus_first && !busy {
+            response.request_focus();
+        }
+    }
+    let error = form.error.map(|error| match error {
+        FormError::TooShort => gettext(locale, "The password needs at least {count} characters.")
+            .replace("{count}", &count),
+        FormError::Mismatch => gettext(locale, "The two new passwords are different.").into_owned(),
+        FormError::WrongCurrent => gettext(locale, "Wrong password. Try again.").into_owned(),
+    });
+    if let Some(error) = error {
+        widgets::rich_text(ui, &error, theme::regular(12.5), palette.danger);
+    }
+    ui.horizontal(|ui| {
+        let confirm = match mode {
+            FormMode::Set => gettext(locale, "Turn on"),
+            FormMode::Change => gettext(locale, "Change password"),
+            FormMode::TurnOff => gettext(locale, "Turn off"),
+        };
+        submit |= ui
+            .add_enabled_ui(!busy, |ui| theme::pill_button(ui, &palette, &confirm, true))
+            .inner
+            .clicked();
+        if busy {
+            theme::spinner(ui, 16.0, palette.accent);
+        } else if theme::pill_button(ui, &palette, &gettext(locale, "Cancel"), false).clicked() {
+            app.actions.push(Action::AppLockForm(None));
+        }
+    });
+    ui.add_space(10.0);
+    if submit && !busy {
+        app.actions.push(Action::SubmitAppLockForm);
+    }
 }
 
 /// A translated description that names keys, with Cmd and Option on macOS.

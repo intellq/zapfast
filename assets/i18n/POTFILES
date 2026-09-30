@@ -42,3 +42,4 @@ src/wallpaper.rs
 src/main.rs
 src/kwin_rule.rs
 src/transcribe.rs
+src/ui/lock.rs

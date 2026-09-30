@@ -722,6 +722,9 @@ pub struct App {
     /// Unread count on the taskbar icon, where the desktop reads it. `None`
     /// for demo and test runs, which must not touch the real taskbar.
     badge: Option<crate::notify::Badge>,
+    /// The app lock: whether the window shows only the lock screen, the
+    /// inactivity count, and the Settings password form.
+    pub app_lock: crate::app_lock::AppLock,
 }
 
 /// A message that flashes after a jump to it, as WhatsApp does.
@@ -839,6 +842,7 @@ impl fastframe_shell::Resident for App {
 }
 
 const TRAY_SHOW: &str = "show";
+const TRAY_LOCK: &str = "lock";
 const TRAY_QUIT: &str = "quit";
 
 /// What a tray click asks for: a left click on Linux and macOS, or the menu's
@@ -850,25 +854,32 @@ fn tray_action(event: fastframe_tray::Event, window_hidden: bool) -> Option<Acti
         Event::Show => Action::ShowWindow,
         Event::Toggle | Event::Menu(TRAY_SHOW) if window_hidden => Action::ShowWindow,
         Event::Toggle | Event::Menu(TRAY_SHOW) => Action::HideWindow,
+        Event::Menu(TRAY_LOCK) => Action::LockApp,
         Event::Menu(TRAY_QUIT) => Action::Quit,
         Event::Menu(_) => return None,
     })
 }
 
-/// The tray item: ZapFast's icon, and a menu to show or hide the window and
-/// to quit.
-fn tray_config() -> fastframe_tray::Config {
+/// The tray item: ZapFast's icon, and a menu to show or hide the window,
+/// to lock it when an app lock password is set, and to quit. The title and
+/// the menu never name a chat, so they are safe while locked.
+///
+/// fastframe-tray fixes the menu when the item is made, so a password set
+/// or removed while ZapFast runs changes the menu at the next start; until
+/// then "Lock ZapFast" does nothing without a password.
+fn tray_config(lockable: bool) -> fastframe_tray::Config {
     use fastframe_tray::MenuItem;
+    let mut menu = vec![MenuItem::action(TRAY_SHOW, "Show or hide ZapFast")];
+    if lockable {
+        menu.push(MenuItem::action(TRAY_LOCK, "Lock ZapFast"));
+    }
+    menu.extend([MenuItem::Separator, MenuItem::action(TRAY_QUIT, "Quit")]);
     fastframe_tray::Config {
         id: "zapfast",
         title: "ZapFast".into(),
         icon: crate::util::app_icon_rgba,
         template_icon: Some(crate::util::tray_template_rgba),
-        menu: vec![
-            MenuItem::action(TRAY_SHOW, tr("Show or hide ZapFast")),
-            MenuItem::Separator,
-            MenuItem::action(TRAY_QUIT, tr("Quit")),
-        ],
+        menu,
     }
 }
 
@@ -909,7 +920,8 @@ impl App {
             .ok();
         if options.tray {
             let waker = waker.clone();
-            app.tray = fastframe_tray::Tray::spawn(tray_config(), move || waker.wake());
+            let lockable = app.settings.app_lock_hash.is_some();
+            app.tray = fastframe_tray::Tray::spawn(tray_config(lockable), move || waker.wake());
         }
         // The clock preference may run a helper on Linux; keep it off the
         // first frame.
@@ -988,6 +1000,8 @@ impl App {
         let locale = crate::i18n::resolve(settings.interface_language);
         crate::i18n::set_current(locale);
         let transcriber = crate::transcribe::Transcriber::new(dirs.whisper_dir(), waker.clone());
+        // With a password set, ZapFast starts locked.
+        let app_lock = crate::app_lock::AppLock::new(settings.app_lock_hash.is_some());
         let mut app = Self {
             dirs,
             settings,
@@ -1213,6 +1227,7 @@ impl App {
             notification_opens: Default::default(),
             notifications: Default::default(),
             badge: None,
+            app_lock,
         };
         // A hand-edited speed snaps to a supported one, so a speed control
         // always shows the speed that plays.
@@ -1377,6 +1392,10 @@ impl App {
         if reading {
             return;
         }
+        if self.app_lock.is_locked() {
+            self.notify_while_locked(chat_id, chat.is_group(), &message.id);
+            return;
+        }
         let (name, is_group) = (self.chat_title(chat), chat.is_group());
         let chat_sound = chat.notification_sound.clone();
         let sender = self.display_name_or(&message.sender, message.sender_name.as_deref());
@@ -1401,6 +1420,30 @@ impl App {
             crate::notify::NotificationTarget {
                 chat: chat_id.to_owned(),
                 message: Some(message.id.clone()),
+            },
+            std::sync::Arc::clone(&self.notification_opens),
+            move || waker.wake(),
+        );
+    }
+
+    /// Announces a message while the app lock is on: "New message" from
+    /// ZapFast, without the chat, the sender, the text or a picture, so the
+    /// desktop shows nothing the lock screen hides. A chat's own sound and
+    /// the mention sound would tell who wrote, so only the message sound
+    /// plays, still silent for groups when group sounds are off. The click
+    /// target stays inside ZapFast: it opens the message once unlocked.
+    fn notify_while_locked(&mut self, chat_id: &str, is_group: bool, message: &str) {
+        let (title, body) = crate::notify::locked_lines(self.locale);
+        let sound = notification_sound(&self.settings, None, is_group, false);
+        let waker = self.waker.clone();
+        self.notifications.show(
+            title,
+            body,
+            None,
+            sound,
+            crate::notify::NotificationTarget {
+                chat: chat_id.to_owned(),
+                message: Some(message.to_owned()),
             },
             std::sync::Arc::clone(&self.notification_opens),
             move || waker.wake(),
@@ -1848,8 +1891,17 @@ impl App {
     fn sync_call_window(&mut self, ctx: &egui::Context) {
         let view = if self.call_in_window() {
             self.call.clone().map(|call| crate::ui::call::CallView {
-                peer: self.call_name(&call.chat),
-                picture: self.call_avatar(&call.chat),
+                // Locked, the call window says nothing about who is on the line.
+                peer: if self.app_lock.is_locked() {
+                    crate::i18n::gettext(self.locale, "Unknown caller").into_owned()
+                } else {
+                    self.call_name(&call.chat)
+                },
+                picture: if self.app_lock.is_locked() {
+                    None
+                } else {
+                    self.call_avatar(&call.chat)
+                },
                 palette: self.palette,
                 locale: self.locale,
                 devices: self.call_devices.clone(),
@@ -3009,7 +3061,10 @@ impl App {
                 self.draft_mentions.clear();
                 self.composer.clear();
                 self.composer_mentions.clear();
-                self.toast_error(tr("This device was unlinked from your phone"));
+                // The password guarded chats that are gone now; a forgotten
+                // one is recovered exactly this way.
+                self.forget_app_lock();
+                self.toast_error("This device was unlinked from your phone");
             }
             LinkStatus::Failed(message) => self.toast_error(message.clone()),
             _ => {}
@@ -3898,9 +3953,19 @@ impl App {
         };
         // The call's own name, not the chat's title: a stranger who calls is an unknown caller here,
         // never a phone number on a lock screen.
-        let title = self.call_name(&call.chat);
+        // Locked, the notification names no one and shows no picture.
+        let locked = self.app_lock.is_locked();
+        let title = if locked {
+            crate::notify::locked_lines(self.locale).0
+        } else {
+            self.call_name(&call.chat)
+        };
         let body = crate::i18n::gettext(self.locale, "Incoming voice call");
-        let picture = self.call_avatar(&call.chat);
+        let picture = if locked {
+            None
+        } else {
+            self.call_avatar(&call.chat)
+        };
         // A call is not a mention and not a group message, so it uses the chat's own sound when it
         // has one and the ordinary message sound otherwise.
         // The ringtone already sounds for the call, so the notification stays quiet.
@@ -4151,6 +4216,17 @@ impl App {
     }
 
     fn apply(&mut self, action: Action, ctx: &egui::Context) {
+        if self.app_lock.is_locked() && !allowed_while_locked(&action) {
+            // A clicked notification opens its message once unlocked; the
+            // rest would show or change what the lock hides.
+            if let Action::OpenMessage { chat, message } = action {
+                self.app_lock.deferred = Some(crate::notify::NotificationTarget {
+                    chat,
+                    message: Some(message),
+                });
+            }
+            return;
+        }
         match action {
             Action::Open(page) => {
                 let opens_chats = page == Page::Chats;
@@ -4160,6 +4236,10 @@ impl App {
                     self.backend.send(Command::FetchAccountPrivacy);
                     // So is the blocklist, unless it came a moment ago.
                     self.backend.send(Command::RefreshBlocklist);
+                }
+                // Typed passwords do not wait in a form nobody sees.
+                if page != Page::Settings && !self.app_lock.checking() {
+                    self.app_lock.form = None;
                 }
                 self.page = page;
                 self.dialog = None;
@@ -5780,6 +5860,63 @@ impl App {
                 self.dialog = None;
                 self.backend.send(Command::Unlink);
             }
+            Action::LockApp => self.lock_app(),
+            Action::UnlockApp => {
+                if let Some(stored) = self.settings.app_lock_hash.clone() {
+                    let waker = self.waker.clone();
+                    self.app_lock.try_unlock(&stored, move || waker.wake());
+                }
+            }
+            Action::ForgotAppPassword(open) => {
+                use crate::app_lock::Forgetting;
+                if self.app_lock.forgetting != Forgetting::Unlinking {
+                    self.app_lock.forgetting = if open {
+                        Forgetting::Confirming
+                    } else {
+                        Forgetting::No
+                    };
+                }
+            }
+            Action::UnlinkLockedApp => {
+                // The lock lifts only once WhatsApp has unlinked and the
+                // chats are gone (`LinkStatus::LoggedOut`), never before.
+                if self.app_lock.is_locked() {
+                    self.app_lock.forgetting = crate::app_lock::Forgetting::Unlinking;
+                    self.backend.send(Command::Unlink);
+                }
+            }
+            Action::AppLockForm(mode) => {
+                use crate::app_lock::{Form, FormMode};
+                // Setting a password must not replace one without it, and
+                // changing or removing one needs one to exist.
+                let fits = |mode: FormMode| {
+                    (mode == FormMode::Set) == self.settings.app_lock_hash.is_none()
+                };
+                if !self.app_lock.checking() {
+                    self.app_lock.form = mode.filter(|mode| fits(*mode)).map(Form::new);
+                }
+            }
+            Action::SubmitAppLockForm => {
+                use crate::app_lock::FormMode;
+                let stored = self.settings.app_lock_hash.clone();
+                let fits = self
+                    .app_lock
+                    .form
+                    .as_ref()
+                    .is_some_and(|form| (form.mode == FormMode::Set) == stored.is_none());
+                if fits {
+                    let waker = self.waker.clone();
+                    self.app_lock
+                        .submit_form(stored.as_deref(), move || waker.wake());
+                } else {
+                    self.app_lock.form = None;
+                }
+            }
+            Action::SetAutoLock(after) => {
+                self.settings.app_lock_after = after;
+                self.app_lock.note_input();
+                self.mark_settings_dirty();
+            }
             Action::Reconnect => self.backend.send(Command::Reconnect),
             Action::StartOverArchive => {
                 self.dialog = None;
@@ -5900,6 +6037,12 @@ impl App {
         if self.window_hidden || ctx.input(|input| input.viewport().focused) == Some(false) {
             self.window_focused = false;
         }
+        self.tick_app_lock(ctx);
+        // Nobody reads behind the lock screen: messages stay unread, the
+        // phone keeps notifying, and notifications here say nothing.
+        if self.app_lock.is_locked() {
+            self.window_focused = false;
+        }
         self.report_presence();
         self.handle_tray();
         #[cfg(target_os = "macos")]
@@ -5919,6 +6062,128 @@ impl App {
         self.hold_media();
         self.follow_receipts();
         self.sync_badge();
+    }
+
+    /// Collects a finished password check, and locks once ZapFast has gone
+    /// unused for the chosen time. Inactivity counts while the window is
+    /// hidden too: only input in the window restarts it.
+    fn tick_app_lock(&mut self, ctx: &egui::Context) {
+        if let Some(outcome) = self.app_lock.poll() {
+            self.app_lock_outcome(outcome);
+        }
+        if self.settings.app_lock_hash.is_none() {
+            // Nothing to unlock with; never leave the window stuck.
+            if self.app_lock.is_locked() {
+                self.app_lock.release();
+            }
+            return;
+        }
+        if self.app_lock.is_locked() {
+            return;
+        }
+        // Recording a voice message, or being on a call, is using ZapFast,
+        // keys or not.
+        if self.recording.is_some() || self.call_keeps_window() {
+            self.app_lock.note_input();
+        }
+        let left = self
+            .app_lock
+            .idle_left(self.settings.app_lock_after.duration());
+        if left.is_zero() {
+            self.lock_app();
+        } else {
+            ctx.request_repaint_after(left);
+        }
+    }
+
+    /// Hides everything behind the lock screen. What was open stays open
+    /// for after the unlock, except what plays, records, or shows beyond the
+    /// window: media stops, a recording is discarded, the locked-chats folder
+    /// closes, and notifications already on the desktop are withdrawn.
+    pub fn lock_app(&mut self) {
+        if self.settings.app_lock_hash.is_none() || self.app_lock.is_locked() {
+            return;
+        }
+        self.app_lock.lock();
+        self.window_focused = false;
+        self.flush_open_draft();
+        self.recording = None;
+        self.player.stop();
+        self.video.stop();
+        self.voice_chat = None;
+        self.voice_wanted = None;
+        self.video_wanted = None;
+        self.dropping = false;
+        self.notifications.clear_all();
+        self.clear_chat_lock_entry();
+        if self.dialog == Some(Dialog::UnlockLockedChats) {
+            self.dialog = None;
+        }
+        if self.locked_folder || self.secret_code_matched() {
+            self.close_locked_folder();
+            self.search.clear();
+            self.search_hits.clear();
+        }
+        self.copy_rows
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clear();
+    }
+
+    /// Applies what the password thread worked out.
+    fn app_lock_outcome(&mut self, outcome: crate::app_lock::Outcome) {
+        use crate::app_lock::{FormError, Outcome};
+        match outcome {
+            Outcome::Unlock(matched) => {
+                if !self.app_lock.is_locked() {
+                    return;
+                }
+                self.app_lock.unlocked(matched);
+                if matched
+                    && let Some(target) = self.app_lock.deferred.take()
+                    && let Some(message) = target.message
+                {
+                    self.actions.push(Action::OpenMessage {
+                        chat: target.chat,
+                        message,
+                    });
+                }
+            }
+            Outcome::WrongCurrent => {
+                if let Some(form) = &mut self.app_lock.form {
+                    form.busy = false;
+                    form.error = Some(FormError::WrongCurrent);
+                }
+            }
+            Outcome::Set(verifier) => {
+                if self.app_lock.form.take().is_none() {
+                    return;
+                }
+                self.settings.app_lock_hash = Some(verifier);
+                self.app_lock.note_input();
+                self.save_settings();
+                self.toast(crate::i18n::gettext(self.locale, "App lock password saved"));
+            }
+            Outcome::TurnOff => {
+                if self.app_lock.form.take().is_none() {
+                    return;
+                }
+                self.settings.app_lock_hash = None;
+                self.save_settings();
+                self.toast(crate::i18n::gettext(self.locale, "App lock turned off"));
+            }
+        }
+    }
+
+    /// Forgets the app lock password and lifts the lock: after unlinking,
+    /// when nothing is left behind it.
+    fn forget_app_lock(&mut self) {
+        self.app_lock.form = None;
+        self.app_lock.deferred = None;
+        self.app_lock.release();
+        if self.settings.app_lock_hash.take().is_some() {
+            self.save_settings();
+        }
     }
 
     /// Mirrors the unread chat count onto the taskbar icon, where the desktop
@@ -6216,7 +6481,13 @@ impl App {
             .lock()
             .unwrap_or_else(|p| p.into_inner()) = None;
         self.apply_theme(ctx);
-        let focused = ctx.input(|input| input.viewport().focused.unwrap_or(true));
+        if ctx.input(|input| input.events.iter().any(is_user_input)) {
+            self.app_lock.note_input();
+        }
+        let locked = self.app_lock.is_locked();
+        // Behind the lock screen nobody is reading; unlocking counts as
+        // coming back to the window.
+        let focused = ctx.input(|input| input.viewport().focused.unwrap_or(true)) && !locked;
         let regained_focus = focused && !self.window_focused;
         // Mark messages received while hidden as read on window return.
         if regained_focus
@@ -6245,9 +6516,14 @@ impl App {
                 self.hide_intent = true;
             }
         }
-        self.lock_scroll_axis(ctx);
-        self.route_scroll(ctx);
-        self.take_drops_and_pastes(ctx);
+        if locked {
+            // Files dropped or pasted on the lock screen go nowhere.
+            self.dropping = false;
+        } else {
+            self.lock_scroll_axis(ctx);
+            self.route_scroll(ctx);
+            self.take_drops_and_pastes(ctx);
+        }
         crate::ui::show(self, ui);
         self.apply_actions(ctx);
         // The old colours, if a change is being revealed, go over everything.
@@ -6868,6 +7144,57 @@ fn notification_sound(
         None if is_group && !settings.group_sounds => NotificationSound::None,
         None => settings.message_sound.clone(),
     }
+}
+
+/// What may still happen while the app lock is on: the lock screen's own
+/// actions, the window and the tray, and settings results that show
+/// nothing. Everything else would show or change what the lock hides.
+fn allowed_while_locked(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::UnlockApp
+            | Action::LockApp
+            | Action::ForgotAppPassword(_)
+            | Action::UnlinkLockedApp
+            | Action::ShowWindow
+            | Action::HideWindow
+            | Action::CloseWindow
+            | Action::Quit
+            | Action::ReloadThemes
+            | Action::ZoomBy(_)
+            | Action::ResetZoom
+            | Action::SettingsChanged
+            | Action::SetChatSound { .. }
+            | Action::SetNotificationSound { .. }
+            | Action::SetDownloadFolder(_)
+            // The call window is its own window and shows no one while locked;
+            // its buttons keep working so a call can be ended or muted.
+            | Action::HangupCall
+            | Action::SetCallMuted(_)
+            | Action::SetCallMicrophone(_)
+            | Action::SetCallSpeaker(_)
+    )
+}
+
+/// Whether an input event is someone using the window, which restarts the
+/// app lock's inactivity count. Focus changes and the pointer leaving are
+/// the desktop's doing, not the person's.
+fn is_user_input(event: &egui::Event) -> bool {
+    matches!(
+        event,
+        egui::Event::Key { .. }
+            | egui::Event::Text(_)
+            | egui::Event::Copy
+            | egui::Event::Cut
+            | egui::Event::Paste(_)
+            | egui::Event::PointerMoved(_)
+            | egui::Event::MouseMoved(_)
+            | egui::Event::PointerButton { .. }
+            | egui::Event::MouseWheel { .. }
+            | egui::Event::Zoom(_)
+            | egui::Event::Touch { .. }
+            | egui::Event::Ime(_)
+    )
 }
 
 fn notification_eligible(chat: &Chat, now: i64, message_at: i64) -> bool {
@@ -8112,11 +8439,24 @@ mod tests {
             Some(Action::Quit)
         ));
         assert!(super::tray_action(Event::Menu("other"), false).is_none());
-        let menu = super::tray_config().menu;
+        let menu = super::tray_config(false).menu;
         assert_eq!(
             menu,
             [
                 fastframe_tray::MenuItem::action(super::TRAY_SHOW, "Show or hide ZapFast"),
+                fastframe_tray::MenuItem::Separator,
+                fastframe_tray::MenuItem::action(super::TRAY_QUIT, "Quit"),
+            ]
+        );
+        assert!(matches!(
+            super::tray_action(Event::Menu(super::TRAY_LOCK), false),
+            Some(Action::LockApp)
+        ));
+        assert_eq!(
+            super::tray_config(true).menu,
+            [
+                fastframe_tray::MenuItem::action(super::TRAY_SHOW, "Show or hide ZapFast"),
+                fastframe_tray::MenuItem::action(super::TRAY_LOCK, "Lock ZapFast"),
                 fastframe_tray::MenuItem::Separator,
                 fastframe_tray::MenuItem::action(super::TRAY_QUIT, "Quit"),
             ]
@@ -11722,5 +12062,372 @@ mod name_tests {
             app.preview_line("@987654321012345 looks sharp", &photo),
             "@Carmine looks sharp"
         );
+    }
+}
+
+#[cfg(test)]
+mod app_lock_tests {
+    use super::*;
+    use crate::app_lock::{Clock, Form, FormError, FormMode};
+    use std::sync::{Arc, Mutex};
+
+    const PASSWORD: &str = "open-sesame";
+    const CHAT: &str = "1@s.whatsapp.net";
+
+    fn settings(password: Option<&str>) -> Settings {
+        Settings {
+            app_lock_hash: password.map(crate::app_lock::verifier),
+            ..Settings::default()
+        }
+    }
+
+    fn app_with(settings: Settings) -> App {
+        let root = std::env::temp_dir().join(format!(
+            "zapfast-app-lock-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        App::headless(AppDirs::under(&root), settings).0
+    }
+
+    /// An app with the lock set but not locked, as after unlocking.
+    fn unlocked_app() -> App {
+        let mut app = app_with(settings(Some(PASSWORD)));
+        app.app_lock.release();
+        app
+    }
+
+    fn manual_clock(app: &mut App) -> Arc<Mutex<Instant>> {
+        let now = Arc::new(Mutex::new(Instant::now()));
+        let read = Arc::clone(&now);
+        let clock: Clock = Arc::new(move || *read.lock().unwrap());
+        app.app_lock.set_clock(clock);
+        now
+    }
+
+    fn advance(now: &Mutex<Instant>, by: Duration) {
+        *now.lock().unwrap() += by;
+    }
+
+    /// Waits for the password thread and applies its answer.
+    fn finish(app: &mut App, ctx: &egui::Context) {
+        let outcome = app.app_lock.wait().expect("a finished check");
+        app.app_lock_outcome(outcome);
+        app.apply_actions(ctx);
+    }
+
+    fn try_password(app: &mut App, ctx: &egui::Context, password: &str) {
+        app.app_lock.entry = password.into();
+        app.apply(Action::UnlockApp, ctx);
+        finish(app, ctx);
+    }
+
+    fn incoming(app: &mut App) -> Message {
+        let mut chat = Chat::new(CHAT.into(), "Ada Lovelace".into());
+        chat.unread = 1;
+        app.chats = vec![chat];
+        Message {
+            id: "m1".into(),
+            chat: CHAT.into(),
+            sender: CHAT.into(),
+            sender_name: None,
+            from_me: false,
+            timestamp: crate::util::now(),
+            content: Content::text("the engine is ready"),
+            status: Delivery::None,
+            delivered_at: None,
+            read_at: None,
+            quoted: None,
+            reactions: Vec::new(),
+            edited: false,
+            mentions: Vec::new(),
+            forwarded: false,
+            thumbnail: None,
+        }
+    }
+
+    #[test]
+    fn it_starts_locked_only_with_a_password() {
+        assert!(app_with(settings(Some(PASSWORD))).app_lock.is_locked());
+        assert!(!app_with(settings(None)).app_lock.is_locked());
+    }
+
+    #[test]
+    fn inactivity_locks_after_the_chosen_time_even_while_hidden() {
+        let ctx = egui::Context::default();
+        let mut app = unlocked_app();
+        app.settings.app_lock_after = crate::settings::AutoLock::OneMinute;
+        let now = manual_clock(&mut app);
+        advance(&now, Duration::from_secs(59));
+        app.background_frame(&ctx);
+        assert!(!app.app_lock.is_locked());
+        // Input restarts the count.
+        app.app_lock.note_input();
+        advance(&now, Duration::from_secs(59));
+        app.background_frame(&ctx);
+        assert!(!app.app_lock.is_locked());
+        // Hidden in the tray, only the headless loop runs, and it locks.
+        app.window_gone();
+        advance(&now, Duration::from_secs(2));
+        app.background_frame(&ctx);
+        assert!(app.app_lock.is_locked());
+    }
+
+    #[test]
+    fn a_longer_choice_waits_longer_and_no_password_never_locks() {
+        let ctx = egui::Context::default();
+        let mut app = unlocked_app();
+        app.apply(
+            Action::SetAutoLock(crate::settings::AutoLock::OneHour),
+            &ctx,
+        );
+        let now = manual_clock(&mut app);
+        advance(&now, Duration::from_secs(59 * 60));
+        app.background_frame(&ctx);
+        assert!(!app.app_lock.is_locked());
+        advance(&now, Duration::from_secs(60));
+        app.background_frame(&ctx);
+        assert!(app.app_lock.is_locked());
+
+        let mut app = app_with(settings(None));
+        let now = manual_clock(&mut app);
+        advance(&now, Duration::from_secs(24 * 60 * 60));
+        app.background_frame(&ctx);
+        app.apply(Action::LockApp, &ctx);
+        assert!(!app.app_lock.is_locked());
+    }
+
+    #[test]
+    fn window_input_counts_as_use() {
+        let ctx = egui::Context::default();
+        let mut app = unlocked_app();
+        app.settings.app_lock_after = crate::settings::AutoLock::OneMinute;
+        app.attach(&ctx);
+        let now = manual_clock(&mut app);
+        advance(&now, Duration::from_secs(50));
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                events: vec![egui::Event::PointerMoved(egui::pos2(10.0, 10.0))],
+                ..Default::default()
+            },
+            |ui| app.frame_ui(ui),
+        );
+        output.textures_delta.clear();
+        advance(&now, Duration::from_secs(50));
+        app.background_frame(&ctx);
+        assert!(!app.app_lock.is_locked());
+    }
+
+    #[test]
+    fn lock_now_stops_media_and_closes_the_locked_folder() {
+        let ctx = egui::Context::default();
+        let mut app = unlocked_app();
+        app.locked_folder = true;
+        app.chat_lock_entry = "half typed".into();
+        app.window_focused = true;
+        app.apply(Action::LockApp, &ctx);
+        assert!(app.app_lock.is_locked());
+        assert!(!app.locked_folder);
+        assert!(app.chat_lock_entry.is_empty());
+        assert!(!app.window_focused);
+    }
+
+    #[test]
+    fn a_right_password_unlocks_and_wrong_ones_back_off() {
+        let ctx = egui::Context::default();
+        let mut app = app_with(settings(Some(PASSWORD)));
+        let now = manual_clock(&mut app);
+        for _ in 0..3 {
+            try_password(&mut app, &ctx, "not the password");
+            assert!(app.app_lock.is_locked());
+            assert!(app.app_lock.wrong);
+        }
+        assert_eq!(app.app_lock.wait_left(), Some(Duration::from_secs(1)));
+        // A try during the wait is not made at all.
+        app.app_lock.entry = PASSWORD.into();
+        app.apply(Action::UnlockApp, &ctx);
+        assert!(!app.app_lock.checking());
+        advance(&now, Duration::from_secs(1));
+        try_password(&mut app, &ctx, PASSWORD);
+        assert!(!app.app_lock.is_locked());
+        assert!(app.app_lock.entry.is_empty());
+    }
+
+    #[test]
+    fn while_locked_actions_do_nothing_and_a_clicked_notification_waits() {
+        let ctx = egui::Context::default();
+        let mut app = app_with(settings(Some(PASSWORD)));
+        app.chats = vec![Chat::new(CHAT.into(), "Ada".into())];
+        app.open_chat = None;
+        app.apply(Action::OpenChat(CHAT.into()), &ctx);
+        app.apply(Action::Open(Page::Settings), &ctx);
+        app.apply(Action::ShowDialog(Dialog::NewChat), &ctx);
+        app.apply(Action::Unlink, &ctx);
+        assert_eq!(app.open_chat, None);
+        assert_eq!(app.page, Page::Chats);
+        assert_eq!(app.dialog, None);
+
+        app.notification_opens
+            .lock()
+            .unwrap()
+            .push(crate::notify::NotificationTarget {
+                chat: CHAT.into(),
+                message: Some("m1".into()),
+            });
+        app.handle_notification_opens();
+        app.apply_actions(&ctx);
+        assert_eq!(app.open_chat, None, "not while locked");
+        try_password(&mut app, &ctx, PASSWORD);
+        assert_eq!(app.open_chat.as_deref(), Some(CHAT), "opened once unlocked");
+    }
+
+    #[test]
+    fn notifications_while_locked_carry_no_chat_sender_text_or_picture() {
+        let mut app = unlocked_app();
+        let message = incoming(&mut app);
+        app.chats[0].notification_sound = Some(crate::settings::NotificationSound::Alert);
+        app.maybe_notify(CHAT, &message);
+        let shown = app.notifications.shown.last().unwrap().clone();
+        assert_eq!(shown.title, "Ada Lovelace");
+        assert_eq!(shown.body, "the engine is ready");
+
+        app.lock_app();
+        app.maybe_notify(CHAT, &message);
+        let shown = app.notifications.shown.last().unwrap();
+        assert_eq!(shown.title, "ZapFast");
+        assert_eq!(shown.body, "New message");
+        assert_eq!(shown.picture, None);
+        assert_eq!(
+            shown.sound, app.settings.message_sound,
+            "the chat's own sound would name it"
+        );
+    }
+
+    #[test]
+    fn messages_arriving_while_locked_stay_unread() {
+        let ctx = egui::Context::default();
+        let mut app = app_with(settings(Some(PASSWORD)));
+        app.open_chat = Some(CHAT.into());
+        app.window_focused = true;
+        app.background_frame(&ctx);
+        let mut chat = Chat::new(CHAT.into(), "Ada".into());
+        chat.unread = 1;
+        app.handle_chat_updated(chat);
+        assert_eq!(app.chat(CHAT).unwrap().unread, 1);
+    }
+
+    #[test]
+    fn setting_changing_and_turning_off_the_password() {
+        let ctx = egui::Context::default();
+        let mut app = app_with(settings(None));
+        // Changing needs a password to change.
+        app.apply(Action::AppLockForm(Some(FormMode::Change)), &ctx);
+        assert_eq!(app.app_lock.form, None);
+        app.apply(Action::AppLockForm(Some(FormMode::Set)), &ctx);
+        let form = app.app_lock.form.as_mut().unwrap();
+        form.new = "first-password".into();
+        form.confirm = "first-password".into();
+        app.apply(Action::SubmitAppLockForm, &ctx);
+        finish(&mut app, &ctx);
+        assert_eq!(app.app_lock.form, None);
+        let first = app.settings.app_lock_hash.clone().unwrap();
+        assert!(crate::app_lock::verifies(&first, "first-password"));
+        assert!(
+            !app.app_lock.is_locked(),
+            "setting a password does not lock"
+        );
+
+        // A second Set cannot replace it without the current password.
+        app.apply(Action::AppLockForm(Some(FormMode::Set)), &ctx);
+        assert_eq!(app.app_lock.form, None);
+
+        let mut change = Form::new(FormMode::Change);
+        change.current = "wrong".into();
+        change.new = "second-password".into();
+        change.confirm = "second-password".into();
+        app.app_lock.form = Some(change.clone());
+        app.apply(Action::SubmitAppLockForm, &ctx);
+        finish(&mut app, &ctx);
+        let form = app.app_lock.form.as_ref().unwrap();
+        assert_eq!(form.error, Some(FormError::WrongCurrent));
+        assert!(!form.busy);
+        assert_eq!(app.settings.app_lock_hash.as_deref(), Some(first.as_str()));
+
+        change.current = "first-password".into();
+        app.app_lock.form = Some(change);
+        app.apply(Action::SubmitAppLockForm, &ctx);
+        finish(&mut app, &ctx);
+        let second = app.settings.app_lock_hash.clone().unwrap();
+        assert!(crate::app_lock::verifies(&second, "second-password"));
+
+        // Turning off requires the password too.
+        app.apply(Action::AppLockForm(Some(FormMode::TurnOff)), &ctx);
+        app.app_lock.form.as_mut().unwrap().current = "first-password".into();
+        app.apply(Action::SubmitAppLockForm, &ctx);
+        finish(&mut app, &ctx);
+        assert!(app.settings.app_lock_hash.is_some());
+        app.app_lock.form.as_mut().unwrap().current = "second-password".into();
+        app.apply(Action::SubmitAppLockForm, &ctx);
+        finish(&mut app, &ctx);
+        assert_eq!(app.settings.app_lock_hash, None);
+        assert_eq!(app.app_lock.form, None);
+    }
+
+    #[test]
+    fn forgetting_the_password_unlocks_only_after_unlinking() {
+        let ctx = egui::Context::default();
+        let mut app = app_with(settings(Some(PASSWORD)));
+        app.apply(Action::ForgotAppPassword(true), &ctx);
+        assert_eq!(
+            app.app_lock.forgetting,
+            crate::app_lock::Forgetting::Confirming
+        );
+        app.apply(Action::UnlinkLockedApp, &ctx);
+        assert_eq!(
+            app.app_lock.forgetting,
+            crate::app_lock::Forgetting::Unlinking
+        );
+        assert!(app.app_lock.is_locked(), "still locked until unlinked");
+        app.handle_link(LinkStatus::LoggedOut);
+        assert!(!app.app_lock.is_locked());
+        assert_eq!(app.settings.app_lock_hash, None);
+    }
+
+    #[test]
+    fn the_lock_shortcut_needs_a_password() {
+        let ctx = egui::Context::default();
+        let press = |app: &mut App| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    events: vec![egui::Event::Key {
+                        key: egui::Key::L,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+                    }],
+                    ..Default::default()
+                },
+                |ui| crate::ui::keys::handle(app, ui.ctx()),
+            );
+            output.textures_delta.clear();
+            std::mem::take(&mut app.actions)
+        };
+        let mut app = unlocked_app();
+        let actions = press(&mut app);
+        assert!(actions.contains(&Action::LockApp), "{actions:?}");
+        assert!(!actions.contains(&Action::FocusComposer));
+        let mut app = app_with(settings(None));
+        assert!(!press(&mut app).contains(&Action::LockApp));
+    }
+
+    #[test]
+    fn a_call_can_be_ended_but_not_answered_behind_the_lock() {
+        assert!(allowed_while_locked(&Action::HangupCall));
+        assert!(allowed_while_locked(&Action::SetCallMuted(true)));
+        // The ringing card is not drawn locked, and answering would show who
+        // is calling.
+        assert!(!allowed_while_locked(&Action::AnswerCall));
+        assert!(!allowed_while_locked(&Action::DeclineCall));
     }
 }
