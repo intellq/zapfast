@@ -615,6 +615,7 @@ pub async fn run(
         recent_hashes: HashMap::new(),
         emoji_cache: HashMap::new(),
         favorite_fetches: HashSet::new(),
+        favorite_gate: Arc::new(tokio::sync::Semaphore::new(1)),
         favorites_pushing: false,
         favorites_again: false,
         favorites_recovered,
@@ -922,6 +923,9 @@ struct Worker {
     emoji_cache: HashMap<PathBuf, EmojiStamp>,
     /// Favorite stickers being fetched from the phone's list, by hash.
     favorite_fetches: HashSet<String>,
+    /// Lets one favorite download run at a time: dozens at once hit WhatsApp's
+    /// rate limit, and most of them fail.
+    favorite_gate: Arc<tokio::sync::Semaphore>,
     /// Whether favorite changes are on their way to the phone.
     favorites_pushing: bool,
     /// More favorite changes arrived while a push was running.
@@ -12889,6 +12893,7 @@ mod receipt_tests {
             recent_hashes: HashMap::new(),
             emoji_cache: HashMap::new(),
             favorite_fetches: HashSet::new(),
+            favorite_gate: Arc::new(tokio::sync::Semaphore::new(1)),
             favorites_pushing: false,
             favorites_again: false,
             favorites_recovered: true,

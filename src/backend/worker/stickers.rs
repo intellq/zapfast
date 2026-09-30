@@ -40,6 +40,16 @@ fn fetchable(action: &wa::sync_action_value::StickerAction) -> bool {
         || (action.media_key.is_none() && action.url.as_deref().is_some_and(|url| !url.is_empty()))
 }
 
+/// Rest between two favorite downloads.
+const FAVORITE_PACE: std::time::Duration = std::time::Duration::from_millis(400);
+
+/// How long to wait before trying a download again after WhatsApp said it was
+/// going too fast (429 `rate-overlimit`), doubling up to four tries.
+fn rate_limit_wait(error: &str, attempt: u32) -> Option<std::time::Duration> {
+    (attempt < 4 && (error.contains("rate-overlimit") || error.contains("code=429")))
+        .then(|| std::time::Duration::from_secs(2 << attempt))
+}
+
 /// A download error without the CDN paths and tokens it may quote.
 fn redacted(error: &str) -> String {
     use fastframe_log::redact;
@@ -724,15 +734,27 @@ impl Worker {
         self.favorite_fetches.insert(hash.clone());
         let commands = self.commands.clone();
         let attachment_limit = self.attachment_limit;
+        let gate = self.favorite_gate.clone();
         tokio::spawn(async move {
+            let _turn = gate.acquire().await;
             let mut result = Err("no download references".to_owned());
-            for download in &candidates {
-                result =
-                    download_attachment(&client, download, &dir, &path, attachment_limit).await;
-                if result.is_ok() {
-                    break;
+            'candidates: for download in &candidates {
+                let mut attempt = 0;
+                loop {
+                    result =
+                        download_attachment(&client, download, &dir, &path, attachment_limit).await;
+                    let Err(error) = &result else {
+                        break 'candidates;
+                    };
+                    let Some(wait) = rate_limit_wait(error, attempt) else {
+                        break;
+                    };
+                    attempt += 1;
+                    tokio::time::sleep(wait).await;
                 }
             }
+            // A short rest keeps a long list from tripping the limit again.
+            tokio::time::sleep(FAVORITE_PACE).await;
             let _ = commands.send(Command::FavoriteFetched { hash, result });
         });
     }
@@ -1351,6 +1373,22 @@ mod tests {
             .expect("reads")
             .expect("row");
         assert!(known.favorite && known.pushed, "the phone already has it");
+    }
+
+    /// A download refused for going too fast waits and tries again, a few times.
+    #[test]
+    fn a_rate_limited_favorite_download_waits_and_retries() {
+        let limited = "received a server error response: code=429, text='rate-overlimit'";
+        assert_eq!(
+            rate_limit_wait(limited, 0),
+            Some(std::time::Duration::from_secs(2))
+        );
+        assert_eq!(
+            rate_limit_wait(limited, 3),
+            Some(std::time::Duration::from_secs(16))
+        );
+        assert_eq!(rate_limit_wait(limited, 4), None);
+        assert_eq!(rate_limit_wait("Download failed with status: 403", 0), None);
     }
 
     /// A favorite the phone names but that cannot be fetched now stays owed:
