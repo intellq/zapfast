@@ -498,9 +498,15 @@ sozinho a partir das Releases do fork (não das do upstream).
   minutos ou 1 hora sem uso, notificações só com "Nova mensagem", ligações
   sem nome nem foto (encerrar e silenciar valem, atender só desbloqueado) e
   menu da bandeja com "Bloquear o ZapFast" a partir do início seguinte.
-- **GIFs.** A busca usa o GIPHY: coloque sua chave em **Configurações ›
-  Sistema › GIPHY API key** (grátis em developers.giphy.com) ou compile com
-  `ZAPFAST_GIPHY_KEY`.
+- **GIFs.** A busca usa o GIPHY e precisa de uma chave de API. A decisão do
+  fork é embutir uma chave nas releases, para ninguém precisar cadastrar a
+  própria: o `release-fork.yml` lê o segredo `ZAPFAST_GIPHY_KEY` do GitHub, e
+  isso vale a partir da primeira release feita com o segredo cadastrado (a
+  0.17.4 saiu sem chave). Sem chave embutida, coloque a sua em
+  **Configurações › Sistema › GIPHY API key** (grátis em
+  developers.giphy.com), ou compile com `ZAPFAST_GIPHY_KEY`. Uma chave
+  embutida fica legível no binário, o que aqui não é problema; a chave das
+  Configurações vale no lugar dela.
 
 Vieram também do upstream, sem mudar o que o fork já fazia: selecionar
 mensagens clicando na linha, menu da mensagem a partir da faixa vazia ao lado,
