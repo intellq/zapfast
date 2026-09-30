@@ -8,11 +8,11 @@ use serde::{Deserialize, Serialize};
 /// typed string. ponytail: fixed cost, revisit if it lags the search field.
 const CHAT_LOCK_ROUNDS: std::num::NonZeroU32 = std::num::NonZeroU32::new(200_000).unwrap();
 
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn unhex(value: &str) -> Option<Vec<u8>> {
+pub(crate) fn unhex(value: &str) -> Option<Vec<u8>> {
     value
         .len()
         .is_multiple_of(2)
@@ -291,6 +291,37 @@ impl WallpaperColor {
     }
 }
 
+/// How long ZapFast may go without input before the app lock locks it:
+/// WhatsApp Web's three choices.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoLock {
+    OneMinute,
+    #[default]
+    FifteenMinutes,
+    OneHour,
+}
+
+impl AutoLock {
+    pub const ALL: [AutoLock; 3] = [Self::OneMinute, Self::FifteenMinutes, Self::OneHour];
+
+    pub fn duration(self) -> std::time::Duration {
+        std::time::Duration::from_secs(match self {
+            Self::OneMinute => 60,
+            Self::FifteenMinutes => 15 * 60,
+            Self::OneHour => 60 * 60,
+        })
+    }
+
+    pub fn label(self, locale: crate::i18n::Locale) -> std::borrow::Cow<'static, str> {
+        match self {
+            Self::OneMinute => crate::i18n::gettext(locale, "After 1 minute"),
+            Self::FifteenMinutes => crate::i18n::gettext(locale, "After 15 minutes"),
+            Self::OneHour => crate::i18n::gettext(locale, "After 1 hour"),
+        }
+    }
+}
+
 /// The sound a new-message notification makes.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -457,6 +488,11 @@ pub struct Settings {
     pub call_speaker: Option<String>,
     /// Whether the call window stays above other windows.
     pub call_window_on_top: bool,
+    /// Salted, slow verifier of the app lock password
+    /// ([`crate::app_lock::verifier`]); `None` leaves the app lock off.
+    pub app_lock_hash: Option<String>,
+    /// How long ZapFast may go unused before the app lock locks it.
+    pub app_lock_after: AutoLock,
 }
 
 impl Default for Settings {
@@ -522,6 +558,8 @@ impl Default for Settings {
             call_microphone: None,
             call_speaker: None,
             call_window_on_top: true,
+            app_lock_hash: None,
+            app_lock_after: AutoLock::default(),
         }
     }
 }

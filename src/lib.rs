@@ -2,6 +2,7 @@
 
 pub mod animation;
 pub mod app;
+pub mod app_lock;
 pub mod archive;
 pub mod audio;
 pub mod autostart;
