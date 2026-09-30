@@ -1122,20 +1122,33 @@ fn app_lock_rows(app: &App, privacy: &mut Section) {
         ),
         move |ui, app| {
             use crate::i18n::gettext;
-            // The row lays its controls out from the right.
+            // Stacked, and centred against the row's text on the left.
             let modes = if enabled {
                 vec![
-                    (FormMode::TurnOff, gettext(app.locale, "Turn off…")),
                     (FormMode::Change, gettext(app.locale, "Change password…")),
+                    (FormMode::TurnOff, gettext(app.locale, "Turn off…")),
                 ]
             } else {
                 vec![(FormMode::Set, gettext(app.locale, "Set password…"))]
             };
-            for (mode, label) in modes {
-                if theme::soft_button(ui, &palette, None, &label, false).clicked() {
-                    app.actions.push(Action::AppLockForm(Some(mode)));
-                }
-            }
+            let button = ui.fonts_mut(|fonts| fonts.row_height(&theme::medium(13.0))) + 14.0;
+            let gap = ui.spacing().item_spacing.y;
+            let stack = button * modes.len() as f32 + gap * (modes.len() - 1) as f32;
+            let text = ui
+                .data(|data| data.get_temp::<f32>(widgets::setting_row_text_height()))
+                .unwrap_or(stack);
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), text.max(stack)),
+                egui::Layout::top_down(egui::Align::Max),
+                |ui| {
+                    ui.add_space((text - stack).max(0.0) / 2.0);
+                    for (mode, label) in modes {
+                        if theme::soft_button(ui, &palette, None, &label, false).clicked() {
+                            app.actions.push(Action::AppLockForm(Some(mode)));
+                        }
+                    }
+                },
+            );
         },
     );
     if app.app_lock.form.is_some() {

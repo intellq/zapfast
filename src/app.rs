@@ -869,11 +869,11 @@ fn tray_action(event: fastframe_tray::Event, window_hidden: bool) -> Option<Acti
 /// then "Lock ZapFast" does nothing without a password.
 fn tray_config(lockable: bool) -> fastframe_tray::Config {
     use fastframe_tray::MenuItem;
-    let mut menu = vec![MenuItem::action(TRAY_SHOW, "Show or hide ZapFast")];
+    let mut menu = vec![MenuItem::action(TRAY_SHOW, tr("Show or hide ZapFast"))];
     if lockable {
-        menu.push(MenuItem::action(TRAY_LOCK, "Lock ZapFast"));
+        menu.push(MenuItem::action(TRAY_LOCK, tr("Lock ZapFast")));
     }
-    menu.extend([MenuItem::Separator, MenuItem::action(TRAY_QUIT, "Quit")]);
+    menu.extend([MenuItem::Separator, MenuItem::action(TRAY_QUIT, tr("Quit"))]);
     fastframe_tray::Config {
         id: "zapfast",
         title: "ZapFast".into(),

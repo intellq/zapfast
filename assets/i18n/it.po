@@ -2322,6 +2322,10 @@ msgstr "Ancora nessuno"
 msgid "Show or hide ZapFast"
 msgstr ""
 
+#: src/app.rs
+msgid "Lock ZapFast"
+msgstr "Blocca ZapFast"
+
 #: src/app.rs:709 src/app.rs:4860 src/ui/keys.rs:391
 msgid "Quit"
 msgstr ""

@@ -827,13 +827,23 @@ pub fn setting_row(
     };
     let width = ui.available_width();
     ui.horizontal(|ui| {
-        ui.vertical(|ui| {
+        let text = ui.vertical(|ui| {
             ui.set_width((width - control_width - ui.spacing().item_spacing.x).max(1.0));
             draw_text(ui);
+        });
+        // For a control taller than one line, which centres itself on the text.
+        ui.data_mut(|data| {
+            data.insert_temp(setting_row_text_height(), text.response.rect.height())
         });
         ui.with_layout(Layout::right_to_left(Align::Center), control);
     });
     ui.add_space(10.0);
+}
+
+/// Where [`setting_row`] leaves the height of the row's text, for a control
+/// that stacks several widgets and centres them against it.
+pub fn setting_row_text_height() -> egui::Id {
+    egui::Id::new("setting-row-text-height")
 }
 
 pub fn paint_vertical_gradient(ui: &Ui, rect: Rect, top: Color32, bottom: Color32) {
