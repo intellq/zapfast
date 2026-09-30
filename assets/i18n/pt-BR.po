@@ -3336,8 +3336,8 @@ msgid "Save attachment"
 msgstr "Salvar anexo"
 
 #: src/backend/worker.rs:4664
-msgid "Saved"
-msgstr "Salvo"
+msgid "File saved"
+msgstr "Arquivo salvo"
 
 #: src/backend/worker.rs:4702
 msgid "Pictures"
@@ -4064,6 +4064,10 @@ msgstr "Recolher ou expandir a lista de conversas"
 #: src/ui/keys.rs:374
 msgid "Scroll the open chat by a page"
 msgstr "Rolar a conversa aberta uma página"
+
+#: src/ui/keys.rs:378
+msgid "Scroll the open chat a few lines (when the history has focus or the input is empty)"
+msgstr "Rolar a conversa aberta algumas linhas (com o foco no histórico ou o campo vazio)"
 
 #: src/ui/keys.rs:378
 msgid "Top / bottom of the open chat (when the input is empty)"
@@ -4914,3 +4918,25 @@ msgstr "Após 1 hora"
 
 #~ msgid "Jump to the newest message"
 #~ msgstr "Ir para a mensagem mais recente"
+
+#: src/ui/dialogs.rs
+msgid ""
+"Everyone in this chat will see \"This message was deleted\" instead of each "
+"of these messages. It cannot be undone."
+msgstr ""
+"Todos nesta conversa verão \"Esta mensagem foi apagada\" no lugar de cada "
+"uma dessas mensagens. Não é possível desfazer."
+
+#: src/ui/dialogs.rs
+msgid "This removes the messages from this computer."
+msgstr "Isso apaga as mensagens deste computador."
+
+#: src/ui/dialogs.rs
+msgid ""
+"This removes the messages from this computer. Check the option below to "
+"remove them from your phone and linked devices too. Other people keep their "
+"copy."
+msgstr ""
+"Isso apaga as mensagens deste computador. Marque a opção abaixo para apagá-"
+"las também do celular e dos dispositivos vinculados. As outras pessoas "
+"mantêm a cópia delas."

@@ -75,10 +75,10 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                 Dialog::ConfirmClearChat(id) => confirm_clear_chat(app, ui, &id),
                 Dialog::ConfirmDeleteMessage {
                     chat,
-                    message,
+                    messages,
                     for_everyone,
                     on_phone,
-                } => confirm_delete_message(app, ui, &chat, &message, for_everyone, on_phone),
+                } => confirm_delete_message(app, ui, &chat, &messages, for_everyone, on_phone),
                 Dialog::Forward { chat, messages } => forward(app, ui, &chat, &messages),
                 Dialog::JoinGroup => join_group(app, ui),
                 Dialog::ConfirmStartOver => confirm_start_over(app, ui),
@@ -1241,37 +1241,54 @@ fn confirm_start_over(app: &mut App, ui: &mut egui::Ui) {
     });
 }
 
-/// Confirms deleting one message. Enter is deliberately not bound here: a
+/// Confirms deleting messages. Enter is deliberately not bound here: a
 /// stray keypress must not destroy a message.
 fn confirm_delete_message(
     app: &mut App,
     ui: &mut egui::Ui,
     chat: &str,
-    id: &str,
+    ids: &[String],
     for_everyone: bool,
     on_phone: bool,
 ) {
     let palette = app.palette;
     // A deleted message exists only here, so it is never deleted on the phone.
-    let local_only = !for_everyone && app.is_revoked(chat, id);
+    let local_only = !for_everyone && ids.iter().all(|id| app.is_revoked(chat, id));
+    let several = ids.len() > 1;
     let (heading, body) = if for_everyone {
         (
             tr("Delete for everyone?"),
-            tr(
-                "Everyone in this chat will see \"This message was deleted\" instead. It cannot be undone.",
-            ),
+            if several {
+                tr(
+                    "Everyone in this chat will see \"This message was deleted\" instead of each of these messages. It cannot be undone.",
+                )
+            } else {
+                tr(
+                    "Everyone in this chat will see \"This message was deleted\" instead. It cannot be undone.",
+                )
+            },
         )
     } else if local_only {
         (
             tr("Delete for me?"),
-            tr("This removes the message from this computer."),
+            if several {
+                tr("This removes the messages from this computer.")
+            } else {
+                tr("This removes the message from this computer.")
+            },
         )
     } else {
         (
             tr("Delete for me?"),
-            tr(
-                "This removes the message from this computer. Check the option below to remove it from your phone and linked devices too. Other people keep their copy.",
-            ),
+            if several {
+                tr(
+                    "This removes the messages from this computer. Check the option below to remove them from your phone and linked devices too. Other people keep their copy.",
+                )
+            } else {
+                tr(
+                    "This removes the message from this computer. Check the option below to remove it from your phone and linked devices too. Other people keep their copy.",
+                )
+            },
         )
     };
     title(ui, app, crate::i18n::gettext(app.locale, heading).as_ref());
@@ -1303,18 +1320,22 @@ fn confirm_delete_message(
                 crate::i18n::gettext(app.locale, "OK")
             };
             if danger_button(ui, app, confirm_label.as_ref()) {
-                app.actions.push(if for_everyone {
-                    Action::DeleteForEveryone {
-                        chat: chat.to_owned(),
-                        id: id.to_owned(),
-                    }
-                } else {
-                    Action::DeleteForMe {
-                        chat: chat.to_owned(),
-                        message: id.to_owned(),
-                        on_phone: selected,
-                    }
-                });
+                for id in ids {
+                    app.actions.push(if for_everyone {
+                        Action::DeleteForEveryone {
+                            chat: chat.to_owned(),
+                            id: id.clone(),
+                        }
+                    } else {
+                        Action::DeleteForMe {
+                            chat: chat.to_owned(),
+                            message: id.clone(),
+                            on_phone: selected,
+                        }
+                    });
+                }
+                // The selection was for these messages.
+                app.actions.push(Action::CancelSelection);
                 app.actions.push(Action::CloseDialog);
             }
             if theme::pill_button(

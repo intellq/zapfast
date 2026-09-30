@@ -1086,7 +1086,7 @@ impl Archive {
              FROM messages
              WHERE chat = ?1 AND timestamp >= ?2 AND (timestamp < ?3 OR (timestamp = ?3 AND rowid <
                  (SELECT rowid FROM messages WHERE chat = ?1 AND id = ?4)))
-             ORDER BY timestamp ASC, rowid ASC
+             ORDER BY timestamp DESC, rowid DESC
              LIMIT ?5",
         )?;
         let rows = statement.query_map(
@@ -1118,7 +1118,11 @@ impl Archive {
                 })
             },
         )?;
-        rows.collect()
+        // The newest `limit` of the range: a cut leaves the part beside
+        // `before`, never a gap between it and what is already loaded.
+        let mut messages = rows.collect::<Result<Vec<_>>>()?;
+        messages.reverse();
+        Ok(messages)
     }
 
     /// Returns downloaded stickers we sent (`from_me`) or received, newest
@@ -3053,6 +3057,14 @@ pub(crate) mod tests {
         assert_eq!(
             range.iter().map(|m| m.timestamp).collect::<Vec<_>>(),
             vec![102, 103, 104]
+        );
+        // A cut keeps the messages nearest `before`, still oldest first.
+        let range = archive
+            .messages_range(chat, 100, (105, "m5"), 2)
+            .expect("range");
+        assert_eq!(
+            range.iter().map(|m| m.timestamp).collect::<Vec<_>>(),
+            vec![103, 104]
         );
         assert!(archive.delete_message(chat, "m3").expect("delete"));
         assert!(!archive.delete_message(chat, "m3").expect("delete"));

@@ -2301,7 +2301,7 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
                     .clone()
                     .map(|chat| Dialog::ConfirmDeleteMessage {
                         chat,
-                        message: "ada-emoji".to_owned(),
+                        messages: vec!["ada-emoji".to_owned()],
                         for_everyone: true,
                         on_phone: false,
                     });
@@ -2312,7 +2312,7 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
                     .clone()
                     .map(|chat| Dialog::ConfirmDeleteMessage {
                         chat,
-                        message: "ada-format".to_owned(),
+                        messages: vec!["ada-format".to_owned()],
                         for_everyone: false,
                         on_phone: true,
                     });
@@ -7000,6 +7000,121 @@ mod tests {
         assert_eq!(after, listed, "every opened chat is still listed");
     }
 
+    /// Alt+Up/Down and Ctrl+Shift+[ ] switch chats while the question is up.
+    /// Confirming afterwards must still delete in the chat the message came
+    /// from, not in whichever chat is open by then (upstream #275).
+    #[test]
+    fn a_message_deletion_confirmed_after_switching_chats_stays_in_its_chat() {
+        let own_chat = SAMPLES[0].id;
+        for (page, message, everyone) in [
+            ("delete-message", "ada-emoji", true),
+            ("delete-message-mine", "ada-format", false),
+        ] {
+            let mut app = app();
+            let (backend, mut commands) = crate::backend::Backend::recording();
+            app.backend = backend;
+            apply_flags(&mut app, Some(page));
+            app.open_chat = Some(SAMPLES[1].id.to_owned());
+            let ctx = egui::Context::default();
+            ctx.enable_accesskit();
+            app.attach(&ctx);
+            render(&mut app, &ctx);
+
+            let pos = accessible_nodes(&mut app, &ctx, Vec::new())
+                .into_iter()
+                .find(|(label, role, _)| {
+                    label == if everyone { "Delete" } else { "OK" }
+                        && *role == egui::accesskit::Role::Button
+                })
+                .map(|(_, _, centre)| centre)
+                .expect("the confirm button is on screen");
+            let press = |pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            frame_with(
+                &mut app,
+                &ctx,
+                vec![egui::Event::PointerMoved(pos), press(true)],
+            );
+            frame_with(&mut app, &ctx, vec![press(false)]);
+
+            let sent: Vec<(String, String)> = std::iter::from_fn(|| commands.try_recv().ok())
+                .filter_map(|command| match command {
+                    crate::backend::Command::Revoke { chat, id }
+                    | crate::backend::Command::DeleteForMe { chat, id, .. } => Some((chat, id)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                sent,
+                [(own_chat.to_owned(), message.to_owned())],
+                "{page}: the deletion goes to the message's own chat"
+            );
+            if everyone {
+                assert!(
+                    matches!(
+                        app.conversations[own_chat]
+                            .message(message)
+                            .map(|message| &message.content),
+                        Some(crate::model::Content::Revoked { .. })
+                    ),
+                    "{page}: the message is revoked in its own chat"
+                );
+            }
+        }
+    }
+
+    /// Deleting for me with several messages selected removes every one.
+    #[test]
+    fn confirming_the_deletion_of_selected_messages_deletes_them_all() {
+        let mut app = app();
+        let (backend, mut commands) = crate::backend::Backend::recording();
+        app.backend = backend;
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let chat = SAMPLES[0].id.to_owned();
+        let ids = vec!["ada-format".to_owned(), "ada-emoji".to_owned()];
+        app.selection = Some((chat.clone(), ids.clone()));
+        app.dialog = Some(crate::model::Dialog::ConfirmDeleteMessage {
+            chat: chat.clone(),
+            messages: ids.clone(),
+            for_everyone: false,
+            on_phone: true,
+        });
+        render(&mut app, &ctx);
+        let pos = accessible_nodes(&mut app, &ctx, Vec::new())
+            .into_iter()
+            .find(|(label, role, _)| label == "OK" && *role == egui::accesskit::Role::Button)
+            .map(|(_, _, centre)| centre)
+            .expect("the confirm button is on screen");
+        let press = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame_with(
+            &mut app,
+            &ctx,
+            vec![egui::Event::PointerMoved(pos), press(true)],
+        );
+        frame_with(&mut app, &ctx, vec![press(false)]);
+        let deleted: Vec<String> = std::iter::from_fn(|| commands.try_recv().ok())
+            .filter_map(|command| match command {
+                crate::backend::Command::DeleteForMe { id, .. } => Some(id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(deleted, ids);
+        assert!(app.selection.is_none(), "the selection is spent");
+        assert!(app.dialog.is_none());
+    }
+
     /// Opening the dialog must not delete anything on its own. A synchronized
     /// deletion waits for the phone before removing the local message.
     #[test]
@@ -7014,7 +7129,7 @@ mod tests {
                 app.dialog,
                 Some(crate::model::Dialog::ConfirmDeleteMessage {
                     chat: SAMPLES[0].id.to_owned(),
-                    message: message.to_owned(),
+                    messages: vec![message.to_owned()],
                     for_everyone: expected_everyone,
                     on_phone: !expected_everyone,
                 })
@@ -8889,7 +9004,7 @@ mod tests {
         frame_with(
             &mut app,
             &ctx,
-            vec![key(egui::Key::ArrowUp, egui::Modifiers::NONE)],
+            vec![key(egui::Key::ArrowUp, egui::Modifiers::COMMAND)],
         );
         assert_eq!(app.editing.as_deref(), Some(expected.0.as_str()));
         assert_eq!(app.composer, expected.1);
@@ -8905,7 +9020,7 @@ mod tests {
         frame_with(
             &mut app,
             &ctx,
-            vec![key(egui::Key::ArrowUp, egui::Modifiers::NONE)],
+            vec![key(egui::Key::ArrowUp, egui::Modifiers::COMMAND)],
         );
         assert!(app.editing.is_none());
         assert_eq!(app.composer, "draft");

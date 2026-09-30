@@ -3144,7 +3144,7 @@ msgid "Save attachment"
 msgstr ""
 
 #: src/backend/worker.rs:4664
-msgid "Saved"
+msgid "File saved"
 msgstr ""
 
 #: src/backend/worker.rs:4702
@@ -3855,6 +3855,10 @@ msgstr ""
 
 #: src/ui/keys.rs:374
 msgid "Scroll the open chat by a page"
+msgstr ""
+
+#: src/ui/keys.rs:378
+msgid "Scroll the open chat a few lines (when the history has focus or the input is empty)"
 msgstr ""
 
 #: src/ui/keys.rs:378
@@ -4756,4 +4760,21 @@ msgstr ""
 
 #: src/settings.rs:319
 msgid "After 1 hour"
+msgstr ""
+
+#: src/ui/dialogs.rs
+msgid ""
+"Everyone in this chat will see \"This message was deleted\" instead of each "
+"of these messages. It cannot be undone."
+msgstr ""
+
+#: src/ui/dialogs.rs
+msgid "This removes the messages from this computer."
+msgstr ""
+
+#: src/ui/dialogs.rs
+msgid ""
+"This removes the messages from this computer. Check the option below to "
+"remove them from your phone and linked devices too. Other people keep their "
+"copy."
 msgstr ""

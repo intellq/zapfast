@@ -97,7 +97,41 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
         && app.reaction_target.is_none()
         && !menu_open
     {
+        // ↑/↓ scroll a few lines while the history has focus (nothing, or a
+        // message, holds it) and while the composer is empty. Any other text
+        // field keeps the arrows for itself, and so do the search results,
+        // which live behind a focused field. The emoji and mention lists
+        // need text in the composer, and Ctrl+↑ edits the previous message.
+        // An empty composer has no cursor to move, so it gives them up too.
+        let history_focused = if editing_text {
+            composer_focused && app.composer.is_empty()
+        } else {
+            history_has_focus(app, ctx)
+        };
+        if history_focused
+            && !editing_text
+            && let Some(id) = ctx.memory(|memory| memory.focused())
+        {
+            // egui would otherwise walk the focus to the nearest widget.
+            ctx.memory_mut(|memory| {
+                memory.set_focus_lock_filter(
+                    id,
+                    egui::EventFilter {
+                        vertical_arrows: true,
+                        ..Default::default()
+                    },
+                );
+            });
+        }
         ctx.input_mut(|input| {
+            if history_focused {
+                if take_plain(input, Key::ArrowUp) {
+                    actions.push(Action::ScrollPage(Scroll::LineUp));
+                }
+                if take_plain(input, Key::ArrowDown) {
+                    actions.push(Action::ScrollPage(Scroll::LineDown));
+                }
+            }
             if take_plain(input, Key::PageUp) {
                 actions.push(Action::ScrollPage(Scroll::PageUp));
             }
@@ -241,11 +275,24 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
         && !app.show_update
         && app.recording.is_none()
         && !menu_open
-        && ctx.input_mut(|input| take_plain(input, Key::ArrowUp));
+        && ctx.input_mut(|input| take_key(input, Key::ArrowUp, Modifiers::COMMAND));
     if let Some(id) = edit_previous.then(|| app.previous_own_editable()).flatten() {
         actions.push(Action::Edit(id));
     }
     app.actions.extend(actions);
+}
+
+/// Whether the message history holds the keyboard focus: no widget does, or
+/// the focused one sits inside the open chat's messages.
+fn history_has_focus(app: &App, ctx: &egui::Context) -> bool {
+    let Some(id) = ctx.memory(|memory| memory.focused()) else {
+        return true;
+    };
+    let Some(pane) = app.scroll_route.rect(crate::app::ScrollPane::Messages) else {
+        return false;
+    };
+    ctx.read_response(id)
+        .is_some_and(|response| pane.contains(response.rect.center()))
 }
 
 /// Removes this frame's first plain (unmodified) press of `key`, if any, and
@@ -253,6 +300,11 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
 /// matches the key with Shift or Alt held, and a plain binding must leave
 /// those combinations, such as Shift+Home for text selection, alone.
 pub(super) fn take_plain(input: &mut egui::InputState, key: Key) -> bool {
+    take_key(input, key, Modifiers::NONE)
+}
+
+/// `take_plain` for a press with exactly these modifiers held.
+fn take_key(input: &mut egui::InputState, key: Key, with: Modifiers) -> bool {
     let mut taken = false;
     input.events.retain(|event| {
         if taken {
@@ -265,7 +317,7 @@ pub(super) fn take_plain(input: &mut egui::InputState, key: Key) -> bool {
                 pressed: true,
                 modifiers,
                 ..
-            } if *found == key && *modifiers == Modifiers::NONE
+            } if *found == key && *modifiers == with
         );
         taken |= matches;
         !matches
@@ -357,7 +409,7 @@ pub const SHORTCUTS: &[(&str, &str)] = &[
         crate::i18n::n_("Previous / next chat, as in WhatsApp"),
     ),
     (
-        "↑",
+        "Ctrl+↑",
         crate::i18n::n_("Edit the previous message (when the input is empty)"),
     ),
     (
@@ -380,6 +432,12 @@ pub const SHORTCUTS: &[(&str, &str)] = &[
     (
         "PgUp / PgDn",
         crate::i18n::n_("Scroll the open chat by a page"),
+    ),
+    (
+        "↑ / ↓",
+        crate::i18n::n_(
+            "Scroll the open chat a few lines (when the history has focus or the input is empty)",
+        ),
     ),
     (
         "Home / End",
@@ -805,6 +863,124 @@ mod tests {
                 "{key:?} did not push the expected action"
             );
         }
+    }
+
+    #[test]
+    fn arrows_scroll_a_few_lines_when_the_history_has_focus() {
+        let (_root, mut app, ids) = app_with_chats(1);
+        app.open_chat = Some(ids[0].clone());
+        let ctx = egui::Context::default();
+        for (key, expected) in [
+            (Key::ArrowUp, Action::ScrollPage(Scroll::LineUp)),
+            (Key::ArrowDown, Action::ScrollPage(Scroll::LineDown)),
+        ] {
+            app.actions.clear();
+            assert!(
+                !press(&mut app, &ctx, key, Modifiers::NONE),
+                "{key:?} survived"
+            );
+            assert_eq!(app.actions, [expected]);
+        }
+        // Shift or Alt keep their own meaning (selection, switching chats).
+        for modifiers in [Modifiers::SHIFT, Modifiers::COMMAND] {
+            app.actions.clear();
+            assert!(press(&mut app, &ctx, Key::ArrowUp, modifiers));
+            assert!(app.actions.is_empty());
+        }
+    }
+
+    #[test]
+    fn arrows_scroll_from_an_empty_composer() {
+        let (_root, mut app, ids) = app_with_chats(1);
+        app.open_chat = Some(ids[0].clone());
+        let ctx = egui::Context::default();
+        let mut text = String::new();
+        let mut actions = Vec::new();
+        for frame in 0..2 {
+            let events = if frame == 0 {
+                vec![]
+            } else {
+                vec![egui::Event::Key {
+                    key: Key::ArrowUp,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Modifiers::NONE,
+                }]
+            };
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    let field =
+                        egui::TextEdit::singleline(&mut text).id(egui::Id::new("composer-text"));
+                    let response = ui.add(field);
+                    if frame == 0 {
+                        response.request_focus();
+                    } else {
+                        handle(&mut app, ui.ctx());
+                        actions = app.actions.clone();
+                    }
+                },
+            );
+            output.textures_delta.clear();
+        }
+        assert_eq!(actions, [Action::ScrollPage(Scroll::LineUp)]);
+    }
+
+    #[test]
+    fn arrows_stay_with_a_focused_field_a_dialog_or_no_open_chat() {
+        let (_root, mut app, ids) = app_with_chats(1);
+        let ctx = egui::Context::default();
+        // No chat open.
+        assert!(press(&mut app, &ctx, Key::ArrowUp, Modifiers::NONE));
+        assert!(app.actions.is_empty());
+        app.open_chat = Some(ids[0].clone());
+        // A field with the focus (the composer with a draft, the search
+        // boxes) keeps them.
+        app.composer = "draft".into();
+        let mut text = String::new();
+        let mut survived = false;
+        for frame in 0..2 {
+            let events = if frame == 0 {
+                vec![]
+            } else {
+                vec![egui::Event::Key {
+                    key: Key::ArrowDown,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Modifiers::NONE,
+                }]
+            };
+            let _ = ctx.run_ui(
+                egui::RawInput {
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    let field =
+                        egui::TextEdit::singleline(&mut text).id(egui::Id::new("composer-text"));
+                    let response = ui.add(field);
+                    if frame == 0 {
+                        response.request_focus();
+                    } else {
+                        handle(&mut app, ui.ctx());
+                        survived = ui.ctx().input(|input| !input.events.is_empty());
+                    }
+                },
+            );
+        }
+        assert!(survived);
+        assert!(app.actions.is_empty());
+        // A dialog does too.
+        ctx.memory_mut(|memory| memory.surrender_focus(egui::Id::new("composer-text")));
+        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+        app.dialog = Some(Dialog::Shortcuts);
+        assert!(press(&mut app, &ctx, Key::ArrowDown, Modifiers::NONE));
+        assert!(app.actions.is_empty());
     }
 
     #[test]

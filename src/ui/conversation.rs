@@ -15,7 +15,7 @@ use crate::app::{App, Conversation, JumpHighlight, KeyScroll, RowHeight};
 use crate::markup;
 use crate::model::{
     Action, Chat, ChatId, ComposerTextCommand, Content, Delivery, Dialog, LinkPreview, Media,
-    MediaState, Message, PickerTab, Scroll,
+    MediaState, Message, PickerTab, Reaction, Scroll,
 };
 use crate::theme::{self, Icon, Palette};
 use crate::wallpaper;
@@ -1983,6 +1983,10 @@ struct View<'a> {
     /// poster meanwhile.
     video_expanded: Option<&'a str>,
     copy_rows: &'a std::sync::Mutex<Vec<crate::transcript::Row>>,
+    /// The messages selected in this chat, in chat order.
+    selection: &'a [String],
+    /// Whether every selected message can be deleted for everyone.
+    selection_revocable: bool,
 }
 
 /// How far a message bubble may extend across the transcript.
@@ -2084,6 +2088,21 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
     let names_or = |id: &str, hint: Option<&str>| app.display_name_or(id, hint);
     let mention_names = |id: &str| app.mention_name(id);
     let keyboard_navigation = std::cell::Cell::new(false);
+    let selected: Vec<String> = app
+        .selection
+        .as_ref()
+        .filter(|(selected_chat, _)| *selected_chat == chat.id)
+        .map(|(_, ids)| ids.clone())
+        .unwrap_or_default();
+    let now = crate::util::now();
+    let selection_revocable = !selected.is_empty()
+        && selected.iter().all(|id| {
+            conversation.message(id).is_some_and(|message| {
+                message.from_me
+                    && !matches!(message.content, Content::Revoked { .. })
+                    && now - message.timestamp <= crate::app::REVOKE_WINDOW.as_secs() as i64
+            })
+        });
     let view = View {
         palette,
         locale: app.locale,
@@ -2114,7 +2133,7 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
         mention_names: &mention_names,
         avatars: &avatars,
         contacts: &app.contacts,
-        now: crate::util::now(),
+        now,
         animate: app.window_focused,
         player: &app.player,
         transcriber: &app.transcriber,
@@ -2123,6 +2142,8 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
         video: &app.video,
         video_expanded: app.video_expanded.as_deref(),
         copy_rows: app.copy_rows.as_ref(),
+        selection: &selected,
+        selection_revocable,
     };
     let mut actions = Vec::new();
     let mut anchored = false;
@@ -2552,6 +2573,8 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                 let page = match kind {
                     Scroll::PageUp => viewport.height() * 0.9,
                     Scroll::PageDown => -(viewport.height() * 0.9),
+                    Scroll::LineUp => KEY_LINE_SCROLL,
+                    Scroll::LineDown => -KEY_LINE_SCROLL,
                     Scroll::Top | Scroll::Bottom => 0.0,
                 };
                 let left = key_scroll
@@ -2562,7 +2585,7 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
             if let Some(scroll) = &mut key_scroll {
                 let fraction = scroll.advance(time);
                 let step = match scroll.kind {
-                    Scroll::PageUp | Scroll::PageDown => {
+                    Scroll::PageUp | Scroll::PageDown | Scroll::LineUp | Scroll::LineDown => {
                         let step = scroll.remaining * fraction;
                         scroll.remaining -= step;
                         step
@@ -4430,27 +4453,47 @@ fn footer(ui: &mut egui::Ui, palette: &Palette, message: &Message, slot: Option<
     }
 }
 
+/// The reaction chips of a message: emoji, count, whether one is ours, and
+/// who sent them. Skin-tone variants of one emoji share a chip, which shows
+/// our own tone when we reacted and the first one seen otherwise.
+fn reaction_chips(
+    reactions: &[Reaction],
+    who: impl Fn(&Reaction) -> String,
+) -> Vec<(String, u32, bool, Vec<String>)> {
+    let mut counts: Vec<(String, u32, bool, Vec<String>)> = Vec::new();
+    for reaction in reactions {
+        let name = who(reaction);
+        let family = crate::app::emoji_family(&reaction.emoji);
+        match counts
+            .iter_mut()
+            .find(|(emoji, ..)| crate::app::emoji_family(emoji) == family)
+        {
+            Some((emoji, count, mine, names)) => {
+                *count += 1;
+                *mine |= reaction.from_me;
+                if reaction.from_me {
+                    emoji.clone_from(&reaction.emoji);
+                }
+                names.push(name);
+            }
+            None => counts.push((reaction.emoji.clone(), 1, reaction.from_me, vec![name])),
+        }
+    }
+    counts
+}
+
+/// How far one press of ↑ or ↓ scrolls the history, in points: a few lines.
+const KEY_LINE_SCROLL: f32 = 72.0;
+
 fn reactions(ui: &mut egui::Ui, view: &View<'_>, message: &Message, actions: &mut Vec<Action>) {
     let palette = view.palette;
-    let mut counts: Vec<(String, u32, bool, Vec<String>)> = Vec::new();
-    for reaction in &message.reactions {
-        let who = if reaction.from_me {
+    let counts = reaction_chips(&message.reactions, |reaction| {
+        if reaction.from_me {
             tr("You").to_owned()
         } else {
             (view.names_or)(&reaction.sender, None)
-        };
-        match counts
-            .iter_mut()
-            .find(|(emoji, _, _, _)| *emoji == reaction.emoji)
-        {
-            Some((_, count, mine, names)) => {
-                *count += 1;
-                *mine |= reaction.from_me;
-                names.push(who);
-            }
-            None => counts.push((reaction.emoji.clone(), 1, reaction.from_me, vec![who])),
         }
-    }
+    });
     // The chips draw no background, so their padding is the gap between
     // reactions: kept narrow, with the first one still where it was.
     ui.spacing_mut().item_spacing.x = 2.0;
@@ -4528,6 +4571,12 @@ fn context_menu(ui: &mut egui::Ui, view: &View<'_>, message: &Message, actions: 
     let palette = view.palette;
     let chat = &view.chat.id;
     let mine = own_reaction(message);
+    // On one of several selected messages, the menu acts on all of them.
+    let group: Vec<String> = if view.selection.len() > 1 && view.selection.contains(&message.id) {
+        view.selection.to_vec()
+    } else {
+        vec![message.id.clone()]
+    };
     ui.allocate_ui_with_layout(
         vec2(ui.available_width(), 34.0),
         Layout::left_to_right(Align::Center),
@@ -4622,7 +4671,7 @@ fn context_menu(ui: &mut egui::Ui, view: &View<'_>, message: &Message, actions: 
     {
         actions.push(Action::ShowDialog(Dialog::Forward {
             chat: chat.clone(),
-            messages: vec![message.id.clone()],
+            messages: group.clone(),
         }));
     }
     if widgets::menu_item(ui, &palette, Some(Icon::Check), tr("Select")) {
@@ -4696,9 +4745,13 @@ fn context_menu(ui: &mut egui::Ui, view: &View<'_>, message: &Message, actions: 
     let can_edit = message.from_me
         && matches!(message.content, Content::Text { .. })
         && age <= crate::app::EDIT_WINDOW.as_secs() as i64;
-    let can_revoke = message.from_me
-        && !matches!(message.content, Content::Revoked { .. })
-        && age <= crate::app::REVOKE_WINDOW.as_secs() as i64;
+    let can_revoke = if group.len() > 1 {
+        view.selection_revocable
+    } else {
+        message.from_me
+            && !matches!(message.content, Content::Revoked { .. })
+            && age <= crate::app::REVOKE_WINDOW.as_secs() as i64
+    };
     if can_edit && widgets::menu_item(ui, &palette, Some(Icon::Pencil), tr("Edit")) {
         actions.push(Action::Edit(message.id.clone()));
     }
@@ -4706,7 +4759,7 @@ fn context_menu(ui: &mut egui::Ui, view: &View<'_>, message: &Message, actions: 
     {
         actions.push(Action::ShowDialog(Dialog::ConfirmDeleteMessage {
             chat: view.chat.id.clone(),
-            message: message.id.clone(),
+            messages: group.clone(),
             for_everyone: true,
             on_phone: false,
         }));
@@ -4714,7 +4767,7 @@ fn context_menu(ui: &mut egui::Ui, view: &View<'_>, message: &Message, actions: 
     if widgets::menu_item(ui, &palette, Some(Icon::EyeOff), tr("Delete for me")) {
         actions.push(Action::ShowDialog(Dialog::ConfirmDeleteMessage {
             chat: view.chat.id.clone(),
-            message: message.id.clone(),
+            messages: group.clone(),
             for_everyone: false,
             on_phone: true,
         }));
@@ -8434,6 +8487,37 @@ mod tests {
             Action::OpenReactionPicker { chat, message, beside_menu: false }
                 if chat == "chat@example" && message == "message-42"
         ));
+    }
+
+    #[test]
+    fn skin_tone_reactions_share_one_chip_in_our_tone() {
+        let react = |sender: &str, from_me: bool, emoji: &str| Reaction {
+            sender: sender.to_owned(),
+            from_me,
+            emoji: emoji.to_owned(),
+        };
+        let who = |reaction: &Reaction| reaction.sender.clone();
+        // Ours comes last: its tone wins and the count is summed.
+        let chips = reaction_chips(&[react("ana", false, "🙏"), react("me", true, "🙏🏽")], who);
+        assert_eq!(
+            chips,
+            [("🙏🏽".to_owned(), 2, true, vec!["ana".into(), "me".into()])]
+        );
+        // Without ours, the first one seen stays; other emoji keep their chip.
+        let chips = reaction_chips(
+            &[
+                react("ana", false, "🙏🏽"),
+                react("bia", false, "🙏"),
+                react("caio", false, "👍"),
+            ],
+            who,
+        );
+        assert_eq!(chips.len(), 2);
+        assert_eq!(
+            (chips[0].0.as_str(), chips[0].1, chips[0].2),
+            ("🙏🏽", 2, false)
+        );
+        assert_eq!((chips[1].0.as_str(), chips[1].1), ("👍", 1));
     }
 
     #[test]

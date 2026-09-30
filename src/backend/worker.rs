@@ -5041,14 +5041,7 @@ impl Worker {
                         return;
                     };
                     let event = match std::fs::copy(&source, &target) {
-                        Ok(_) => Event::Info(format!(
-                            "{} {}",
-                            tr("Saved"),
-                            target.file_name().map_or_else(
-                                || name.clone(),
-                                |name| name.to_string_lossy().into_owned()
-                            )
-                        )),
+                        Ok(_) => Event::Info(tr("File saved").to_owned()),
                         Err(error) => {
                             Event::Error(format!("Could not save the attachment: {error}"))
                         }

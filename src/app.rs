@@ -90,6 +90,14 @@ impl ScrollRoute {
             .push((pane, rect));
     }
 
+    /// Where `pane` was drawn in the last frame.
+    pub fn rect(&self, pane: ScrollPane) -> Option<egui::Rect> {
+        self.placed
+            .iter()
+            .find(|(placed, _)| *placed == pane)
+            .map(|(_, rect)| *rect)
+    }
+
     /// The vertical scrolling taken for `pane` from over another place this
     /// frame, for the pane to apply with `Ui::scroll_with_delta`.
     pub fn take(&mut self, pane: ScrollPane) -> f32 {
@@ -251,6 +259,15 @@ pub(crate) struct RowHeight {
     pub height: f32,
     /// The egui pass the row was last laid out in; `None` for an estimate.
     pub pass: Option<u64>,
+}
+
+/// A message the reader jumped to that is still on its way from the archive.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JumpLoad {
+    pub chat: ChatId,
+    pub id: String,
+    /// Whether a load aimed at this message was sent.
+    pub requested: bool,
 }
 
 impl Conversation {
@@ -666,6 +683,10 @@ pub struct App {
     /// A message reached from a quote or a search result, which flashes
     /// once it is in view so the eye finds it.
     pub jump_highlight: Option<JumpHighlight>,
+    /// A jump to a message that is not loaded yet, kept while archive pages
+    /// load toward it. A page already in flight when the jump was asked for
+    /// does not carry it, so the app asks again when that page lands.
+    pub jump_load: Option<JumpLoad>,
     pub focus_composer: bool,
     pub focus_search: bool,
     /// What the Settings page is filtered by.
@@ -1200,6 +1221,7 @@ impl App {
             at_bottom: true,
             scroll_anchor: None,
             jump_highlight: None,
+            jump_load: None,
             focus_composer: false,
             focus_search: false,
             settings_search: String::new(),
@@ -2524,13 +2546,16 @@ impl App {
                 } => {
                     let conversation = self.conversations.entry(chat.clone()).or_default();
                     let was_empty = conversation.messages.is_empty();
-                    if older && !messages.is_empty() {
+                    let progress = !messages.is_empty();
+                    if older && progress {
                         conversation.phone_delivered = true;
                     }
                     conversation.merge(messages, older);
                     if older {
                         conversation.loading_older = false;
                         conversation.complete = complete;
+                        // A jump that was waiting for this page asks on.
+                        self.continue_jump(&chat, progress);
                     } else if was_empty {
                         conversation.complete = complete;
                     }
@@ -3469,6 +3494,76 @@ impl App {
         }
     }
 
+    /// Loads archive pages toward `id`, a message the reader jumped to. A page
+    /// already in flight is not aimed at it: the jump waits in `jump_load` and
+    /// `continue_jump` asks again when that page lands.
+    fn load_toward(&mut self, chat: &str, id: &str) {
+        let conversation = self.conversations.entry(chat.to_owned()).or_default();
+        if conversation.message(id).is_some() {
+            self.jump_load = None;
+            return;
+        }
+        let mut jump = JumpLoad {
+            chat: chat.to_owned(),
+            id: id.to_owned(),
+            requested: false,
+        };
+        if !conversation.loading_older
+            && let Some(oldest) = conversation.messages.first()
+        {
+            conversation.loading_older = true;
+            jump.requested = true;
+            self.backend.send(Command::LoadUntil {
+                chat: chat.to_owned(),
+                id: id.to_owned(),
+                before: (oldest.timestamp, oldest.id.clone()),
+            });
+        }
+        self.jump_load = Some(jump);
+    }
+
+    /// After a page of older messages: finishes a pending jump if its message
+    /// arrived, and otherwise asks for more toward it, as long as pages keep
+    /// bringing messages (`progress`), or none was asked for yet.
+    fn continue_jump(&mut self, chat: &str, progress: bool) {
+        let Some(jump) = self.jump_load.clone().filter(|jump| jump.chat == chat) else {
+            return;
+        };
+        let Some(conversation) = self.conversations.get_mut(chat) else {
+            self.jump_load = None;
+            return;
+        };
+        if conversation.message(&jump.id).is_some() || conversation.loading_older {
+            if conversation.message(&jump.id).is_some() {
+                self.jump_load = None;
+            }
+            return;
+        }
+        match conversation.messages.first() {
+            Some(oldest) if !jump.requested || progress => {
+                conversation.loading_older = true;
+                let before = (oldest.timestamp, oldest.id.clone());
+                if let Some(pending) = self.jump_load.as_mut() {
+                    pending.requested = true;
+                }
+                self.backend.send(Command::LoadUntil {
+                    chat: chat.to_owned(),
+                    id: jump.id,
+                    before,
+                });
+            }
+            _ => self.jump_load = None,
+        }
+    }
+
+    /// Whether a jump to a message still loading in `chat` owns the scroll
+    /// anchor, so that paging for history does not take it over.
+    fn jump_pending(&self, chat: &str) -> bool {
+        self.jump_load
+            .as_ref()
+            .is_some_and(|jump| jump.chat == chat)
+    }
+
     pub fn load_older(&mut self, chat: &str) {
         let Some(conversation) = self.conversations.get_mut(chat) else {
             return;
@@ -3485,7 +3580,13 @@ impl App {
         }
         conversation.loading_older = true;
         let before = (oldest.timestamp, oldest.id.clone());
-        self.scroll_anchor = Some(oldest.id.clone());
+        let jumping = self
+            .jump_load
+            .as_ref()
+            .is_some_and(|jump| jump.chat == chat);
+        if !jumping {
+            self.scroll_anchor = Some(oldest.id.clone());
+        }
         self.backend.send(Command::LoadChat {
             chat: chat.to_owned(),
             before: Some(before),
@@ -3523,10 +3624,13 @@ impl App {
         }
         conversation.fetching_phone = true;
         conversation.phone_silent = false;
-        self.scroll_anchor = conversation
-            .messages
-            .first()
-            .map(|oldest| oldest.id.clone());
+        if !self.jump_pending(chat) {
+            self.scroll_anchor = self
+                .conversations
+                .get(chat)
+                .and_then(|conversation| conversation.messages.first())
+                .map(|oldest| oldest.id.clone());
+        }
         self.backend.send(Command::FetchOlder(chat.to_owned()));
     }
 
@@ -3573,6 +3677,7 @@ impl App {
             self.composer_tools_open = false;
             self.emoji_jump = None;
             self.jump_highlight = None;
+            self.jump_load = None;
             if let Some(previous) = self.open_chat.take() {
                 let draft = std::mem::take(&mut self.composer);
                 // Discard an unfinished edit instead of keeping it as a draft.
@@ -4315,19 +4420,8 @@ impl App {
                 self.at_bottom = false;
                 self.scroll_anchor = Some(message.clone());
                 self.jump_highlight = Some(JumpHighlight::new(chat.clone(), message.clone()));
-                let conversation = self.conversations.entry(chat.clone()).or_default();
-                if conversation.message(&message).is_none()
-                    && !conversation.loading_older
-                    && let Some(oldest) = conversation.messages.first()
-                {
-                    // Load older archive pages toward the search result.
-                    conversation.loading_older = true;
-                    self.backend.send(Command::LoadUntil {
-                        chat,
-                        id: message,
-                        before: (oldest.timestamp, oldest.id.clone()),
-                    });
-                }
+                // Load older archive pages toward the search result.
+                self.load_toward(&chat, &message);
             }
             Action::StartCall(chat) => {
                 self.backend.send(Command::StartCall { chat });
@@ -5543,7 +5637,7 @@ impl App {
                 // Reaching the top releases stick-to-bottom, as the wheel and
                 // the edge-scroll drag do; reaching the bottom (paging down or
                 // End) lets it take over again, so it is left alone here.
-                if matches!(scroll, Scroll::PageUp | Scroll::Top) {
+                if matches!(scroll, Scroll::PageUp | Scroll::LineUp | Scroll::Top) {
                     self.scroll_to_bottom = false;
                 }
                 self.scroll_page = Some(scroll);
@@ -5553,19 +5647,8 @@ impl App {
                 let Some(chat) = self.open_chat.clone() else {
                     return;
                 };
-                let conversation = self.conversations.entry(chat.clone()).or_default();
-                if conversation.message(&id).is_none()
-                    && !conversation.loading_older
-                    && let Some(oldest) = conversation.messages.first()
-                {
-                    // Load older archive pages toward the target.
-                    conversation.loading_older = true;
-                    self.backend.send(Command::LoadUntil {
-                        chat: chat.clone(),
-                        id: id.clone(),
-                        before: (oldest.timestamp, oldest.id.clone()),
-                    });
-                }
+                // Load older archive pages toward the target.
+                self.load_toward(&chat, &id);
                 self.jump_highlight = Some(JumpHighlight::new(chat, id.clone()));
                 self.scroll_anchor = Some(id);
             }
@@ -9112,7 +9195,7 @@ mod tests {
         }
         app.dialog = Some(Dialog::ConfirmDeleteMessage {
             chat: other.into(),
-            message: "m1".into(),
+            messages: vec!["m1".into()],
             for_everyone: true,
             on_phone: false,
         });
@@ -10418,6 +10501,83 @@ mod tests {
         );
         app.open_chat(bob.into());
         assert_eq!(app.jump_highlight, None);
+    }
+
+    /// A jump asked for while a page of older messages is in flight is not
+    /// lost: when that page lands, the app asks for more toward the target,
+    /// and paging for history does not take the scroll anchor from it.
+    #[test]
+    fn a_jump_made_while_a_page_loads_keeps_going_toward_its_target() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _detached) =
+            App::headless(AppDirs::under(directory.path()), Settings::default());
+        let (backend, mut commands, events) = Backend::recording_with_events();
+        app.backend = backend;
+        let ctx = egui::Context::default();
+        let chat = "1@s.whatsapp.net";
+        app.chats.push(Chat::new(chat.into(), "Ada".into()));
+        app.open_chat = Some(chat.into());
+        app.conversations.insert(
+            chat.into(),
+            Conversation {
+                requested: true,
+                loading_older: true,
+                messages: vec![message(chat, "recent", 100)],
+                ..Default::default()
+            },
+        );
+        app.apply(Action::ScrollTo("old".into()), &ctx);
+        assert!(
+            std::iter::from_fn(|| commands.try_recv().ok())
+                .next()
+                .is_none(),
+            "the page in flight is not aimed at the target"
+        );
+        assert_eq!(app.scroll_anchor.as_deref(), Some("old"));
+        // Paging for history must not take the anchor from the jump.
+        app.conversations.get_mut(chat).unwrap().loading_older = false;
+        app.load_older(chat);
+        assert_eq!(app.scroll_anchor.as_deref(), Some("old"));
+        let _ = std::iter::from_fn(|| commands.try_recv().ok()).count();
+        // The page lands without the target: the app asks toward it.
+        events
+            .send(Event::Messages {
+                chat: chat.into(),
+                messages: vec![message(chat, "middle", 50)],
+                older: true,
+                complete: false,
+            })
+            .unwrap();
+        app.handle_events();
+        let asked: Vec<_> = std::iter::from_fn(|| commands.try_recv().ok())
+            .filter_map(|command| match command {
+                Command::LoadUntil { id, before, .. } => Some((id, before.1)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(asked, [("old".to_owned(), "middle".to_owned())]);
+        // A load that brings messages but not the target goes on; one that
+        // brings the target ends the jump.
+        events
+            .send(Event::Messages {
+                chat: chat.into(),
+                messages: vec![message(chat, "closer", 20)],
+                older: true,
+                complete: false,
+            })
+            .unwrap();
+        app.handle_events();
+        assert!(app.jump_load.is_some());
+        events
+            .send(Event::Messages {
+                chat: chat.into(),
+                messages: vec![message(chat, "old", 5)],
+                older: true,
+                complete: false,
+            })
+            .unwrap();
+        app.handle_events();
+        assert!(app.jump_load.is_none());
     }
 
     #[test]

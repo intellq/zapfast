@@ -1189,11 +1189,12 @@ pub enum Dialog {
     ConfirmLeaveGroup(ChatId),
     /// Confirms blocking a contact.
     ConfirmBlock(ChatId),
-    /// Confirms deleting one message. The archive is the only copy, so a
-    /// local delete cannot be undone either.
+    /// Confirms deleting messages, one or the selected ones, in chat order.
+    /// The archive is the only copy, so a local delete cannot be undone
+    /// either.
     ConfirmDeleteMessage {
         chat: ChatId,
-        message: String,
+        messages: Vec<String>,
         /// Revokes for everyone instead of deleting only this copy.
         for_everyone: bool,
         /// Whether a "for me" deletion is also sent to the phone.
@@ -1348,6 +1349,10 @@ pub enum Scroll {
     PageUp,
     /// About one screen toward newer messages.
     PageDown,
+    /// A few lines toward older messages, from the up arrow.
+    LineUp,
+    /// A few lines toward newer messages, from the down arrow.
+    LineDown,
     /// The top of the loaded history.
     Top,
     /// The newest message, eased. `Action::ScrollToBottom` (Ctrl+End) jumps
