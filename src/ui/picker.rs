@@ -1106,6 +1106,43 @@ mod emoji_tests {
 
 // --- GIFs ---------------------------------------------------------------
 
+/// The "Powered by GIPHY" mark GIPHY's terms ask for wherever its results
+/// show: their own artwork, the transparent one for dark backgrounds and the
+/// one on its own black banner for light ones. It opens giphy.com.
+fn giphy_attribution(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
+    let (uri, bytes, height) = if palette.dark {
+        (
+            "bytes://powered-by-giphy-for-dark.png",
+            &include_bytes!("../../assets/giphy/powered-by-giphy-for-dark.png")[..],
+            85.0,
+        )
+    } else {
+        (
+            "bytes://powered-by-giphy-for-light.png",
+            &include_bytes!("../../assets/giphy/powered-by-giphy-for-light.png")[..],
+            136.0,
+        )
+    };
+    let size = vec2(GIPHY_MARK_WIDTH, GIPHY_MARK_WIDTH * height / 641.0);
+    ui.add_space(4.0);
+    let response = ui
+        .add(
+            egui::Image::from_bytes(uri, bytes)
+                .fit_to_exact_size(size)
+                .corner_radius(4.0)
+                .sense(Sense::click()),
+        )
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    ui.add_space(2.0);
+    if response.clicked() {
+        app.actions
+            .push(Action::OpenUrl("https://giphy.com/".to_owned()));
+    }
+}
+
+/// Width of the "Powered by GIPHY" mark in the GIF tab.
+const GIPHY_MARK_WIDTH: f32 = 150.0;
+
 fn gif_tab(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
     // Ask for a key when none is set or GIPHY rejects it.
     let bad_key = app.gif_error.as_ref().is_some_and(|error| error.bad_key);
@@ -1194,6 +1231,7 @@ fn gif_tab(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
     if submit && query.trim() != app.gif_query.trim() {
         app.actions.push(Action::SearchGifs(query));
     }
+    giphy_attribution(app, ui, palette);
     if app.gif_pending {
         ui.horizontal(|ui| {
             theme::spinner(ui, 16.0, palette.accent);
