@@ -315,12 +315,28 @@ fn inline(line: &str) -> Vec<Span> {
             });
         }
     };
+    // Byte offset of each character, plus the end: a web address is found in
+    // the line's text and then copied through whole.
+    let mut offsets: Vec<usize> = line.char_indices().map(|(at, _)| at).collect();
+    offsets.push(line.len());
     let mut i = 0;
     let triple = |at: usize| {
         at + 2 < chars.len() && chars[at] == '`' && chars[at + 1] == '`' && chars[at + 2] == '`'
     };
     while i < chars.len() {
         let c = chars[i];
+        // A web address is no formatting: the underscores of
+        // `x.com/___4o____/status/1` are part of it.
+        if c.is_ascii_alphanumeric()
+            && (i == 0 || !chars[i - 1].is_alphanumeric())
+            && let Some((end, _)) = link_at(line, offsets[i])
+            && let Ok(end) = offsets.binary_search(&end)
+            && end > i
+        {
+            run.extend(&chars[i..end]);
+            i = end;
+            continue;
+        }
         // WhatsApp inline monospace: ```text```.
         if triple(i)
             && let Some(close) = (i + 3..chars.len()).find(|&at| triple(at))
@@ -730,6 +746,22 @@ mod tests {
             Some("https://zapfast.rocks".into())
         );
         assert_eq!(first_web_link("no link here, main.rs"), None);
+    }
+
+    #[test]
+    fn underscores_inside_a_web_address_are_not_formatting() {
+        let url = "https://x.com/___4o____/status/2105111192289362413";
+        let spans = parse(&format!("veja {url} agora"), &[]);
+        let linked: Vec<_> = spans.iter().filter(|span| span.link.is_some()).collect();
+        assert_eq!(linked.len(), 1);
+        assert_eq!(linked[0].text, url);
+        assert!(spans.iter().all(|span| !span.italic));
+        // Formatting around an address still works, and stays out of it.
+        let spans = parse("_veja_ *https://a.com/x_y_z*", &[]);
+        assert!(spans.iter().any(|span| span.italic && span.text == "veja"));
+        let link = spans.iter().find(|span| span.link.is_some()).unwrap();
+        assert_eq!(link.text, "https://a.com/x_y_z");
+        assert!(link.bold);
     }
 
     #[test]
