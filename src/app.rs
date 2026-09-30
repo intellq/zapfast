@@ -594,6 +594,8 @@ pub struct App {
     /// Chat filter in the forwarding destination dialog.
     pub forward_search: String,
     pub forward_targets: Vec<ChatId>,
+    /// Whether the forward dialog sends media without their captions.
+    pub forward_without_captions: bool,
     pub forward_max_chats: usize,
     pub forward_max_groups: usize,
     pending_forward: Option<(ChatId, Vec<String>)>,
@@ -1155,6 +1157,7 @@ impl App {
             dialog: None,
             forward_search: String::new(),
             forward_targets: Vec::new(),
+            forward_without_captions: false,
             forward_max_chats: 5,
             forward_max_groups: 5,
             pending_forward: None,
@@ -2428,6 +2431,7 @@ impl App {
             self.forward_max_chats = max_chats;
             self.forward_max_groups = max_groups;
             self.forward_targets.clear();
+            self.forward_without_captions = false;
             self.dialog = Some(Dialog::Forward {
                 chat: from_chat,
                 messages,
@@ -4638,6 +4642,7 @@ impl App {
                 from_chat,
                 messages,
                 to_chats,
+                without_captions,
             } => {
                 if to_chats.is_empty() || to_chats != self.forward_targets {
                     return;
@@ -4651,10 +4656,12 @@ impl App {
                     from_chat,
                     messages,
                     to_chats,
+                    without_captions,
                 });
                 self.dialog = None;
                 self.forward_search.clear();
                 self.forward_targets.clear();
+                self.forward_without_captions = false;
                 self.selection = None;
                 if let Some(destination) = destination {
                     self.open_chat(destination);
@@ -5322,6 +5329,7 @@ impl App {
                 if matches!(&dialog, Dialog::Forward { .. }) {
                     self.forward_search.clear();
                     self.forward_targets.clear();
+                    self.forward_without_captions = false;
                     if let Dialog::Forward { chat, messages } = dialog {
                         self.pending_forward = Some((chat.clone(), messages.clone()));
                         self.dialog = None;
@@ -5352,6 +5360,7 @@ impl App {
                 self.invite = None;
                 self.forward_search.clear();
                 self.forward_targets.clear();
+                self.forward_without_captions = false;
                 self.pending_forward = None;
                 self.contact_edit = None;
                 self.group_name_edit = None;
@@ -8741,6 +8750,7 @@ mod tests {
                 from_chat: chat.into(),
                 messages: vec!["first".into(), "third".into()],
                 to_chats: vec!["2@s.whatsapp.net".into()],
+                without_captions: false,
             },
             &ctx,
         );
@@ -8789,6 +8799,7 @@ mod tests {
             from_chat: from.into(),
             messages: vec!["first".into()],
             to_chats: to.iter().map(|id| (*id).into()).collect(),
+            without_captions: false,
         };
         // To several chats, the reader stays where they were.
         app.forward_targets = vec![one.into(), two.into()];

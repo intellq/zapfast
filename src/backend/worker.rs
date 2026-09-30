@@ -4596,7 +4596,8 @@ impl Worker {
                 from_chat,
                 messages,
                 to_chats,
-            } => self.forward_messages(from_chat, messages, to_chats),
+                without_captions,
+            } => self.forward_messages(from_chat, messages, to_chats, without_captions),
             // Stores the open chat's unsent text, or clears it when empty.
             Command::SaveDraft { chat, text } => {
                 let at = std::time::SystemTime::now()
@@ -6402,6 +6403,7 @@ impl Worker {
         from_chat: ChatId,
         messages: Vec<String>,
         to_chats: Vec<ChatId>,
+        without_captions: bool,
     ) {
         let Some((max_chats, max_groups)) = self.forward_limits(&from_chat, &messages) else {
             return;
@@ -6434,7 +6436,7 @@ impl Worker {
             };
             for message in &messages {
                 if let Some((id, message, expiration)) =
-                    self.forward_job(&from_chat, message, to_chat)
+                    self.forward_job(&from_chat, message, to_chat, without_captions)
                 {
                     jobs.push((id, (to_chat.clone(), jid.clone(), message, expiration)));
                 }
@@ -6552,6 +6554,7 @@ impl Worker {
         from_chat: &ChatId,
         message_id: &str,
         to_chat: &ChatId,
+        without_captions: bool,
     ) -> Option<(String, wa::Message, Option<u32>)> {
         let Ok(Some(source)) = self.archive.message(from_chat, message_id) else {
             self.emit(Event::Error(
@@ -6586,7 +6589,16 @@ impl Worker {
         };
         // whatsapp-rust owns the forwarding rules: unwrap transient wrappers,
         // strip quote chains and secrets, and retain reusable media metadata.
-        let (message, expiration) = outgoing_forward(&original, self.ephemeral_expiration(to_chat));
+        let (mut message, expiration) =
+            outgoing_forward(&original, self.ephemeral_expiration(to_chat));
+        // What we wrote ourselves is ours to send again, not a forward.
+        let own = source.from_me && !source.forwarded;
+        if own {
+            clear_forwarded(&mut message);
+        }
+        if without_captions {
+            clear_caption(&mut message);
+        }
         let client = self.client.clone()?;
         let id = client.generate_message_id();
         let mentions = self.mentions_of(&mentioned_of(&message));
@@ -6600,6 +6612,15 @@ impl Worker {
             mentions,
             thumbnail,
         );
+        let mut row = row;
+        row.forwarded = !own;
+        if without_captions
+            && let Content::Image { caption, .. }
+            | Content::Video { caption, .. }
+            | Content::Document { caption, .. } = &mut row.content
+        {
+            *caption = None;
+        }
         self.store_message(row, Some(message.encode_to_vec()), None);
         Some((id, message, expiration))
     }
@@ -8181,6 +8202,33 @@ fn outgoing_forward(original: &wa::Message, expiration: Option<u32>) -> (wa::Mes
     }
     let expiration = apply_ephemeral_expiration(&mut message, expiration);
     (message, expiration)
+}
+
+/// Takes the forwarded mark off a message, so it goes out as new.
+fn clear_forwarded(message: &mut wa::Message) {
+    if let Some(mut context) = context_of(message).cloned() {
+        context.is_forwarded = None;
+        context.forwarding_score = None;
+        message.set_context_info(context);
+    }
+}
+
+/// Takes the caption, and the mentions in it, off a photo, video or document.
+fn clear_caption(message: &mut wa::Message) {
+    let mut cleared = false;
+    if let Some(image) = message.image_message.as_option_mut() {
+        cleared |= image.caption.take().is_some();
+    }
+    if let Some(video) = message.video_message.as_option_mut() {
+        cleared |= video.caption.take().is_some();
+    }
+    if let Some(document) = message.document_message.as_option_mut() {
+        cleared |= document.caption.take().is_some();
+    }
+    if cleared && let Some(mut context) = context_of(message).cloned() {
+        context.mentioned_jid.clear();
+        message.set_context_info(context);
+    }
 }
 
 fn apply_ephemeral_expiration(message: &mut wa::Message, expiration: Option<u32>) -> Option<u32> {
@@ -12029,6 +12077,62 @@ mod tests {
                 assert_eq!(original.get_ephemeral_expiration(), Some(7_776_000));
             }
         }
+    }
+
+    fn captioned_photo() -> wa::Message {
+        wa::Message {
+            image_message: MessageField::some(wa::message::ImageMessage {
+                caption: Some("typed by hand".into()),
+                context_info: MessageField::some(wa::ContextInfo {
+                    is_forwarded: Some(true),
+                    forwarding_score: Some(1),
+                    mentioned_jid: vec!["5511999990000@s.whatsapp.net".into()],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn what_we_wrote_goes_out_without_the_forwarded_mark() {
+        let mut message = captioned_photo();
+        assert!(forwarded_of(&message));
+        clear_forwarded(&mut message);
+        assert!(!forwarded_of(&message));
+        assert_eq!(
+            message
+                .image_message
+                .as_option()
+                .unwrap()
+                .caption
+                .as_deref(),
+            Some("typed by hand")
+        );
+    }
+
+    #[test]
+    fn a_forward_can_leave_the_caption_and_its_mentions_behind() {
+        let mut message = captioned_photo();
+        clear_caption(&mut message);
+        assert_eq!(message.image_message.as_option().unwrap().caption, None);
+        assert!(mentioned_of(&message).is_empty());
+        // The forwarded mark is a separate matter.
+        assert!(forwarded_of(&message));
+        // A message with no caption is left as it was.
+        let mut plain = wa::Message {
+            image_message: MessageField::some(wa::message::ImageMessage {
+                context_info: MessageField::some(wa::ContextInfo {
+                    mentioned_jid: vec!["5511999990000@s.whatsapp.net".into()],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        clear_caption(&mut plain);
+        assert_eq!(mentioned_of(&plain).len(), 1);
     }
 
     #[test]

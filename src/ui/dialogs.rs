@@ -631,6 +631,27 @@ fn forward(app: &mut App, ui: &mut egui::Ui, from_chat: &str, messages: &[String
         ui.add_space(12.0);
     }
     ui.add_space(8.0);
+    let has_caption = messages.iter().any(|id| {
+        app.conversations
+            .get(from_chat)
+            .and_then(|conversation| conversation.message(id))
+            .is_some_and(|message| {
+                matches!(
+                    &message.content,
+                    crate::model::Content::Image { caption: Some(text), .. }
+                        | crate::model::Content::Video { caption: Some(text), .. }
+                        | crate::model::Content::Document { caption: Some(text), .. }
+                        if !text.trim().is_empty()
+                )
+            })
+    });
+    if has_caption {
+        ui.checkbox(
+            &mut app.forward_without_captions,
+            crate::i18n::gettext(app.locale, "Send without the caption"),
+        );
+        ui.add_space(6.0);
+    }
     let count = app.forward_targets.len();
     let limit = app.forward_max_chats;
     ui.horizontal(|ui| {
@@ -652,6 +673,7 @@ fn forward(app: &mut App, ui: &mut egui::Ui, from_chat: &str, messages: &[String
                     from_chat: from_chat.to_owned(),
                     messages: messages.to_vec(),
                     to_chats: app.forward_targets.clone(),
+                    without_captions: has_caption && app.forward_without_captions,
                 });
             }
             if ui

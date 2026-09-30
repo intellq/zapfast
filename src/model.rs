@@ -1552,6 +1552,8 @@ pub enum Action {
         from_chat: ChatId,
         messages: Vec<String>,
         to_chats: Vec<ChatId>,
+        /// Sends photos, videos and documents without their captions.
+        without_captions: bool,
     },
     ToggleForwardTarget(ChatId),
     /// Starts selecting messages in the open chat, beginning with this one.

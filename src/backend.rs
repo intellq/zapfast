@@ -184,6 +184,8 @@ pub enum Command {
         from_chat: ChatId,
         messages: Vec<String>,
         to_chats: Vec<ChatId>,
+        /// Leaves the captions of photos, videos and documents out.
+        without_captions: bool,
     },
     /// Updates our typing state in a chat.
     Composing {
