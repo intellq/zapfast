@@ -676,81 +676,80 @@ fn emoji_suggestions(app: &mut App, ui: &mut egui::Ui, field: egui::Id) {
     let mut picked = submit.then(|| candidates[app.emoji_selected].clone());
     let palette = app.palette;
 
-    ui.add_space(4.0);
-    Frame::new()
-        .fill(palette.overlay)
-        .stroke(Stroke::new(1.0, palette.outline))
-        .corner_radius(CornerRadius::same(theme::RADIUS + 2))
-        .inner_margin(Margin::same(4))
-        .show(ui, |ui| {
-            let row_height = 36.0;
-            ui.spacing_mut().item_spacing.y = 0.0;
-            for (index, candidate) in candidates.iter().enumerate() {
-                let (rect, response) =
-                    ui.allocate_exact_size(vec2(ui.available_width(), row_height), Sense::click());
-                if index == app.emoji_selected {
-                    ui.painter()
-                        .rect_filled(rect, 6.0, palette.accent.gamma_multiply(0.18));
-                    ui.painter().rect_stroke(
-                        rect,
-                        6.0,
-                        Stroke::new(1.0, palette.accent),
-                        egui::StrokeKind::Inside,
-                    );
-                } else if response.hovered() {
-                    ui.painter().rect_filled(rect, 6.0, palette.surface_hover);
-                }
-
-                let emoji = widgets::line(
-                    ui,
-                    candidate.emoji,
-                    theme::regular(22.0),
-                    palette.text,
-                    30.0,
-                    1,
+    widgets::raised(ui, &palette, suggestion_frame(&palette), |ui| {
+        let row_height = 36.0;
+        ui.spacing_mut().item_spacing.y = 0.0;
+        for (index, candidate) in candidates.iter().enumerate() {
+            let (rect, response) =
+                ui.allocate_exact_size(vec2(ui.available_width(), row_height), Sense::click());
+            if index == app.emoji_selected {
+                ui.painter().rect_filled(
+                    rect,
+                    SUGGESTION_ROW_RADIUS,
+                    palette.accent.gamma_multiply(0.18),
                 );
-                emoji.paint(
-                    ui,
-                    pos2(rect.left() + 6.0, rect.center().y - emoji.size().y / 2.0),
-                    palette.text,
+                ui.painter().rect_stroke(
+                    rect,
+                    SUGGESTION_ROW_RADIUS,
+                    Stroke::new(1.0, palette.accent),
+                    egui::StrokeKind::Inside,
                 );
-                let shortcode = widgets::line(
-                    ui,
-                    &candidate.shortcode,
-                    theme::medium(13.0),
-                    palette.text,
-                    (rect.width() * 0.4).max(100.0),
-                    1,
-                );
-                let text_x = rect.left() + 42.0;
-                shortcode.paint(
-                    ui,
-                    pos2(text_x, rect.center().y - shortcode.size().y / 2.0),
-                    palette.text,
-                );
-                let name_x = text_x + shortcode.size().x + 12.0;
-                let name = widgets::line(
-                    ui,
-                    candidate.name,
-                    theme::regular(12.5),
-                    palette.secondary,
-                    (rect.right() - name_x - 8.0).max(0.0),
-                    1,
-                );
-                name.paint(
-                    ui,
-                    pos2(name_x, rect.center().y - name.size().y / 2.0),
-                    palette.secondary,
-                );
-                if response
-                    .on_hover_cursor(egui::CursorIcon::PointingHand)
-                    .clicked()
-                {
-                    app.emoji_selected = index;
-                    picked = Some(candidate.clone());
-                }
+            } else if response.hovered() {
+                ui.painter()
+                    .rect_filled(rect, SUGGESTION_ROW_RADIUS, palette.surface_hover);
             }
-        });
+
+            let emoji = widgets::line(
+                ui,
+                candidate.emoji,
+                theme::regular(22.0),
+                palette.text,
+                30.0,
+                1,
+            );
+            emoji.paint(
+                ui,
+                pos2(rect.left() + 6.0, rect.center().y - emoji.size().y / 2.0),
+                palette.text,
+            );
+            let shortcode = widgets::line(
+                ui,
+                &candidate.shortcode,
+                theme::medium(13.0),
+                palette.text,
+                (rect.width() * 0.4).max(100.0),
+                1,
+            );
+            let text_x = rect.left() + 42.0;
+            shortcode.paint(
+                ui,
+                pos2(text_x, rect.center().y - shortcode.size().y / 2.0),
+                palette.text,
+            );
+            let name_x = text_x + shortcode.size().x + 12.0;
+            let name = widgets::line(
+                ui,
+                candidate.name,
+                theme::regular(12.5),
+                palette.secondary,
+                (rect.right() - name_x - 8.0).max(0.0),
+                1,
+            );
+            name.paint(
+                ui,
+                pos2(name_x, rect.center().y - name.size().y / 2.0),
+                palette.secondary,
+            );
+            if response
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .clicked()
+            {
+                app.emoji_selected = index;
+                picked = Some(candidate.clone());
+            }
+        }
+    });
+    strip_gap(ui);
     if let Some(candidate) = picked {
         app.actions.push(Action::InsertEmojiCompletion {
             emoji: candidate.emoji.to_owned(),
@@ -788,89 +787,88 @@ fn mention_picker(app: &mut App, ui: &mut egui::Ui, chat: &Chat, field: egui::Id
     let mut picked = submit.then(|| candidates[app.mention_selected].clone());
     let palette = app.palette;
 
-    ui.add_space(4.0);
-    Frame::new()
-        .fill(palette.overlay)
-        .stroke(Stroke::new(1.0, palette.outline))
-        .corner_radius(CornerRadius::same(theme::RADIUS + 2))
-        .inner_margin(Margin::same(4))
-        .show(ui, |ui| {
-            let row_height = 38.0;
-            egui::ScrollArea::vertical()
-                .id_salt("mention-members")
-                .max_height(row_height * candidates.len().min(5) as f32)
-                .auto_shrink([false, true])
-                .show_rows(ui, row_height, candidates.len(), |ui, range| {
-                    ui.spacing_mut().item_spacing.y = 0.0;
-                    for index in range {
-                        let (id, label) = &candidates[index];
-                        let (rect, response) = ui.allocate_exact_size(
-                            vec2(ui.available_width(), row_height),
-                            Sense::click(),
+    widgets::raised(ui, &palette, suggestion_frame(&palette), |ui| {
+        let row_height = 38.0;
+        egui::ScrollArea::vertical()
+            .id_salt("mention-members")
+            .max_height(row_height * candidates.len().min(5) as f32)
+            .auto_shrink([false, true])
+            .show_rows(ui, row_height, candidates.len(), |ui, range| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                for index in range {
+                    let (id, label) = &candidates[index];
+                    let (rect, response) = ui.allocate_exact_size(
+                        vec2(ui.available_width(), row_height),
+                        Sense::click(),
+                    );
+                    if index == app.mention_selected || response.hovered() {
+                        ui.painter().rect_filled(
+                            rect,
+                            SUGGESTION_ROW_RADIUS,
+                            palette.surface_hover,
                         );
-                        if index == app.mention_selected || response.hovered() {
-                            ui.painter().rect_filled(rect, 6.0, palette.surface_hover);
-                        }
-                        let avatar = Rect::from_center_size(
-                            pos2(rect.left() + 19.0, rect.center().y),
-                            Vec2::splat(28.0),
-                        );
-                        let picture = app.avatar(id);
-                        widgets::paint_avatar(
-                            ui,
-                            &palette,
-                            avatar,
-                            label.trim_start_matches('~'),
-                            id,
-                            picture.as_deref(),
-                        );
-                        let detail = crate::model::phone_of(id)
-                            .map(crate::util::phone)
-                            .unwrap_or_default();
-                        let detail = widgets::line(
-                            ui,
-                            &detail,
-                            theme::regular(11.5),
-                            palette.secondary,
-                            (rect.width() * 0.36).min(150.0),
-                            1,
-                        );
-                        let name = widgets::line(
-                            ui,
-                            label,
-                            theme::medium(13.5),
-                            palette.text,
-                            rect.width() - detail.size().x - 62.0,
-                            1,
-                        );
-                        name.paint(
-                            ui,
-                            pos2(rect.left() + 40.0, rect.center().y - name.size().y / 2.0),
-                            palette.text,
-                        );
-                        detail.paint(
-                            ui,
-                            pos2(
-                                rect.right() - detail.size().x - 8.0,
-                                rect.center().y - detail.size().y / 2.0,
-                            ),
-                            palette.secondary,
-                        );
-                        if response.hovered() {
-                            app.mention_selected = index;
-                        }
-                        if (down || up) && index == app.mention_selected {
-                            response.scroll_to_me(Some(Align::Center));
-                        }
-                        if response
-                            .on_hover_cursor(egui::CursorIcon::PointingHand)
-                            .clicked()
-                        {
-                            picked = Some((id.clone(), label.clone()));
-                        }
                     }
-                });
-        });
+                    let avatar = Rect::from_center_size(
+                        pos2(rect.left() + 19.0, rect.center().y),
+                        Vec2::splat(28.0),
+                    );
+                    let picture = app.avatar(id);
+                    widgets::paint_avatar(
+                        ui,
+                        &palette,
+                        avatar,
+                        label.trim_start_matches('~'),
+                        id,
+                        picture.as_deref(),
+                    );
+                    let detail = crate::model::phone_of(id)
+                        .map(crate::util::phone)
+                        .unwrap_or_default();
+                    let detail = widgets::line(
+                        ui,
+                        &detail,
+                        theme::regular(11.5),
+                        palette.secondary,
+                        (rect.width() * 0.36).min(150.0),
+                        1,
+                    );
+                    let name = widgets::line(
+                        ui,
+                        label,
+                        theme::medium(13.5),
+                        palette.text,
+                        rect.width() - detail.size().x - 62.0,
+                        1,
+                    );
+                    name.paint(
+                        ui,
+                        pos2(rect.left() + 40.0, rect.center().y - name.size().y / 2.0),
+                        palette.text,
+                    );
+                    detail.paint(
+                        ui,
+                        pos2(
+                            rect.right() - detail.size().x - 8.0,
+                            rect.center().y - detail.size().y / 2.0,
+                        ),
+                        palette.secondary,
+                    );
+                    if response.hovered() {
+                        app.mention_selected = index;
+                    }
+                    if (down || up) && index == app.mention_selected {
+                        response.scroll_to_me(Some(Align::Center));
+                    }
+                    if response
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .clicked()
+                    {
+                        picked = Some((id.clone(), label.clone()));
+                    }
+                }
+            });
+    });
+    strip_gap(ui);
     if let Some((id, name)) = picked {
         app.actions.push(Action::InsertMention {
             id,
@@ -1619,7 +1617,7 @@ fn last_line<R>(ui: &mut egui::Ui, line: f32, add: impl FnOnce(&mut egui::Ui) ->
 /// The rounded field that holds the composer's controls, or the recorder.
 fn composer_pill(palette: &Palette) -> Frame {
     Frame::new()
-        .fill(palette.surface)
+        .fill(palette.bubble_in)
         .corner_radius(CornerRadius::same(COMPOSER_RADIUS))
         // The end buttons are inset by as much at the sides as above and
         // below, so they sit evenly in the rounded ends.
@@ -1677,6 +1675,41 @@ fn strip_gap(ui: &mut egui::Ui) {
     ui.add_space(STRIP_GAP - ui.spacing().item_spacing.y);
 }
 
+/// Corner radius of the strips above the composer and of its suggestion
+/// lists: rounder than a bubble, closer to the composer's own ends.
+const STRIP_RADIUS: u8 = 16;
+
+/// The frame of a strip above the composer (reply, edit, unsent voice).
+/// Like the composer it takes the incoming bubble's colour, which in the
+/// light theme is white on the chat rather than the grey interface surface.
+/// Its content starts 14 points in, so a reply's accent bar lines up with
+/// the composer's plus below it.
+fn strip_frame(palette: &Palette) -> Frame {
+    Frame::new()
+        .fill(palette.bubble_in)
+        .corner_radius(CornerRadius::same(STRIP_RADIUS))
+        .inner_margin(Margin {
+            left: 14,
+            right: 10,
+            top: 6,
+            bottom: 6,
+        })
+}
+
+/// The emoji and @mention suggestion lists, raised above the composer like
+/// the strips, with the same fill and corners.
+fn suggestion_frame(palette: &Palette) -> Frame {
+    Frame::new()
+        .fill(palette.bubble_in)
+        .corner_radius(CornerRadius::same(STRIP_RADIUS))
+        .inner_margin(Margin::same(SUGGESTION_INSET))
+}
+
+/// Space between a suggestion list's edge and its rows.
+const SUGGESTION_INSET: i8 = 4;
+/// A suggestion row's corners, concentric with the list's.
+const SUGGESTION_ROW_RADIUS: f32 = (STRIP_RADIUS as i8 - SUGGESTION_INSET) as f32;
+
 fn unsent_voice_strip(app: &mut App, ui: &mut egui::Ui, samples: usize) {
     let palette = app.palette;
     let seconds = (samples as f64 / f64::from(crate::voice::RATE))
@@ -1685,77 +1718,61 @@ fn unsent_voice_strip(app: &mut App, ui: &mut egui::Ui, samples: usize) {
     let label = crate::i18n::gettext(app.locale, "Voice message ({duration}) not sent")
         .replace("{duration}", &crate::util::duration(seconds));
     let discard = crate::i18n::gettext(app.locale, "Discard voice message");
-    widgets::raised(
-        ui,
-        &palette,
-        Frame::new()
-            .fill(palette.surface)
-            .corner_radius(CornerRadius::same(theme::RADIUS))
-            .inner_margin(Margin::symmetric(10, 6)),
-        |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                theme::icon(ui, Icon::Mic, 16.0, palette.danger);
-                theme::text(ui, &label, theme::semibold(12.5), palette.danger);
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let button = theme::icon_button(
-                        ui,
-                        Icon::X,
-                        16.0,
-                        palette.secondary,
-                        palette.text,
-                        discard.as_ref(),
-                    );
-                    #[cfg(test)]
-                    ui.ctx().data_mut(|data| {
-                        data.insert_temp(egui::Id::new("unsent-voice-discard"), button.rect)
-                    });
-                    if button.clicked() {
-                        app.actions.push(Action::DiscardUnsentVoice);
-                    }
+    widgets::raised(ui, &palette, strip_frame(&palette), |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal(|ui| {
+            theme::icon(ui, Icon::Mic, 16.0, palette.danger);
+            theme::text(ui, &label, theme::semibold(12.5), palette.danger);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let button = theme::icon_button(
+                    ui,
+                    Icon::X,
+                    16.0,
+                    palette.secondary,
+                    palette.text,
+                    discard.as_ref(),
+                );
+                #[cfg(test)]
+                ui.ctx().data_mut(|data| {
+                    data.insert_temp(egui::Id::new("unsent-voice-discard"), button.rect)
                 });
+                if button.clicked() {
+                    app.actions.push(Action::DiscardUnsentVoice);
+                }
             });
-        },
-    );
+        });
+    });
     strip_gap(ui);
 }
 
 fn edit_strip(app: &mut App, ui: &mut egui::Ui) {
     let palette = app.palette;
-    widgets::raised(
-        ui,
-        &palette,
-        Frame::new()
-            .fill(palette.surface)
-            .corner_radius(CornerRadius::same(theme::RADIUS))
-            .inner_margin(Margin::symmetric(10, 6)),
-        |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                theme::icon(ui, Icon::Pencil, 16.0, palette.accent);
-                theme::text(
+    widgets::raised(ui, &palette, strip_frame(&palette), |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal(|ui| {
+            theme::icon(ui, Icon::Pencil, 16.0, palette.accent);
+            theme::text(
+                ui,
+                tr("Editing message"),
+                theme::semibold(12.5),
+                palette.accent,
+            );
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if theme::icon_button(
                     ui,
-                    tr("Editing message"),
-                    theme::semibold(12.5),
-                    palette.accent,
-                );
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if theme::icon_button(
-                        ui,
-                        Icon::X,
-                        16.0,
-                        palette.secondary,
-                        palette.text,
-                        tr("Stop editing (Esc)"),
-                    )
-                    .clicked()
-                    {
-                        app.actions.push(Action::CancelEdit);
-                    }
-                });
+                    Icon::X,
+                    16.0,
+                    palette.secondary,
+                    palette.text,
+                    tr("Stop editing (Esc)"),
+                )
+                .clicked()
+                {
+                    app.actions.push(Action::CancelEdit);
+                }
             });
-        },
-    );
+        });
+    });
     strip_gap(ui);
 }
 
@@ -1768,57 +1785,49 @@ fn reply_strip(app: &mut App, ui: &mut egui::Ui, quoted: &Message) {
     };
     let summary = markup::plain(&quoted.summary(), &app.mention_list(quoted));
     let picture = quote_picture(quoted);
-    let strip = widgets::raised(
-        ui,
-        &palette,
-        Frame::new()
-            .fill(palette.surface)
-            .corner_radius(CornerRadius::same(theme::RADIUS))
-            .inner_margin(Margin::symmetric(10, 6)),
-        |ui| {
-            ui.set_width(ui.available_width().max(0.0));
-            ui.horizontal(|ui| {
-                let (bar, _) = ui.allocate_exact_size(vec2(3.0, 34.0), Sense::hover());
-                ui.painter().rect_filled(bar, 2.0, palette.accent);
-                ui.vertical(|ui| {
-                    ui.spacing_mut().item_spacing.y = 1.0;
-                    let reserved = if picture.is_some() { 88.0 } else { 40.0 };
-                    ui.set_max_width((ui.available_width() - reserved).max(0.0));
-                    widgets::rich_text(
-                        ui,
-                        &tr("Replying to {who}").replace("{who}", &who),
-                        theme::semibold(12.5),
-                        palette.accent,
-                    );
-                    widgets::rich_text(ui, &summary, theme::regular(12.5), palette.secondary);
-                });
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if theme::icon_button(
-                        ui,
-                        Icon::X,
-                        16.0,
-                        palette.secondary,
-                        palette.text,
-                        tr("Cancel reply (Esc)"),
-                    )
-                    .clicked()
-                    {
-                        app.actions.push(Action::CancelReply);
-                    }
-                    if let Some(picture) = &picture {
-                        let (rect, _) = ui.allocate_exact_size(Vec2::splat(40.0), Sense::hover());
-                        paint_quote_picture(
-                            ui,
-                            picture,
-                            rect,
-                            CornerRadius::same(4),
-                            palette.surface_hover,
-                        );
-                    }
-                });
+    let strip = widgets::raised(ui, &palette, strip_frame(&palette), |ui| {
+        ui.set_width(ui.available_width().max(0.0));
+        ui.horizontal(|ui| {
+            let (bar, _) = ui.allocate_exact_size(vec2(3.0, 34.0), Sense::hover());
+            ui.painter().rect_filled(bar, 2.0, palette.accent);
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 1.0;
+                let reserved = if picture.is_some() { 88.0 } else { 40.0 };
+                ui.set_max_width((ui.available_width() - reserved).max(0.0));
+                widgets::rich_text(
+                    ui,
+                    &tr("Replying to {who}").replace("{who}", &who),
+                    theme::semibold(12.5),
+                    palette.accent,
+                );
+                widgets::rich_text(ui, &summary, theme::regular(12.5), palette.secondary);
             });
-        },
-    );
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if theme::icon_button(
+                    ui,
+                    Icon::X,
+                    16.0,
+                    palette.secondary,
+                    palette.text,
+                    tr("Cancel reply (Esc)"),
+                )
+                .clicked()
+                {
+                    app.actions.push(Action::CancelReply);
+                }
+                if let Some(picture) = &picture {
+                    let (rect, _) = ui.allocate_exact_size(Vec2::splat(40.0), Sense::hover());
+                    paint_quote_picture(
+                        ui,
+                        picture,
+                        rect,
+                        CornerRadius::same(4),
+                        palette.surface_hover,
+                    );
+                }
+            });
+        });
+    });
     ui.ctx()
         .data_mut(|data| data.insert_temp(reply_strip_id(), strip.response.rect));
     strip_gap(ui);
