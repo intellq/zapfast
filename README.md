@@ -551,6 +551,17 @@ Da sincronização com o upstream 0.18.2:
   fim ao enviar, para mostrá-la. `Shift+Insert` cola, como `Ctrl+V`, no
   compositor.
 
+Depois da 0.18.201:
+
+- **Enviar** qualquer mensagem rola o histórico até o fim, de qualquer ponto.
+- **Botão de configurações** vira um **X vermelho** enquanto as Configurações
+  estão abertas; clicar nele (ou `Ctrl+,`) as fecha e a engrenagem volta.
+- **Miniatura de vídeo** mais nítida: o vídeo já baixado mostra o próprio
+  primeiro quadro, e a miniatura minúscula do WhatsApp é ampliada com filtro
+  cúbico e leve desfoque.
+- **Histórico para cima:** ao chegar a página mais antiga, a mensagem que você
+  via no topo continua no topo (antes a tela ia parar no meio da página nova).
+
 Esta sincronização também incorpora mudanças recentes do upstream: confirmação
 antes de apagar mensagens, aba de figurinhas recebidas, recuperação de conexão
 via IPv4 quando IPv6 falha, melhorias de teclado e zoom de imagens, correção
