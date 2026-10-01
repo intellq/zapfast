@@ -3813,13 +3813,11 @@ impl App {
     /// the newest edge. Sending from older history must not lose their place,
     /// unless the message quotes one: it is an answer, so the reader goes to
     /// see it, even from a bubble that kept the keyboard focus.
-    fn follow_outgoing(&mut self, quoted: bool) {
-        if quoted {
-            self.scroll_to_bottom = true;
-            self.scroll_to_bottom_forced = true;
-        } else if self.at_bottom {
-            self.scroll_to_bottom = true;
-        }
+    /// Whatever the user sends, the history goes to its end to show it, from
+    /// anywhere and even from a bubble with keyboard focus.
+    fn follow_outgoing(&mut self) {
+        self.scroll_to_bottom = true;
+        self.scroll_to_bottom_forced = true;
     }
 
     fn send_text(&mut self, chat: ChatId, text: String, quoting: Option<String>) {
@@ -3858,7 +3856,6 @@ impl App {
             .filter(|link| link.chat == chat && !link.dismissed && self.settings.link_previews)
             .and_then(|link| link.card.flatten())
             .filter(|card| text.contains(&card.link));
-        let quoted = quoting.is_some();
         self.backend.send(Command::SendText {
             chat,
             text,
@@ -3866,7 +3863,7 @@ impl App {
             mentions,
             preview,
         });
-        self.follow_outgoing(quoted);
+        self.follow_outgoing();
     }
 
     /// Replaces selected display-name mentions with WhatsApp's `@user`
@@ -3922,7 +3919,6 @@ impl App {
     fn send_pending(&mut self, chat: ChatId, caption: String) {
         // The reply travels with the first attachment, like the caption.
         let mut quoting = self.reply_to.take();
-        let quoted = quoting.is_some();
         let caption = caption.trim().to_owned();
         let (caption, mentions) = self.encode_composer_mentions(&chat, caption);
         let caption = Some(caption).filter(|text| !text.is_empty());
@@ -3961,7 +3957,7 @@ impl App {
                 quoting: quoting.take(),
             });
         }
-        self.follow_outgoing(quoted);
+        self.follow_outgoing();
     }
 
     #[allow(dead_code)]
@@ -3989,7 +3985,7 @@ impl App {
             mentions: Vec::new(),
             quoting: None,
         });
-        self.follow_outgoing(false);
+        self.follow_outgoing();
     }
 
     /// Applies one call state from the backend.
@@ -4502,7 +4498,7 @@ impl App {
                         button,
                         choice,
                     });
-                    self.follow_outgoing(false);
+                    self.follow_outgoing();
                 }
             }
             Action::CreatePoll { chat, draft } => {
@@ -5272,14 +5268,13 @@ impl App {
             Action::SendSticker(path) => {
                 if let Some(chat) = self.open_chat.clone() {
                     let quoting = self.reply_to.take();
-                    let quoted = quoting.is_some();
                     self.backend.send(Command::SendSticker {
                         chat,
                         path,
                         quoting,
                     });
                     self.picker = None;
-                    self.follow_outgoing(quoted);
+                    self.follow_outgoing();
                     self.refocus_composer(ctx);
                 }
             }
@@ -5296,10 +5291,9 @@ impl App {
                 if let Some(chat) = self.open_chat.clone() {
                     self.toast(tr("Sending GIF…"));
                     let quoting = self.reply_to.take();
-                    let quoted = quoting.is_some();
                     self.backend.send(Command::SendGif { chat, gif, quoting });
                     self.picker = None;
-                    self.follow_outgoing(quoted);
+                    self.follow_outgoing();
                     self.refocus_composer(ctx);
                 }
             }
@@ -6549,13 +6543,12 @@ impl App {
                 && let Some((_, samples)) = self.unsent_voice.take()
             {
                 let quoting = self.reply_to.take();
-                let quoted = quoting.is_some();
                 self.backend.send(Command::SendVoice {
                     chat,
                     samples,
                     quoting,
                 });
-                self.follow_outgoing(quoted);
+                self.follow_outgoing();
             }
             return;
         };
@@ -6566,13 +6559,12 @@ impl App {
             Ok(samples) if samples.len() < crate::voice::RATE as usize / 2 => {}
             Ok(samples) => {
                 let quoting = self.reply_to.take();
-                let quoted = quoting.is_some();
                 self.backend.send(Command::SendVoice {
                     chat,
                     samples,
                     quoting,
                 });
-                self.follow_outgoing(quoted);
+                self.follow_outgoing();
             }
             Err(error) => self.toast_error(format!("{}: {error}", tr("Could not record"))),
         }
@@ -7935,17 +7927,14 @@ mod tests {
         assert!(matches!(app.pending.as_slice(), [Pending::Picture { .. }]));
     }
 
-    /// Sending a quote scrolls to the end from anywhere in the history, even
-    /// from a bubble with keyboard focus; a plain send from older history
-    /// leaves the reader where they were.
+    /// Any send scrolls to the end from anywhere in the history, even from a
+    /// bubble with keyboard focus.
     #[test]
-    fn a_quoted_send_scrolls_to_the_end_from_older_history() {
+    fn a_send_scrolls_to_the_end_from_older_history() {
         let mut app = app();
         app.at_bottom = false;
         app.scroll_to_bottom = false;
-        app.follow_outgoing(false);
-        assert!(!app.scroll_to_bottom, "a plain send keeps the place");
-        app.follow_outgoing(true);
+        app.follow_outgoing();
         assert!(app.scroll_to_bottom && app.scroll_to_bottom_forced);
     }
 
@@ -10170,7 +10159,7 @@ mod tests {
     }
 
     #[test]
-    fn sending_a_reply_scrolls_to_the_end_while_a_plain_send_keeps_older_messages_in_view() {
+    fn sending_a_message_scrolls_to_the_end_from_older_history() {
         let mut app = app();
         let (backend, mut commands) = Backend::recording();
         app.backend = backend;
@@ -10211,8 +10200,8 @@ mod tests {
             &egui::Context::default(),
         );
         assert!(
-            !app.scroll_to_bottom,
-            "a plain send keeps the older position"
+            app.scroll_to_bottom && app.scroll_to_bottom_forced,
+            "a plain send goes to the end as well"
         );
 
         app.at_bottom = true;

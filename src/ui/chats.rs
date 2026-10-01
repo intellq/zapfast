@@ -180,16 +180,27 @@ fn header(app: &mut App, ui: &mut egui::Ui) {
                     );
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let settings_open = app.page == Page::Settings;
                     if theme::icon_button(
                         ui,
-                        Icon::Settings,
+                        // While Settings are showing the gear is a red X that
+                        // closes them, and the gear returns once they close.
+                        if settings_open {
+                            Icon::X
+                        } else {
+                            Icon::Settings
+                        },
                         18.0,
-                        if app.page == Page::Settings {
-                            palette.accent
+                        if settings_open {
+                            palette.danger
                         } else {
                             palette.secondary
                         },
-                        palette.text,
+                        if settings_open {
+                            palette.danger
+                        } else {
+                            palette.text
+                        },
                         // Same as the avatar: the label says what the click
                         // does now, not what it opened.
                         if app.page == Page::Settings {
