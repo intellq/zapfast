@@ -1,6 +1,6 @@
 [package]
 name = "zapfast"
-version = "0.17.4"
+version = "0.18.201"
 edition = "2024"
 rust-version = "1.98"
 license = "MIT"

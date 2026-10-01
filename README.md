@@ -23,8 +23,8 @@ See **[zapfast.rocks](https://zapfast.rocks)** for downloads and guides.
 ## Alterações deste fork (`intellq`)
 
 Este fork acompanha o [projeto original](https://github.com/crmne/zapfast)
-até o commit [`f0a7706`](https://github.com/crmne/zapfast/commit/f0a7706)
-(versão 0.17.0 e ajustes seguintes).
+até o commit [`c895bbd`](https://github.com/crmne/zapfast/commit/c895bbd)
+(versão 0.18.2 e ajustes seguintes).
 Além das novidades do upstream, esta branch inclui as seguintes mudanças:
 
 ### Instalar este fork
@@ -32,7 +32,8 @@ Além das novidades do upstream, esta branch inclui as seguintes mudanças:
 As versões do fork ficam em
 [Releases](https://github.com/intellq/zapfast/releases/latest), para Linux e
 Windows x86_64. Os números seguem o upstream: as versões 0.17.1 a 0.17.4 são o
-fork sobre o upstream 0.17.0, e depois do upstream 0.17.1 vem a 0.17.101. Os pacotes são
+fork sobre o upstream 0.17.0, a 0.18.201 é o fork sobre o upstream 0.18.2, e depois
+do upstream 0.18.3 vem a 0.18.301. Os pacotes são
 assinados com a chave do fork, e o ZapFast instalado por eles se atualiza
 sozinho a partir das Releases do fork (não das do upstream).
 
@@ -528,6 +529,27 @@ na lista de conversas, navegação por teclado nos resultados da busca, nomes de
 membros pelo primeiro nome salvo, tiques de entrega de mesma altura, sombras e
 botões flutuantes do visual novo, esmaecimento dos filtros cortados na lista
 e "Recomeçar" com chave de arquivo inválida.
+
+Da sincronização com o upstream 0.18.2:
+
+- **Vídeo com prévia.** O vídeo enviado leva o primeiro quadro, o tamanho e a
+  duração; na conversa aparece a prévia, mesmo antes de baixar. Em tela cheia,
+  `Espaço` toca e pausa, `M` liga e desliga o som, `←` e `→` pulam 5 segundos e
+  `Esc` fecha (essas teclas não aparecem na lista de atalhos).
+- **Fila de figurinhas.** As figurinhas recebidas são buscadas duas por vez; se
+  o WhatsApp pede para ir mais devagar, a fila espera (30 s, dobrando até 15
+  min) e as que sumiram dos servidores descansam por uma semana.
+- **Fonte da interface** em **Configurações › Aparência**: Inter (padrão) ou a
+  fonte do sistema.
+- **Logo novo** (um disco aceso com um balão de tinta) no ícone, na bandeja, no
+  Sobre e nas telas de entrada e de bloqueio; a bandeja nomeia o ícone
+  (fastframe v0.2.2, que agora é a versão de todas as peças fastframe).
+- **Janela de atalhos** que se ajusta ao tamanho da janela, borda da lista de
+  conversas desenhada como a do cabeçalho, texto selecionável mais leve e sem a
+  mensagem do rodio no terminal ao fim de um áudio.
+- **Responder (citar)** uma mensagem de qualquer ponto do histórico rola até o
+  fim ao enviar, para mostrá-la. `Shift+Insert` cola, como `Ctrl+V`, no
+  compositor.
 
 Esta sincronização também incorpora mudanças recentes do upstream: confirmação
 antes de apagar mensagens, aba de figurinhas recebidas, recuperação de conexão
