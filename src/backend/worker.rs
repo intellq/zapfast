@@ -48,6 +48,7 @@ mod link_preview;
 mod link_watch;
 mod poll_history;
 mod polls;
+mod sticker_pace;
 mod stickers;
 
 use super::{Command, Event, GroupEdit, LinkStatus, Refusal, Unsent, Waker, read_sync::ReadSync};
@@ -615,7 +616,8 @@ pub async fn run(
         recent_hashes: HashMap::new(),
         emoji_cache: HashMap::new(),
         favorite_fetches: HashSet::new(),
-        favorite_gate: Arc::new(tokio::sync::Semaphore::new(1)),
+        sticker_pace: Default::default(),
+        sticker_failed: HashSet::new(),
         favorites_pushing: false,
         favorites_again: false,
         favorites_recovered,
@@ -698,6 +700,7 @@ pub async fn run(
                 worker.expire_older_requests();
                 worker.retry_avatars();
                 worker.pump_group_info();
+                worker.pump_favorite_stickers();
                 worker.pump_read_sync();
                 worker.pump_favorite_chats();
                 worker.pump_poll_votes();
@@ -923,9 +926,10 @@ struct Worker {
     emoji_cache: HashMap<PathBuf, EmojiStamp>,
     /// Favorite stickers being fetched from the phone's list, by hash.
     favorite_fetches: HashSet<String>,
-    /// Lets one favorite download run at a time: dozens at once hit WhatsApp's
-    /// rate limit, and most of them fail.
-    favorite_gate: Arc<tokio::sync::Semaphore>,
+    /// Favorites waiting for their turn, and the pause the server asked for.
+    sticker_pace: sticker_pace::Pace,
+    /// Recent stickers whose download failed this session, not asked again.
+    sticker_failed: HashSet<String>,
     /// Whether favorite changes are on their way to the phone.
     favorites_pushing: bool,
     /// More favorite changes arrived while a push was running.
@@ -5544,8 +5548,17 @@ impl Worker {
                             log::warn!("could not file a sticker");
                         }
                     }
-                    Err(_error) => log::warn!("could not fetch a sticker"),
+                    Err(error) if sticker_pace::rate_limited(&error) => {
+                        log::warn!("sticker downloads paused: the server asked to slow down");
+                        self.sticker_pace.limited(Instant::now());
+                    }
+                    Err(_error) => {
+                        log::warn!("could not fetch a sticker");
+                        self.sticker_failed.insert(hash);
+                    }
                 }
+                // The next missing ones take the freed places.
+                self.fetch_missing_stickers();
                 // Recent is sorted by use, so each arrival lands mid-grid and
                 // shifts every tile after it. Publish the batch once, instead
                 // of reshuffling the open picker under the reader (#165).
@@ -7053,6 +7066,11 @@ impl Worker {
         let Some(client) = self.client.clone() else {
             return;
         };
+        // A few at a time, and none while the server asked to wait: each
+        // arrival starts the next (#298).
+        if !self.sticker_pace.open(Instant::now()) {
+            return;
+        }
         let phone = match self.archive.phone_stickers() {
             Ok(list) => list,
             Err(error) => {
@@ -7062,7 +7080,12 @@ impl Worker {
         };
         let dir = self.dirs.sticker_cache_dir();
         for sticker in phone.into_iter().filter(|sticker| sticker.path.is_none()) {
-            if !self.sticker_fetches.insert(sticker.hash.clone()) {
+            if self.sticker_fetches.len() >= sticker_pace::IN_FLIGHT {
+                break;
+            }
+            if self.sticker_failed.contains(&sticker.hash)
+                || !self.sticker_fetches.insert(sticker.hash.clone())
+            {
                 continue;
             }
             let Ok(meta) = wa::StickerMetadata::decode_from_slice(&sticker.raw) else {
@@ -12917,7 +12940,8 @@ mod receipt_tests {
             recent_hashes: HashMap::new(),
             emoji_cache: HashMap::new(),
             favorite_fetches: HashSet::new(),
-            favorite_gate: Arc::new(tokio::sync::Semaphore::new(1)),
+            sticker_pace: Default::default(),
+            sticker_failed: HashSet::new(),
             favorites_pushing: false,
             favorites_again: false,
             favorites_recovered: true,

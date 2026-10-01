@@ -40,16 +40,6 @@ fn fetchable(action: &wa::sync_action_value::StickerAction) -> bool {
         || (action.media_key.is_none() && action.url.as_deref().is_some_and(|url| !url.is_empty()))
 }
 
-/// Rest between two favorite downloads.
-const FAVORITE_PACE: std::time::Duration = std::time::Duration::from_millis(400);
-
-/// How long to wait before trying a download again after WhatsApp said it was
-/// going too fast (429 `rate-overlimit`), doubling up to four tries.
-fn rate_limit_wait(error: &str, attempt: u32) -> Option<std::time::Duration> {
-    (attempt < 4 && (error.contains("rate-overlimit") || error.contains("code=429")))
-        .then(|| std::time::Duration::from_secs(2 << attempt))
-}
-
 /// A download error without the CDN paths and tokens it may quote.
 fn redacted(error: &str) -> String {
     use fastframe_log::redact;
@@ -681,7 +671,13 @@ impl Worker {
             }
             return;
         }
-        self.fetch_favorite(hash);
+        // Through the queue: a snapshot of the phone's favorites replays
+        // every one of them here at once.
+        let saved = self.dirs.saved_sticker_dir().join(format!("{hash}.webp"));
+        if !saved.exists() && !self.copy_local_favorite(&hash) {
+            self.sticker_pace.push(hash);
+            self.pump_favorite_stickers();
+        }
     }
 
     /// Brings a favorite's file into the favorites folder: from a copy of the
@@ -689,18 +685,9 @@ impl Worker {
     fn fetch_favorite(&mut self, hash: String) {
         let dir = self.dirs.saved_sticker_dir();
         let path = dir.join(format!("{hash}.webp"));
-        if path.exists() || self.favorite_fetches.contains(&hash) {
+        if path.exists() || self.favorite_fetches.contains(&hash) || self.copy_local_favorite(&hash)
+        {
             return;
-        }
-        if let Some(source) = self.local_sticker_copy(&hash) {
-            match super::super::sticker_store::save(&dir, &source) {
-                Ok(_) => {
-                    log::info!("favorite sticker copied from a local copy");
-                    self.emit_stickers();
-                    return;
-                }
-                Err(error) => log::warn!("could not copy a favorite sticker: {error}"),
-            }
         }
         let Some(file_sha256) = digest_of_hash(&hash) else {
             return;
@@ -734,29 +721,36 @@ impl Worker {
         self.favorite_fetches.insert(hash.clone());
         let commands = self.commands.clone();
         let attachment_limit = self.attachment_limit;
-        let gate = self.favorite_gate.clone();
         tokio::spawn(async move {
-            let _turn = gate.acquire().await;
             let mut result = Err("no download references".to_owned());
-            'candidates: for download in &candidates {
-                let mut attempt = 0;
-                loop {
-                    result =
-                        download_attachment(&client, download, &dir, &path, attachment_limit).await;
-                    let Err(error) = &result else {
-                        break 'candidates;
-                    };
-                    let Some(wait) = rate_limit_wait(error, attempt) else {
-                        break;
-                    };
-                    attempt += 1;
-                    tokio::time::sleep(wait).await;
+            for download in &candidates {
+                result =
+                    download_attachment(&client, download, &dir, &path, attachment_limit).await;
+                if result.is_ok() {
+                    break;
                 }
             }
-            // A short rest keeps a long list from tripping the limit again.
-            tokio::time::sleep(FAVORITE_PACE).await;
             let _ = commands.send(Command::FavoriteFetched { hash, result });
         });
+    }
+
+    /// Saves a favorite from a copy of the same sticker already on this
+    /// computer, which costs the servers nothing. Whether it did.
+    fn copy_local_favorite(&mut self, hash: &str) -> bool {
+        let Some(source) = self.local_sticker_copy(hash) else {
+            return false;
+        };
+        match super::super::sticker_store::save(&self.dirs.saved_sticker_dir(), &source) {
+            Ok(_) => {
+                log::info!("favorite sticker copied from a local copy");
+                self.emit_stickers();
+                true
+            }
+            Err(error) => {
+                log::warn!("could not copy a favorite sticker: {error}");
+                false
+            }
+        }
     }
 
     /// A file on this computer holding the sticker with this content hash: in
@@ -809,15 +803,51 @@ impl Worker {
                 return;
             }
         };
+        // Copies already on this computer first; only the rest need the servers.
+        let mut owed = Vec::new();
+        for hash in missing {
+            if !self.copy_local_favorite(&hash) && !self.favorite_recently_gone(&hash) {
+                owed.push(hash);
+            }
+        }
+        let missing = owed;
         if !missing.is_empty() {
             log::info!(
-                "fetching {} favorite stickers from the phone",
+                "fetching {} favorite stickers from the phone, a few at a time",
                 missing.len()
             );
         }
         for hash in missing {
+            self.sticker_pace.push(hash);
+        }
+        self.pump_favorite_stickers();
+    }
+
+    /// Starts the next favorites in line, unless the server asked to wait.
+    pub(super) fn pump_favorite_stickers(&mut self) {
+        if self.client.is_none() || self.sticker_pace.is_empty() {
+            return;
+        }
+        for hash in self
+            .sticker_pace
+            .take(Instant::now(), self.favorite_fetches.len())
+        {
             self.fetch_favorite(hash);
         }
+    }
+
+    /// Whether this favorite's file was gone from the servers not long ago,
+    /// so asking again on this connection would only spend the rate limit.
+    fn favorite_recently_gone(&self, hash: &str) -> bool {
+        self.archive
+            .meta(&format!("favorite_sticker_gone:{hash}"))
+            .ok()
+            .flatten()
+            .and_then(|at| at.parse::<u64>().ok())
+            .is_some_and(|at| {
+                (crate::util::now().max(0) as u64).saturating_sub(at)
+                    < super::sticker_pace::GONE_FOR.as_secs()
+            })
     }
 
     /// Keeps a fetched favorite only when it is the sticker the phone named.
@@ -834,6 +864,21 @@ impl Worker {
                     let _ = std::fs::remove_file(&path);
                 }
                 self.emit_stickers();
+            }
+            Err(error) if super::sticker_pace::rate_limited(&error) => {
+                log::warn!("favorite sticker downloads paused: the server asked to slow down");
+                self.sticker_pace.limited(Instant::now());
+                self.sticker_pace.push(hash.to_owned());
+            }
+            // Gone from the servers: rest a week rather than ask each time.
+            Err(error) if super::sticker_pace::gone(&error) => {
+                log::warn!(
+                    "a favorite sticker is no longer on WhatsApp's servers; asking again in a week"
+                );
+                let _ = self.archive.set_meta(
+                    &format!("favorite_sticker_gone:{hash}"),
+                    &crate::util::now().to_string(),
+                );
             }
             // The phone's record stays, so the next connection tries again.
             Err(error) => log::warn!(
@@ -1375,22 +1420,6 @@ mod tests {
         assert!(known.favorite && known.pushed, "the phone already has it");
     }
 
-    /// A download refused for going too fast waits and tries again, a few times.
-    #[test]
-    fn a_rate_limited_favorite_download_waits_and_retries() {
-        let limited = "received a server error response: code=429, text='rate-overlimit'";
-        assert_eq!(
-            rate_limit_wait(limited, 0),
-            Some(std::time::Duration::from_secs(2))
-        );
-        assert_eq!(
-            rate_limit_wait(limited, 3),
-            Some(std::time::Duration::from_secs(16))
-        );
-        assert_eq!(rate_limit_wait(limited, 4), None);
-        assert_eq!(rate_limit_wait("Download failed with status: 403", 0), None);
-    }
-
     /// A favorite the phone names but that cannot be fetched now stays owed:
     /// the next connection fetches it instead of forgetting it.
     #[test]
@@ -1424,6 +1453,34 @@ mod tests {
         worker.fetch_missing_favorites();
         let saved = worker.dirs.saved_sticker_dir().join(format!("{hash}.webp"));
         assert_eq!(std::fs::read(saved).ok(), Some(bytes));
+    }
+
+    /// Favorites with no copy here wait their turn instead of all going to
+    /// the servers at once, and one whose file was gone from the servers is
+    /// not asked for again on the next connection (#298, #307).
+    #[test]
+    fn missing_favorites_queue_and_a_gone_one_rests() {
+        let (mut worker, _root, _events, _commands) = sticker_worker();
+        let hashes: Vec<String> = (0..5)
+            .map(|index| {
+                let bytes = sticker_bytes(&format!("favorite {index}"));
+                worker.favorite_sticker_update(&phone_favorite(&bytes, true, now_millis()));
+                crate::backend::sticker_store::content_hash(&bytes)
+            })
+            .collect();
+        worker.favorite_fetched(
+            &hashes[0],
+            Err("Download media not found/expired with status: 410".to_owned()),
+        );
+        worker.sticker_pace = Default::default();
+        worker.fetch_missing_favorites();
+        let queued = worker.sticker_pace.take(Instant::now(), 0);
+        assert_eq!(queued.len(), 2, "two at a time");
+        assert!(!queued.contains(&hashes[0]), "the gone one rests");
+        let rest = worker.sticker_pace.take(Instant::now(), 0);
+        let rest2 = worker.sticker_pace.take(Instant::now(), 0);
+        assert_eq!(queued.len() + rest.len() + rest2.len(), 4);
+        assert!(worker.sticker_pace.is_empty());
     }
 
     /// The phone's clock need not agree with this computer's. A change the
