@@ -4778,3 +4778,11 @@ msgid ""
 "remove them from your phone and linked devices too. Other people keep their "
 "copy."
 msgstr ""
+
+#: src/ui/settings.rs
+msgid "Font"
+msgstr ""
+
+#: src/ui/settings.rs
+msgid "System is your desktop's interface font. Inter looks the same on every computer."
+msgstr ""

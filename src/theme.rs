@@ -477,10 +477,42 @@ pub fn apply(ctx: &egui::Context, palette: &Palette) {
     ctx.set_global_style(style);
 }
 
-/// Inter at four weights, egui's own fonts behind it, and installed fonts
-/// for the scripts Inter lacks, hinted as the desktop asks.
+/// Whether the interface is drawn in the platform's font instead of the
+/// bundled Inter (Settings, Appearance, Font).
+static SYSTEM_FONT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Chooses the interface's typeface and installs it. Call it before
+/// [`install`] with the saved choice, and again when the choice changes.
+pub fn set_font(ctx: &egui::Context, font: crate::settings::FontChoice) {
+    let system = font == crate::settings::FontChoice::System;
+    if SYSTEM_FONT.swap(system, std::sync::atomic::Ordering::AcqRel) != system {
+        install_fonts(ctx);
+    }
+}
+
+/// Whether the platform's font is the chosen typeface.
+#[cfg(test)]
+pub fn system_font_chosen() -> bool {
+    SYSTEM_FONT.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// The typeface the interface is asked to draw with: the setting's, and
+/// always Inter in tests, so layouts do not depend on the machine.
+fn primary_font() -> fastframe_fonts::Primary {
+    if !cfg!(test) && SYSTEM_FONT.load(std::sync::atomic::Ordering::Acquire) {
+        fastframe_fonts::Primary::System
+    } else {
+        fastframe_fonts::Primary::Inter
+    }
+}
+
+/// The chosen interface font at four weights (Inter, or the platform's
+/// where it can be found), egui's own fonts behind it, and installed fonts
+/// for the scripts it lacks, hinted as the desktop asks.
 fn install_fonts(ctx: &egui::Context) {
-    let mut fonts = fastframe_fonts::FontSetup::default().definitions();
+    let mut fonts = fastframe_fonts::FontSetup::default()
+        .primary(primary_font())
+        .definitions();
     text_rendering().apply_to(&mut fonts);
     ctx.set_fonts(fonts);
 }
