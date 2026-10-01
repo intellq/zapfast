@@ -3809,9 +3809,14 @@ impl App {
     }
 
     /// Keeps following outgoing messages only when the reader was already at
-    /// the newest edge. Sending from older history must not lose their place.
-    fn follow_outgoing(&mut self) {
-        if self.at_bottom {
+    /// the newest edge. Sending from older history must not lose their place,
+    /// unless the message quotes one: it is an answer, so the reader goes to
+    /// see it, even from a bubble that kept the keyboard focus.
+    fn follow_outgoing(&mut self, quoted: bool) {
+        if quoted {
+            self.scroll_to_bottom = true;
+            self.scroll_to_bottom_forced = true;
+        } else if self.at_bottom {
             self.scroll_to_bottom = true;
         }
     }
@@ -3852,6 +3857,7 @@ impl App {
             .filter(|link| link.chat == chat && !link.dismissed && self.settings.link_previews)
             .and_then(|link| link.card.flatten())
             .filter(|card| text.contains(&card.link));
+        let quoted = quoting.is_some();
         self.backend.send(Command::SendText {
             chat,
             text,
@@ -3859,7 +3865,7 @@ impl App {
             mentions,
             preview,
         });
-        self.follow_outgoing();
+        self.follow_outgoing(quoted);
     }
 
     /// Replaces selected display-name mentions with WhatsApp's `@user`
@@ -3915,6 +3921,7 @@ impl App {
     fn send_pending(&mut self, chat: ChatId, caption: String) {
         // The reply travels with the first attachment, like the caption.
         let mut quoting = self.reply_to.take();
+        let quoted = quoting.is_some();
         let caption = caption.trim().to_owned();
         let (caption, mentions) = self.encode_composer_mentions(&chat, caption);
         let caption = Some(caption).filter(|text| !text.is_empty());
@@ -3953,7 +3960,7 @@ impl App {
                 quoting: quoting.take(),
             });
         }
-        self.follow_outgoing();
+        self.follow_outgoing(quoted);
     }
 
     #[allow(dead_code)]
@@ -3981,7 +3988,7 @@ impl App {
             mentions: Vec::new(),
             quoting: None,
         });
-        self.follow_outgoing();
+        self.follow_outgoing(false);
     }
 
     /// Applies one call state from the backend.
@@ -4494,7 +4501,7 @@ impl App {
                         button,
                         choice,
                     });
-                    self.follow_outgoing();
+                    self.follow_outgoing(false);
                 }
             }
             Action::CreatePoll { chat, draft } => {
@@ -5264,13 +5271,14 @@ impl App {
             Action::SendSticker(path) => {
                 if let Some(chat) = self.open_chat.clone() {
                     let quoting = self.reply_to.take();
+                    let quoted = quoting.is_some();
                     self.backend.send(Command::SendSticker {
                         chat,
                         path,
                         quoting,
                     });
                     self.picker = None;
-                    self.follow_outgoing();
+                    self.follow_outgoing(quoted);
                     self.refocus_composer(ctx);
                 }
             }
@@ -5287,9 +5295,10 @@ impl App {
                 if let Some(chat) = self.open_chat.clone() {
                     self.toast(tr("Sending GIF…"));
                     let quoting = self.reply_to.take();
+                    let quoted = quoting.is_some();
                     self.backend.send(Command::SendGif { chat, gif, quoting });
                     self.picker = None;
-                    self.follow_outgoing();
+                    self.follow_outgoing(quoted);
                     self.refocus_composer(ctx);
                 }
             }
@@ -6533,12 +6542,13 @@ impl App {
                 && let Some((_, samples)) = self.unsent_voice.take()
             {
                 let quoting = self.reply_to.take();
+                let quoted = quoting.is_some();
                 self.backend.send(Command::SendVoice {
                     chat,
                     samples,
                     quoting,
                 });
-                self.follow_outgoing();
+                self.follow_outgoing(quoted);
             }
             return;
         };
@@ -6549,11 +6559,13 @@ impl App {
             Ok(samples) if samples.len() < crate::voice::RATE as usize / 2 => {}
             Ok(samples) => {
                 let quoting = self.reply_to.take();
+                let quoted = quoting.is_some();
                 self.backend.send(Command::SendVoice {
                     chat,
                     samples,
                     quoting,
                 });
+                self.follow_outgoing(quoted);
             }
             Err(error) => self.toast_error(format!("{}: {error}", tr("Could not record"))),
         }
@@ -6741,7 +6753,14 @@ impl App {
             && now - self.command_seen_at < CTRL_V_GRACE
             && self.text_typed_at < self.command_seen_at;
         let paste = paste || late_release;
-        let requested = paste && (text || !self.paste_before_release);
+        // Shift+Insert pastes like Ctrl+V in the composer, a binding the
+        // hint bar and the shortcut list leave out. Taking the key keeps the
+        // text field from also seeing it.
+        let insert = self.page == Page::Chats
+            && self.dialog.is_none()
+            && ctx.memory(|memory| memory.has_focus(egui::Id::new("composer-text")))
+            && ctx.input_mut(|input| input.consume_key(egui::Modifiers::SHIFT, egui::Key::Insert));
+        let requested = insert || (paste && (text || !self.paste_before_release));
         if released || !focused {
             self.paste_before_release = false;
         } else if text {
@@ -6784,6 +6803,10 @@ impl App {
                     rgba,
                 },
             });
+        } else if insert {
+            // Only text is on the clipboard: egui reads it and hands the
+            // field the same paste event Ctrl+V brings.
+            ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaste);
         }
     }
 
@@ -7887,6 +7910,36 @@ mod tests {
         );
         assert_eq!(image_reads, 1);
         assert!(matches!(app.pending.as_slice(), [Pending::Picture { .. }]));
+    }
+
+    /// Shift+Insert in the composer pastes a clipboard picture as Ctrl+V does.
+    #[test]
+    fn shift_insert_pastes_a_picture_like_ctrl_v() {
+        let (mut app, ctx) = clipboard_app();
+        let insert = egui::Event::Key {
+            key: egui::Key::Insert,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::SHIFT,
+        };
+        let (reads, _) = clipboard_frame_with_files(&mut app, &ctx, vec![insert], None, true);
+        assert_eq!(reads, 1);
+        assert!(matches!(app.pending.as_slice(), [Pending::Picture { .. }]));
+    }
+
+    /// Sending a quote scrolls to the end from anywhere in the history, even
+    /// from a bubble with keyboard focus; a plain send from older history
+    /// leaves the reader where they were.
+    #[test]
+    fn a_quoted_send_scrolls_to_the_end_from_older_history() {
+        let mut app = app();
+        app.at_bottom = false;
+        app.scroll_to_bottom = false;
+        app.follow_outgoing(false);
+        assert!(!app.scroll_to_bottom, "a plain send keeps the place");
+        app.follow_outgoing(true);
+        assert!(app.scroll_to_bottom && app.scroll_to_bottom_forced);
     }
 
     #[test]
@@ -10110,7 +10163,7 @@ mod tests {
     }
 
     #[test]
-    fn sending_a_reply_keeps_older_messages_in_view() {
+    fn sending_a_reply_scrolls_to_the_end_while_a_plain_send_keeps_older_messages_in_view() {
         let mut app = app();
         let (backend, mut commands) = Backend::recording();
         app.backend = backend;
@@ -10128,13 +10181,31 @@ mod tests {
             &egui::Context::default(),
         );
 
-        assert!(!app.scroll_to_bottom, "the older position stays selected");
+        assert!(
+            app.scroll_to_bottom && app.scroll_to_bottom_forced,
+            "a reply goes to the end, to be seen"
+        );
         assert!(!app.at_bottom, "sending does not pretend the view moved");
         assert!(
             std::iter::from_fn(|| commands.try_recv().ok()).any(|command| matches!(
                 command,
                 Command::SendText { quoting: Some(id), .. } if id == "older-message"
             ))
+        );
+
+        app.scroll_to_bottom = false;
+        app.scroll_to_bottom_forced = false;
+        app.apply(
+            Action::SendText {
+                chat: chat.into(),
+                text: "Plain fixture".into(),
+                quoting: None,
+            },
+            &egui::Context::default(),
+        );
+        assert!(
+            !app.scroll_to_bottom,
+            "a plain send keeps the older position"
         );
 
         app.at_bottom = true;
