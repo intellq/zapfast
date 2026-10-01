@@ -232,7 +232,7 @@ impl Sound {
             Err(_) if has_audio_track(path) == Some(false) => return Ok(None),
             Err(error) => return Err(error),
         };
-        let device = match rodio::DeviceSinkBuilder::open_default_sink() {
+        let device = match crate::audio::open_output() {
             Ok(device) => device,
             Err(error) => {
                 log::warn!("video plays without sound: {error}");
