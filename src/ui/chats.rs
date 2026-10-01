@@ -41,13 +41,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         app.settings.sidebar_width = width;
         app.actions.push(Action::SettingsChanged);
     }
-    // Separate the panel from the conversation.
-    let rect = response.response.rect;
-    ui.painter().vline(
-        rect.right(),
-        rect.y_range(),
-        egui::Stroke::new(1.0, palette.outline),
-    );
+    // Separate the panel from the conversation, as the header's line does.
+    widgets::paint_edge_beside(ui, &palette, response.response.rect);
 }
 
 /// Walks matching chats while the global search field keeps keyboard focus.
@@ -1299,12 +1294,7 @@ pub fn compact_show(app: &mut App, ui: &mut egui::Ui) {
         compact_list(app, ui);
     });
     // Separate the rail from the conversation, exactly as the full list does.
-    let rect = response.response.rect;
-    ui.painter().vline(
-        rect.right(),
-        rect.y_range(),
-        egui::Stroke::new(1.0, palette.outline),
-    );
+    widgets::paint_edge_beside(ui, &palette, response.response.rect);
 }
 
 /// The avatars: the chats the full list would show right now, under the same
