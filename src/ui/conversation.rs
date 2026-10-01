@@ -2382,7 +2382,14 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                         // rect it last had on screen, where other rows are
                         // now. The bubble registers its click targets from
                         // it, so drop it rather than let it take their clicks.
-                        if known.is_none_or(|row| row.pass.is_none_or(|last| last + 1 < pass)) {
+                        // So does every row when older messages were just
+                        // added above them, or a jump lays them all out: the
+                        // bubble's response merges that rect with its new
+                        // one, which would aim the scroll at the middle of
+                        // everything in between.
+                        if view.anchor.is_some()
+                            || known.is_none_or(|row| row.pass.is_none_or(|last| last + 1 < pass))
+                        {
                             let id = bubble_id(&chat.id, &message.id).with("rect");
                             ui.ctx().data_mut(|data| data.remove::<Rect>(id));
                         }
@@ -2525,7 +2532,10 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                         if let Some(response) = response
                             && view.anchor == Some(message.id.as_str())
                         {
-                            response.scroll_to_me(Some(Align::Center));
+                            response.scroll_to_me_animation(
+                                Some(Align::Center),
+                                egui::style::ScrollAnimation::none(),
+                            );
                             anchored = true;
                         }
                         let measured = ui.cursor().top() - before;

@@ -708,6 +708,50 @@ pub fn icon_button(
     }
 }
 
+/// A solid red square with a border and a white X: the button that takes the
+/// place of another while what it opened is showing, easy to see and to hit.
+pub fn close_button(ui: &mut egui::Ui, palette: &Palette, size: f32, tooltip: &str) -> Response {
+    let edge = size + 12.0;
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(edge), Sense::click());
+    reveal_focus(&response);
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), tooltip)
+    });
+    if ui.is_rect_visible(rect) {
+        let lit = response.hovered() || response.has_focus();
+        // Close to the background's own tone, so it reads as part of the
+        // header, yet clearly redder than it.
+        let fill = if lit {
+            palette.danger
+        } else {
+            palette.panel.lerp_to_gamma(palette.danger, 0.75)
+        };
+        let scale = if response.is_pointer_button_down_on() {
+            0.92
+        } else {
+            1.0
+        };
+        let body = egui::Rect::from_center_size(rect.center(), Vec2::splat(edge - 2.0) * scale);
+        ui.painter().rect_filled(body, 8.0, fill);
+        ui.painter().rect_stroke(
+            body,
+            8.0,
+            Stroke::new(
+                1.5,
+                palette.danger.gamma_multiply(if lit { 1.0 } else { 0.9 }),
+            ),
+            egui::StrokeKind::Inside,
+        );
+        paint_icon(ui, Icon::X, rect, size * 0.8 * scale, Color32::WHITE);
+    }
+    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+    if tooltip.is_empty() {
+        response
+    } else {
+        response.on_hover_text(tooltip)
+    }
+}
+
 /// Round filled icon button.
 pub fn circle_button(
     ui: &mut egui::Ui,

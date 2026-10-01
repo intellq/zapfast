@@ -2903,6 +2903,101 @@ mod tests {
         }
     }
 
+    /// Paging up to the top of the loaded history and receiving the older
+    /// page lands the view on the seam with the page below, not in the middle
+    /// of the new one: the rows' remembered rects from before the page came
+    /// must not aim the scroll.
+    #[test]
+    fn an_older_page_lands_the_view_at_the_seam() {
+        let root = std::env::temp_dir().join(format!("zapfast-seam-{}", std::process::id()));
+        let (mut app, events) = App::headless(AppDirs::under(&root), Settings::default());
+        populate(&mut app);
+        let chat = SAMPLES[0].id;
+        let page = |from: usize, to: usize| -> Vec<Message> {
+            (from..to)
+                .map(|index| {
+                    let words = "word ".repeat(3 + (index * 7) % 60);
+                    message(
+                        chat,
+                        &format!("m-{index:04}"),
+                        false,
+                        1_600_000_000 + index as i64 * 600,
+                        Content::text(format!("{index} {words}")),
+                    )
+                })
+                .collect()
+        };
+        let conversation = app.conversations.get_mut(chat).unwrap();
+        conversation.messages = page(200, 300);
+        conversation.complete = false;
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        let run = |app: &mut App, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1180.0, 780.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    let ctx = ui.ctx().clone();
+                    app.background_frame(&ctx);
+                    app.frame_ui(ui);
+                },
+            );
+            output.textures_delta.clear();
+        };
+        let page_up = vec![egui::Event::Key {
+            key: egui::Key::PageUp,
+            physical_key: Some(egui::Key::PageUp),
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }];
+        for _ in 0..4 {
+            run(&mut app, vec![]);
+        }
+        for _ in 0..400 {
+            run(&mut app, page_up.clone());
+            if app.conversations[chat].loading_older {
+                break;
+            }
+        }
+        assert!(
+            app.conversations[chat].loading_older,
+            "paging up asked for more"
+        );
+        assert_eq!(app.scroll_anchor.as_deref(), Some("m-0200"));
+        events
+            .send(crate::backend::Event::Messages {
+                chat: chat.to_owned(),
+                messages: page(100, 200),
+                older: true,
+                complete: false,
+            })
+            .unwrap();
+        app.handle_events();
+        for _ in 0..4 {
+            run(&mut app, vec![]);
+        }
+        let on_screen = |id: &str| {
+            ctx.data(|data| {
+                data.get_temp::<egui::Rect>(
+                    crate::ui::conversation::bubble_id(chat, id).with("body"),
+                )
+            })
+            .is_some_and(|rect| rect.bottom() > 0.0 && rect.top() < 780.0)
+        };
+        assert!(
+            on_screen("m-0200") && on_screen("m-0199"),
+            "the seam between the pages is in view"
+        );
+        assert!(!on_screen("m-0150"), "the middle of the new page is not");
+    }
+
     /// A clicked notification lands on the message it announced and keeps it
     /// in view, even with the unread divider far above it.
     #[test]

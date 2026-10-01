@@ -2462,7 +2462,7 @@ impl App {
         }
     }
 
-    fn handle_events(&mut self) {
+    pub(crate) fn handle_events(&mut self) {
         for event in self.backend.poll() {
             match event {
                 Event::ForwardInspected {

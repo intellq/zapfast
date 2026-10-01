@@ -181,37 +181,23 @@ fn header(app: &mut App, ui: &mut egui::Ui) {
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     let settings_open = app.page == Page::Settings;
-                    if theme::icon_button(
-                        ui,
-                        // While Settings are showing the gear is a red X that
-                        // closes them, and the gear returns once they close.
-                        if settings_open {
-                            Icon::X
-                        } else {
-                            Icon::Settings
-                        },
-                        18.0,
-                        if settings_open {
-                            palette.danger
-                        } else {
-                            palette.secondary
-                        },
-                        if settings_open {
-                            palette.danger
-                        } else {
-                            palette.text
-                        },
+                    // While Settings are showing, the gear is a solid red X
+                    // that closes them, and the gear returns once they close.
+                    let response = if settings_open {
                         // Same as the avatar: the label says what the click
                         // does now, not what it opened.
-                        if app.page == Page::Settings {
-                            tr("Close settings (Ctrl+,)")
-                        } else {
-                            tr("Settings (Ctrl+,)")
-                        },
-                    )
-                    .tab_stop(Stop::Settings)
-                    .clicked()
-                    {
+                        theme::close_button(ui, &palette, 18.0, tr("Close settings (Ctrl+,)"))
+                    } else {
+                        theme::icon_button(
+                            ui,
+                            Icon::Settings,
+                            18.0,
+                            palette.secondary,
+                            palette.text,
+                            tr("Settings (Ctrl+,)"),
+                        )
+                    };
+                    if response.tab_stop(Stop::Settings).clicked() {
                         app.actions.push(Action::ToggleSettings);
                     }
                     if theme::icon_button(
