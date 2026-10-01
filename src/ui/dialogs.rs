@@ -23,7 +23,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         .backdrop_color(palette.shadow)
         .show(ctx, |ui| {
             ui.set_width(match dialog {
-                Dialog::Shortcuts => 540.0,
+                Dialog::Shortcuts => shortcuts_width(ui.ctx().content_rect().width()),
                 Dialog::About => 380.0,
                 Dialog::ConfirmUnlink => 380.0,
                 Dialog::ConfirmLeaveGroup(_) | Dialog::ConfirmBlock(_) => 380.0,
@@ -768,10 +768,54 @@ fn title(ui: &mut egui::Ui, app: &mut App, label: &str) {
     ui.add_space(4.0);
 }
 
+/// The shortcuts dialog's width with its two columns, and with one.
+const SHORTCUTS_WIDE: f32 = 920.0;
+const SHORTCUTS_NARROW: f32 = 540.0;
+/// The space between the two columns.
+const SHORTCUTS_GUTTER: f32 = 32.0;
+
+/// How wide the shortcuts dialog is in a window `window` wide: two columns
+/// where they fit, one otherwise, and never wider than the window.
+fn shortcuts_width(window: f32) -> f32 {
+    let room = window - 64.0;
+    if room >= SHORTCUTS_WIDE {
+        SHORTCUTS_WIDE
+    } else {
+        SHORTCUTS_NARROW.min(room).max(180.0)
+    }
+}
+
+/// One shortcut: its keys in a column `keys_width` wide, then what it does,
+/// wrapped in the room that is left.
+fn shortcut_row(
+    ui: &mut egui::Ui,
+    palette: &theme::Palette,
+    keys_width: f32,
+    keys: &str,
+    what: &'static str,
+) {
+    ui.horizontal_top(|ui| {
+        let rest = (ui.available_width() - keys_width - ui.spacing().item_spacing.x).max(60.0);
+        ui.allocate_ui_with_layout(vec2(keys_width, 0.0), Layout::top_down(Align::Min), |ui| {
+            ui.set_width(keys_width);
+            theme::text(
+                ui,
+                super::keys::label(keys),
+                theme::semibold(13.0),
+                palette.text,
+            );
+        });
+        ui.allocate_ui_with_layout(vec2(rest, 0.0), Layout::top_down(Align::Min), |ui| {
+            ui.set_width(rest);
+            theme::paragraph(ui, tr(what), theme::regular(13.0), palette.secondary);
+        });
+    });
+}
+
 fn shortcuts(app: &mut App, ui: &mut egui::Ui) {
     let palette = app.palette;
     title(ui, app, tr("Keyboard shortcuts"));
-    // Reserve enough width for the longest shortcut before laying out the grid.
+    // Reserve enough width for the longest shortcut before laying out the rows.
     let keys_width = super::keys::SHORTCUTS
         .iter()
         .map(|(keys, _)| {
@@ -784,22 +828,36 @@ fn shortcuts(app: &mut App, ui: &mut egui::Ui) {
                 .size()
                 .x
         })
-        .fold(0.0, f32::max);
-    egui::Grid::new("shortcuts")
-        .num_columns(2)
-        .min_col_width(keys_width)
-        .spacing([18.0, 8.0])
+        .fold(0.0, f32::max)
+        .ceil();
+    // Two columns in a window wide enough for them; whatever the window
+    // still cannot show scrolls, so the title and the close button stay.
+    let width = ui.available_width();
+    let columns = if width >= SHORTCUTS_WIDE { 2 } else { 1 };
+    let column = (width - SHORTCUTS_GUTTER * (columns - 1) as f32) / columns as f32;
+    let per_column = super::keys::SHORTCUTS.len().div_ceil(columns);
+    let height = (ui.ctx().content_rect().height() - 190.0).max(120.0);
+    egui::ScrollArea::vertical()
+        .id_salt("shortcuts")
+        .max_height(height)
+        .auto_shrink([false, true])
         .show(ui, |ui| {
-            for (keys, what) in super::keys::SHORTCUTS {
-                theme::text(
-                    ui,
-                    super::keys::label(keys),
-                    theme::semibold(13.0),
-                    palette.text,
-                );
-                theme::text(ui, tr(what), theme::regular(13.0), palette.secondary);
-                ui.end_row();
-            }
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = SHORTCUTS_GUTTER;
+                for rows in super::keys::SHORTCUTS.chunks(per_column) {
+                    ui.allocate_ui_with_layout(
+                        vec2(column, 0.0),
+                        Layout::top_down(Align::Min),
+                        |ui| {
+                            ui.set_width(column);
+                            ui.spacing_mut().item_spacing = vec2(18.0, 8.0);
+                            for (keys, what) in rows {
+                                shortcut_row(ui, &palette, keys_width, keys, what);
+                            }
+                        },
+                    );
+                }
+            });
         });
     ui.add_space(12.0);
     // The hint bar's × hides it; this brings it back.

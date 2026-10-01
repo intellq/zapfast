@@ -10397,6 +10397,43 @@ mod tests {
         assert_eq!(app.dialog, Some(crate::model::Dialog::Shortcuts));
     }
 
+    /// The shortcuts dialog stays inside the window: two columns where the
+    /// window is wide enough, and a list that scrolls where it is too short.
+    #[test]
+    fn the_shortcuts_dialog_fits_the_window() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        app.dialog = Some(crate::model::Dialog::Shortcuts);
+        for size in [
+            [1180.0, 780.0],
+            [1600.0, 1000.0],
+            [760.0, 560.0],
+            [420.0, 380.0],
+        ] {
+            let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::from(size));
+            for _ in 0..4 {
+                let input = egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                };
+                let mut output = ctx.run_ui(input, |ui| {
+                    let ctx = ui.ctx().clone();
+                    app.background_frame(&ctx);
+                    app.frame_ui(ui);
+                });
+                output.textures_delta.clear();
+            }
+            let dialog = ctx
+                .memory(|memory| memory.area_rect(egui::Id::new("dialog")))
+                .expect("the dialog is open");
+            assert!(
+                screen.shrink(8.0).contains_rect(dialog),
+                "{size:?}: {dialog:?}"
+            );
+        }
+    }
+
     /// The profile picture in the chat-list header is the first control Tab
     /// reaches outside macOS. Registered as hover first and made clickable
     /// afterwards, it dropped focus on every frame and Tab went nowhere.

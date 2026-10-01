@@ -292,7 +292,8 @@ egui pitfalls this code has already hit:
   `ui/keys.rs`. Layouts that put another character on the shifted key never
   produce either spelling; `Alt+↑/↓` is the layout-independent way to switch
   chats. A long label in `SHORTCUTS` widens the dialog's key column and
-  truncates the descriptions at the default window size.
+  leaves its descriptions less room to wrap in; the dialog takes two columns
+  in a wide window and scrolls in a short one.
 - `with_layout(..., Align::Center)` directly inside a vertical container
   claims the whole available height; wrap it in `ui.horizontal`.
 - `ui.horizontal` inside a right-aligned bubble lays out right to left;
