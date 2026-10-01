@@ -742,13 +742,17 @@ pub fn circle_button(
     }
 }
 
+/// The ink of the logo's bubble.
+pub const LOGO_INK: Color32 = Color32::from_rgb(0x0b, 0x0e, 0x0c);
+
 /// Draws the app logo.
 pub fn logo(ui: &egui::Ui, center: egui::Pos2, diameter: f32, disc: Color32, glyph: Color32) {
     ui.painter().circle_filled(center, diameter / 2.0, disc);
-    // Match `packaging/icons/zapfast.svg`.
-    let icon_size = diameter * 0.56;
+    // Match `packaging/icons/zapfast-small.svg`: the bubble sits a little
+    // right of and above the centre, where its tail balances it.
+    let icon_size = diameter * 0.674;
     let icon_rect = egui::Rect::from_center_size(
-        center - Vec2::new(0.0, diameter * 0.02),
+        center + Vec2::new(diameter * 0.009, -diameter * 0.009),
         Vec2::splat(icon_size),
     );
     Icon::MessageCircle

@@ -2103,14 +2103,8 @@ fn about(app: &mut App, ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 14.0;
         let (logo, _) = ui.allocate_exact_size(Vec2::splat(44.0), egui::Sense::hover());
-        // The white glyph on the accent disc matches the app icon.
-        theme::logo(
-            ui,
-            logo.center(),
-            44.0,
-            palette.accent,
-            egui::Color32::WHITE,
-        );
+        // The ink bubble on the accent disc matches the app icon.
+        theme::logo(ui, logo.center(), 44.0, palette.accent, theme::LOGO_INK);
         ui.vertical(|ui| {
             theme::text(
                 ui,

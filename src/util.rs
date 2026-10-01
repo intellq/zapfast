@@ -691,36 +691,40 @@ pub fn hue(seed: &str) -> f32 {
 
 /// Embedded SVG app logo used across platform surfaces.
 const MARK: &[u8] = include_bytes!("../packaging/icons/zapfast.svg");
+/// The same mark without its rim and shading, which blur below this size.
+const SMALL_MARK: &[u8] = include_bytes!("../packaging/icons/zapfast-small.svg");
+const SMALL_BELOW: usize = 40;
 
 /// Rasterizes the logo to straight-alpha RGBA.
 pub fn app_icon_rgba(size: usize) -> Vec<u8> {
-    let side = size.max(1) as u32;
-    let rendered = resvg::usvg::Tree::from_data(MARK, &resvg::usvg::Options::default())
-        .ok()
-        .and_then(|tree| {
-            let mut pixmap = resvg::tiny_skia::Pixmap::new(side, side)?;
-            let scale = side as f32 / tree.size().width();
-            resvg::render(
-                &tree,
-                resvg::tiny_skia::Transform::from_scale(scale, scale),
-                &mut pixmap.as_mut(),
-            );
-            Some(
-                pixmap
-                    .pixels()
-                    .iter()
-                    .flat_map(|pixel| {
-                        let color = pixel.demultiply();
-                        [color.red(), color.green(), color.blue(), color.alpha()]
-                    })
-                    .collect::<Vec<u8>>(),
-            )
-        });
-    match rendered {
+    let mark = if size < SMALL_BELOW { SMALL_MARK } else { MARK };
+    match render_mark(mark, size) {
         Some(rgba) => rgba,
         // Fall back to an accent disc if the embedded SVG cannot render.
         None => plain_disc(size),
     }
+}
+
+fn render_mark(mark: &[u8], size: usize) -> Option<Vec<u8>> {
+    let side = size.max(1) as u32;
+    let tree = resvg::usvg::Tree::from_data(mark, &resvg::usvg::Options::default()).ok()?;
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(side, side)?;
+    let scale = side as f32 / tree.size().width();
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::from_scale(scale, scale),
+        &mut pixmap.as_mut(),
+    );
+    Some(
+        pixmap
+            .pixels()
+            .iter()
+            .flat_map(|pixel| {
+                let color = pixel.demultiply();
+                [color.red(), color.green(), color.blue(), color.alpha()]
+            })
+            .collect(),
+    )
 }
 
 fn plain_disc(size: usize) -> Vec<u8> {
@@ -742,13 +746,17 @@ fn plain_disc(size: usize) -> Vec<u8> {
     rgba
 }
 
-/// Converts the logo to a monochrome macOS menu-bar template.
+/// Converts the logo to a monochrome macOS menu-bar template: the disc,
+/// with the bubble cut out of it.
 pub fn tray_template_rgba(size: usize) -> Vec<u8> {
-    let mut rgba = app_icon_rgba(size);
+    // The flat mark at every size: a template has no room for shading.
+    let mut rgba = render_mark(SMALL_MARK, size).unwrap_or_else(|| plain_disc(size));
+    // The disc's green against the ink's says how much of a pixel is disc.
+    const INK: f32 = 14.0;
+    const DISC: f32 = 168.0;
     for pixel in rgba.as_chunks_mut::<4>().0 {
-        if pixel[0] > 200 && pixel[1] > 200 && pixel[2] > 200 {
-            pixel[3] = 0;
-        }
+        let disc = ((f32::from(pixel[1]) - INK) / (DISC - INK)).clamp(0.0, 1.0);
+        pixel[3] = (f32::from(pixel[3]) * disc).round() as u8;
         pixel[0] = 0;
         pixel[1] = 0;
         pixel[2] = 0;
@@ -1043,5 +1051,33 @@ mod tests {
         assert_eq!(icon[3], 0);
         let middle = (16 * 32 + 16) * 4;
         assert_eq!(icon[middle + 3], 255);
+    }
+
+    /// The menu-bar template is the disc with the bubble cut out: solid in
+    /// the bubble's middle, clear along its outline and outside the disc.
+    #[test]
+    fn the_tray_template_cuts_the_bubble_out_of_the_disc() {
+        let size = 64;
+        let template = tray_template_rgba(size);
+        let alpha = |x: usize, y: usize| template[(y * size + x) * 4 + 3];
+        assert_eq!(alpha(0, 0), 0);
+        assert_eq!(alpha(32, 32), 255, "inside the bubble is disc");
+        assert_eq!(alpha(32, 4), 255, "so is the rim above it");
+        let outline = (0..32).map(|y| alpha(32, y)).min().unwrap();
+        assert!(outline < 40, "the outline is cut out: {outline}");
+        assert!(
+            template
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|p| p[..3] == [0, 0, 0])
+        );
+    }
+
+    /// Both marks render, the large one with its filters.
+    #[test]
+    fn both_marks_render() {
+        assert!(render_mark(MARK, 128).is_some());
+        assert!(render_mark(SMALL_MARK, 22).is_some());
     }
 }
