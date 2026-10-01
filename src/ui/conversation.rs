@@ -1968,6 +1968,8 @@ struct View<'a> {
     /// Pictures of the loaded messages that others quote, by message id.
     quote_pictures: &'a HashMap<String, QuotePicture>,
     anchor: Option<&'a str>,
+    /// The anchor returns to the top of the view, not to its middle.
+    anchor_at_top: bool,
     /// Demo/test: keep this message's context menu open.
     open_menu: Option<&'a str>,
     reaction: Option<&'a str>,
@@ -2130,6 +2132,7 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
         } else {
             app.scroll_anchor.as_deref()
         },
+        anchor_at_top: app.scroll_anchor_at_top,
         open_menu: app.open_message_menu.as_deref(),
         reaction: app
             .reaction_target
@@ -2533,7 +2536,11 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                             && view.anchor == Some(message.id.as_str())
                         {
                             response.scroll_to_me_animation(
-                                Some(Align::Center),
+                                Some(if view.anchor_at_top {
+                                    Align::Min
+                                } else {
+                                    Align::Center
+                                }),
                                 egui::style::ScrollAnimation::none(),
                             );
                             anchored = true;

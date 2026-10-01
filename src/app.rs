@@ -680,6 +680,10 @@ pub struct App {
     pub at_bottom: bool,
     /// Message id to scroll into view.
     pub scroll_anchor: Option<String>,
+    /// The anchor is the oldest message from before older ones were loaded:
+    /// it goes back to the top of the view, where the reader left it, rather
+    /// than to its middle as a message the reader jumped to does.
+    pub scroll_anchor_at_top: bool,
     /// A message reached from a quote or a search result, which flashes
     /// once it is in view so the eye finds it.
     pub jump_highlight: Option<JumpHighlight>,
@@ -1220,6 +1224,7 @@ impl App {
             scroll_page: None,
             at_bottom: true,
             scroll_anchor: None,
+            scroll_anchor_at_top: false,
             jump_highlight: None,
             jump_load: None,
             focus_composer: false,
@@ -3587,6 +3592,7 @@ impl App {
             .is_some_and(|jump| jump.chat == chat);
         if !jumping {
             self.scroll_anchor = Some(oldest.id.clone());
+            self.scroll_anchor_at_top = true;
         }
         self.backend.send(Command::LoadChat {
             chat: chat.to_owned(),
@@ -3631,6 +3637,7 @@ impl App {
                 .get(chat)
                 .and_then(|conversation| conversation.messages.first())
                 .map(|oldest| oldest.id.clone());
+            self.scroll_anchor_at_top = true;
         }
         self.backend.send(Command::FetchOlder(chat.to_owned()));
     }
@@ -4423,6 +4430,7 @@ impl App {
                 self.scroll_to_bottom = false;
                 self.at_bottom = false;
                 self.scroll_anchor = Some(message.clone());
+                self.scroll_anchor_at_top = false;
                 self.jump_highlight = Some(JumpHighlight::new(chat.clone(), message.clone()));
                 // Load older archive pages toward the search result.
                 self.load_toward(&chat, &message);
@@ -5655,6 +5663,7 @@ impl App {
                 self.load_toward(&chat, &id);
                 self.jump_highlight = Some(JumpHighlight::new(chat, id.clone()));
                 self.scroll_anchor = Some(id);
+                self.scroll_anchor_at_top = false;
             }
             Action::Search(text) => {
                 self.search = text;

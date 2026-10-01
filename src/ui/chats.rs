@@ -186,7 +186,7 @@ fn header(app: &mut App, ui: &mut egui::Ui) {
                     let response = if settings_open {
                         // Same as the avatar: the label says what the click
                         // does now, not what it opened.
-                        theme::close_button(ui, &palette, 18.0, tr("Close settings (Ctrl+,)"))
+                        theme::close_button(ui, 18.0, tr("Close settings (Ctrl+,)"))
                     } else {
                         theme::icon_button(
                             ui,

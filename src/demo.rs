@@ -2971,6 +2971,10 @@ mod tests {
             "paging up asked for more"
         );
         assert_eq!(app.scroll_anchor.as_deref(), Some("m-0200"));
+        // The last page-up has finished by the time the page comes.
+        for _ in 0..40 {
+            run(&mut app, vec![]);
+        }
         events
             .send(crate::backend::Event::Messages {
                 chat: chat.to_owned(),
@@ -2983,18 +2987,22 @@ mod tests {
         for _ in 0..4 {
             run(&mut app, vec![]);
         }
-        let on_screen = |id: &str| {
+        let top = |id: &str| {
             ctx.data(|data| {
                 data.get_temp::<egui::Rect>(
                     crate::ui::conversation::bubble_id(chat, id).with("body"),
                 )
             })
-            .is_some_and(|rect| rect.bottom() > 0.0 && rect.top() < 780.0)
+            .map(|rect| rect.top())
         };
+        // The message the reader was looking at first is where it was, at the
+        // top of the view, and the new page is just above it.
+        let seam = top("m-0200").expect("the seam is in view");
         assert!(
-            on_screen("m-0200") && on_screen("m-0199"),
-            "the seam between the pages is in view"
+            (0.0..150.0).contains(&seam),
+            "the seam is at the top: {seam}"
         );
+        let on_screen = |id: &str| top(id).is_some();
         assert!(!on_screen("m-0150"), "the middle of the new page is not");
     }
 

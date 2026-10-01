@@ -710,7 +710,7 @@ pub fn icon_button(
 
 /// A solid red square with a border and a white X: the button that takes the
 /// place of another while what it opened is showing, easy to see and to hit.
-pub fn close_button(ui: &mut egui::Ui, palette: &Palette, size: f32, tooltip: &str) -> Response {
+pub fn close_button(ui: &mut egui::Ui, size: f32, tooltip: &str) -> Response {
     let edge = size + 12.0;
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(edge), Sense::click());
     reveal_focus(&response);
@@ -719,12 +719,11 @@ pub fn close_button(ui: &mut egui::Ui, palette: &Palette, size: f32, tooltip: &s
     });
     if ui.is_rect_visible(rect) {
         let lit = response.hovered() || response.has_focus();
-        // Close to the background's own tone, so it reads as part of the
-        // header, yet clearly redder than it.
+        // A vivid red that stays red on any palette, with a lighter edge.
         let fill = if lit {
-            palette.danger
+            Color32::from_rgb(0xf5, 0x28, 0x3c)
         } else {
-            palette.panel.lerp_to_gamma(palette.danger, 0.75)
+            Color32::from_rgb(0xde, 0x14, 0x28)
         };
         let scale = if response.is_pointer_button_down_on() {
             0.92
@@ -736,10 +735,7 @@ pub fn close_button(ui: &mut egui::Ui, palette: &Palette, size: f32, tooltip: &s
         ui.painter().rect_stroke(
             body,
             8.0,
-            Stroke::new(
-                1.5,
-                palette.danger.gamma_multiply(if lit { 1.0 } else { 0.9 }),
-            ),
+            Stroke::new(1.5, Color32::from_rgb(0xff, 0x6e, 0x7a)),
             egui::StrokeKind::Inside,
         );
         paint_icon(ui, Icon::X, rect, size * 0.8 * scale, Color32::WHITE);
