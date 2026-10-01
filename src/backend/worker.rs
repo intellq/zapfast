@@ -9103,14 +9103,38 @@ async fn stage_media(
         });
     }
     if kind == "video" {
+        // A GIF from the picker has no file to read a poster from, so its own
+        // bytes give the picture, size, and length phones show before they
+        // download it. A file attached from disk gets them in `with_poster`.
+        let poster = if gif {
+            let bytes = bytes.clone();
+            tokio::task::spawn_blocking(move || crate::animation::poster(&bytes))
+                .await
+                .ok()
+                .flatten()
+        } else {
+            None
+        };
+        let thumbnail = poster
+            .as_ref()
+            .and_then(|poster| poster.picture.clone())
+            .and_then(|picture| thumbnail_jpeg(&image::DynamicImage::ImageRgb8(picture)));
+        let size_in_pixels = poster.as_ref().map(|poster| (poster.width, poster.height));
         let content = Content::Video {
             caption: None,
-            media: media(Some(&mime_owned), Some(size), None, None),
-            seconds: None,
+            media: media(
+                Some(&mime_owned),
+                Some(size),
+                size_in_pixels.map(|(width, _)| width),
+                size_in_pixels.map(|(_, height)| height),
+            ),
+            seconds: poster.as_ref().map(|poster| poster.seconds),
             gif,
             note: false,
         };
-        return Ok(staged(content, mime_owned, bytes));
+        let mut prepared = staged(content, mime_owned, bytes);
+        prepared.thumbnail = thumbnail;
+        return Ok(prepared);
     }
     if let Some(audio_mime) = whatsapp_audio_mime(mime) {
         let mime_owned = audio_mime.to_owned();

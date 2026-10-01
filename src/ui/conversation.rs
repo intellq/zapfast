@@ -6767,7 +6767,14 @@ fn video(
     // leaves it out); the frame still draws as a video, on a dark fill.
     let thumbnail = message.thumbnail.as_deref();
     let limit = width.min(PICTURE_WIDTH);
-    let size = frame_size(media, Some((16, 9)), limit, PICTURE_HEIGHT.min(limit * 1.3));
+    // Without its size, a widescreen frame that fills the bubble: the hint is
+    // in pixels, so a bare 16 by 9 would shrink it to the narrowest picture.
+    let size = frame_size(
+        media,
+        Some((1280, 720)),
+        limit,
+        PICTURE_HEIGHT.min(limit * 1.3),
+    );
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     let playing = match (&media.path, gif) {
         (Some(path), true) => Some(animation::frame(
@@ -6818,8 +6825,8 @@ fn video(
                     6.0,
                 );
             }
-            None => match thumbnail {
-                Some(thumbnail) => {
+            None => match (thumbnail, &media.path) {
+                (Some(thumbnail), _) => {
                     // Registering the poster decodes it, so it waits for the row to show.
                     let uri = thumbnail_uri(ui.ctx(), &message.chat, &message.id, thumbnail);
                     egui::Image::new(uri)
@@ -6827,7 +6834,21 @@ fn video(
                         .corner_radius(6.0)
                         .paint_at(ui, rect);
                 }
-                None => {
+                (None, Some(path)) => {
+                    ui.painter().rect_filled(rect, 6.0, Color32::BLACK);
+                    if let animation::Frame::Ready(texture) =
+                        animation::frame(ui, path, rect, false)
+                    {
+                        paint_texture(
+                            ui,
+                            fit_within(texture.size_vec2(), rect),
+                            texture.id(),
+                            Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                            6.0,
+                        );
+                    }
+                }
+                (None, None) => {
                     ui.painter().rect_filled(rect, 6.0, Color32::from_gray(28));
                 }
             },

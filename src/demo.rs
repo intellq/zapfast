@@ -10697,6 +10697,53 @@ mod tests {
         );
     }
 
+    /// A video sent before ZapFast made thumbnails has none. With its file
+    /// here it shows its first frame; without either it still draws as a
+    /// video, on a dark fill, never as a file card.
+    #[test]
+    fn a_video_without_a_thumbnail_shows_from_its_file() {
+        fn texts(shape: &egui::Shape, out: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Text(text) => out.push(text.galley.text().to_owned()),
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| texts(shape, out)),
+                _ => {}
+            }
+        }
+        let drawn = |app: &mut App, ctx: &egui::Context| {
+            let mut shapes = Vec::new();
+            for _ in 0..3 {
+                shapes = frame_sized(app, ctx, 780.0, Vec::new());
+            }
+            let mut drawn = Vec::new();
+            for clipped in &shapes {
+                texts(&clipped.shape, &mut drawn);
+            }
+            drawn
+        };
+        let mut app = app();
+        apply_flags(&mut app, Some("video"));
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        let chat = SAMPLES[0].id;
+        let rows = &mut app.conversations.get_mut(chat).unwrap().messages;
+        rows.retain(|row| row.id == "demo-video");
+        rows[0].thumbnail = None;
+        let card = |drawn: &[String]| drawn.iter().any(|text| text == "Video");
+        assert!(
+            !card(&drawn(&mut app, &ctx)),
+            "a video with its file here is not a file card"
+        );
+
+        let rows = &mut app.conversations.get_mut(chat).unwrap().messages;
+        if let Content::Video { media, .. } = &mut rows[0].content {
+            media.path = None;
+        }
+        assert!(
+            !card(&drawn(&mut app, &ctx)),
+            "without a thumbnail or a file it is still a video frame"
+        );
+    }
+
     #[test]
     fn sidebar_can_be_hidden_and_the_composer_sends() {
         let mut app = app();
