@@ -6333,6 +6333,58 @@ fn thumbnail_uri(ctx: &egui::Context, chat: &str, id: &str, bytes: &[u8]) -> Str
     uri
 }
 
+/// Longest side a video's tiny poster is enlarged to before it is drawn.
+const SMOOTH_POSTER_SIDE: u32 = 480;
+/// How many enlarged posters stay in memory; the rest are made again.
+const SMOOTH_POSTERS_KEPT: usize = 48;
+
+type SmoothPosters = std::sync::Arc<std::sync::Mutex<HashMap<String, std::sync::Arc<[u8]>>>>;
+
+/// The poster that came with a video, enlarged with a cubic filter and a
+/// light blur: the phone's is about a hundred pixels wide, and stretching it
+/// on the graphics card shows its blocks. The poster itself is returned when
+/// it is already large, or cannot be read.
+fn smooth_poster(ctx: &egui::Context, key: &str, bytes: &[u8]) -> std::sync::Arc<[u8]> {
+    let memo: SmoothPosters = ctx.data_mut(|data| {
+        data.get_temp_mut_or_default::<SmoothPosters>(egui::Id::new("smooth-posters"))
+            .clone()
+    });
+    let mut memo = memo.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(made) = memo.get(key) {
+        return made.clone();
+    }
+    let made: std::sync::Arc<[u8]> = enlarge_poster(bytes).unwrap_or_else(|| bytes.into()).into();
+    if memo.len() >= SMOOTH_POSTERS_KEPT {
+        memo.clear();
+    }
+    memo.insert(key.to_owned(), made.clone());
+    made
+}
+
+fn enlarge_poster(bytes: &[u8]) -> Option<Vec<u8>> {
+    use image::imageops::{FilterType, blur, resize};
+    let picture = image::load_from_memory(bytes).ok()?.into_rgb8();
+    let (width, height) = picture.dimensions();
+    let longest = width.max(height);
+    if longest == 0 || longest >= SMOOTH_POSTER_SIDE {
+        return None;
+    }
+    let scale = SMOOTH_POSTER_SIDE as f32 / longest as f32;
+    let enlarged = resize(
+        &picture,
+        (width as f32 * scale).round() as u32,
+        (height as f32 * scale).round() as u32,
+        FilterType::CatmullRom,
+    );
+    // Enough to melt the JPEG's blocks, little enough to keep its edges.
+    let smoothed = blur(&enlarged, scale * 0.4);
+    let mut out = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 92)
+        .encode_image(&smoothed)
+        .ok()?;
+    Some(out)
+}
+
 /// Default image bounds based on [`CARD_WIDTH`].
 const PICTURE_WIDTH: f32 = CARD_WIDTH;
 const PICTURE_HEIGHT: f32 = 440.0;
@@ -6835,20 +6887,19 @@ fn video(
                     6.0,
                 );
             }
-            None => match (thumbnail, &media.path) {
-                (Some(thumbnail), _) => {
-                    // Registering the poster decodes it, so it waits for the row to show.
-                    let uri = thumbnail_uri(ui.ctx(), &message.chat, &message.id, thumbnail);
-                    egui::Image::new(uri)
-                        .fit_to_exact_size(size)
-                        .corner_radius(6.0)
-                        .paint_at(ui, rect);
-                }
-                (None, Some(path)) => {
-                    ui.painter().rect_filled(rect, 6.0, Color32::BLACK);
-                    if let animation::Frame::Ready(texture) =
-                        animation::frame(ui, path, rect, false)
-                    {
+            None => {
+                // A downloaded video shows its own first frame, sharp at the
+                // bubble's size; the phone's tiny poster stands in until that
+                // frame is decoded, and for a video that is not downloaded.
+                let first_frame = media.path.as_ref().and_then(|path| {
+                    match animation::frame(ui, path, rect, false) {
+                        animation::Frame::Ready(texture) => Some(texture),
+                        _ => None,
+                    }
+                });
+                match (first_frame, thumbnail) {
+                    (Some(texture), _) => {
+                        ui.painter().rect_filled(rect, 6.0, Color32::BLACK);
                         paint_texture(
                             ui,
                             fit_within(texture.size_vec2(), rect),
@@ -6857,11 +6908,28 @@ fn video(
                             6.0,
                         );
                     }
+                    (None, Some(thumbnail)) => {
+                        // Registering the poster decodes it, so it waits for the row to show.
+                        let key = format!("{}-{}", message.chat, message.id);
+                        let smooth = smooth_poster(ui.ctx(), &key, thumbnail);
+                        // Its own id: a quote of this message registers the plain poster.
+                        let id = format!("{}-smooth", message.id);
+                        let uri = thumbnail_uri(ui.ctx(), &message.chat, &id, &smooth);
+                        egui::Image::new(uri)
+                            .fit_to_exact_size(size)
+                            .corner_radius(6.0)
+                            .paint_at(ui, rect);
+                    }
+                    (None, None) => {
+                        let fill = if media.path.is_some() {
+                            Color32::BLACK
+                        } else {
+                            Color32::from_gray(28)
+                        };
+                        ui.painter().rect_filled(rect, 6.0, fill);
+                    }
                 }
-                (None, None) => {
-                    ui.painter().rect_filled(rect, 6.0, Color32::from_gray(28));
-                }
-            },
+            }
         }
         let state = status.as_ref().map(|status| status.state);
         let outgoing = media_sending(view, message) || media_unsent(view, message);
@@ -8365,6 +8433,33 @@ fn chat_of(chat: &ChatId) -> &str {
 
 #[cfg(test)]
 mod tests {
+
+    /// A video's poster from the phone is about a hundred pixels wide; it is
+    /// enlarged before it is drawn, and a large one is left alone.
+    #[test]
+    fn a_small_video_poster_is_enlarged_and_a_large_one_is_kept() {
+        let jpeg = |width: u32, height: u32| {
+            let picture = image::RgbImage::from_fn(width, height, |x, y| {
+                image::Rgb([(x * 255 / width) as u8, (y * 255 / height) as u8, 90])
+            });
+            let mut bytes = Vec::new();
+            image::codecs::jpeg::JpegEncoder::new(&mut bytes)
+                .encode_image(&picture)
+                .unwrap();
+            bytes
+        };
+        let enlarged = enlarge_poster(&jpeg(96, 54)).expect("a small poster grows");
+        let (width, height) = image::load_from_memory(&enlarged)
+            .unwrap()
+            .to_rgb8()
+            .dimensions();
+        assert_eq!((width, height), (SMOOTH_POSTER_SIDE, 270));
+        assert!(
+            enlarge_poster(&jpeg(640, 360)).is_none(),
+            "a large poster stays as it is"
+        );
+        assert!(enlarge_poster(b"not a picture").is_none());
+    }
     use super::*;
 
     #[test]

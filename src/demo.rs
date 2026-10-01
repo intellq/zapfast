@@ -10704,7 +10704,7 @@ mod tests {
         let key: String = chat.chars().filter(char::is_ascii_alphanumeric).collect();
         let registered = (0..40)
             .filter(|index| {
-                let uri = format!("bytes://thumb-{key}-{}", id(*index));
+                let uri = format!("bytes://thumb-{key}-{}-smooth", id(*index));
                 ctx.try_load_bytes(&uri).is_ok()
             })
             .count();
