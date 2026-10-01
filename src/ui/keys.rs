@@ -359,26 +359,69 @@ fn preview_keys(app: &mut App, ctx: &egui::Context) {
     app.actions.extend(actions);
 }
 
-/// Handles keys while a video is expanded: Escape returns it to its message
-/// and Space plays or pauses it. No chat shortcut runs.
+/// Handles keys while a video is expanded: Escape returns it to its message,
+/// Space plays or pauses it, M mutes it, and the left and right arrows jump
+/// five seconds. No chat shortcut runs and nothing is typed under it.
 fn video_keys(app: &mut App, ctx: &egui::Context) {
-    let (escape, space) = ctx.input_mut(|input| {
-        (
+    let (escape, space, mute, back, forward) = ctx.input_mut(|input| {
+        let keys = (
             input.consume_key(Modifiers::NONE, Key::Escape),
             input.consume_key(Modifiers::NONE, Key::Space),
-        )
+            input.consume_key(Modifiers::NONE, Key::M),
+            input.consume_key(Modifiers::NONE, Key::ArrowLeft),
+            input.consume_key(Modifiers::NONE, Key::ArrowRight),
+        );
+        input
+            .events
+            .retain(|event| !matches!(event, egui::Event::Text(_)));
+        keys
     });
     // Escape leaves the video; the corner button returns it, still
     // playing, to its message.
     if escape {
         app.actions.push(Action::CloseVideo);
     }
-    if space && let Some((message, path)) = app.video.loaded() {
+    let Some((message, path)) = app
+        .video
+        .loaded()
+        .map(|(message, path)| (message.to_owned(), path.to_owned()))
+    else {
+        return;
+    };
+    if space {
         app.actions.push(Action::PlayVideo {
-            message: message.to_owned(),
-            path: path.to_owned(),
+            message: message.clone(),
+            path,
         });
     }
+    if mute {
+        app.actions.push(Action::ToggleVideoSound);
+    }
+    for (pressed, seconds) in [(back, -VIDEO_JUMP), (forward, VIDEO_JUMP)] {
+        if pressed
+            && let Some(status) = app.video.status(&message)
+            && let Some(fraction) = jump_fraction(status.position, status.total, seconds)
+        {
+            app.actions.push(Action::SeekVideo {
+                message: message.clone(),
+                fraction,
+            });
+        }
+    }
+}
+
+/// How far the arrows jump an expanded video, in seconds.
+const VIDEO_JUMP: f32 = 5.0;
+
+/// Where a jump of `seconds` from `position` lands, as a fraction of the
+/// video's length; `None` until the length is known.
+fn jump_fraction(
+    position: std::time::Duration,
+    total: std::time::Duration,
+    seconds: f32,
+) -> Option<f32> {
+    let total = total.as_secs_f32();
+    (total > 0.0).then(|| ((position.as_secs_f32() + seconds) / total).clamp(0.0, 1.0))
 }
 
 /// Ctrl+F searches the open chat, as in WhatsApp, the chat list when no
@@ -475,6 +518,21 @@ pub fn label(keys: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The arrows jump five seconds inside the video and stop at its ends;
+    /// with no length yet there is nowhere to jump.
+    #[test]
+    fn video_jumps_stay_inside_the_video() {
+        use std::time::Duration;
+        let ten = Duration::from_secs(10);
+        assert_eq!(jump_fraction(Duration::from_secs(4), ten, 5.0), Some(0.9));
+        assert_eq!(jump_fraction(Duration::from_secs(4), ten, -5.0), Some(0.0));
+        assert_eq!(jump_fraction(Duration::from_secs(8), ten, 5.0), Some(1.0));
+        assert_eq!(
+            jump_fraction(Duration::from_secs(4), Duration::ZERO, 5.0),
+            None
+        );
+    }
 
     #[test]
     fn ctrl_f_searches_the_open_chat_the_list_or_the_settings() {
