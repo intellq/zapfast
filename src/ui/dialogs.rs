@@ -878,7 +878,7 @@ fn about(app: &mut App, ui: &mut egui::Ui) {
     title(ui, app, tr("About"));
     ui.horizontal(|ui| {
         let (logo, _) = ui.allocate_exact_size(egui::Vec2::splat(44.0), egui::Sense::hover());
-        theme::logo(ui, logo.center(), 44.0, palette.accent, theme::LOGO_INK);
+        theme::mark(ui, logo.center(), 44.0);
         ui.vertical(|ui| {
             theme::text(ui, "ZapFast", theme::bold(17.0), palette.text);
             theme::text(

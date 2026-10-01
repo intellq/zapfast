@@ -742,10 +742,33 @@ pub fn circle_button(
     }
 }
 
-/// The ink of the logo's bubble.
-pub const LOGO_INK: Color32 = Color32::from_rgb(0x0b, 0x0e, 0x0c);
+/// Draws the app's mark as it ships: the lit disc and the ink bubble of
+/// `packaging/icons/zapfast.svg`, rendered once per pixel size.
+pub fn mark(ui: &egui::Ui, center: egui::Pos2, diameter: f32) {
+    let ctx = ui.ctx();
+    let pixels = (diameter * ctx.pixels_per_point()).round().max(1.0) as usize;
+    let id = egui::Id::new(("zapfast-mark", pixels));
+    let texture = match ctx.data_mut(|data| data.get_temp::<egui::TextureHandle>(id)) {
+        Some(texture) => texture,
+        None => {
+            let rgba = crate::util::app_icon_rgba(pixels);
+            let image = egui::ColorImage::from_rgba_unmultiplied([pixels, pixels], &rgba);
+            let texture = ctx.load_texture(
+                format!("zapfast-mark-{pixels}"),
+                image,
+                egui::TextureOptions::LINEAR,
+            );
+            ctx.data_mut(|data| data.insert_temp(id, texture.clone()));
+            texture
+        }
+    };
+    let rect = egui::Rect::from_center_size(center, Vec2::splat(diameter));
+    let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+    ui.painter().image(texture.id(), rect, uv, Color32::WHITE);
+}
 
-/// Draws the app logo.
+/// Draws the logo's shape in two flat colours, for the empty conversation's
+/// faint watermark.
 pub fn logo(ui: &egui::Ui, center: egui::Pos2, diameter: f32, disc: Color32, glyph: Color32) {
     ui.painter().circle_filled(center, diameter / 2.0, disc);
     // Match `packaging/icons/zapfast-small.svg`: the bubble sits a little

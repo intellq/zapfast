@@ -10397,6 +10397,23 @@ mod tests {
         assert_eq!(app.dialog, Some(crate::model::Dialog::Shortcuts));
     }
 
+    /// The About dialog shows the mark the app ships, rendered at its pixel
+    /// size from the packaged SVG, not a disc drawn in the theme's colours.
+    #[test]
+    fn about_shows_the_shipped_mark() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        app.dialog = Some(crate::model::Dialog::About);
+        render(&mut app, &ctx);
+        let texture = ctx
+            .data_mut(|data| {
+                data.get_temp::<egui::TextureHandle>(egui::Id::new(("zapfast-mark", 44_usize)))
+            })
+            .expect("the mark was drawn at 44 pixels");
+        assert_eq!(texture.size(), [44, 44]);
+    }
+
     /// The shortcuts dialog stays inside the window: two columns where the
     /// window is wide enough, and a list that scrolls where it is too short.
     #[test]
