@@ -551,6 +551,28 @@ Da sincronização com o upstream 0.18.2:
   fim ao enviar, para mostrá-la. `Shift+Insert` cola, como `Ctrl+V`, no
   compositor.
 
+Na 0.18.203:
+
+- **Botão de conversas arquivadas** no cabeçalho, à esquerda do que oculta a
+  lista (com uma bolinha quando há não lidas); o chip "Arquivadas" saiu da
+  barra de filtros. Com as arquivadas abertas, a engrenagem vira o **X
+  vermelho** que volta à lista.
+- **Ocultar os filtros de conversas** (Configurações, Aparência; desligado por
+  padrão) esconde a barra Todas, Não lidas, Privadas… e lista todas as conversas.
+- **Barra de rolagem** dos filtros e das etiquetas ocupa uma faixa própria, em
+  vez de flutuar sobre os botões.
+- **Arrastar arquivos:** segurar o arquivo cerca de meio segundo sobre uma
+  conversa da lista a abre; soltar sobre o histórico envia para ela. O aviso
+  tem duas linhas ("Solte para enviar para" e o nome), fica centralizado no
+  histórico e ganha uma borda tracejada. Soltar sobre uma conversa da lista
+  envia para ela; soltar na lista fora de uma conversa não envia. Precisa da
+  posição do arrasto, que o winit não dava: `vendor/winit/VENDORED.md` (Wayland e
+  Windows; no X11 o aviso aparece sempre, como antes).
+- **`install.sh`** mostra só "ZapFast instalado." (mais o aviso de PATH ou de
+  outro `zapfast`, se houver).
+- Do upstream: no Wayland, clicar numa notificação (ou abrir o ZapFast de
+  novo) fecha a janela e abre outra, para o compositor trazê-la à frente (#353).
+
 Na 0.18.202:
 
 - **Enviar** qualquer mensagem rola o histórico até o fim, de qualquer ponto.
@@ -632,8 +654,11 @@ de sincronizar a exclusão "para mim" com o celular é uma extensão deste fork.
   them in the phone's order below any pinned chats. A chat added here goes to
   the end of the list; channels cannot be favorites.
   Followed channels have their own **Channels** chip and stay out of the other
-  filters; right-click it to mute or unmute every channel at once. **Archived**
-  opens the archived chats. Right-click a chat and choose **Mark as unread**
+  filters; right-click it to mute or unmute every channel at once. The archive
+  button, left of the one that hides the chat list, opens the archived chats (a
+  dot on it says one has unread messages); inside, the gear is a red X that
+  returns to the chat list. **Hide the chat filters** in Settings, Appearance,
+  removes the row of chips (off by default) and lists every chat. Right-click a chat and choose **Mark as unread**
   to put an empty dot on it, as on the phone; the mark syncs with your phone
   both ways, and opening the chat or a new message clears it. Opening a chat with
   unread messages scrolls to an "unread messages" divider above the first one.
@@ -761,7 +786,8 @@ de sincronizar a exclusão "para mim" com o celular é uma extensão deste fork.
   seconds. Error messages stay above the composer until you dismiss them, and
   a button copies their text for a bug report. A repeated error replaces its
   earlier copy, and only the three newest are kept.
-- **Send attachments with captions.** Paste a picture, drop files, or choose
+- **Send attachments with captions.** Paste a picture, drop files (hold them over a chat in the list for a moment to
+  open it, then release over the history; the card shows the chat's name), or choose
   **Send files** from the plus menu. They stay in the composer until you send them or press Escape.
   Pasting a picture uses its image data without adding the source URL or HTML
   to your caption. Files copied in Finder, Explorer, or a Linux file manager
