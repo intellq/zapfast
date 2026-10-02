@@ -34,6 +34,8 @@ pub enum Stop {
     /// One chip in the label row, by its position among the labels.
     Label(u8),
     ManageLabels,
+    /// The forward button of the bar shown while messages are selected.
+    ForwardSelection,
 }
 
 #[derive(Clone, Copy, Debug)]

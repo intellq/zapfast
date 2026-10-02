@@ -551,6 +551,14 @@ Da sincronização com o upstream 0.18.2:
   fim ao enviar, para mostrá-la. `Shift+Insert` cola, como `Ctrl+V`, no
   compositor.
 
+Na 0.18.204:
+
+- **Barra de seleção** de mensagens com três ícones, sem texto e com dica:
+  **encaminhar**, **copiar** (o texto das selecionadas, uma linha por
+  mensagem quando há várias) e **apagar** (pergunta se é para mim ou, quando
+  todas são suas e estão no prazo, para todos). A barra tem fundo sólido, em
+  vez de transparente sobre o papel de parede.
+
 Na 0.18.203:
 
 - **Botão de conversas arquivadas** no cabeçalho, à esquerda do que oculta a
@@ -723,8 +731,12 @@ de sincronizar a exclusão "para mim" com o celular é uma extensão deste fork.
   clock format or the time locale (`LC_TIME`) on Linux. **Select** in a
   message's menu, or Ctrl-click (Command-click on macOS) on a message, starts
   a selection: click more messages to add or remove them, Shift-click to add
-  everything up to the one you click, then **Forward…** sends them together,
-  in their original order, or Escape cancels. A batch goes out one message at
+  everything up to the one you click. A solid bar at the bottom then offers
+  three icons, with a tooltip each: **Forward** sends them together, in their
+  original order; **Copy** puts their text on the clipboard (one message as it
+  is, several as a line each, headed like a copy across messages); **Delete**
+  asks before deleting for you, or for everyone when all of them are yours and
+  still within the time WhatsApp allows. Escape cancels. A batch goes out one message at
   a time, each starting once the one before it reached WhatsApp, so a picture
   cannot overtake the text that came before it.
 - **WhatsApp formatting.** Bold, italic, strikethrough, code, lists, quotes,

@@ -891,15 +891,25 @@ fn mention_picker(app: &mut App, ui: &mut egui::Ui, chat: &Chat, field: egui::Id
 
 fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
     let palette = app.palette;
+    // The composer floats over the wallpaper; the bar of selected messages is
+    // a solid strip, so it reads as a bar and not as text on the wallpaper.
+    let selecting = app
+        .selection
+        .as_ref()
+        .is_some_and(|(selected_chat, _)| *selected_chat == chat.id);
     let shown = egui::Panel::bottom("composer")
         .show_separator_line(false)
         .frame(
             Frame::new()
-                .fill(Color32::TRANSPARENT)
+                .fill(if selecting {
+                    palette.panel
+                } else {
+                    Color32::TRANSPARENT
+                })
                 .inner_margin(Margin {
                     left: 8,
                     right: 8,
-                    top: 0,
+                    top: if selecting { 8 } else { 0 },
                     bottom: 8,
                 }),
         )
@@ -2107,14 +2117,7 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
         .map(|(_, ids)| ids.clone())
         .unwrap_or_default();
     let now = crate::util::now();
-    let selection_revocable = !selected.is_empty()
-        && selected.iter().all(|id| {
-            conversation.message(id).is_some_and(|message| {
-                message.from_me
-                    && !matches!(message.content, Content::Revoked { .. })
-                    && now - message.timestamp <= crate::app::REVOKE_WINDOW.as_secs() as i64
-            })
-        });
+    let selection_revocable = all_revocable(&conversation, &selected, now);
     let view = View {
         palette,
         locale: app.locale,
@@ -3365,19 +3368,33 @@ fn clamp_into(pos: egui::Pos2, view: Rect) -> egui::Pos2 {
     )
 }
 
-/// Builds the transcript row used when copying across messages.
-fn transcript_row(
-    view: &View<'_>,
-    message: &Message,
-    body: String,
-    placements: Vec<String>,
-) -> crate::transcript::Row {
-    let who = if message.from_me {
-        (view.mention_names)(&message.sender)
-    } else {
-        (view.names_or)(&message.sender, message.sender_name.as_deref())
-    };
-    let marker = match &message.content {
+/// The text "Copy text" takes from a message: its words, a caption, the
+/// coordinates of a location, or a contact's card.
+fn copyable_text(content: &Content) -> Option<String> {
+    match content {
+        Content::Text { text, .. } | Content::Interactive { text, .. } => Some(text.clone()),
+        Content::Image { caption, .. }
+        | Content::Video { caption, .. }
+        | Content::Document { caption, .. } => caption.clone(),
+        Content::Location {
+            latitude,
+            longitude,
+            ..
+        }
+        | Content::LiveLocation {
+            latitude,
+            longitude,
+            ..
+        } => Some(format!("{latitude},{longitude}")),
+        Content::Contact { vcard, .. } => Some(vcard.clone()),
+        _ => None,
+    }
+}
+
+/// What a message without text is called in copied text: "[photo]", "[video]",
+/// "[document: notes.pdf]", and so on.
+fn content_marker(content: &Content) -> Option<String> {
+    match content {
         Content::Image { .. } => Some(tr("[photo]").to_owned()),
         Content::Video { gif: true, .. } => Some(tr("[GIF]").to_owned()),
         Content::Video { .. } => Some(tr("[video]").to_owned()),
@@ -3419,7 +3436,22 @@ fn transcript_row(
             Some(tr("[photo]").to_owned())
         }
         _ => None,
+    }
+}
+
+/// Builds the transcript row used when copying across messages.
+fn transcript_row(
+    view: &View<'_>,
+    message: &Message,
+    body: String,
+    placements: Vec<String>,
+) -> crate::transcript::Row {
+    let who = if message.from_me {
+        (view.mention_names)(&message.sender)
+    } else {
+        (view.names_or)(&message.sender, message.sender_name.as_deref())
     };
+    let marker = content_marker(&message.content);
     let reactions = if message.reactions.is_empty() {
         String::new()
     } else {
@@ -4704,24 +4736,7 @@ fn context_menu(ui: &mut egui::Ui, view: &View<'_>, message: &Message, actions: 
     if widgets::menu_item(ui, &palette, Some(Icon::Check), tr("Select")) {
         actions.push(Action::SelectMessage(message.id.clone()));
     }
-    let text = match &message.content {
-        Content::Text { text, .. } | Content::Interactive { text, .. } => Some(text.clone()),
-        Content::Image { caption, .. }
-        | Content::Video { caption, .. }
-        | Content::Document { caption, .. } => caption.clone(),
-        Content::Location {
-            latitude,
-            longitude,
-            ..
-        }
-        | Content::LiveLocation {
-            latitude,
-            longitude,
-            ..
-        } => Some(format!("{latitude},{longitude}")),
-        Content::Contact { vcard, .. } => Some(vcard.clone()),
-        _ => None,
-    };
+    let text = copyable_text(&message.content);
     if let Some(text) = text
         && widgets::menu_item(ui, &palette, Some(Icon::Copy), tr("Copy text"))
     {
@@ -8376,6 +8391,70 @@ pub(crate) fn recording_wave_id() -> egui::Id {
     egui::Id::new("recording-wave")
 }
 
+/// Whether every selected message is ours, not yet deleted, and still within
+/// the time WhatsApp lets us delete it for everyone.
+fn all_revocable(conversation: &Conversation, selected: &[String], now: i64) -> bool {
+    !selected.is_empty()
+        && selected.iter().all(|id| {
+            conversation.message(id).is_some_and(|message| {
+                message.from_me
+                    && !matches!(message.content, Content::Revoked { .. })
+                    && now - message.timestamp <= crate::app::REVOKE_WINDOW.as_secs() as i64
+            })
+        })
+}
+
+/// The text of the selected messages, in chat order: one message gives its
+/// words; several give a line each, headed like a copy across messages.
+pub(crate) fn selection_text(app: &App, chat: &str, selected: &[String]) -> String {
+    let Some(conversation) = app.conversations.get(chat) else {
+        return String::new();
+    };
+    let picked: Vec<&Message> = conversation
+        .messages
+        .iter()
+        .filter(|message| selected.contains(&message.id))
+        .collect();
+    let body = |message: &Message| -> String {
+        let mentions: Vec<markup::Mention> = message
+            .mentions
+            .iter()
+            .map(|mention| markup::Mention {
+                user: mention.user.clone(),
+                name: app.mention_name(&mention.id),
+            })
+            .collect();
+        let text = copyable_text(&message.content)
+            .map(|text| markup::plain(&text, &mentions))
+            .unwrap_or_default();
+        match (content_marker(&message.content), text.is_empty()) {
+            (Some(marker), true) => marker,
+            (Some(marker), false) => format!("{marker} {text}"),
+            (None, _) => text,
+        }
+    };
+    if let [only] = picked.as_slice() {
+        return body(only);
+    }
+    picked
+        .iter()
+        .map(|message| {
+            let who = if message.from_me {
+                app.mention_name(&message.sender)
+            } else {
+                app.display_name_or(&message.sender, message.sender_name.as_deref())
+            };
+            format!(
+                "[{}] {}: {}",
+                crate::util::copy_stamp(message.timestamp),
+                who,
+                body(message)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Replaces the composer while messages are selected.
 fn selection_bar(app: &mut App, ui: &mut egui::Ui, chat: &str, selected: &[String]) {
     let palette = app.palette;
@@ -8400,11 +8479,84 @@ fn selection_bar(app: &mut App, ui: &mut egui::Ui, chat: &str, selected: &[Strin
         };
         theme::text(ui, &count, theme::medium(14.5), palette.text);
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if theme::pill_button(ui, &palette, tr("Forward…"), true).clicked() {
+            // From the right: forward, copy, delete.
+            if theme::icon_button(
+                ui,
+                Icon::Forward,
+                18.0,
+                palette.secondary,
+                palette.text,
+                tr("Forward"),
+            )
+            .tab_stop(Stop::ForwardSelection)
+            .clicked()
+            {
                 app.actions.push(Action::ShowDialog(Dialog::Forward {
                     chat: chat.to_owned(),
                     messages: selected.to_vec(),
                 }));
+            }
+            let text = selection_text(app, chat, selected);
+            ui.add_enabled_ui(!text.is_empty(), |ui| {
+                if theme::icon_button(
+                    ui,
+                    Icon::Copy,
+                    18.0,
+                    palette.secondary,
+                    palette.text,
+                    tr("Copy"),
+                )
+                .clicked()
+                {
+                    app.actions.push(Action::CopyText(text));
+                }
+            });
+            let revocable = app.conversations.get(chat).is_some_and(|conversation| {
+                all_revocable(conversation, selected, crate::util::now())
+            });
+            let trash = theme::icon_button(
+                ui,
+                Icon::Trash,
+                18.0,
+                palette.secondary,
+                palette.text,
+                tr("Delete"),
+            );
+            let confirm = |app: &mut App, for_everyone: bool| {
+                app.actions
+                    .push(Action::ShowDialog(Dialog::ConfirmDeleteMessage {
+                        chat: chat.to_owned(),
+                        messages: selected.to_vec(),
+                        for_everyone,
+                        on_phone: !for_everyone,
+                    }));
+            };
+            if revocable {
+                // Both ways are open: the menu asks which.
+                let width = widgets::menu_width(
+                    ui,
+                    &[tr("Delete for everyone"), tr("Delete for me")],
+                    true,
+                );
+                egui::Popup::menu(&trash)
+                    .width(width)
+                    .frame(widgets::menu_frame(&palette))
+                    .show(|ui| {
+                        if widgets::menu_item(
+                            ui,
+                            &palette,
+                            Some(Icon::Trash),
+                            tr("Delete for everyone"),
+                        ) {
+                            confirm(app, true);
+                        }
+                        if widgets::menu_item(ui, &palette, Some(Icon::EyeOff), tr("Delete for me"))
+                        {
+                            confirm(app, false);
+                        }
+                    });
+            } else if trash.clicked() {
+                confirm(app, false);
             }
         });
     });

@@ -7038,6 +7038,95 @@ mod tests {
         );
     }
 
+    /// With messages selected the bar has three icons and no text: forward,
+    /// copy and delete, each with its tooltip, and copying gives the text of
+    /// the selected messages in chat order.
+    #[test]
+    fn the_selection_bar_has_forward_copy_and_delete_icons() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let chat = app.open_chat.clone().expect("a chat is open");
+        let texts: Vec<String> = app.conversations[&chat]
+            .messages
+            .iter()
+            .filter(|message| matches!(message.content, crate::model::Content::Text { .. }))
+            .take(2)
+            .map(|message| message.id.clone())
+            .collect();
+        assert_eq!(texts.len(), 2, "the sample has text messages");
+        for id in texts.iter().rev() {
+            app.actions
+                .push(crate::model::Action::SelectMessage(id.clone()));
+        }
+        let mut labels = Vec::new();
+        let mut shapes = Vec::new();
+        for _ in 0..3 {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1180.0, 780.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    let ctx = ui.ctx().clone();
+                    app.background_frame(&ctx);
+                    app.frame_ui(ui);
+                },
+            );
+            output.textures_delta.clear();
+            shapes = output.shapes.clone();
+            labels = output
+                .platform_output
+                .accesskit_update
+                .expect("accessibility tree")
+                .nodes
+                .iter()
+                .filter_map(|(_, node)| node.label().map(str::to_owned))
+                .collect();
+        }
+        // The strip is solid: a filled rectangle in the panel colour along
+        // the bottom edge, where the composer's own strip is transparent.
+        let panel = app.palette.panel;
+        assert!(
+            shapes.iter().any(|clipped| matches!(
+                &clipped.shape,
+                egui::Shape::Rect(rect)
+                    if rect.fill == panel
+                        && rect.rect.bottom() >= 779.0
+                        && rect.rect.width() > 500.0
+            )),
+            "the selection bar has a solid background"
+        );
+        for tooltip in ["Forward", "Copy", "Delete", "Cancel selection"] {
+            assert!(
+                labels.contains(&tooltip.to_owned()),
+                "the bar has {tooltip}: {labels:?}"
+            );
+        }
+        assert!(
+            !labels.contains(&"Forward…".to_owned()),
+            "the text button is gone"
+        );
+        let both = crate::ui::conversation::selection_text(&app, &chat, &texts);
+        let lines: Vec<&str> = both.lines().collect();
+        assert!(lines.len() >= 2, "a line per message: {both:?}");
+        assert!(
+            lines[0].starts_with('['),
+            "headed like a copy across messages"
+        );
+        let one = crate::ui::conversation::selection_text(&app, &chat, &texts[..1]);
+        assert!(
+            !one.starts_with('['),
+            "one message copies as it is: {one:?}"
+        );
+        assert!(both.contains(&one), "{both:?} holds {one:?}");
+    }
+
     /// While Settings are showing, both header buttons say what a click does
     /// now: a screen reader reads the label, not the accent colour.
     #[test]

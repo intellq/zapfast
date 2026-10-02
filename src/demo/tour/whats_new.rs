@@ -251,7 +251,7 @@ pub(super) fn script() -> Vec<Cue> {
             "Shift + click · Select the ones between",
         ),
     );
-    add(69.2, Move(Label("Forward…")));
+    add(69.2, Move(Stop(Control::ForwardSelection)));
     add(69.6, Click(left));
     add(71.8, esc("Esc · Close"));
     add(72.4, esc("Esc · Cancel the selection"));
