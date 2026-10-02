@@ -14,9 +14,56 @@ pub fn protocol_summary(message: &str) -> Cow<'static, str> {
         "WhatsApp rate limit reached".into()
     } else if let Some(summary) = connect_summary(&message.to_ascii_lowercase()) {
         summary
+    } else if let Some(summary) = snapshot_summary(message) {
+        summary.into()
     } else {
         "protocol diagnostic (private details omitted)".into()
     }
+}
+
+/// The counts of an app-state snapshot whose MAC did not match: the
+/// collection's name, how many records it held and how many the check folded.
+/// The MACs and the hash on the same line are keyed material and stay out.
+fn snapshot_summary(message: &str) -> Option<String> {
+    let rest = message.strip_prefix("Snapshot ")?;
+    let (collection, rest) = rest.split_once(' ')?;
+    if !rest.contains("MAC mismatch")
+        || collection.is_empty()
+        || !collection
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c == '_')
+    {
+        return None;
+    }
+    let number_before = |text: &str, marker: &str| -> Option<u32> {
+        let head = text.split_once(marker)?.0;
+        head.rsplit(' ').next()?.parse().ok()
+    };
+    let number_after = |text: &str, marker: &str| -> Option<u32> {
+        let tail = text.split_once(marker)?.1;
+        tail.split(|c: char| !c.is_ascii_digit())
+            .next()?
+            .parse()
+            .ok()
+    };
+    let mut summary = format!("app-state snapshot of {collection}: MAC mismatch");
+    if let Some(records) = number_before(rest, " records") {
+        summary.push_str(&format!(", {records} records"));
+    }
+    if let Some(folded) = number_after(rest, "the fold folded ") {
+        summary.push_str(&format!(", {folded} folded"));
+    }
+    if let Some(unkeyed) = number_after(rest, "records (") {
+        summary.push_str(&format!(", {unkeyed} without an index"));
+    }
+    summary.push_str(if rest.contains("key decodes its own record") {
+        ", the key decodes its own record"
+    } else if rest.contains("key failed on its own record") {
+        ", the key fails on its own record"
+    } else {
+        ""
+    });
+    Some(summary)
 }
 
 /// Names why a connection attempt failed, from the phrases whatsapp-rust and
@@ -280,6 +327,26 @@ mod tests {
                 "Transient connect failure, will retry: Timed out waiting for handshake response"
             ),
             "timed out waiting for the WhatsApp handshake"
+        );
+    }
+
+    #[test]
+    fn a_snapshot_mismatch_keeps_its_counts_and_nothing_else() {
+        assert_eq!(
+            protocol_summary("Snapshot regular_high v812 MAC mismatch over 345 records"),
+            "app-state snapshot of regular_high: MAC mismatch, 345 records"
+        );
+        assert_eq!(
+            protocol_summary(
+                "Snapshot regular_high v812 MAC mismatch: computed=ab12, expected=cd34, \
+                 ltHash=ef56, the fold folded 340 of 345 records (5 carrying no index), \
+                 key probe says the snapshot's key decodes its own record"
+            ),
+            "app-state snapshot of regular_high: MAC mismatch, 345 records, 340 folded, 5 without an index, the key decodes its own record"
+        );
+        assert_eq!(
+            protocol_summary("Snapshot 123@s.whatsapp.net v1 MAC mismatch over 2 records"),
+            "protocol diagnostic (private details omitted)"
         );
     }
 
