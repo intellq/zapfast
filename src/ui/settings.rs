@@ -470,6 +470,14 @@ fn sections(app: &App) -> Vec<Section> {
         },
     );
     appearance.row_with_width(translated(locale, "Language"), "", 220.0, language_picker);
+    appearance.toggle(
+        translated(locale, "Hide the chat filters"),
+        translated(
+            locale,
+            "The row with All, Unread, Private and the other filters under the search field.",
+        ),
+        |settings| &mut settings.hide_chat_filters,
+    );
     if crate::emoji::whatsapp_font_file(&app.dirs.emoji_font_dir()).is_some() {
         appearance.toggle(
             translated(locale, "WhatsApp emoji"),

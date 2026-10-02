@@ -476,6 +476,14 @@ pub struct App {
     avatar_full_requests: HashSet<String>,
     /// Whether files are being dragged over the window.
     pub dropping: bool,
+    /// Where the dragged files are held, when the platform says (Wayland).
+    pub drag_pos: Option<egui::Pos2>,
+    /// The chat row under the dragged files, noted as the list draws.
+    drag_over_chat: Option<String>,
+    /// The chat the files have rested on, and since when (input time).
+    drag_dwell: Option<(String, f64)>,
+    /// The chat history's area, which is where a drop sends the files.
+    pub history_rect: Option<egui::Rect>,
     /// A text paste already handled the clipboard before the shortcut release.
     paste_before_release: bool,
     /// When the command key (Ctrl) was last seen held, and when text was last
@@ -1112,6 +1120,10 @@ impl App {
             avatars_full: HashMap::new(),
             avatar_full_requests: HashSet::new(),
             dropping: false,
+            drag_pos: None,
+            drag_over_chat: None,
+            drag_dwell: None,
+            history_rect: None,
             paste_before_release: false,
             command_seen_at: f64::NEG_INFINITY,
             text_typed_at: f64::NEG_INFINITY,
@@ -2198,6 +2210,16 @@ impl App {
             && !self.settings.chat_lock_hint_dismissed
     }
 
+    /// The chat filter that narrows the list: the one picked, unless the row of
+    /// filters is hidden, which leaves no way to pick another or to undo it.
+    pub fn chat_filter_in_use(&self) -> ChatFilter {
+        if self.settings.hide_chat_filters {
+            ChatFilter::All
+        } else {
+            self.chat_filter
+        }
+    }
+
     /// Visible chats filtered by search, archive state, and the chat filter,
     /// with pinned first.
     /// Locked chats only appear inside the locked folder.
@@ -2205,6 +2227,7 @@ impl App {
         let needle = crate::util::search_key(self.search.trim());
         let locked = self.locked_folder_open();
         let filtering = !locked && needle.is_empty() && !self.show_archived;
+        let filter = self.chat_filter_in_use();
         let mut chats: Vec<&Chat> = self
             .chats
             .iter()
@@ -2217,9 +2240,8 @@ impl App {
                 _ if !filtering => true,
                 Some(label) => self.chat_wears(chat, label),
                 None => {
-                    self.chat_filter.matches(chat)
-                        || (self.chat_filter == ChatFilter::Unread
-                            && self.unread_kept.contains(&chat.id))
+                    filter.matches(chat)
+                        || (filter == ChatFilter::Unread && self.unread_kept.contains(&chat.id))
                 }
             })
             .filter(|chat| {
@@ -2236,7 +2258,7 @@ impl App {
             .collect();
         // The Favorites chip keeps the phone's order below the pinned chats.
         let favorites_order =
-            filtering && self.label_filter.is_none() && self.chat_filter == ChatFilter::Favorites;
+            filtering && self.label_filter.is_none() && filter == ChatFilter::Favorites;
         chats.sort_by(|a, b| {
             b.pinned.cmp(&a.pinned).then_with(|| {
                 if a.pinned && b.pinned {
@@ -5613,7 +5635,7 @@ impl App {
             // Only the filtered list sends this: search results and
             // notifications open chats without keeping them.
             Action::KeepUnread(id) => {
-                if self.chat_filter == ChatFilter::Unread {
+                if self.chat_filter_in_use() == ChatFilter::Unread {
                     self.unread_kept.insert(id);
                 }
             }
@@ -6691,9 +6713,27 @@ impl App {
         self.mark_settings_dirty();
     }
 
-    /// Handles dropped files and pasted images for the open chat.
+    /// Notes the chat whose row is under the dragged files.
+    pub fn note_drag_over(&mut self, chat: &str, rect: egui::Rect) {
+        if self.drag_pos.is_some_and(|pos| rect.contains(pos)) {
+            self.drag_over_chat = Some(chat.to_owned());
+        }
+    }
+
+    /// Whether the dragged files are over the chat history. Where the
+    /// platform does not say where they are, they count as there.
+    pub fn drag_over_history(&self) -> bool {
+        match (self.drag_pos, self.history_rect) {
+            (Some(pos), Some(history)) => history.contains(pos),
+            _ => true,
+        }
+    }
+
+    /// Handles dropped files and pasted images for the open chat. Files held
+    /// over a chat in the list for a moment open it, so a drop on the history
+    /// sends to the chat that was picked on the way.
     fn take_drops_and_pastes(&mut self, ctx: &egui::Context) {
-        let (dropped, hovering) = ctx.input(|input| {
+        let (dropped, hovering, pos, now) = ctx.input(|input| {
             let dropped: Vec<PathBuf> = input
                 .raw
                 .dropped_files
@@ -6701,13 +6741,69 @@ impl App {
                 .map(|file| file.path().to_path_buf())
                 .collect();
             let hovering = !input.raw.hovered_files.is_empty();
-            (dropped, hovering)
+            (
+                dropped,
+                hovering,
+                input.pointer.hover_pos().or(input.pointer.latest_pos()),
+                input.time,
+            )
         });
         self.dropping = hovering && self.open_chat.is_some();
+        if hovering {
+            let over = self.drag_over_chat.take();
+            // A drag that reports no position leaves everything as it was.
+            self.drag_pos = pos;
+            if self.drag_pos.is_some() {
+                self.follow_drag(over, now, ctx);
+            }
+        } else if dropped.is_empty() {
+            self.drag_pos = None;
+            self.drag_over_chat = None;
+            self.drag_dwell = None;
+        }
         if !dropped.is_empty() {
-            self.actions.push(Action::SendFiles(dropped));
+            // Released over a chat of the list, the files go to that chat;
+            // released anywhere else outside the history, nowhere.
+            let over = self.drag_over_chat.take();
+            let outside = self.drag_pos.is_some() && !self.drag_over_history();
+            self.drag_pos = None;
+            self.drag_dwell = None;
+            if let Some(chat) = over {
+                if self.open_chat.as_deref() != Some(chat.as_str()) {
+                    self.actions.push(Action::OpenChat(chat));
+                }
+                self.actions.push(Action::SendFiles(dropped));
+            } else if !outside {
+                self.actions.push(Action::SendFiles(dropped));
+            }
         }
         self.take_clipboard_paste(ctx, || clipboard_contents(clipboard_files, clipboard_image));
+    }
+
+    /// Opens the chat the dragged files have rested on for a moment.
+    fn follow_drag(&mut self, over: Option<String>, now: f64, ctx: &egui::Context) {
+        let Some(chat) = over else {
+            self.drag_dwell = None;
+            return;
+        };
+        if self.open_chat.as_deref() == Some(chat.as_str()) {
+            self.drag_dwell = None;
+            return;
+        }
+        match &self.drag_dwell {
+            Some((resting, since)) if *resting == chat => {
+                if now - since >= DRAG_DWELL {
+                    self.drag_dwell = None;
+                    self.actions.push(Action::OpenChat(chat));
+                } else {
+                    ctx.request_repaint_after(std::time::Duration::from_millis(100));
+                }
+            }
+            _ => {
+                self.drag_dwell = Some((chat, now));
+                ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            }
+        }
     }
 
     /// Stages pasted files or a pasted picture for the open chat.
@@ -7155,6 +7251,9 @@ pub fn primary_selection() -> Option<String> {
 /// How long after Ctrl comes up a V release still counts as Ctrl+V, in
 /// seconds.
 const CTRL_V_GRACE: f64 = 0.8;
+
+/// How long dragged files rest on a chat in the list before it opens.
+const DRAG_DWELL: f64 = 0.4;
 
 /// What a paste into the composer stages.
 #[derive(Debug)]
@@ -11135,6 +11234,30 @@ mod tests {
             ["Cy", "Ada", "Bob", "Dee"],
             "other chips keep recency"
         );
+    }
+
+    #[test]
+    fn hiding_the_chat_filters_lists_every_chat_again() {
+        let mut app = app();
+        assert!(
+            !app.settings.hide_chat_filters,
+            "the row of filters is shown by default"
+        );
+        let mut ada = Chat::new("1@s.whatsapp.net".into(), "Ada".into());
+        ada.last_activity = 40;
+        let mut club = Chat::new("3@g.us".into(), "Club".into());
+        club.last_activity = 20;
+        app.chats = vec![ada, club];
+        crate::model::speak_in(&mut app.chats);
+        app.chat_filter = ChatFilter::Groups;
+        assert_eq!(app.visible_chats().len(), 1);
+        // With the row hidden there is no chip to undo the filter, so it
+        // stops applying.
+        app.settings.hide_chat_filters = true;
+        assert_eq!(app.chat_filter_in_use(), ChatFilter::All);
+        assert_eq!(app.visible_chats().len(), 2);
+        app.settings.hide_chat_filters = false;
+        assert_eq!(app.visible_chats().len(), 1);
     }
 
     #[test]

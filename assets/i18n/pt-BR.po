@@ -4164,8 +4164,8 @@ msgstr ""
 "Toque em Conectar dispositivo e depois em Conectar com número de telefone"
 
 #: src/ui/mod.rs:229
-msgid "Drop to send to {name}"
-msgstr "Solte para enviar para {name}"
+msgid "Drop to send to"
+msgstr "Solte para enviar para"
 
 #: src/ui/mod.rs:246
 msgid "Loading chat history… {percent}%"
@@ -4948,3 +4948,19 @@ msgstr "Fonte"
 #: src/ui/settings.rs
 msgid "System is your desktop's interface font. Inter looks the same on every computer."
 msgstr "\"Sistema\" é a fonte da interface do seu computador. Inter fica igual em todos os computadores."
+
+#: src/ui/chats.rs
+msgid "Archived chats"
+msgstr "Conversas arquivadas"
+
+#: src/ui/settings.rs
+msgid "Hide the chat filters"
+msgstr "Ocultar os filtros de conversas"
+
+#: src/ui/settings.rs
+msgid "The row with All, Unread, Private and the other filters under the search field."
+msgstr "A barra com Todas, Não lidas, Privadas e os demais filtros, abaixo do campo de busca."
+
+#: src/ui/chats.rs
+msgid "Close archived chats"
+msgstr "Fechar as conversas arquivadas"

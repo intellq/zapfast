@@ -75,7 +75,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         SidebarDisplayMode::CollapsedIconsOnly => chats::compact_show(app, ui),
     }
     let search_overlay = pane::show(app, ui);
-    egui::CentralPanel::default()
+    let central = egui::CentralPanel::default()
         .frame(central_frame(app))
         .show(ui, |ui| match app.page {
             Page::Settings => settings::show(app, ui),
@@ -92,7 +92,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     image_preview::show(app, ctx);
     video_view::show(app, ctx);
     call::show(app, ctx);
-    drop_target(app, ctx);
+    app.history_rect = (app.page == Page::Chats).then_some(central.response.rect);
+    drop_target(app, ctx, central.response.rect);
     toasts(app, ctx);
     focus_ring(app, ctx);
 }
@@ -212,9 +213,11 @@ fn focus_ring(app: &App, ctx: &egui::Context) {
     ctx.data_mut(|data| data.insert_temp(focus_ring_id().with("layer"), response.layer_id));
 }
 
-/// Shows where dragged files will be sent.
-fn drop_target(app: &mut App, ctx: &egui::Context) {
-    if !app.dropping {
+/// Shows where dragged files will be sent: a dashed border around the chat
+/// history, and over its middle a card with the chat's name.
+fn drop_target(app: &mut App, ctx: &egui::Context, history: egui::Rect) {
+    // Held over the chat list, the files are not on the history yet.
+    if !app.dropping || !app.drag_over_history() {
         return;
     }
     let palette = app.palette;
@@ -222,8 +225,27 @@ fn drop_target(app: &mut App, ctx: &egui::Context) {
         .current_chat()
         .map(|chat| app.chat_title(chat))
         .unwrap_or_default();
+    let border = history.shrink(3.0);
+    let corners = [
+        border.left_top(),
+        border.right_top(),
+        border.right_bottom(),
+        border.left_bottom(),
+        border.left_top(),
+    ];
+    ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("drop-border"),
+    ))
+    .extend(egui::Shape::dashed_line(
+        &corners,
+        Stroke::new(3.0, palette.accent),
+        9.0,
+        6.0,
+    ));
     egui::Area::new(egui::Id::new("drop-target"))
-        .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
+        .pivot(Align2::CENTER_CENTER)
+        .fixed_pos(history.center())
         .order(egui::Order::Foreground)
         .interactable(false)
         .show(ctx, |ui| {
@@ -233,14 +255,17 @@ fn drop_target(app: &mut App, ctx: &egui::Context) {
                 .corner_radius(CornerRadius::same(theme::RADIUS + 4))
                 .inner_margin(Margin::symmetric(28, 20))
                 .show(ui, |ui| {
+                    // The name can be long: it wraps inside the history's width.
+                    ui.set_max_width((history.width() - 120.0).max(120.0));
                     ui.vertical_centered(|ui| {
                         theme::icon(ui, Icon::Paperclip, 28.0, palette.accent);
                         theme::text(
                             ui,
-                            tr("Drop to send to {name}").replace("{name}", &name),
+                            tr("Drop to send to"),
                             theme::semibold(15.0),
                             palette.text,
                         );
+                        theme::text(ui, name, theme::semibold(15.0), palette.text);
                     });
                 });
         });

@@ -887,6 +887,26 @@ pub fn dialog_row_highlight(ui: &Ui, rect: Rect, color: Color32) {
     );
 }
 
+/// A horizontal row of chips that scrolls sideways. Its scroll bar takes a
+/// strip of its own under the chips, instead of floating over them.
+pub fn chip_scroll<R>(
+    ui: &mut Ui,
+    id: &str,
+    add_contents: impl FnOnce(&mut Ui) -> R,
+) -> egui::scroll_area::ScrollAreaOutput<R> {
+    ui.scope(|ui| {
+        let scroll = &mut ui.spacing_mut().scroll;
+        scroll.floating_allocated_width =
+            scroll.floating_width + scroll.bar_inner_margin + scroll.bar_outer_margin;
+        egui::ScrollArea::horizontal()
+            .id_salt(id)
+            .animated(false)
+            .auto_shrink([false, true])
+            .show(ui, add_contents)
+    })
+    .inner
+}
+
 /// Fades the rightmost `width` points of `rect` into `color`, over content
 /// that scrolls on past the edge. One gradient quad.
 pub fn fade_right(ui: &Ui, rect: Rect, width: f32, color: Color32) {

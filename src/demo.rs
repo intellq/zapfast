@@ -6845,6 +6845,199 @@ mod tests {
         );
     }
 
+    /// The archive works as Settings do: the gear is an X while it is open,
+    /// and the X leaves it for the chat list.
+    #[test]
+    fn the_x_leaves_the_archive_for_the_chat_list() {
+        use crate::ui::focus::Stop;
+        let mut app = app();
+        let ctx = egui::Context::default();
+        // The macOS header carries no gear.
+        if crate::theme::macos_chrome(&ctx) {
+            return;
+        }
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        app.actions.push(crate::model::Action::ShowArchived(true));
+        for _ in 0..3 {
+            frame_sized(&mut app, &ctx, 780.0, Vec::new());
+        }
+        assert!(app.show_archived);
+        let id = crate::ui::focus::stops(&ctx)
+            .into_iter()
+            .find(|(stop, _)| *stop == Stop::Settings)
+            .map(|(_, id)| id)
+            .expect("the settings button is drawn");
+        let pos = ctx
+            .read_response(id)
+            .expect("it publishes its rect")
+            .rect
+            .center();
+        for pressed in [true, false] {
+            frame_sized(
+                &mut app,
+                &ctx,
+                780.0,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        frame_sized(&mut app, &ctx, 780.0, Vec::new());
+        assert!(!app.show_archived, "the X closes the archive");
+        assert_eq!(
+            app.page,
+            crate::model::Page::Chats,
+            "and does not open Settings"
+        );
+    }
+
+    /// Dragging a file over the window shows the card in the middle of the
+    /// chat history, not of the whole window.
+    #[test]
+    fn the_drop_card_is_centred_on_the_history() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let hovered = egui::HoveredFile {
+            path: Some("/tmp/photo.png".into()),
+            ..Default::default()
+        };
+        for _ in 0..3 {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1180.0, 780.0),
+                    )),
+                    hovered_files: vec![hovered.clone()],
+                    ..Default::default()
+                },
+                |ui| {
+                    let ctx = ui.ctx().clone();
+                    app.background_frame(&ctx);
+                    app.frame_ui(ui);
+                },
+            );
+            output.textures_delta.clear();
+        }
+        assert!(app.dropping);
+        let card = egui::containers::AreaState::load(&ctx, egui::Id::new("drop-target"))
+            .expect("the card is shown")
+            .rect();
+        assert!(
+            card.center().x > 1180.0 / 2.0 + 40.0,
+            "the history is right of the chat list, so its middle is right of the window's: {card:?}"
+        );
+    }
+
+    #[derive(Debug)]
+    struct DroppedPhoto;
+
+    impl egui::DroppedFile for DroppedPhoto {
+        fn path(&self) -> &std::path::Path {
+            std::path::Path::new("/tmp/photo.png")
+        }
+
+        fn bytes(&self) -> Result<Vec<u8>, String> {
+            Err("not read in a test".into())
+        }
+    }
+
+    /// Files held over a chat of the list for a moment open it; a drop on the
+    /// history then stages them for that chat, and the card is only shown over
+    /// the history.
+    #[test]
+    fn files_held_over_a_chat_open_it_and_a_drop_on_the_history_sends_there() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let first = app.open_chat.clone().expect("a chat is open");
+        let target = app
+            .visible_chats()
+            .iter()
+            .map(|chat| chat.id.clone())
+            .find(|id| *id != first)
+            .expect("the sample has other chats");
+        let row = ctx
+            .data(|data| data.get_temp::<egui::Rect>(crate::ui::chats::chat_row_id(&target)))
+            .expect("the row is on screen")
+            .center();
+        let hovered = egui::HoveredFile {
+            path: Some("/tmp/photo.png".into()),
+            ..Default::default()
+        };
+        let drag =
+            |app: &mut App, time: f64, pos: egui::Pos2, dropped: Vec<egui::DroppedFileHandle>| {
+                let hovering = dropped.is_empty();
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(1180.0, 780.0),
+                        )),
+                        time: Some(time),
+                        events: vec![egui::Event::PointerMoved(pos)],
+                        hovered_files: if hovering {
+                            vec![hovered.clone()]
+                        } else {
+                            Vec::new()
+                        },
+                        dropped_files: dropped,
+                        ..Default::default()
+                    },
+                    |ui| {
+                        let ctx = ui.ctx().clone();
+                        app.background_frame(&ctx);
+                        app.frame_ui(ui);
+                    },
+                );
+                output.textures_delta.clear();
+            };
+        drag(&mut app, 10.0, row, Vec::new());
+        drag(&mut app, 10.1, row, Vec::new());
+        assert_eq!(
+            app.open_chat.as_deref(),
+            Some(first.as_str()),
+            "a moment is not yet enough"
+        );
+        assert!(!app.drag_over_history(), "the files are over the list");
+        for step in 0..4 {
+            drag(&mut app, 10.3 + step as f64 * 0.1, row, Vec::new());
+        }
+        assert_eq!(
+            app.open_chat.as_deref(),
+            Some(target.as_str()),
+            "resting on a chat opens it"
+        );
+        let history = app.history_rect.expect("the history is drawn");
+        drag(&mut app, 11.0, history.center(), Vec::new());
+        drag(&mut app, 11.1, history.center(), Vec::new());
+        assert!(app.drag_over_history());
+        assert_eq!(app.open_chat.as_deref(), Some(target.as_str()));
+        drag(
+            &mut app,
+            11.2,
+            history.center(),
+            vec![std::sync::Arc::new(DroppedPhoto)],
+        );
+        drag(&mut app, 11.3, history.center(), vec![]);
+        assert!(
+            app.pending
+                .iter()
+                .any(|item| matches!(item, crate::app::Pending::File(_))),
+            "the drop staged the file for the chat that was opened"
+        );
+    }
+
     /// While Settings are showing, both header buttons say what a click does
     /// now: a screen reader reads the label, not the accent colour.
     #[test]
@@ -10279,6 +10472,7 @@ mod tests {
                 Stop::Emoji,
                 Stop::ChatSearch,
                 Stop::Profile,
+                Stop::Archived,
                 Stop::Sidebar,
                 Stop::NewChat,
                 Stop::Settings,
@@ -10289,7 +10483,6 @@ mod tests {
                 Stop::Favorites,
                 Stop::Groups,
                 Stop::Channels,
-                Stop::Archived,
                 Stop::Locked,
             ]
             .into_iter()

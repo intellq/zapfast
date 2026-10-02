@@ -181,12 +181,15 @@ fn header(app: &mut App, ui: &mut egui::Ui) {
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     let settings_open = app.page == Page::Settings;
-                    // While Settings are showing, the gear is a solid red X
-                    // that closes them, and the gear returns once they close.
+                    // The archive works as Settings do: the gear is a solid
+                    // red X while it is open, and the X leaves it.
+                    let archive_open = app.show_archived && !settings_open;
                     let response = if settings_open {
                         // Same as the avatar: the label says what the click
                         // does now, not what it opened.
                         theme::close_button(ui, 18.0, tr("Close settings (Ctrl+,)"))
+                    } else if archive_open {
+                        theme::close_button(ui, 18.0, tr("Close archived chats"))
                     } else {
                         theme::icon_button(
                             ui,
@@ -198,7 +201,11 @@ fn header(app: &mut App, ui: &mut egui::Ui) {
                         )
                     };
                     if response.tab_stop(Stop::Settings).clicked() {
-                        app.actions.push(Action::ToggleSettings);
+                        app.actions.push(if archive_open {
+                            Action::ShowArchived(false)
+                        } else {
+                            Action::ToggleSettings
+                        });
                     }
                     if theme::icon_button(
                         ui,
@@ -227,6 +234,7 @@ fn header(app: &mut App, ui: &mut egui::Ui) {
                     {
                         app.actions.push(Action::ToggleSidebar);
                     }
+                    archived_button(app, ui);
                 });
             });
             ui.add_space(6.0);
@@ -251,6 +259,32 @@ fn header(app: &mut App, ui: &mut egui::Ui) {
             }
             filter_chips(app, ui);
         });
+}
+
+/// The button to the archive, left of the one that hides the chat list. It is
+/// there while something is archived; inside the archive the arrow goes back.
+fn archived_button(app: &mut App, ui: &mut egui::Ui) {
+    if app.show_archived || app.locked_folder || app.archived_count() == 0 {
+        return;
+    }
+    let palette = app.palette;
+    let response = theme::icon_button(
+        ui,
+        Icon::Archive,
+        18.0,
+        palette.secondary,
+        palette.text,
+        tr("Archived chats"),
+    )
+    .tab_stop(Stop::Archived);
+    // Unread chats in the archive show as a dot on the corner.
+    if app.archived_unread() > 0 {
+        let dot = response.rect.right_top() + vec2(-7.0, 7.0);
+        ui.painter().circle_filled(dot, 4.0, palette.accent);
+    }
+    if response.clicked() {
+        app.actions.push(Action::ShowArchived(true));
+    }
 }
 
 fn macos_header(app: &mut App, ui: &mut egui::Ui) {
@@ -328,6 +362,7 @@ fn macos_header(app: &mut App, ui: &mut egui::Ui) {
                     {
                         app.actions.push(Action::ToggleSidebar);
                     }
+                    archived_button(app, ui);
                 });
             });
             ui.add_space(6.0);
@@ -373,108 +408,91 @@ fn filter_chips(app: &mut App, ui: &mut egui::Ui) {
     }
     let palette = app.palette;
     ui.add_space(8.0);
-    let output = egui::ScrollArea::horizontal()
-        .id_salt("chat-filters")
-        .animated(false)
-        .auto_shrink([false, true])
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing = vec2(4.0, 6.0);
-                for filter in ChatFilter::EVERY {
-                    let count = match filter {
-                        ChatFilter::All => 0,
-                        _ => app.unread_chats(filter),
-                    };
-                    let selected = !app.locked_folder_open()
-                        && !app.show_archived
-                        && app.label_filter.is_none()
-                        && app.chat_filter == filter;
-                    let chip = widgets::filter_chip(
-                        ui,
-                        &palette,
-                        filter.label(app.locale).as_ref(),
-                        count,
-                        selected,
-                    )
-                    .tab_stop(match filter {
-                        ChatFilter::All => Stop::All,
-                        ChatFilter::Unread => Stop::Unread,
-                        ChatFilter::Private => Stop::Private,
-                        ChatFilter::Favorites => Stop::Favorites,
-                        ChatFilter::Groups => Stop::Groups,
-                        ChatFilter::Channels => Stop::Channels,
+    if app.settings.hide_chat_filters {
+        labels::chip_row(app, ui, &palette);
+        return;
+    }
+    let output = widgets::chip_scroll(ui, "chat-filters", |ui| {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing = vec2(4.0, 6.0);
+            for filter in ChatFilter::EVERY {
+                let count = match filter {
+                    ChatFilter::All => 0,
+                    _ => app.unread_chats(filter),
+                };
+                let selected = !app.locked_folder_open()
+                    && !app.show_archived
+                    && app.label_filter.is_none()
+                    && app.chat_filter == filter;
+                let chip = widgets::filter_chip(
+                    ui,
+                    &palette,
+                    filter.label(app.locale).as_ref(),
+                    count,
+                    selected,
+                )
+                .tab_stop(match filter {
+                    ChatFilter::All => Stop::All,
+                    ChatFilter::Unread => Stop::Unread,
+                    ChatFilter::Private => Stop::Private,
+                    ChatFilter::Favorites => Stop::Favorites,
+                    ChatFilter::Groups => Stop::Groups,
+                    ChatFilter::Channels => Stop::Channels,
+                });
+                // Store the chip rect for interaction tests.
+                ui.ctx()
+                    .data_mut(|data| data.insert_temp(filter_chip_id(filter), chip.rect));
+                let chip = if filter == ChatFilter::Channels {
+                    let now = crate::util::now();
+                    let all_muted = app
+                        .chats
+                        .iter()
+                        .filter(|chat| chat.is_channel())
+                        .all(|chat| chat.muted(now));
+                    chip.context_menu(|ui| {
+                        let (icon, label) = if all_muted {
+                            (Icon::Bell, tr("Unmute all channels"))
+                        } else {
+                            (Icon::BellOff, tr("Mute all channels"))
+                        };
+                        if widgets::menu_item(ui, &palette, Some(icon), label) {
+                            app.actions.push(Action::MuteAllChannels(!all_muted));
+                            ui.close();
+                        }
                     });
-                    // Store the chip rect for interaction tests.
-                    ui.ctx()
-                        .data_mut(|data| data.insert_temp(filter_chip_id(filter), chip.rect));
-                    let chip = if filter == ChatFilter::Channels {
-                        let now = crate::util::now();
-                        let all_muted = app
-                            .chats
-                            .iter()
-                            .filter(|chat| chat.is_channel())
-                            .all(|chat| chat.muted(now));
-                        chip.context_menu(|ui| {
-                            let (icon, label) = if all_muted {
-                                (Icon::Bell, tr("Unmute all channels"))
-                            } else {
-                                (Icon::BellOff, tr("Mute all channels"))
-                            };
-                            if widgets::menu_item(ui, &palette, Some(icon), label) {
-                                app.actions.push(Action::MuteAllChannels(!all_muted));
-                                ui.close();
-                            }
-                        });
-                        chip
-                    } else {
-                        chip
-                    };
-                    if chip.clicked() {
-                        // A second click on the active chip returns to every chat.
-                        let next = if selected { ChatFilter::All } else { filter };
-                        app.actions.push(Action::SetChatFilter(next));
-                    }
-                }
-                if app.archived_count() > 0 || app.show_archived {
-                    let selected = app.show_archived;
-                    let chip = widgets::filter_chip(
-                        ui,
-                        &palette,
-                        crate::i18n::gettext(app.locale, "Archived").as_ref(),
-                        app.archived_unread(),
-                        selected,
-                    )
-                    .tab_stop(Stop::Archived);
-                    ui.ctx().data_mut(|data| {
-                        data.insert_temp(egui::Id::new("archived-chip"), chip.rect);
-                    });
-                    if chip.clicked() {
-                        app.actions.push(Action::ShowArchived(!selected));
-                    }
-                }
-                if app.locked_count() > 0 || app.locked_folder_open() {
-                    let selected = app.locked_folder_open();
-                    let chip = widgets::filter_chip(
-                        ui,
-                        &palette,
-                        crate::i18n::gettext(app.locale, "Locked").as_ref(),
-                        0,
-                        selected,
-                    )
-                    .tab_stop(Stop::Locked)
-                    .on_hover_text(tr("Open locked chats with your local code"));
-                    ui.ctx()
-                        .data_mut(|data| data.insert_temp(egui::Id::new("locked-chip"), chip.rect));
-                    if chip.clicked() {
-                        app.actions.push(Action::OpenLockedFolder);
-                    }
+                    chip
                 } else {
-                    ui.ctx()
-                        .data_mut(|data| data.remove::<egui::Rect>(egui::Id::new("locked-chip")));
+                    chip
+                };
+                if chip.clicked() {
+                    // A second click on the active chip returns to every chat.
+                    let next = if selected { ChatFilter::All } else { filter };
+                    app.actions.push(Action::SetChatFilter(next));
                 }
-                ui.add_space(4.0);
-            })
-        });
+            }
+            if app.locked_count() > 0 || app.locked_folder_open() {
+                let selected = app.locked_folder_open();
+                let chip = widgets::filter_chip(
+                    ui,
+                    &palette,
+                    crate::i18n::gettext(app.locale, "Locked").as_ref(),
+                    0,
+                    selected,
+                )
+                .tab_stop(Stop::Locked)
+                .on_hover_text(tr("Open locked chats with your local code"));
+                ui.ctx()
+                    .data_mut(|data| data.insert_temp(egui::Id::new("locked-chip"), chip.rect));
+                if chip.clicked() {
+                    app.actions.push(Action::OpenLockedFolder);
+                }
+            } else {
+                ui.ctx()
+                    .data_mut(|data| data.remove::<egui::Rect>(egui::Id::new("locked-chip")));
+            }
+            ui.add_space(4.0);
+        })
+    });
     // Chips cut off at the edge fade into the panel, which says the row
     // scrolls on.
     let hidden = output.content_size.x - output.state.offset.x - output.inner_rect.width();
@@ -507,8 +525,8 @@ fn list(app: &mut App, ui: &mut egui::Ui) {
         let favorites_title;
         let (title, body) = if app.show_archived {
             (tr("Nothing archived"), tr("Archived chats appear here."))
-        } else if app.chat_filter != ChatFilter::All {
-            let title = match app.chat_filter {
+        } else if app.chat_filter_in_use() != ChatFilter::All {
+            let title = match app.chat_filter_in_use() {
                 ChatFilter::Unread => tr("No unread chats"),
                 ChatFilter::Private => tr("No private chats"),
                 ChatFilter::Channels => tr("No channels"),
@@ -935,6 +953,7 @@ fn row(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> egui::Response {
         vec2(ui.available_width(), theme::ROW_HEIGHT),
         Sense::click(),
     );
+    app.note_drag_over(&chat.id, rect);
     theme::reveal_focus(&response);
     // The preview area and the whole last message, when the row cuts it short.
     let mut full_preview: Option<(Rect, String, String)> = None;
@@ -1398,6 +1417,7 @@ fn compact_row(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> egui::Response 
     let selected = app.open_chat.as_deref() == Some(chat.id.as_str());
     let (rect, response) =
         ui.allocate_exact_size(vec2(ui.available_width(), COMPACT_CELL), Sense::click());
+    app.note_drag_over(&chat.id, rect);
     theme::reveal_focus(&response);
     response.widget_info(|| {
         egui::WidgetInfo::selected(

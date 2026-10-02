@@ -99,17 +99,13 @@ pub fn chip_row(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
         return;
     }
     ui.add_space(2.0);
-    let row = egui::ScrollArea::horizontal()
-        .id_salt("label-chips")
-        .animated(false)
-        .auto_shrink([false, true])
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing = vec2(4.0, 6.0);
-                label_chips(app, ui, palette);
-                ui.add_space(4.0);
-            });
+    let row = widgets::chip_scroll(ui, "label-chips", |ui| {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing = vec2(4.0, 6.0);
+            label_chips(app, ui, palette);
+            ui.add_space(4.0);
         });
+    });
     ui.ctx()
         .data_mut(|data| data.insert_temp(chip_row_id(), row.inner_rect));
 }

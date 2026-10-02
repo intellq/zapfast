@@ -441,6 +441,9 @@ pub struct Settings {
     /// The hint bar under the composer, hidden with its × and shown again
     /// from the Keyboard shortcuts dialog.
     pub show_shortcut_hints: bool,
+    /// Hides the row of chat filters (All, Unread, Private, ...) under the
+    /// search field. The list then shows every chat.
+    pub hide_chat_filters: bool,
     /// Recently used emoji, newest first.
     pub recent_emoji: Vec<String>,
     /// Emoji reaction usage on this device, most-used first (recent breaks ties).
@@ -554,6 +557,7 @@ impl Default for Settings {
             wallpaper_image: None,
             last_chat: None,
             show_shortcut_hints: true,
+            hide_chat_filters: false,
             recent_emoji: Vec::new(),
             reaction_emoji: Vec::new(),
             giphy_key: String::new(),

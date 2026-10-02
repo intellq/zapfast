@@ -18,6 +18,8 @@ pub enum Stop {
     ChatSearchDay,
     Back,
     Profile,
+    /// The archive button in the header, left of the sidebar's.
+    Archived,
     Sidebar,
     NewChat,
     Settings,
@@ -28,7 +30,6 @@ pub enum Stop {
     Favorites,
     Groups,
     Channels,
-    Archived,
     Locked,
     /// One chip in the label row, by its position among the labels.
     Label(u8),

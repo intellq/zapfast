@@ -3954,7 +3954,7 @@ msgid "Tap Link a device, then Link with phone number instead"
 msgstr ""
 
 #: src/ui/mod.rs:229
-msgid "Drop to send to {name}"
+msgid "Drop to send to"
 msgstr ""
 
 #: src/ui/mod.rs:246
@@ -4785,4 +4785,20 @@ msgstr ""
 
 #: src/ui/settings.rs
 msgid "System is your desktop's interface font. Inter looks the same on every computer."
+msgstr ""
+
+#: src/ui/chats.rs
+msgid "Archived chats"
+msgstr ""
+
+#: src/ui/settings.rs
+msgid "Hide the chat filters"
+msgstr ""
+
+#: src/ui/settings.rs
+msgid "The row with All, Unread, Private and the other filters under the search field."
+msgstr ""
+
+#: src/ui/chats.rs
+msgid "Close archived chats"
 msgstr ""
