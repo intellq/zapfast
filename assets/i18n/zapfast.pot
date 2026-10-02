@@ -4156,6 +4156,15 @@ msgstr ""
 msgid "unsupported image format"
 msgstr ""
 
+#: src/main.rs
+msgid ""
+"ZapFast could not start.\n"
+"\n"
+"Details: {details}\n"
+"\n"
+"The log may say more: {log}"
+msgstr ""
+
 #: src/main.rs:330
 msgid ""
 "This operating system does not offer OpenGL 2.0. Update your graphics card "

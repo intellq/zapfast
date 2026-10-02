@@ -1195,6 +1195,12 @@ Builds for every release are on the
 | Windows x64 and arm64 | `zapfast-vX.Y.Z-<target>-setup.exe` (no administrator rights needed), or the `.zip` |
 | macOS, universal | `zapfast-vX.Y.Z-macos-universal.dmg` |
 
+ZapFast draws its window with OpenGL and needs a graphics driver that offers
+OpenGL 2.1 or newer. On Windows, install the driver from the maker of the
+graphics chip: the Microsoft Basic Display Adapter, some virtual machines and
+some remote desktop sessions offer no usable OpenGL. When the driver falls
+short, Windows shows a message saying so instead of starting.
+
 On macOS, the rounded Dock icon matches the app bundle. Native menus provide
 Settings, editing, search, view controls, and window commands. The traffic
 lights share the chat header, leaving more room for conversations in a normal

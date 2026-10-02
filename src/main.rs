@@ -130,6 +130,21 @@ fn default_log_filter(verbose: bool) -> &'static str {
 }
 
 fn main() -> eframe::Result<()> {
+    let result = run();
+    // A Windows release has no console, so an error that ends the start
+    // would otherwise leave the reader nothing to see (#349). `run` has
+    // already released the single-instance lock.
+    // A missing OpenGL has its own translated notice (`report_missing_opengl`).
+    #[cfg(windows)]
+    if let Err(error) = &result
+        && !graphics_unavailable(error)
+    {
+        startup_failure_dialog(error);
+    }
+    result
+}
+
+fn run() -> eframe::Result<()> {
     // First, before parsing the command line or touching any state: run the
     // update helper when asked (`--apply-update <job>`, then exit), and take
     // `--update-receipt` and `--update-error` off the command line.
@@ -385,6 +400,39 @@ fn report_missing_opengl() {
             .summary("ZapFast")
             .body(text)
             .show();
+    }
+}
+
+/// The text of the dialog shown when ZapFast cannot start for a reason other
+/// than OpenGL, which [`report_missing_opengl`] explains. Kept apart from the
+/// dialog so it is tested on every platform.
+#[cfg(any(windows, test))]
+fn startup_failure_text(details: &str, log: &std::path::Path) -> String {
+    zapfast::i18n::tr("ZapFast could not start.\n\nDetails: {details}\n\nThe log may say more: {log}")
+        .replace("{details}", details)
+        .replace("{log}", &log.display().to_string())
+}
+
+/// Explains a failed start in a message box, the only thing a release
+/// without a console can show before its window exists.
+#[cfg(windows)]
+fn startup_failure_dialog(error: &eframe::Error) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        MB_ICONERROR, MB_OK, MB_SETFOREGROUND, MessageBoxW,
+    };
+    use windows::core::PCWSTR;
+
+    let text = startup_failure_text(&error.to_string(), &paths::AppDirs::discover().log_file());
+    let wide = |text: &str| text.encode_utf16().chain([0]).collect::<Vec<u16>>();
+    let (text, caption) = (wide(&text), wide("ZapFast"));
+    // SAFETY: both strings are NUL-terminated and outlive the call.
+    unsafe {
+        MessageBoxW(
+            None,
+            PCWSTR(text.as_ptr()),
+            PCWSTR(caption.as_ptr()),
+            MB_OK | MB_ICONERROR | MB_SETFOREGROUND,
+        );
     }
 }
 
@@ -763,6 +811,20 @@ mod window_fit_tests {
         );
         // A monitor that reports no size leaves the window alone.
         assert_eq!(size_within_monitor((900, 800), (0, 0)), None);
+    }
+}
+
+#[cfg(test)]
+mod startup_failure_tests {
+    use super::*;
+
+    #[test]
+    fn a_failed_start_shows_its_details_and_the_log() {
+        let log = std::path::Path::new("C:/zapfast/zapfast.log");
+        let text = startup_failure_text("The directory is not writable", log);
+        assert!(text.starts_with("ZapFast could not start."));
+        assert!(text.contains("The directory is not writable"));
+        assert!(text.contains(&log.display().to_string()));
     }
 }
 
