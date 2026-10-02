@@ -749,6 +749,13 @@ pub struct App {
     pub hide_intent: bool,
     /// Whether a headless app should create a window.
     pub wants_show: bool,
+    /// Whether this session draws through Wayland, where a compositor ignores
+    /// a programmatic focus or unminimize request and the window is closed and
+    /// reopened instead.
+    wayland: bool,
+    /// Whether the current window close should reopen a fresh one at once
+    /// (`Closed::Reopen`) rather than stop drawing.
+    reopen: bool,
     /// Requests received from later launches.
     control_commands: Option<std::sync::Arc<std::sync::Mutex<Vec<ControlCommand>>>>,
     /// Chats and messages from clicked notifications.
@@ -836,11 +843,34 @@ impl Pending {
     }
 }
 
+/// Whether this session draws through Wayland, where a compositor ignores an
+/// app's request to focus or unminimize one of its own windows: winit's
+/// Wayland `focus_window` is a no-op and `set_minimized(false)` only warns.
+/// Mirrors winit's own choice: Wayland when either variable is non-empty.
+#[cfg(target_os = "linux")]
+fn wayland_session() -> bool {
+    ["WAYLAND_DISPLAY", "WAYLAND_SOCKET"]
+        .into_iter()
+        .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()))
+}
+
+/// Wayland is Linux-only; elsewhere a window focuses and restores normally.
+#[cfg(not(target_os = "linux"))]
+fn wayland_session() -> bool {
+    false
+}
+
 /// The app outlives its window: closing it with "keep running" on hides
 /// ZapFast, and the tray, a notification or another launch brings it back.
 impl fastframe_shell::Resident for App {
     fn closed(&self) -> fastframe_shell::Closed {
-        if !self.quit_requested && self.hide_intent {
+        if self.quit_requested {
+            fastframe_shell::Closed::Quit
+        } else if self.reopen {
+            // The window was closed only to make a fresh one, which is how a
+            // Wayland session brings a minimized or covered window forward.
+            fastframe_shell::Closed::Reopen
+        } else if self.hide_intent {
             fastframe_shell::Closed::Hide
         } else {
             fastframe_shell::Closed::Quit
@@ -1265,6 +1295,8 @@ impl App {
             window_hidden: false,
             hide_intent: false,
             wants_show: false,
+            wayland: wayland_session(),
+            reopen: false,
             control_commands: None,
             notification_opens: Default::default(),
             notifications: Default::default(),
@@ -1585,6 +1617,7 @@ impl App {
         self.paste_before_release = false;
         self.hide_intent = false;
         self.wants_show = false;
+        self.reopen = false;
         self.refocus_composer(ctx);
         // Before the tray: muda keeps the first menu handler it is given, and
         // the tray installs one when it makes its item on the first window.
@@ -6063,6 +6096,14 @@ impl App {
                 if self.window_hidden {
                     // The headless loop in `main` will create the window.
                     self.wants_show = true;
+                } else if self.wayland {
+                    // Wayland drops a programmatic focus or unminimize
+                    // request, so a minimized or covered window cannot come
+                    // forward that way. Close it and let the shell open a
+                    // fresh one at once: the compositor raises a new toplevel,
+                    // and a notification click lands on a visible window.
+                    self.reopen = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 } else {
                     // Focus alone leaves a minimized window where it is on
                     // Windows, so restore it first.
@@ -8258,6 +8299,28 @@ mod tests {
         assert!(app.tray.is_none());
         assert!(!Resident::start_hidden(&mut app), "no tray, no way back");
         assert!(!app.hide_intent);
+    }
+
+    /// A Wayland compositor ignores an app's focus and unminimize requests, so
+    /// a notification click or a second launch closes the window and asks the
+    /// shell for a fresh one, which the compositor raises. Elsewhere the
+    /// window is only told to restore and focus.
+    #[test]
+    fn a_wayland_show_reopens_the_window_instead_of_focusing_it() {
+        use fastframe_shell::{Closed, Resident};
+        let ctx = egui::Context::default();
+
+        let mut app = app();
+        app.wayland = true;
+        app.apply(Action::ShowWindow, &ctx);
+        assert!(app.reopen, "Wayland closes the window to make a fresh one");
+        assert_eq!(app.closed(), Closed::Reopen);
+
+        let mut app = self::app();
+        app.wayland = false;
+        app.apply(Action::ShowWindow, &ctx);
+        assert!(!app.reopen, "elsewhere the window is only focused");
+        assert_ne!(app.closed(), Closed::Reopen);
     }
 
     #[test]
