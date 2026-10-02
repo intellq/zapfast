@@ -524,7 +524,7 @@ impl Default for Settings {
         Self {
             version: SETTINGS_VERSION,
             theme: ThemeChoice::Dark,
-            font: FontChoice::Inter,
+            font: FontChoice::System,
             interface_language: None,
             custom_theme: None,
             custom_theme_cache: None,
@@ -561,7 +561,7 @@ impl Default for Settings {
             start_minimized: false,
             open_whatsapp_links: true,
             notifications: true,
-            message_sound: NotificationSound::Receive,
+            message_sound: NotificationSound::None,
             mention_sound: NotificationSound::Alert,
             group_sounds: true,
             download_folder: None,
@@ -846,12 +846,22 @@ mod tests {
         assert!(settings.group_sounds);
     }
 
-    /// Settings written before the font could be chosen keep Inter; the
-    /// choice is saved by name.
+    /// A new install uses the platform's font and no message sound; a saved
+    /// choice is kept, and the font is saved by name.
     #[test]
-    fn the_font_defaults_to_inter_and_is_saved_by_name() {
-        let older: Settings = serde_json::from_str(r#"{"theme":"light"}"#).unwrap();
-        assert_eq!(older.font, FontChoice::Inter);
+    fn a_new_install_uses_the_system_font_and_no_message_sound() {
+        let fresh = Settings::default();
+        assert_eq!(fresh.font, FontChoice::System);
+        assert_eq!(fresh.message_sound, NotificationSound::None);
+        assert_eq!(fresh.mention_sound, NotificationSound::Alert);
+        let kept: Settings =
+            serde_json::from_str(r#"{"font":"inter","message_sound":"receive"}"#).unwrap();
+        assert_eq!(kept.font, FontChoice::Inter);
+        assert_eq!(kept.message_sound, NotificationSound::Receive);
+    }
+
+    #[test]
+    fn the_font_is_saved_by_name() {
         let chosen: Settings = serde_json::from_str(r#"{"font":"system"}"#).unwrap();
         assert_eq!(chosen.font, FontChoice::System);
         let saved = serde_json::to_value(&chosen).unwrap();

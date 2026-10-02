@@ -539,8 +539,8 @@ Da sincronização com o upstream 0.18.2:
 - **Fila de figurinhas.** As figurinhas recebidas são buscadas duas por vez; se
   o WhatsApp pede para ir mais devagar, a fila espera (30 s, dobrando até 15
   min) e as que sumiram dos servidores descansam por uma semana.
-- **Fonte da interface** em **Configurações › Aparência**: Inter (padrão) ou a
-  fonte do sistema.
+- **Fonte da interface** em **Configurações › Aparência**: a fonte do sistema (padrão) ou
+  Inter.
 - **Logo novo** (um disco aceso com um balão de tinta) no ícone, na bandeja, no
   Sobre e nas telas de entrada e de bloqueio; a bandeja nomeia o ícone
   (fastframe v0.2.2, que agora é a versão de todas as peças fastframe).
@@ -551,7 +551,7 @@ Da sincronização com o upstream 0.18.2:
   fim ao enviar, para mostrá-la. `Shift+Insert` cola, como `Ctrl+V`, no
   compositor.
 
-Depois da 0.18.201:
+Na 0.18.202:
 
 - **Enviar** qualquer mensagem rola o histórico até o fim, de qualquer ponto.
 - **Botão de configurações** vira um **X vermelho** enquanto as Configurações
@@ -561,6 +561,18 @@ Depois da 0.18.201:
   cúbico e leve desfoque.
 - **Histórico para cima:** ao chegar a página mais antiga, a mensagem que você
   via no topo continua no topo (antes a tela ia parar no meio da página nova).
+- **Silêncios e favoritas** em instalação nova: numa conta a sincronização de
+  `regular_high` falhava com `snapshot MAC mismatch` e nenhum silêncio de
+  conversa chegava. Uma cópia do crate `wacore-appstate`
+  (`vendor/wacore-appstate/VENDORED.md`) aceita esse snapshot, com cada
+  registro ainda autenticado um a um.
+- **Janela fechada para a bandeja** volta na mesma altura: o limite do eframe
+  usava a escala inteira do monitor no Wayland (125% contava como 200%) e
+  cortava janelas altas.
+- **`install.sh`** aberto pelo gerenciador de arquivos mostra uma janela com o
+  resultado (instalado ou o motivo do erro).
+- **Padrões de uma instalação nova:** fonte do sistema e **Som da mensagem**
+  em nenhum; quem já escolheu mantém a escolha.
 
 Esta sincronização também incorpora mudanças recentes do upstream: confirmação
 antes de apagar mensagens, aba de figurinhas recebidas, recuperação de conexão
@@ -1023,8 +1035,9 @@ de sincronizar a exclusão "para mim" com o celular é uma extensão deste fork.
   Sounds follow Pidgin: **Message sound** plays for every new message, in
   chats and groups alike, and **Mention sound** when someone in a group
   mentions you or replies to one of your messages. Each can be Pidgin's classic
-  message sound (the default for messages), its alert (the default for
-  mentions), the system's notification sound, no sound, or an audio file
+  message sound, its alert (the default for
+  mentions), the system's notification sound, no sound (the default for
+  messages), or an audio file
   (WAV, MP3, or OGG Vorbis) that ZapFast plays itself. Turning off **Play
   sounds for group messages** keeps group notifications silent unless they
   mention or answer you. **Notification sound** in a chat's right-click menu

@@ -8963,7 +8963,7 @@ mod tests {
             &ctx,
         );
         assert_eq!(app.settings.mention_sound, NotificationSound::None);
-        assert_eq!(app.settings.message_sound, NotificationSound::Receive);
+        assert_eq!(app.settings.message_sound, NotificationSound::None);
     }
 
     #[test]
@@ -9018,7 +9018,10 @@ mod tests {
 
     #[test]
     fn mentions_sound_even_in_quiet_groups_and_chat_sounds_win() {
-        let mut settings = Settings::default();
+        let mut settings = Settings {
+            message_sound: NotificationSound::Receive,
+            ..Settings::default()
+        };
         let sound = |settings: &Settings, chat, group, for_us| {
             notification_sound(settings, chat, group, for_us)
         };
@@ -10238,13 +10241,13 @@ mod tests {
         let mut app = app();
         let ctx = egui::Context::default();
         app.attach(&ctx);
-        assert_eq!(app.settings.font, FontChoice::Inter);
-        app.apply(Action::SetFont(FontChoice::System), &ctx);
         assert_eq!(app.settings.font, FontChoice::System);
-        assert!(crate::theme::system_font_chosen());
         app.apply(Action::SetFont(FontChoice::Inter), &ctx);
         assert_eq!(app.settings.font, FontChoice::Inter);
         assert!(!crate::theme::system_font_chosen());
+        app.apply(Action::SetFont(FontChoice::System), &ctx);
+        assert_eq!(app.settings.font, FontChoice::System);
+        assert!(crate::theme::system_font_chosen());
     }
 
     #[test]
