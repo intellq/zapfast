@@ -802,7 +802,7 @@ de sincronizar a exclusão "para mim" com o celular é uma extensão deste fork.
   seconds. Error messages stay above the composer until you dismiss them, and
   a button copies their text for a bug report. A repeated error replaces its
   earlier copy, and only the three newest are kept.
-- **Send attachments with captions.** Paste a picture, drop files (hold them over a chat in the list for a moment to
+- **Send attachments with captions.** Paste a picture or copied files, drop files (hold them over a chat in the list for a moment to
   open it, then release over the history; the card shows the chat's name), or choose
   **Send files** from the plus menu. They stay in the composer until you send them or press Escape.
   Pasting a picture uses its image data without adding the source URL or HTML
