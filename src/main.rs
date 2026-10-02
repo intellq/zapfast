@@ -312,10 +312,9 @@ fn main() -> eframe::Result<()> {
                         }),
                 )
             });
-            let zoom = lease.peek(|app| app.settings.zoom);
             eframe::run_native(
                 "ZapFast",
-                native_options(demo_persistence.clone(), zoom),
+                native_options(demo_persistence.clone()),
                 Box::new(move |cc| {
                     let mut app = lease.take(&cc.egui_ctx);
                     app.attach(&cc.egui_ctx);
@@ -416,20 +415,9 @@ fn tour_script(name: &str) -> zapfast::demo::tour::Script {
     zapfast::demo::tour::Script::from_name(name).unwrap_or_default()
 }
 
-fn native_options(
-    demo_persistence: Option<std::path::PathBuf>,
-    zoom: f32,
-) -> eframe::NativeOptions {
+fn native_options(demo_persistence: Option<std::path::PathBuf>) -> eframe::NativeOptions {
+    let demo_size = demo_size_arg().unwrap_or([1180.0, 780.0]);
     let demo = demo_persistence.is_some();
-    let default_size = demo_size_arg().unwrap_or([1180.0, 780.0]);
-    // Outside demos the hook below scales the size by the zoom, so the
-    // default is given in the units eframe restores a saved size in.
-    let zoom = window_zoom(zoom);
-    let initial_size = if demo {
-        default_size
-    } else {
-        [default_size[0] / zoom, default_size[1] / zoom]
-    };
     let viewport = egui::ViewportBuilder::default()
         .with_title(if demo { "ZapFast Demo" } else { "ZapFast" })
         .with_app_id(if demo {
@@ -437,7 +425,7 @@ fn native_options(
         } else {
             std::env::var("FLATPAK_ID").unwrap_or_else(|_| "zapfast".to_owned())
         })
-        .with_inner_size(initial_size)
+        .with_inner_size(demo_size)
         // Keep the floor small enough that Windows can still snap the window
         // into narrow Aero Snap and LG Screen Split zones (a 2560 px ultrawide
         // split four ways is about 640 px wide, which a 720 px minimum blocks).
@@ -458,7 +446,6 @@ fn native_options(
         persistence_path: demo_persistence,
         // Do not restore window size during fixed-size screenshot runs.
         persist_window: !demo,
-        window_builder: (!demo).then(|| restore_zoomed_size(zoom)),
         ..Default::default()
     }
 }
@@ -499,32 +486,6 @@ fn fit_to_monitor(ctx: &egui::Context, frame: &eframe::Frame) {
     ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(
         egui::vec2(width as f32, height as f32) / points,
     ));
-}
-
-/// The interface zoom as a usable window scale.
-fn window_zoom(zoom: f32) -> f32 {
-    if zoom.is_finite() && zoom > 0.0 {
-        zoom
-    } else {
-        1.0
-    }
-}
-
-/// Undoes the interface zoom in the window size eframe restores (#293).
-///
-/// eframe saves the window's size in points at the context's zoom factor,
-/// which ZapFast sets from its settings once the window exists. It restores
-/// that size into a fresh context whose zoom is still 1, so every window the
-/// shell reopened came back smaller by the zoom, and a zoom above 1 shrank it
-/// a little on each reopen. Scaling the size by the zoom it was saved at
-/// recreates the window at its previous size.
-fn restore_zoomed_size(zoom: f32) -> eframe::WindowBuilderHook {
-    Box::new(move |mut viewport: egui::ViewportBuilder| {
-        if let Some(size) = viewport.inner_size {
-            viewport.inner_size = Some(size * zoom);
-        }
-        viewport
-    })
 }
 
 /// eframe adapter holding the long-lived [`app::App`] for one window; it goes
@@ -866,57 +827,5 @@ mod log_filter_tests {
             log::Level::Warn,
             "arboard::platform::linux"
         ));
-    }
-}
-
-#[cfg(test)]
-mod window_size_tests {
-    use super::*;
-
-    /// The inner size eframe gives a window it creates from these options,
-    /// restoring `saved` if a size was saved. Its context is new, so the zoom
-    /// is 1 until the app sets it.
-    fn created_points(options: eframe::NativeOptions, saved: Option<egui::Vec2>) -> egui::Vec2 {
-        let mut viewport = options.viewport;
-        if let Some(saved) = saved {
-            viewport = viewport.with_inner_size(saved);
-        }
-        let hook = options.window_builder.expect("a window builder hook");
-        hook(viewport).inner_size.expect("an inner size")
-    }
-
-    #[test]
-    fn a_reopened_window_keeps_its_size_at_any_zoom() {
-        let scale = 1.5;
-        for zoom in [0.8, 1.0, 1.25, 2.0] {
-            let mut physical = egui::vec2(1500.0, 960.0);
-            for _ in 0..10 {
-                // eframe saves the inner size in points at the current zoom.
-                let saved = physical / (scale * zoom);
-                physical = created_points(native_options(None, zoom), Some(saved)) * scale;
-            }
-            assert!(
-                (physical - egui::vec2(1500.0, 960.0)).length() < 0.01,
-                "zoom {zoom} reopened at {physical:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn a_first_window_opens_at_the_default_size_at_any_zoom() {
-        for zoom in [0.8, 1.0, 1.25, 2.0, f32::NAN, 0.0] {
-            let size = created_points(native_options(None, zoom), None);
-            assert!(
-                (size - egui::vec2(1180.0, 780.0)).length() < 0.01,
-                "zoom {zoom} opened at {size:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn demos_keep_their_exact_size_and_no_restore_hook() {
-        let options = native_options(Some("window.ron".into()), 1.25);
-        assert!(options.window_builder.is_none());
-        assert_eq!(options.viewport.inner_size, Some(egui::vec2(1180.0, 780.0)));
     }
 }

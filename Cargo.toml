@@ -164,18 +164,23 @@ wacore-appstate = { path = "vendor/wacore-appstate" }
 # compositor stops showing never blocks in a vsync swap (emilk/egui#8631).
 # Each emoji cluster (families, skin tones, keycaps, flags) lays out one emoji
 # wide, and the Wayland clipboard shares winit's data device (see below).
+# Focus on a widget without an accessibility node goes to the root
+# (emilk/egui#8621, the group rename crash in #313), glow falls back to a
+# compatibility-profile context on old Windows drivers (#349,
+# emilk/egui#8655), and a saved window size keeps its zoom factor so a window
+# no longer shrinks each time it reopens (#293, emilk/egui#8656).
 # Every egui crate comes from the same revision so they share one emath and
 # epaint. Drop this once egui releases all three.
-ecolor = { git = "https://github.com/crmne/egui", rev = "61a38149a4010ff9b8257dc6a03b98818b98fd02" }
-eframe = { git = "https://github.com/crmne/egui", rev = "61a38149a4010ff9b8257dc6a03b98818b98fd02" }
-egui = { git = "https://github.com/crmne/egui", rev = "61a38149a4010ff9b8257dc6a03b98818b98fd02" }
-egui-wgpu = { git = "https://github.com/crmne/egui", rev = "61a38149a4010ff9b8257dc6a03b98818b98fd02" }
-egui-winit = { git = "https://github.com/crmne/egui", rev = "61a38149a4010ff9b8257dc6a03b98818b98fd02" }
-egui_extras = { git = "https://github.com/crmne/egui", rev = "61a38149a4010ff9b8257dc6a03b98818b98fd02" }
-egui_glow = { git = "https://github.com/crmne/egui", rev = "61a38149a4010ff9b8257dc6a03b98818b98fd02" }
-emath = { git = "https://github.com/crmne/egui", rev = "61a38149a4010ff9b8257dc6a03b98818b98fd02" }
-epaint = { git = "https://github.com/crmne/egui", rev = "61a38149a4010ff9b8257dc6a03b98818b98fd02" }
-epaint_default_fonts = { git = "https://github.com/crmne/egui", rev = "61a38149a4010ff9b8257dc6a03b98818b98fd02" }
+ecolor = { git = "https://github.com/crmne/egui", rev = "ba6790fe7cf46e58e8d27ce1524cbfdee745e938" }
+eframe = { git = "https://github.com/crmne/egui", rev = "ba6790fe7cf46e58e8d27ce1524cbfdee745e938" }
+egui = { git = "https://github.com/crmne/egui", rev = "ba6790fe7cf46e58e8d27ce1524cbfdee745e938" }
+egui-wgpu = { git = "https://github.com/crmne/egui", rev = "ba6790fe7cf46e58e8d27ce1524cbfdee745e938" }
+egui-winit = { git = "https://github.com/crmne/egui", rev = "ba6790fe7cf46e58e8d27ce1524cbfdee745e938" }
+egui_extras = { git = "https://github.com/crmne/egui", rev = "ba6790fe7cf46e58e8d27ce1524cbfdee745e938" }
+egui_glow = { git = "https://github.com/crmne/egui", rev = "ba6790fe7cf46e58e8d27ce1524cbfdee745e938" }
+emath = { git = "https://github.com/crmne/egui", rev = "ba6790fe7cf46e58e8d27ce1524cbfdee745e938" }
+epaint = { git = "https://github.com/crmne/egui", rev = "ba6790fe7cf46e58e8d27ce1524cbfdee745e938" }
+epaint_default_fonts = { git = "https://github.com/crmne/egui", rev = "ba6790fe7cf46e58e8d27ce1524cbfdee745e938" }
 # crmne/winit apps-0.30, shared with the same apps: winit 0.30.13 plus Wayland
 # `Occluded` for the xdg-shell suspended state with commits on the app's behalf
 # while it isn't presenting (rust-windowing/winit#4709, #4710), macOS Quit
@@ -183,7 +188,9 @@ epaint_default_fonts = { git = "https://github.com/crmne/egui", rev = "61a38149a
 # different scale (winit#4694). eframe from the fork above calls the Occluded
 # API. File drops on Wayland (#178), with egui's clipboard on winit's one
 # data device: Hyprland sends the clipboard only to a client's first data
-# device, so a second one stopped pasting (crmne/spotifast#614). A copy of it
+# device, so a second one stopped pasting (crmne/spotifast#614). A dropped
+# macOS window is ordered out before it closes, so a Touch Bar exception
+# cannot leave it on screen (#260, rust-windowing/winit#4728). A copy of it
 # in vendor/winit also reports the pointer's position while a file is dragged
 # over the window on Wayland. See vendor/winit/VENDORED.md.
 winit = { path = "vendor/winit" }

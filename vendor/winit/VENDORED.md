@@ -1,7 +1,7 @@
 # winit (cópia do fork crmne/winit)
 
 Cópia de [crmne/winit](https://github.com/crmne/winit) `apps-0.30` no commit
-`fb8b24c` (o que o upstream do ZapFast fixa), ligada pelo `[patch.crates-io]`
+`ed7caa9` (o que o upstream do ZapFast fixa), ligada pelo `[patch.crates-io]`
 do `Cargo.toml` do ZapFast. Os manifestos (`Cargo.toml` e `dpi/Cargo.toml`)
 trocam os campos herdados do workspace pelos valores do commit; sem
 `examples`, `tests` nem `docs`.
