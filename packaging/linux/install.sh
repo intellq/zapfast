@@ -230,12 +230,7 @@ case ":$PATH:" in
     ;;
 esac
 
-echo "ZapFast instalado em $installed"
-echo "Atalho no menu de aplicativos: $apps_dir/zapfast.desktop"
-echo "Links do WhatsApp (wa.me, api.whatsapp.com, whatsapp://) abrem no ZapFast."
-if [[ $desktop_shortcut == yes && -n ${desktop_dir:-} && -d ${desktop_dir:-/nonexistent} ]]; then
-  echo "Atalho na área de trabalho: $desktop_dir/zapfast.desktop"
-fi
+echo "ZapFast instalado."
 if [[ $added_path == yes ]]; then
   echo "$bin_dir foi adicionado ao PATH; vale nos terminais novos e na próxima sessão."
 fi
@@ -245,5 +240,6 @@ if [[ -n $other ]]; then
   echo "Atenção: há outro zapfast em $other. Remova-o para não abrir a cópia errada." >&2
 fi
 if pgrep -x zapfast >/dev/null 2>&1; then
+  echo
   echo "O ZapFast está aberto: feche-o (Ctrl+Q) e abra de novo para usar esta versão."
 fi
