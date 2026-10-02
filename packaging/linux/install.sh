@@ -11,6 +11,38 @@ set -euo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
+# Started from a file manager there is no terminal to read the messages in, so
+# they are collected and shown in a window at the end, whether the install
+# worked or not.
+if [[ ! -t 1 && ! -t 2 && -n ${DISPLAY:-}${WAYLAND_DISPLAY:-} ]]; then
+  report=$(mktemp)
+  exec >"$report" 2>&1
+  show_result() {
+    local status=$1 text kind=info
+    trap - EXIT
+    text=$(cat "$report")
+    rm -f "$report"
+    if [[ $status -ne 0 ]]; then
+      kind=error
+      text="A instalação do ZapFast falhou (código $status).${text:+$'\n\n'}$text"
+    fi
+    if command -v kdialog >/dev/null 2>&1; then
+      if [[ $kind == error ]]; then
+        kdialog --title ZapFast --error "$text" || true
+      else
+        kdialog --title ZapFast --msgbox "$text" || true
+      fi
+    elif command -v zenity >/dev/null 2>&1; then
+      zenity "--$kind" --no-markup --title ZapFast --text "$text" || true
+    elif command -v notify-send >/dev/null 2>&1; then
+      notify-send --app-name ZapFast --icon zapfast ZapFast "$text" || true
+    elif command -v xmessage >/dev/null 2>&1; then
+      xmessage -center "$text" || true
+    fi
+  }
+  trap 'show_result $?' EXIT
+fi
+
 desktop_shortcut=yes
 for argument in "$@"; do
   case "$argument" in

@@ -2667,9 +2667,19 @@ impl Worker {
                 } else {
                     None
                 };
-                let _ =
+                let applied =
                     self.archive
                         .set_muted_at(&chat, until, update.timestamp.timestamp_millis());
+                log::debug!(
+                    "app state: mute of a {} until {until:?} (full sync: {}, stored: {})",
+                    if chat.ends_with("@g.us") {
+                        "group"
+                    } else {
+                        "chat"
+                    },
+                    update.from_full_sync,
+                    applied.is_ok()
+                );
                 self.emit_chat(&chat);
             }
             E::RemoveRecentStickerUpdate(update) => self.recent_sticker_removed(update),
@@ -4050,6 +4060,26 @@ impl Worker {
             {
                 self.learn_pair(&lid, &pn);
             }
+        }
+        {
+            let groups = || {
+                parsed
+                    .chats
+                    .iter()
+                    .filter(|chat| chat.id.ends_with("@g.us"))
+            };
+            log::debug!(
+                "history chunk: {} chats, {} groups ({} muted, {} cleared, {} without mute metadata), chat state applied: {metadata}",
+                parsed.chats.len(),
+                groups().count(),
+                groups()
+                    .filter(|chat| matches!(chat.muted_until, Some(Some(_))))
+                    .count(),
+                groups()
+                    .filter(|chat| matches!(chat.muted_until, Some(None)))
+                    .count(),
+                groups().filter(|chat| chat.muted_until.is_none()).count(),
+            );
         }
         let mut filed = Vec::new();
         for (id, name) in &parsed.push_names {

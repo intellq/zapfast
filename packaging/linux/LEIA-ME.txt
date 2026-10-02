@@ -9,6 +9,9 @@ e na área de trabalho (use --no-desktop-shortcut para não criar este). Se
 ~/.local/bin não estiver no PATH, o instalador o acrescenta ao ~/.profile (e
 ao ~/.bashrc, ~/.zshrc ou fish, se existirem).
 
+Se o instalador for aberto pelo gerenciador de arquivos (Dolphin, Nautilus),
+ele mostra uma janela com o resultado: instalado ou o motivo do erro.
+
 Instalado assim, o ZapFast avisa quando há versão nova e se atualiza sozinho.
 Rodar o install.sh de uma versão mais nova também atualiza.
 

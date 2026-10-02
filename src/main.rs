@@ -436,6 +436,12 @@ fn native_options(demo_persistence: Option<std::path::PathBuf>) -> eframe::Nativ
         .with_fullsize_content_view(true)
         .with_titlebar_shown(false)
         .with_title_shown(false);
+    // eframe caps the restored size at the largest monitor, but under Wayland
+    // winit reports a monitor's integer scale (a 125% screen counts as 200%),
+    // which makes that cap far too small: a window left tall came back short
+    // after closing to the tray. The first frame checks the size instead.
+    #[cfg(target_os = "linux")]
+    let viewport = viewport.with_clamp_size_to_monitor_size(false);
     eframe::NativeOptions {
         viewport,
         persistence_path: demo_persistence,
@@ -474,6 +480,44 @@ fn unzoom_saved_window(storage: &mut dyn eframe::Storage, zoom: f32) {
         *size *= zoom;
         eframe::set_value(storage, SAVED_WINDOW_KEY, &window);
     }
+}
+
+/// The size, in physical pixels, a window gets when it is larger than the
+/// monitor it is on, or `None` when it fits.
+#[cfg(any(target_os = "linux", test))]
+fn size_within_monitor(window: (u32, u32), monitor: (u32, u32)) -> Option<(u32, u32)> {
+    if monitor.0 == 0 || monitor.1 == 0 || (window.0 <= monitor.0 && window.1 <= monitor.1) {
+        return None;
+    }
+    Some((window.0.min(monitor.0), window.1.min(monitor.1)))
+}
+
+/// Shrinks a restored window that is larger than its monitor, which some
+/// Linux systems cannot show. The window's own scale is exact where the
+/// monitor's is rounded, so this compares physical pixels.
+#[cfg(target_os = "linux")]
+fn fit_to_monitor(ctx: &egui::Context, frame: &eframe::Frame) {
+    let Some(window) = frame.winit_window() else {
+        return;
+    };
+    let Some(monitor) = window.current_monitor() else {
+        return;
+    };
+    let (inner, size) = (window.inner_size(), monitor.size());
+    let Some((width, height)) =
+        size_within_monitor((inner.width, inner.height), (size.width, size.height))
+    else {
+        return;
+    };
+    log::warn!(
+        "the restored window ({}x{}) is larger than its monitor; fitting it to {width}x{height}",
+        inner.width,
+        inner.height
+    );
+    let points = ctx.input(|input| input.pixels_per_point);
+    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(
+        egui::vec2(width as f32, height as f32) / points,
+    ));
 }
 
 /// eframe adapter holding the long-lived [`app::App`] for one window; it goes
@@ -573,6 +617,8 @@ impl eframe::App for Shell {
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         if !std::mem::replace(&mut self.window_recovery_checked, true) {
             fastframe_shell::window::recover_offscreen(ctx, frame);
+            #[cfg(target_os = "linux")]
+            fit_to_monitor(ctx, frame);
         }
         let app = &mut *self.app;
         #[cfg(feature = "demo")]
@@ -762,6 +808,22 @@ mod saved_window_tests {
     /// What eframe wrote for a window left at 1079 by 958 points at 120% on
     /// Wayland, where there is no position.
     const SAVED: &str = "(inner_position_pixels:None,outer_position_pixels:None,fullscreen:false,maximized:false,inner_size_points:Some((x:899.1666,y:798.3333)))";
+
+    #[test]
+    fn a_window_is_shrunk_only_when_it_exceeds_the_monitor() {
+        assert_eq!(size_within_monitor((1500, 1380), (3440, 1440)), None);
+        assert_eq!(size_within_monitor((3440, 1440), (3440, 1440)), None);
+        assert_eq!(
+            size_within_monitor((3600, 1380), (3440, 1440)),
+            Some((3440, 1380))
+        );
+        assert_eq!(
+            size_within_monitor((900, 2000), (1920, 1080)),
+            Some((900, 1080))
+        );
+        // A monitor that reports no size leaves the window alone.
+        assert_eq!(size_within_monitor((900, 800), (0, 0)), None);
+    }
 
     #[test]
     fn the_saved_size_leaves_the_zoom_out() {
