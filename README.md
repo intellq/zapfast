@@ -679,7 +679,9 @@ de sincronizar a exclusão "para mim" com o celular é uma extensão deste fork.
   Unnamed groups use a shared participant summary for their title and subtitle.
   It names each saved contact by its whole first name as saved on the phone (the
   first word of the name when none is known), repeated names appear as `Andrea ×3`, and your
-  own entry is shown as `You`.
+  own entry is shown as `You`. The sender before a group's last message goes by
+  the same name. Contacts synced by an older version are read once more from the
+  phone after updating, so their first names are known too.
   Incomplete group metadata preserves known names and retries with backoff;
   an empty cached subject remains eligible for recovery.
   Typing indicators show other participants, excluding your own linked devices.
@@ -1293,8 +1295,10 @@ way. The pencil opens **New chat**, with **Message yourself** and
 lets you message a new number without saving it. **Also save to your phone's
 contacts** in that dialog adds the contact to your phone's address book too, as
 the phone asks; the next contact starts from your last choice. You
-can also open a group member's contact card. Saved names sync through WhatsApp
-to your phone and linked devices.
+can also open a group member's contact card. Renaming a contact opens with its
+first and last name as saved, each of which may hold several words; a name
+saved without a separate first name opens whole in the first-name field. Saved
+names sync through WhatsApp to your phone and linked devices.
 
 ### Locked chats
 

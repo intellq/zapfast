@@ -41,6 +41,7 @@ mod blocking;
 mod bot_replies;
 mod calls;
 mod channel_pictures;
+mod contact_names;
 mod device_store;
 mod favorite_chats;
 mod interactive;
@@ -556,6 +557,17 @@ pub async fn run(
             && archive
                 .set_meta(stickers::FAVORITES_RECOVERED, "complete")
                 .is_ok());
+    // Likewise only contacts synced before first names were kept lack them.
+    let first_names_recovered = archive
+        .meta(contact_names::FIRST_NAMES_RECOVERED)
+        .ok()
+        .flatten()
+        .as_deref()
+        == Some("complete")
+        || (archive.chats().is_ok_and(|chats| chats.is_empty())
+            && archive
+                .set_meta(contact_names::FIRST_NAMES_RECOVERED, "complete")
+                .is_ok());
     let mut worker = Worker {
         attachment_limit,
         keep_deleted: false,
@@ -622,6 +634,8 @@ pub async fn run(
         favorites_again: false,
         favorites_recovered,
         favorites_recovering: false,
+        first_names_recovered,
+        first_names_recovering: false,
         downloads: HashSet::new(),
         read_sync: ReadSync::default(),
         favorite_chats: Default::default(),
@@ -938,6 +952,10 @@ struct Worker {
     favorites_recovered: bool,
     /// That replay is running.
     favorites_recovering: bool,
+    /// The phone's contacts from before first names were kept were replayed.
+    first_names_recovered: bool,
+    /// That replay is running.
+    first_names_recovering: bool,
     /// Active attachment downloads by chat, message id, and carousel card.
     downloads: HashSet<(ChatId, String, Option<usize>)>,
     /// Serial forward in flight. The next send waits for the running one.
@@ -2473,6 +2491,7 @@ impl Worker {
                 self.push_favorites();
                 self.fetch_missing_favorites();
                 self.recover_favorites();
+                self.recover_first_names();
                 let _ = self.archive.retry_poll_votes();
                 self.pump_poll_votes();
                 if let Some(client) = self.client.clone() {
@@ -4867,6 +4886,7 @@ impl Worker {
             Command::FavoritesPushed => self.favorites_pushed(),
             Command::FavoriteFetched { hash, result } => self.favorite_fetched(&hash, result),
             Command::FavoritesRecovered { complete } => self.favorites_recovered(complete),
+            Command::FirstNamesRecovered { complete } => self.first_names_recovered(complete),
             Command::ImportStickerUrl { url } => {
                 let commands = self.commands.clone();
                 let packs = self.packs_dir();
@@ -10343,6 +10363,60 @@ mod tests {
     }
 
     #[test]
+    fn the_contact_replay_brings_first_names_saved_before_they_were_kept() {
+        const ID: &str = "15551234568@s.whatsapp.net";
+        let (mut worker, _events, _inbox, _wa) = receipt_tests::worker();
+        worker.first_names_recovered = false;
+        // Synced before first names were kept: the full name alone.
+        let contact = Contact {
+            id: ID.into(),
+            full_name: Some("Mary Ann Evans".into()),
+            first_name: None,
+            push_name: None,
+        };
+        worker.archive.upsert_contact(&contact).expect("stores");
+        worker.contacts.insert(ID.into(), contact);
+        // The snapshot replays the contact with its first name.
+        worker.on_contact_update(
+            &wa_events::ContactUpdate::builder()
+                .jid(Jid::pn("15551234568"))
+                .timestamp(whatsapp_rust::wacore::time::from_millis_or_now(1))
+                .action(Box::new(wa::sync_action_value::ContactAction {
+                    full_name: Some("Mary Ann Evans".into()),
+                    first_name: Some("Mary Ann".into()),
+                    ..Default::default()
+                }))
+                .from_full_sync(true)
+                .build(),
+        );
+        let stored = worker.archive.contact(ID).expect("reads").expect("stored");
+        assert_eq!(stored.first_name.as_deref(), Some("Mary Ann"));
+
+        // An unfinished replay is asked again on the next connection.
+        worker.first_names_recovering = true;
+        worker.first_names_recovered(false);
+        assert!(!worker.first_names_recovered && !worker.first_names_recovering);
+        assert_eq!(
+            worker
+                .archive
+                .meta(contact_names::FIRST_NAMES_RECOVERED)
+                .unwrap(),
+            None
+        );
+        // A finished one is never asked again.
+        worker.first_names_recovered(true);
+        assert!(worker.first_names_recovered);
+        assert_eq!(
+            worker
+                .archive
+                .meta(contact_names::FIRST_NAMES_RECOVERED)
+                .unwrap()
+                .as_deref(),
+            Some("complete")
+        );
+    }
+
+    #[test]
     fn polish_refreshes_a_stale_quote_label_when_the_sender_id_is_unchanged() {
         const SENDER: &str = "15551234567@s.whatsapp.net";
         let (mut worker, _events, _inbox, _wa) = receipt_tests::worker();
@@ -12976,6 +13050,8 @@ mod receipt_tests {
             favorites_again: false,
             favorites_recovered: true,
             favorites_recovering: false,
+            first_names_recovered: true,
+            first_names_recovering: false,
             downloads: HashSet::new(),
             read_sync: ReadSync::default(),
             favorite_chats: Default::default(),

@@ -407,6 +407,11 @@ pub enum Command {
     FavoritesRecovered {
         complete: bool,
     },
+    /// Internal: the one-time replay of the phone's contacts, for the first
+    /// names saved before ZapFast kept them, finished.
+    FirstNamesRecovered {
+        complete: bool,
+    },
     /// Internal: a favorite from the phone finished downloading.
     FavoriteFetched {
         hash: String,

@@ -1811,6 +1811,22 @@ impl App {
 
     /// Resolves a consistent display name using settings and an optional
     /// message-provided fallback. Our own id becomes "You".
+    /// The short name WhatsApp shows where space is short (a group's member
+    /// line, the sender before a group's last message) for `id`, whose full
+    /// display name is `name`: the first name saved with the contact, whole,
+    /// as it can hold several words. Without one (a profile name, or a
+    /// contact the phone has not sent since first names were kept) the first
+    /// word of the name; a phone number and our own "You" stay whole.
+    pub fn short_name<'a>(&'a self, id: &str, name: &'a str) -> &'a str {
+        if self.me.as_deref() == Some(id) || name.starts_with('+') {
+            return name;
+        }
+        if let Some(first) = self.contacts.get(id).and_then(Contact::first_name) {
+            return first;
+        }
+        name.split_whitespace().next().unwrap_or(name)
+    }
+
     pub fn display_name_or(&self, id: &str, hint: Option<&str>) -> String {
         if self.me.as_deref() == Some(id) {
             return tr("You").to_owned();
@@ -2167,17 +2183,7 @@ impl App {
             if name.starts_with('+') || name == tr("Unknown") {
                 numbers.push(name);
             } else {
-                // The saved first name, as WhatsApp shows here, whole: it can
-                // hold several words. Without one (a profile name, or a
-                // contact synced before first names were kept), the first
-                // word, so the line stays short.
-                let first = self.contacts.get(id).and_then(Contact::first_name);
-                let name = name.trim_start_matches('~');
-                names.push(
-                    first
-                        .unwrap_or_else(|| name.split_whitespace().next().unwrap_or(name))
-                        .to_owned(),
-                );
+                names.push(self.short_name(id, name.trim_start_matches('~')).to_owned());
             }
         }
         names.sort_by_key(|name| name.to_lowercase());
@@ -5542,8 +5548,9 @@ impl App {
                 self.group_name_edit = None;
                 self.refocus_composer(ctx);
             }
-            Action::EditContact(prefill) => {
-                self.contact_edit = Some(crate::util::split_name(&prefill));
+            Action::EditContact { id, name } => {
+                let first = self.contacts.get(&id).and_then(Contact::first_name);
+                self.contact_edit = Some(crate::util::editor_names(&name, first));
             }
             Action::SaveContact { id, first, last } => {
                 self.contact_edit = None;
@@ -12467,6 +12474,82 @@ mod name_tests {
         assert_eq!(
             app.participant_names(&chat),
             "Bob, Grace, Mary, My Dih, Stray"
+        );
+        // The sender before a group's last message goes by the same name.
+        assert_eq!(
+            app.short_name("15550000010@s.whatsapp.net", "My Dih"),
+            "My Dih"
+        );
+        assert_eq!(
+            app.short_name("15550000011@s.whatsapp.net", "Grace Hopper"),
+            "Grace"
+        );
+        assert_eq!(app.short_name("2@s.whatsapp.net", "~Bob Builder"), "~Bob");
+        assert_eq!(
+            app.short_name("3@s.whatsapp.net", "+1 555 0100"),
+            "+1 555 0100"
+        );
+        let me = app.me.clone().unwrap();
+        assert_eq!(app.short_name(&me, "You"), "You");
+    }
+
+    #[test]
+    fn the_contact_editor_opens_with_the_saved_first_name_whole() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        let saved = |app: &mut App, id: &str, full: &str, first: Option<&str>| {
+            app.contacts.insert(
+                id.into(),
+                Contact {
+                    id: id.into(),
+                    full_name: Some(full.into()),
+                    first_name: first.map(Into::into),
+                    push_name: None,
+                },
+            );
+        };
+        let edit = |app: &mut App, id: &str, name: &str| {
+            app.apply(
+                Action::EditContact {
+                    id: id.into(),
+                    name: name.into(),
+                },
+                &ctx,
+            );
+            app.contact_edit.take().expect("the editor opens")
+        };
+        let pair = |first: &str, last: &str| (first.to_owned(), last.to_owned());
+        // #314: a first name of two words, without and with a last name.
+        saved(
+            &mut app,
+            "15550000020@s.whatsapp.net",
+            "first second",
+            Some("first second"),
+        );
+        assert_eq!(
+            edit(&mut app, "15550000020@s.whatsapp.net", "first second"),
+            pair("first second", "")
+        );
+        saved(
+            &mut app,
+            "15550000021@s.whatsapp.net",
+            "first second third",
+            Some("first second"),
+        );
+        assert_eq!(
+            edit(&mut app, "15550000021@s.whatsapp.net", "first second third"),
+            pair("first second", "third")
+        );
+        // Without a saved first name the whole name stays first, so saving
+        // it unchanged cannot shorten the first name to one word.
+        saved(&mut app, "15550000022@s.whatsapp.net", "My Dih", None);
+        assert_eq!(
+            edit(&mut app, "15550000022@s.whatsapp.net", "My Dih"),
+            pair("My Dih", "")
+        );
+        assert_eq!(
+            compose_name("My Dih", ""),
+            (Some("My Dih".into()), Some("My Dih".into()))
         );
     }
 

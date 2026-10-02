@@ -1660,8 +1660,12 @@ pub enum Action {
         sticker: PathBuf,
         member: bool,
     },
-    /// Opens the prefilled contact-name editor.
-    EditContact(String),
+    /// Opens the contact-name editor for `id`, prefilled with `name` and
+    /// split as the contact's saved first name says.
+    EditContact {
+        id: String,
+        name: String,
+    },
     /// Saves a contact through WhatsApp contact sync. `first` is the short
     /// display name and `last` completes the full name.
     SaveContact {

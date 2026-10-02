@@ -2158,7 +2158,10 @@ fn chat_info(app: &mut App, ui: &mut egui::Ui, id: &str) {
             } else {
                 tr("Add to contacts")
             },
-            vec![Action::EditContact(name.trim_start_matches('~').to_owned())],
+            vec![Action::EditContact {
+                id: id.to_owned(),
+                name: name.trim_start_matches('~').to_owned(),
+            }],
         ));
     }
     if let Some(phone) = chat.phone() {
