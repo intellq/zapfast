@@ -149,6 +149,12 @@ fastframe-macos = { git = "https://github.com/crmne/fastframe", tag = "v0.2.2" }
 # without a marker file (vendor/fastframe-update/VENDORED.md).
 fastframe-update = { path = "vendor/fastframe-update", features = ["reqwest"] }
 
+# Copy of wacore-appstate that accepts the regular_high snapshot whose
+# aggregate MAC does not match (mutes and favorite chats never synced on a new
+# link). See vendor/wacore-appstate/VENDORED.md.
+[patch."https://github.com/oxidezap/whatsapp-rust"]
+wacore-appstate = { path = "vendor/wacore-appstate" }
+
 [patch.crates-io]
 # crmne/egui apps-0.36, shared with Spotifast, RekordFlash and TonePush: egui
 # 0.36.1 with right-to-left shaping and glyph clusters from crmne/zapfast#144
