@@ -277,11 +277,6 @@ fn archived_button(app: &mut App, ui: &mut egui::Ui) {
         tr("Archived chats"),
     )
     .tab_stop(Stop::Archived);
-    // Unread chats in the archive show as a dot on the corner.
-    if app.archived_unread() > 0 {
-        let dot = response.rect.right_top() + vec2(-7.0, 7.0);
-        ui.painter().circle_filled(dot, 4.0, palette.accent);
-    }
     if response.clicked() {
         app.actions.push(Action::ShowArchived(true));
     }

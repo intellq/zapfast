@@ -553,6 +553,8 @@ Da sincronização com o upstream 0.18.2:
 
 Na 0.18.204:
 
+- **Botão de arquivadas** sem a bolinha de não lidas: quem quiser verificar,
+  abre o botão.
 - **Barra de seleção** de mensagens com três ícones, sem texto e com dica:
   **encaminhar**, **copiar** (o texto das selecionadas, uma linha por
   mensagem quando há várias) e **apagar** (pergunta se é para mim ou, quando
@@ -663,8 +665,8 @@ de sincronizar a exclusão "para mim" com o celular é uma extensão deste fork.
   the end of the list; channels cannot be favorites.
   Followed channels have their own **Channels** chip and stay out of the other
   filters; right-click it to mute or unmute every channel at once. The archive
-  button, left of the one that hides the chat list, opens the archived chats (a
-  dot on it says one has unread messages); inside, the gear is a red X that
+  button, left of the one that hides the chat list, opens the archived chats (it
+  shows nothing for unread ones: open it to look); inside, the gear is a red X that
   returns to the chat list. **Hide the chat filters** in Settings, Appearance,
   removes the row of chips (off by default) and lists every chat. Right-click a chat and choose **Mark as unread**
   to put an empty dot on it, as on the phone; the mark syncs with your phone

@@ -2371,14 +2371,6 @@ impl App {
         contacts
     }
 
-    /// Archived chats with unread messages, for the Archived chip.
-    pub fn archived_unread(&self) -> usize {
-        self.chats
-            .iter()
-            .filter(|chat| chat.archived && !chat.locked && chat.unread > 0)
-            .count()
-    }
-
     pub fn archived_count(&self) -> usize {
         self.chats
             .iter()
@@ -11152,7 +11144,6 @@ mod tests {
         assert_eq!(names(&app), ["News"]);
         app.apply(Action::ShowArchived(true), &ctx);
         assert_eq!(names(&app), ["Old"]);
-        assert_eq!(app.archived_unread(), 1);
         app.apply(Action::SetChatFilter(ChatFilter::All), &ctx);
         assert!(!app.show_archived, "choosing a filter leaves the archive");
         assert_eq!(names(&app), ["Ada"]);
