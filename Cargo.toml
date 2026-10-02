@@ -180,8 +180,10 @@ epaint_default_fonts = { git = "https://github.com/crmne/egui", rev = "0b431145c
 # through close requests (winit#4692), and file drag and drop on Wayland
 # through the data device (#178), which upstream only has in 0.31's new API
 # (winit#4571), and Windows drags between monitors of different scale
-# (winit#4694). eframe from the fork above calls the Occluded API.
-winit = { git = "https://github.com/crmne/winit", rev = "f4fed12c0b1426ee00ba56cd60898b309d9d917b" }
+# (winit#4694). eframe from the fork above calls the Occluded API. A copy of it
+# in vendor/winit also reports the pointer's position while a file is dragged
+# over the window on Wayland. See vendor/winit/VENDORED.md.
+winit = { path = "vendor/winit" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus-secret-service-keyring-store = { version = "1.0.1", features = ["rt-tokio-crypto-rust"] }
