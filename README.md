@@ -889,7 +889,7 @@ de sincronizar a exclusão "para mim" com o celular é uma extensão deste fork.
   unsent text survives closing ZapFast and restarting, and the chat list shows
   a chat's draft in its row, after "Draft:". Open menus, dialogs, and unfinished actions
   are dismissed first. Sending while reading older messages keeps your place; use the
-  newest-message button or End to return to the latest message. With **Replace text with emoji** on in Settings,
+  newest-message button or End to return to the latest message. The chat list scrolls to the top after you send, where the chat now is; under the Favorites chip the list keeps the phone's order and stays in place. With **Replace text with emoji** on in Settings,
   type `:name` to autocomplete an emoji without leaving the composer; it is
   off by default, so text such as `:P` is sent as typed, or `@` in a group to mention a member.
   Reply, react with any emoji, edit, forward, delete, and check when a message was sent,

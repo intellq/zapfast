@@ -376,6 +376,8 @@ pub struct App {
     pub open_chat: Option<ChatId>,
     /// Chat row to reveal after keyboard navigation.
     pub scroll_chat_into_view: Option<ChatId>,
+    /// A sent message moves its chat up, so the chat list goes to the top.
+    pub scroll_chats_to_top: bool,
     /// Composer drafts by chat.
     pub drafts: HashMap<ChatId, String>,
     draft_mentions: HashMap<ChatId, Vec<ComposerMention>>,
@@ -1093,6 +1095,7 @@ impl App {
             conversations: HashMap::new(),
             open_chat,
             scroll_chat_into_view: None,
+            scroll_chats_to_top: false,
             drafts: HashMap::new(),
             draft_mentions: HashMap::new(),
             composer: String::new(),
@@ -2290,8 +2293,7 @@ impl App {
             })
             .collect();
         // The Favorites chip keeps the phone's order below the pinned chats.
-        let favorites_order =
-            filtering && self.label_filter.is_none() && filter == ChatFilter::Favorites;
+        let favorites_order = self.favorites_order();
         chats.sort_by(|a, b| {
             b.pinned.cmp(&a.pinned).then_with(|| {
                 if a.pinned && b.pinned {
@@ -2335,6 +2337,16 @@ impl App {
             }
             _ => true,
         }
+    }
+
+    /// Whether the chat list keeps the phone's favorites order instead of the
+    /// latest activity, so a sent message does not move its chat up.
+    fn favorites_order(&self) -> bool {
+        self.label_filter.is_none()
+            && self.chat_filter_in_use() == ChatFilter::Favorites
+            && !self.show_archived
+            && crate::util::search_key(self.search.trim()).is_empty()
+            && !self.locked_folder_open()
     }
 
     /// Matching individual contacts without a listed chat, sorted by name.
@@ -3870,8 +3882,16 @@ impl App {
     /// Whatever the user sends, the history goes to its end to show it, from
     /// anywhere and even from a bubble with keyboard focus.
     fn follow_outgoing(&mut self) {
+        self.follow_sent_chat();
         self.scroll_to_bottom = true;
         self.scroll_to_bottom_forced = true;
+    }
+
+    /// Scrolls the chat list to the top, where a sent message moves its chat.
+    fn follow_sent_chat(&mut self) {
+        if !self.favorites_order() {
+            self.scroll_chats_to_top = true;
+        }
     }
 
     fn send_text(&mut self, chat: ChatId, text: String, quoting: Option<String>) {
@@ -4562,6 +4582,7 @@ impl App {
                         Ok(draft) => {
                             self.poll_creating = true;
                             self.backend.send(Command::CreatePoll { chat, draft });
+                            self.follow_sent_chat();
                         }
                         Err(error) => self.toast_error(error),
                     }
@@ -4811,6 +4832,7 @@ impl App {
                     to_chats,
                     without_captions,
                 });
+                self.follow_sent_chat();
                 self.dialog = None;
                 self.forward_search.clear();
                 self.forward_targets.clear();
@@ -5307,6 +5329,7 @@ impl App {
                         "Sending the sticker pack…",
                     ));
                     self.backend.send(Command::SendStickerPack { chat, dir });
+                    self.follow_sent_chat();
                 }
             }
             Action::SetStickerPack {
@@ -10264,6 +10287,69 @@ mod tests {
             .filter(|toast| toast.kind == ToastKind::Error)
             .map(|toast| toast.message.clone())
             .collect()
+    }
+
+    #[test]
+    fn sending_a_message_scrolls_the_chat_list_to_the_top() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut app, _) = App::headless(AppDirs::under(root.path()), Settings::default());
+        let (backend, _commands) = Backend::recording();
+        app.backend = backend;
+        let ctx = egui::Context::default();
+        let chat = "fixture@s.whatsapp.net";
+        app.open_chat = Some(chat.into());
+        let sends = [
+            Action::SendText {
+                chat: chat.into(),
+                text: "Text fixture".into(),
+                quoting: None,
+            },
+            Action::SendSticker(PathBuf::from("sticker.webp")),
+            Action::ShareStickerPack(PathBuf::from("sticker-pack")),
+            Action::Forward {
+                from_chat: chat.into(),
+                messages: vec!["fixture-message".into()],
+                to_chats: vec!["other@s.whatsapp.net".into()],
+                without_captions: false,
+            },
+            Action::CreatePoll {
+                chat: chat.into(),
+                draft: crate::model::PollDraft {
+                    question: "Question fixture".into(),
+                    options: vec!["One".into(), "Two".into()],
+                    multiple: false,
+                },
+            },
+        ];
+        // The fork's forward goes only to the chats picked in its dialog.
+        app.forward_targets = vec!["other@s.whatsapp.net".into()];
+        for send in sends {
+            let name = format!("{send:?}");
+            app.scroll_chats_to_top = false;
+            app.apply(send, &ctx);
+            assert!(app.scroll_chats_to_top, "{name} scrolls the list up");
+        }
+    }
+
+    #[test]
+    fn sending_under_the_favorites_chip_keeps_the_list_in_place() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut app, _) = App::headless(AppDirs::under(root.path()), Settings::default());
+        let (backend, _commands) = Backend::recording();
+        app.backend = backend;
+        let chat = "fixture@s.whatsapp.net";
+        app.open_chat = Some(chat.into());
+        // Favorites keep the phone's order, so the chat does not move up.
+        app.chat_filter = ChatFilter::Favorites;
+        app.apply(
+            Action::SendText {
+                chat: chat.into(),
+                text: "Text fixture".into(),
+                quoting: None,
+            },
+            &egui::Context::default(),
+        );
+        assert!(!app.scroll_chats_to_top);
     }
 
     #[test]
