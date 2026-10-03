@@ -3957,7 +3957,10 @@ fn settled_width(ui: &egui::Ui, view: &View<'_>, message: &Message, cap: f32) ->
     let card = message.quoted.is_some()
         || match &message.content {
             Content::Text { preview, .. } => preview.is_some(),
-            Content::Document { .. } | Content::Audio { .. } | Content::Poll { .. } => true,
+            Content::Document { .. }
+            | Content::Audio { .. }
+            | Content::Poll { .. }
+            | Content::PhoneOnly { .. } => true,
             Content::Interactive { card, .. } => card.is_some(),
             _ => false,
         };
@@ -5530,16 +5533,21 @@ fn content(
                 }
                 None => tr("This message can only be seen on your phone."),
             };
-            mirrored_row(
-                ui,
-                own,
-                |ui| {
-                    theme::icon(ui, Icon::Smartphone, 14.0, palette.dim);
-                },
-                |ui| {
-                    theme::text(ui, text, theme::regular(13.5), palette.secondary);
-                },
-            );
+            // The audio box's width, so the notice wraps inside it instead of
+            // running out to the cap and being cut.
+            ui.scope(|ui| {
+                ui.set_width(width);
+                mirrored_row(
+                    ui,
+                    own,
+                    |ui| {
+                        theme::icon(ui, Icon::Smartphone, 14.0, palette.dim);
+                    },
+                    |ui| {
+                        theme::paragraph(ui, text, theme::regular(13.5), palette.secondary);
+                    },
+                );
+            });
             None
         }
         Content::Unsupported { what } => {
