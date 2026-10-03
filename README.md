@@ -23,7 +23,7 @@ See **[zapfast.rocks](https://zapfast.rocks)** for downloads and guides.
 ## Alterações deste fork (`intellq`)
 
 Este fork acompanha o [projeto original](https://github.com/crmne/zapfast)
-até o commit [`c895bbd`](https://github.com/crmne/zapfast/commit/c895bbd)
+até o commit [`4279245`](https://github.com/crmne/zapfast/commit/4279245)
 (versão 0.18.2 e ajustes seguintes).
 Além das novidades do upstream, esta branch inclui as seguintes mudanças:
 
@@ -560,6 +560,24 @@ Na 0.18.204:
   mensagem quando há várias) e **apagar** (pergunta se é para mim ou, quando
   todas são suas e estão no prazo, para todos). A barra tem fundo sólido, em
   vez de transparente sobre o papel de parede.
+- **Número completo no lugar do mascarado.** Em grupos, quem não está nos seus
+  contatos chega do WhatsApp com o número mascarado (`+55∙∙∙∙∙∙∙∙∙01`) como
+  nome. Quando o ZapFast sabe o número (pelo id ou pelo vínculo do id de
+  privacidade), mostra o número completo; a máscara só fica quando não há
+  outro jeito de identificar a pessoa. Um nome de perfil (`~Nome`) continua
+  valendo mais.
+- **Visualização única** com a largura da caixa de áudio: o aviso quebra em
+  linhas em vez de ser cortado com reticências.
+- Do upstream: o tamanho da janela com zoom se mantém ao reabrir, agora pelo
+  próprio egui (#293, no lugar da correção do fork); enviar uma mensagem leva
+  a lista de conversas ao topo, exceto nas Favoritas, que seguem a ordem do
+  celular (#360); renomear um contato mantém inteiro o primeiro nome de várias
+  palavras (#314); o campo da biografia em **Configurações › Conta** se chama
+  **Recado**, como no celular, e o do aplicativo continua **Sobre** (#352);
+  colar arquivos copiados e soltar arquivos no Wayland passam pelo mesmo canal
+  do winit, que o Hyprland exige (crmne/winit `ed7caa9`, crmne/egui `ba6790f`,
+  fastframe v0.3.0). A cópia em `vendor/winit` foi atualizada e mantém a
+  posição do arrasto.
 
 Na 0.18.203:
 
