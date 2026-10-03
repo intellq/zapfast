@@ -1078,8 +1078,9 @@ de sincronizar a exclusão "para mim" com o celular é uma extensão deste fork.
   `~/Library/LaunchAgents` on macOS, or a `Run` entry for your user on Windows,
   and removes it when turned off. The entry passes `--start-hidden` only while
   **Start minimized** is on, and ZapFast rewrites it when that changes; a
-  minimized start opens the window anyway when no tray is available. The
-  Flatpak does not offer this setting yet.
+  minimized start opens the window anyway when no tray shows ZapFast yet. The
+  tray icon still appears once a panel starts, even one that starts after
+  ZapFast at login. The Flatpak does not offer this setting yet.
 - **Desktop notifications.** Get notifications with the chat picture when you
   are away from the open chat. Muted chats do not notify you, and archived
   chats stay quiet until you unarchive them. Windows notifications

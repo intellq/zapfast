@@ -242,6 +242,9 @@ protocol. These notes are for coding agents and new contributors.
   Linux, tray-icon on Windows and macOS; on macOS made with the first window
   and pumped by `fastframe_tray::idle` while none exists), and `src/macos.rs`
   hands its menu events to `fastframe_tray::claim_menu_event` first.
+  Closing keeps ZapFast running, and a hidden start stays hidden, only while
+  `Tray::is_shown`: on Linux the item exists before a panel shows it (a
+  start at login beats the panel) and registers once one appears.
   `src/single_instance.rs` holds a lock file in the runtime
   directory, and a second launch asks the first to surface over a private
   socket (a token-checked loopback port on Windows). `src/notify.rs` sends desktop notifications

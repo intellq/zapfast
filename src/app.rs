@@ -745,6 +745,10 @@ pub struct App {
     /// Cross-thread window repaint handle.
     waker: Waker,
     tray: Option<fastframe_tray::Tray>,
+    /// Stands in for whether a panel shows the tray item, which tests cannot
+    /// spawn.
+    #[cfg(test)]
+    test_tray_shown: Option<bool>,
     /// Whether the app is running without a window.
     pub window_hidden: bool,
     /// Whether window close should keep the process running.
@@ -946,6 +950,11 @@ fn tray_config(lockable: bool) -> fastframe_tray::Config {
         title: "ZapFast".into(),
         icon: crate::util::app_icon_rgba,
         template_icon: Some(crate::util::tray_template_rgba),
+        // The tray icon is the app icon, so hosts that draw only named icons
+        // may use the installed one.
+        themed_icon: true,
+        // A left click on macOS toggles the window, as on Linux.
+        menu_on_click: false,
         menu,
     }
 }
@@ -1295,6 +1304,8 @@ impl App {
             wa_link_text: None,
             waker,
             tray: None,
+            #[cfg(test)]
+            test_tray_shown: None,
             window_hidden: false,
             hide_intent: false,
             wants_show: false,
@@ -1349,7 +1360,21 @@ impl App {
 
     /// Whether window close keeps the app in the tray.
     pub fn hides_to_tray(&self) -> bool {
-        self.tray.is_some() && self.settings.keep_running_in_background
+        self.tray_shown() && self.settings.keep_running_in_background
+    }
+
+    /// Whether a panel shows the tray item now, so a hidden window can be
+    /// brought back from it. On Linux the item exists before a panel shows
+    /// it (ZapFast started at login before the panel), and on a desktop
+    /// without one it never is.
+    fn tray_shown(&self) -> bool {
+        #[cfg(test)]
+        if let Some(shown) = self.test_tray_shown {
+            return shown;
+        }
+        self.tray
+            .as_ref()
+            .is_some_and(fastframe_tray::Tray::is_shown)
     }
 
     fn handle_tray(&mut self) {
@@ -6170,7 +6195,7 @@ impl App {
                 if self.call_keeps_window() {
                     // A call's card and window go with the main window, so it only steps aside.
                     ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
-                } else if self.tray.is_some() {
+                } else if self.tray_shown() {
                     self.hide_intent = true;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
@@ -8361,6 +8386,34 @@ mod tests {
         assert!(app.tray.is_none());
         assert!(!Resident::start_hidden(&mut app), "no tray, no way back");
         assert!(!app.hide_intent);
+    }
+
+    /// On Linux the tray item exists before a panel shows it (ZapFast started
+    /// at login before the panel, or a desktop without one). Until a panel
+    /// shows it, closing quits, a hidden start opens the window, and the
+    /// window is not hidden, since nothing could bring it back.
+    #[test]
+    fn a_tray_no_panel_shows_does_not_keep_the_app_running() {
+        use fastframe_shell::Resident;
+        let ctx = egui::Context::default();
+        let mut app = app();
+        assert!(app.settings.keep_running_in_background);
+        app.test_tray_shown = Some(false);
+        assert!(!app.hides_to_tray());
+        assert!(!Resident::start_hidden(&mut app));
+        app.apply(Action::HideWindow, &ctx);
+        assert!(!app.hide_intent);
+
+        app.test_tray_shown = Some(true);
+        assert!(app.hides_to_tray());
+        app.apply(Action::HideWindow, &ctx);
+        assert!(app.hide_intent);
+        app.hide_intent = false;
+        assert!(Resident::start_hidden(&mut app));
+        assert!(app.hide_intent);
+
+        app.settings.keep_running_in_background = false;
+        assert!(!app.hides_to_tray(), "the setting still decides");
     }
 
     /// A Wayland compositor ignores an app's focus and unminimize requests, so
