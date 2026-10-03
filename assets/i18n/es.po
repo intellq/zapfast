@@ -2028,6 +2028,11 @@ msgstr "Cuenta"
 msgid "Your name"
 msgstr "Tu nombre"
 
+#: src/ui/settings.rs:1023 src/ui/settings.rs:2006
+msgctxt "profile"
+msgid "About"
+msgstr "Info."
+
 #: src/ui/settings.rs:835 src/ui/settings.rs:1490
 msgid "Change profile picture"
 msgstr "Cambiar foto de perfil"

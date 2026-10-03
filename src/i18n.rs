@@ -347,6 +347,10 @@ mod tests {
             pgettext(Locale::ChineseSimplified, "privacy", "About"),
             "个人简介"
         );
+        assert_eq!(
+            pgettext(Locale::ChineseSimplified, "profile", "About"),
+            "个人简介"
+        );
         assert_eq!(gettext(Locale::ChineseSimplified, "Groups"), "群组");
         assert_eq!(pgettext(Locale::ChineseSimplified, "sound", "None"), "无");
     }

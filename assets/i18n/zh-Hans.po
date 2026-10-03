@@ -2004,6 +2004,11 @@ msgstr "账号"
 msgid "Your name"
 msgstr "你的名字"
 
+#: src/ui/settings.rs:1023 src/ui/settings.rs:2006
+msgctxt "profile"
+msgid "About"
+msgstr "个人简介"
+
 #: src/ui/settings.rs:835 src/ui/settings.rs:1490
 msgid "Change profile picture"
 msgstr "更换头像"

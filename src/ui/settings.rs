@@ -1019,7 +1019,10 @@ fn sections(app: &App) -> Vec<Section> {
     account_section.block(
         vec![
             translated(locale, "Your name"),
-            translated(locale, "About"),
+            Text {
+                shown: crate::i18n::pgettext(locale, "profile", "About"),
+                source: "About".into(),
+            },
             translated(locale, "Change profile picture"),
             translated(locale, "Unlink this computer"),
         ],
@@ -2000,7 +2003,7 @@ fn account(app: &mut App, ui: &mut egui::Ui) {
                     ui,
                     &palette,
                     draft_about,
-                    &crate::i18n::gettext(app.locale, "About"),
+                    &crate::i18n::pgettext(app.locale, "profile", "About"),
                     139,
                 );
                 return;
