@@ -106,6 +106,8 @@ enum Control {
         fn(&mut Settings) -> &mut bool,
         Option<fn(&Settings) -> bool>,
     ),
+    /// A switch bound to the active WhatsApp account.
+    AccountToggle(fn(&mut crate::settings::AccountSettings) -> &mut bool),
     /// Something that lays itself out, like the account card.
     Block(Draw),
     /// A switch shown off and disabled until what it needs is installed,
@@ -202,6 +204,21 @@ impl Section {
         }
     }
 
+    fn account_toggle(
+        &mut self,
+        title: impl Into<Text>,
+        description: impl Into<Text>,
+        field: fn(&mut crate::settings::AccountSettings) -> &mut bool,
+    ) {
+        let row = Row {
+            title: title.into(),
+            description: description.into(),
+            keywords: Vec::new(),
+            indent: false,
+        };
+        self.entries.push((row, Control::AccountToggle(field)));
+    }
+
     fn block(&mut self, keywords: Vec<Text>, draw: impl FnOnce(&mut egui::Ui, &mut App) + 'static) {
         let row = Row {
             keywords,
@@ -260,6 +277,9 @@ fn draw_entry(ui: &mut egui::Ui, app: &mut App, palette: &Palette, row: &Row, co
             ui.add_enabled_ui(enabled.is_none_or(|test| test(&app.settings)), |ui| {
                 toggle(ui, app, &row.title.shown, &row.description.shown, field);
             });
+        }
+        Control::AccountToggle(field) => {
+            account_toggle(ui, app, &row.title.shown, &row.description.shown, field);
         }
         Control::Block(draw) => draw(ui, app),
         Control::Unavailable => {
@@ -419,7 +439,7 @@ fn sections(app: &App) -> Vec<Section> {
         Text::default(),
         180.0,
         move |ui, app| {
-            let label = if app.settings.wallpaper_image.is_some() {
+            let label = if app.account().settings.wallpaper_image.is_some() {
                 crate::i18n::gettext(app.locale, "Image").into_owned()
             } else {
                 wallpaper_label(app.locale, app.settings.wallpaper_color_for(palette.dark))
@@ -770,7 +790,7 @@ fn sections(app: &App) -> Vec<Section> {
     );
 
     let mut notifications = Section::new(translated(locale, "Notifications"));
-    notifications.toggle(
+    notifications.account_toggle(
         translated(locale, "Desktop notifications"),
         translated(
             locale,
@@ -778,7 +798,7 @@ fn sections(app: &App) -> Vec<Section> {
         ),
         |settings| &mut settings.notifications,
     );
-    if app.settings.notifications {
+    if app.account().settings.notifications {
         let (title, description) = sound_text(locale, false);
         notifications.row(title, description, |ui, app| sound_control(ui, app, false));
         notifications.toggle(
@@ -805,12 +825,12 @@ fn sections(app: &App) -> Vec<Section> {
             "Lets contacts see when you read their messages; groups always get them, as on the phone.",
         )
     };
-    privacy.toggle(
+    privacy.account_toggle(
         translated(locale, "Send read receipts"),
         receipts_note,
         |settings| &mut settings.send_read_receipts,
     );
-    privacy.toggle(
+    privacy.account_toggle(
         translated(locale, "Show when you are typing"),
         "",
         |settings| &mut settings.send_typing,
@@ -1057,16 +1077,19 @@ fn sections(app: &App) -> Vec<Section> {
             },
             translated(locale, "Change profile picture"),
             translated(locale, "Unlink this computer"),
+            translated(locale, "Add account"),
+            translated(locale, "Remove this account"),
         ],
         |ui, app| account(app, ui),
     );
 
     let mut files = Section::new(translated(locale, "Files"));
-    let state = app.dirs.state.clone();
+    // The account on screen: each number keeps its own archive and media.
+    let state = app.account().dirs.state.clone();
     let open_folder = crate::i18n::gettext(locale, "Open folder");
     files.row_with_width(
         translated(locale, "Message archive"),
-        app.dirs.archive_db().display().to_string(),
+        app.account().dirs.archive_db().display().to_string(),
         160.0,
         {
             let open_folder = open_folder.clone();
@@ -1080,7 +1103,9 @@ fn sections(app: &App) -> Vec<Section> {
         },
     );
     let custom = app.settings.download_folder.clone();
-    let media = custom.clone().unwrap_or_else(|| app.dirs.media_cache_dir());
+    let media = custom
+        .clone()
+        .unwrap_or_else(|| app.account().dirs.media_cache_dir());
     files.row(
         translated(locale, "Downloads"),
         media.display().to_string(),
@@ -1884,7 +1909,7 @@ fn image_buttons(app: &mut App, ui: &mut egui::Ui, width: f32) {
     let palette = app.palette;
     let choose = crate::i18n::gettext(app.locale, "Choose image…");
     let remove = crate::i18n::gettext(app.locale, "Remove image");
-    let has_image = app.settings.wallpaper_image.is_some();
+    let has_image = app.account().settings.wallpaper_image.is_some();
     let spacing = ui.spacing().item_spacing.x;
     let mut row_width = theme::soft_button_width(ui, &choose, true);
     if has_image {
@@ -2018,7 +2043,7 @@ fn account(app: &mut App, ui: &mut egui::Ui) {
             app.actions.push(Action::PickProfilePicture);
         }
         ui.vertical(|ui| {
-            ui.set_width((ui.available_width() - 230.0).max(160.0));
+            ui.set_width((ui.available_width() - 380.0).max(160.0));
             if let Some((draft_name, draft_about)) = &mut draft {
                 submitted |= profile_field(
                     ui,
@@ -2064,7 +2089,23 @@ fn account(app: &mut App, ui: &mut egui::Ui) {
             }
         });
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if theme::soft_button(
+            // With other numbers here, unlinking this one also takes it off
+            // the switcher; the last one stays, waiting to be linked again.
+            if app.has_several_accounts() {
+                if theme::soft_button(
+                    ui,
+                    &palette,
+                    Some(Icon::LogOut),
+                    &crate::i18n::gettext(app.locale, "Remove this account"),
+                    false,
+                )
+                .clicked()
+                {
+                    let id = app.account().id.clone();
+                    app.actions
+                        .push(Action::ShowDialog(Dialog::ConfirmRemoveAccount(id)));
+                }
+            } else if theme::soft_button(
                 ui,
                 &palette,
                 Some(Icon::LogOut),
@@ -2074,6 +2115,17 @@ fn account(app: &mut App, ui: &mut egui::Ui) {
             .clicked()
             {
                 app.actions.push(Action::ShowDialog(Dialog::ConfirmUnlink));
+            }
+            if theme::soft_button(
+                ui,
+                &palette,
+                Some(Icon::Plus),
+                &crate::i18n::gettext(app.locale, "Add account"),
+                false,
+            )
+            .clicked()
+            {
+                app.actions.push(Action::AddAccount);
             }
         });
     });
@@ -2253,6 +2305,20 @@ fn switch_row(
         changed = response.changed();
     });
     changed
+}
+
+fn account_toggle(
+    ui: &mut egui::Ui,
+    app: &mut App,
+    label: &str,
+    description: &str,
+    field: impl Fn(&mut crate::settings::AccountSettings) -> &mut bool,
+) {
+    let mut value = *field(&mut app.account_mut().settings);
+    if switch_row(ui, app, label, description, &mut value) {
+        *field(&mut app.account_mut().settings) = value;
+        app.account_mut().mark_settings_dirty();
+    }
 }
 
 /// Title and description of the sound for new messages or for mentions and

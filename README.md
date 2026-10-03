@@ -673,6 +673,16 @@ de sincronizar a exclusão "para mim" com o celular é uma extensão deste fork.
 
 - **Links to your phone.** Scan a QR code or link with your phone number.
   Recent history is copied to this computer after linking and stored here.
+  Several numbers can stay linked in one window: click your own picture at
+  the top of the chat list to switch between them or to add another (a dot on
+  it means another number has unread chats; **Settings > Account > Add
+  account** works too). Each number keeps its own keys, archive,
+  media, and per-number settings (notifications, receipts, typing, automatic
+  downloads, wallpaper); the taskbar count adds up every number's unread
+  chats. A setup from an earlier version moves into `accounts/1/` on the first
+  start, keyring key included; if that cannot finish (a locked keyring, or a
+  folder already in the way), ZapFast stops without moving anything and says
+  why in its log.
 - **Chats.** See pinned, unread, muted, and archived chats, typing indicators,
   and message status. Incoming text uses the available conversation width
   before wrapping, while outgoing bubbles stay compact. Search chats, saved
@@ -1494,11 +1504,13 @@ from the environment and honors `NO_PROXY`.
 | What | Linux | Notes |
 | --- | --- | --- |
 | Settings | `~/.config/zapfast/settings.json` | JSON, safe to edit; the app lock password and the locked-chats code are kept only as salted verifiers |
-| Device keys | `~/.local/state/zapfast/session.db` | Owned by whatsapp-rust; deleting it unlinks |
-| Messages | `~/.local/state/zapfast/archive.db` | SQLCipher-encrypted SQLite, unlocked by the OS keyring; raw messages retain attachment keys |
-| Attachments, avatars | `~/.cache/zapfast/` | Safe to delete; **Settings > Files > Change…** sends new downloads to another folder, leaving earlier ones in place |
-| Favorite stickers and packs | `~/.local/state/zapfast/stickers/` | Plain WebP files; each pack is a folder |
-| Wallpaper image | `~/.local/state/zapfast/wallpaper.jpg` | Copy of the chosen picture, or `.png`, `.webp`, `.gif`; deleted by **Remove image** |
+| Account list | `~/.config/zapfast/accounts.json` | Which numbers are linked here and which one is showing |
+| Device keys | `~/.local/state/zapfast/accounts/<id>/session.db` | Owned by whatsapp-rust; deleting it unlinks that number |
+| Messages | `~/.local/state/zapfast/accounts/<id>/archive.db` | SQLCipher-encrypted SQLite, unlocked by the OS keyring; raw messages retain attachment keys |
+| Attachments, avatars | `~/.cache/zapfast/accounts/<id>/` | Safe to delete; **Settings > Files > Change…** sends new downloads to another folder, leaving earlier ones in place |
+| Favorite stickers and packs | `~/.local/state/zapfast/accounts/<id>/stickers/` | Plain WebP files; each pack is a folder |
+| Wallpaper image | `~/.local/state/zapfast/accounts/<id>/wallpaper.jpg` | Copy of the chosen picture for that number, or `.png`, `.webp`, `.gif`; deleted by **Remove image** |
+| Per-number settings | `~/.local/state/zapfast/accounts/<id>/settings.json` | Notifications, receipts, typing, automatic downloads, the last open chat, and the wallpaper of that number |
 | Transcription models | `~/.local/state/zapfast/whisper/` | Downloaded on the first transcription; **Delete models** in Settings, or `uninstall.sh --purge`, removes them |
 | Log of the last run | `~/.local/state/zapfast/zapfast.log` | `--verbose` for more; **Settings > Files > Log > Open** shows it in its folder when no app opens it |
 

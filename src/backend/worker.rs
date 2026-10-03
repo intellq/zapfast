@@ -59,7 +59,7 @@ use crate::model::{
     ATTACHMENT_DOWNLOAD_LIMIT, Chat, ChatId, ChatKind, Contact, Content, Delivery, Gif, GifError,
     LIVE_LOCATION_LIMIT, LinkCard, LinkPreview, Media, MentionRef, Message, Quoted, Reaction,
 };
-use crate::paths::AppDirs;
+use crate::paths::AccountDirs;
 use crate::privacy::{self, PrivacyChoice, PrivacyKind};
 
 /// Delay after the last history chunk before sync is complete.
@@ -485,7 +485,7 @@ fn sticker_hash(sha256: Option<&[u8]>, enc_sha256: Option<&[u8]>) -> Option<Stri
 }
 
 pub async fn run(
-    dirs: AppDirs,
+    dirs: AccountDirs,
     events: std::sync::mpsc::Sender<Event>,
     commands: mpsc::UnboundedSender<Command>,
     mut inbox: mpsc::UnboundedReceiver<Command>,
@@ -747,7 +747,7 @@ enum RuntimeEvent {
 /// removes the linked session so the next link replays history into a new
 /// archive. Nothing is deleted from the archive: restoring the original
 /// keyring and renaming the file back recovers it.
-fn set_aside_unreadable_archive(dirs: &AppDirs) -> std::io::Result<PathBuf> {
+fn set_aside_unreadable_archive(dirs: &AccountDirs) -> std::io::Result<PathBuf> {
     let archive = dirs.archive_db();
     let stamp = jiff::Zoned::now().strftime("%Y%m%d-%H%M%S").to_string();
     let kept = archive.with_file_name(format!("archive-unreadable-{stamp}.db"));
@@ -867,7 +867,7 @@ struct Worker {
     receipts_pruned: Instant,
     /// Notices a link that stays open after a sleep but carries nothing.
     link_watch: link_watch::LinkWatch,
-    dirs: AppDirs,
+    dirs: AccountDirs,
     events: std::sync::mpsc::Sender<Event>,
     commands: mpsc::UnboundedSender<Command>,
     waker: Waker,
@@ -5111,12 +5111,12 @@ impl Worker {
                     else {
                         return;
                     };
-                    let result = crate::wallpaper::import(&path, &dirs);
+                    let result = crate::wallpaper::import(&path, &dirs.state);
                     let _ = events.send(Event::WallpaperImagePicked(result));
                     waker.wake();
                 });
             }
-            Command::RemoveWallpaperImage => crate::wallpaper::remove(&self.dirs),
+            Command::RemoveWallpaperImage => crate::wallpaper::remove(&self.dirs.state),
             Command::SetProfile { name, about } => self.set_profile(name, about),
             Command::PickProfilePicture => {
                 let commands = self.commands.clone();
@@ -6063,6 +6063,19 @@ impl Worker {
                 } else {
                     self.on_logged_out().await;
                 }
+            }
+            Command::RemoveAccount => {
+                // A link that does not answer must not keep the account:
+                // the folders go once the backend stops either way.
+                if let Some(client) = self.client.clone()
+                    && tokio::time::timeout(Duration::from_secs(15), client.logout())
+                        .await
+                        .is_err()
+                {
+                    log::warn!("unlinking a removed account timed out");
+                }
+                self.stop_bot().await;
+                self.emit(Event::AccountRemoved);
             }
             Command::Reconnect => {
                 if let Some(client) = self.client.clone() {
@@ -12300,14 +12313,14 @@ mod tests {
     #[test]
     fn starting_over_keeps_the_old_archive_and_forgets_the_link() {
         let root = std::env::temp_dir().join(format!("zapfast-start-over-{}", std::process::id()));
-        let dirs = AppDirs::under(&root);
+        let dirs = crate::paths::AppDirs::under(&root);
         dirs.ensure().unwrap();
         std::fs::write(dirs.archive_db(), b"encrypted").unwrap();
         let mut wal = dirs.archive_db().into_os_string();
         wal.push("-wal");
         std::fs::write(&wal, b"log").unwrap();
         std::fs::write(dirs.session_db(), b"keys").unwrap();
-        let kept = set_aside_unreadable_archive(&dirs).unwrap();
+        let kept = set_aside_unreadable_archive(&dirs.as_account()).unwrap();
         assert_eq!(std::fs::read(&kept).unwrap(), b"encrypted");
         let mut kept_wal = kept.clone().into_os_string();
         kept_wal.push("-wal");
@@ -13314,7 +13327,7 @@ mod receipt_tests {
             privacy_generation: 0,
             privacy_retry: Instant::now(),
             withheld_pages: Vec::new(),
-            dirs: AppDirs::under(&root),
+            dirs: crate::paths::AppDirs::under(&root).as_account(),
             events,
             commands,
             waker: Waker::default(),

@@ -5026,3 +5026,45 @@ msgstr "Barra lateral"
 #: src/ui/settings.rs
 msgid "Your profile picture and the archive, hide list, new chat and Settings buttons in a column left of the chats, with the search field at the top."
 msgstr "Sua foto de perfil e os botões de arquivadas, ocultar a lista, nova conversa e configurações numa coluna à esquerda das conversas, com o campo de busca no topo."
+
+#: src/ui/dialogs.rs:1
+msgid "Remove this account?"
+msgstr "Remover esta conta?"
+
+#: src/ui/dialogs.rs:1
+msgid "This unlinks the number on this computer and deletes its local chats. Other accounts stay."
+msgstr "Isso desconecta o número deste computador e apaga as conversas locais dele. As outras contas continuam."
+
+#: src/ui/settings.rs:1 src/ui/accounts.rs:1
+msgid "Add account"
+msgstr "Adicionar conta"
+
+#: src/ui/settings.rs:1
+msgid "Remove this account"
+msgstr "Remover esta conta"
+
+#: src/app.rs:1
+msgid "Could not delete the removed account's files"
+msgstr "Não foi possível apagar os arquivos da conta removida"
+
+#: src/app.rs:1
+msgid "Could not add an account"
+msgstr "Não foi possível adicionar uma conta"
+
+#: src/account.rs:1
+#, rust-format
+msgid "Account {id}"
+msgstr "Conta {id}"
+
+#: src/ui/accounts.rs:1
+msgid "Switch account"
+msgstr "Trocar de conta"
+
+#: src/ui/accounts.rs:1
+msgid "Not linked"
+msgstr "Não conectada"
+
+#: src/ui/accounts.rs:1
+#, rust-format
+msgid "{count} unread chats"
+msgstr "{count} conversas não lidas"

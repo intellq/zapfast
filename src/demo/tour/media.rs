@@ -33,7 +33,7 @@ pub(crate) fn emoji_image(character: char, side: u32) -> Result<RgbaImage> {
 }
 
 pub fn populate(app: &mut App) -> Result<()> {
-    let dir = app.dirs.media_cache_dir().join("tour");
+    let dir = app.account().dirs.media_cache_dir().join("tour");
     std::fs::create_dir_all(&dir)?;
     let mut gifs = Vec::new();
     let mut stickers = Vec::new();

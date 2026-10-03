@@ -8,17 +8,18 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use crate::account::Account;
 use crate::audio::{Player, Recorder};
 use crate::backend::{Backend, Command, Event, LinkStatus, Refusal, Unsent, Waker};
 use crate::i18n::Locale;
 use crate::image_preview::PreviewState;
 use crate::model::{
-    Action, Chat, ChatFilter, ChatId, ComposerTextCommand, Contact, Content, Delivery, Dialog, Gif,
-    GifError, Label, Media, MediaState, Message, Page, PickerTab, Scroll, SidebarDisplayMode,
-    StickerPack, StickerShelf, Toast, ToastKind,
+    AccountId, Action, Chat, ChatFilter, ChatId, ComposerTextCommand, Contact, Content, Delivery,
+    Dialog, Gif, GifError, Label, Media, MediaState, Message, Page, PickerTab, Scroll,
+    SidebarDisplayMode, StickerPack, StickerShelf, Toast, ToastKind,
 };
 use crate::paths::AppDirs;
-use crate::settings::{NotificationSound, Settings, ThemeChoice};
+use crate::settings::{AccountRoster, NotificationSound, Settings, ThemeChoice};
 use crate::single_instance::{ControlCommand, Guard};
 use crate::theme::{self, Palette};
 
@@ -335,7 +336,14 @@ pub struct App {
     pub locale: Locale,
     settings_dirty: bool,
     last_settings_save: Instant,
-    pub backend: Backend,
+    pub roster: AccountRoster,
+    pub accounts: Vec<Account>,
+    pub active: usize,
+    pub adding_account: bool,
+    /// The account on screen when "Add account" was chosen, for Cancel.
+    account_before_adding: Option<AccountId>,
+    /// Whether the account switcher under our own avatar is open.
+    pub account_menu: bool,
     pub palette: Palette,
     pub custom_themes: theme::Catalog,
     applied_dark: Option<bool>,
@@ -348,29 +356,8 @@ pub struct App {
     /// The wallpaper image named in the settings, decoded off this thread.
     pub wallpaper_image: crate::wallpaper::CustomImage,
 
-    pub link: LinkStatus,
-    /// Whether link-time history sync is active.
-    pub syncing: bool,
-    pub sync_percent: Option<u32>,
-    pub me: Option<String>,
-    /// Our privacy id (`@lid`), which mentions of us may carry instead.
-    pub me_lid: Option<String>,
-    pub me_name: Option<String>,
-    /// Account about text.
-    pub me_about: Option<String>,
-
-    /// Chats ordered by latest activity.
-    pub chats: Vec<Chat>,
-    pub contacts: HashMap<String, Contact>,
-    pub conversations: HashMap<ChatId, Conversation>,
-    pub open_chat: Option<ChatId>,
-    /// Chat row to reveal after keyboard navigation.
-    pub scroll_chat_into_view: Option<ChatId>,
     /// A sent message moves its chat up, so the chat list goes to the top.
     pub scroll_chats_to_top: bool,
-    /// Composer drafts by chat.
-    pub drafts: HashMap<ChatId, String>,
-    draft_mentions: HashMap<ChatId, Vec<ComposerMention>>,
     pub composer: String,
     /// Text selection at the moment the composer's context menu opened.
     pub composer_menu_selection: Option<egui::text::CCursorRange>,
@@ -401,11 +388,6 @@ pub struct App {
     pub editing: Option<String>,
     composing: bool,
     last_keystroke: Option<Instant>,
-    pub search: String,
-    /// Chat result reached with the arrow keys in the global search field.
-    pub search_selected: Option<ChatId>,
-    /// Message search results, newest first.
-    pub search_hits: Vec<Message>,
     /// The search pane beside the open chat: its query, day filter and the
     /// matches it lists.
     pub chat_search_open: bool,
@@ -435,18 +417,6 @@ pub struct App {
     pub new_chat_search: String,
     /// Last answer from the slow code verifier, keyed by what was checked.
     chat_lock_check: std::cell::RefCell<Option<(String, Option<String>, bool)>>,
-    /// Active typers and their latest event time by chat.
-    pub typing: HashMap<ChatId, Vec<(String, Instant)>>,
-    pub presence: HashMap<String, Presence>,
-    /// Whether account privacy disables direct-chat read receipts.
-    pub account_receipts_off: bool,
-    /// Last account privacy snapshot from the phone.
-    pub account_privacy: crate::privacy::Snapshot,
-    /// Every contact the account has blocked, by chat id; `None` until the
-    /// server has said on this link.
-    pub blocklist: Option<Vec<ChatId>>,
-    /// Contacts a block or unblock is on its way for.
-    pub blocking: HashSet<ChatId>,
     /// Whether Settings lists the blocked contacts.
     pub blocked_list_open: bool,
     /// Receipts of the message whose "Message info" is open.
@@ -461,11 +431,6 @@ pub struct App {
     pub selection: Option<(ChatId, Vec<String>)>,
     /// The message a Shift-click range starts from.
     selection_anchor: Option<String>,
-    avatars: HashMap<String, Option<PathBuf>>,
-    avatar_requests: HashSet<String>,
-    /// Full-size profile pictures for info dialogs.
-    avatars_full: HashMap<String, Option<PathBuf>>,
-    avatar_full_requests: HashSet<String>,
     /// Whether files are being dragged over the window.
     pub dropping: bool,
     /// Where the dragged files are held, when the platform says (Wayland).
@@ -499,8 +464,6 @@ pub struct App {
     pub reaction_target: Option<(ChatId, String)>,
     /// Control that opened the reaction picker.
     pub reaction_anchor: Option<egui::Rect>,
-    /// Chats this account may pin; WhatsApp Plus raises it once known.
-    pub pin_limit: usize,
     /// The reaction picker came from a message's context menu, which stays
     /// open beside it.
     pub reaction_beside_menu: bool,
@@ -555,8 +518,6 @@ pub struct App {
     lid_phones: HashMap<ChatId, String>,
     /// Image currently shown in the native preview.
     pub image_preview: Option<PreviewState>,
-    /// Voice messages with a sent played receipt.
-    played_told: HashSet<String>,
     /// Message bodies registered for transcript copy formatting.
     pub copy_rows: std::sync::Arc<std::sync::Mutex<Vec<crate::transcript::Row>>>,
     /// Previous message-list rect used by the selection hook.
@@ -566,19 +527,6 @@ pub struct App {
     /// Whether a GIF search is active.
     pub gif_pending: bool,
     pub gif_error: Option<GifError>,
-    pub stickers: Vec<PathBuf>,
-    /// Downloaded stickers others sent, newest first.
-    pub stickers_received: Vec<PathBuf>,
-    /// Favorite stickers, newest first.
-    pub stickers_saved: Vec<PathBuf>,
-    /// Imported sticker packs, newest first.
-    pub sticker_packs: Vec<StickerPack>,
-    /// Whether the sticker list is loading.
-    pub stickers_pending: bool,
-    /// Whether a sticker pack import is active.
-    pub sticker_import_pending: bool,
-    /// signal.art link in the sticker tab.
-    pub sticker_link: String,
     /// The list the sticker tab shows.
     pub sticker_shelf: StickerShelf,
     /// Text in the sticker search field.
@@ -611,35 +559,11 @@ pub struct App {
     pub forward_max_chats: usize,
     pub forward_max_groups: usize,
     pending_forward: Option<(ChatId, Vec<String>)>,
-    pub poll_draft: crate::model::PollDraft,
-    pub poll_creating: bool,
-    pub poll_voting: HashSet<(ChatId, String)>,
-    pub interactive_sending: HashSet<(ChatId, String)>,
-    /// Own voice messages and attachments being prepared, uploaded and sent.
-    pub media_sending: HashSet<(ChatId, String)>,
-    /// Share of each sending attachment uploaded so far, in percent.
-    pub media_progress: HashMap<(ChatId, String), u8>,
-    /// Contact-name editor buffers.
-    pub contact_edit: Option<(String, String)>,
     /// The group name being typed in the group info dialog.
     pub group_name_edit: Option<String>,
-    /// Groups whose name or photo change WhatsApp has not answered yet.
-    pub group_saving: HashSet<ChatId>,
-    /// New-contact buffers and lookup state.
-    pub new_contact_phone: String,
-    pub new_contact_name: String,
-    pub new_contact_last: String,
-    pub new_contact_pending: bool,
     /// The new-contact dialog's "Save to phone" box.
     pub new_contact_to_phone: bool,
-    /// Phone number entered for pairing.
-    pub pair_phone: String,
     pub sidebar_visible: bool,
-    pub show_archived: bool,
-    /// Chat-list filter; applies to the main list, not to search or the archive.
-    pub chat_filter: ChatFilter,
-    /// Labels known here, in creation order. Local to this computer.
-    pub labels: Vec<Label>,
     /// Name typed in the label manager.
     pub label_name: String,
     /// Colour the manager will use for the next label.
@@ -652,6 +576,12 @@ pub struct App {
     unread_kept: HashSet<ChatId>,
     pub toasts: Vec<Toast>,
     pub actions: Vec<Action>,
+    /// Actions queued by a backend event, applied on that account after the frame.
+    deferred_account_actions: Vec<(AccountId, Action)>,
+    /// Set while the events of an account that is not on screen are being
+    /// applied: they update that account only, never the window's composer,
+    /// dialogs, playback, or read state.
+    events_hidden: bool,
     /// A newer release than this build, once GitHub has said so.
     pub update: Option<crate::updates::Release>,
     last_update_check: Option<Instant>,
@@ -707,10 +637,13 @@ pub struct App {
     /// window only after its first frame, so the focus asked for when it was
     /// made lands on an invisible window, and a restored one may stay behind.
     refocus_frames: u8,
-    /// Presence last reported to the backend.
-    reported_online: Option<bool>,
     /// The live call, or the outcome of the one that just ended.
     pub call: Option<crate::calls::CallUpdate>,
+    /// The account the call belongs to, which may not be the one on screen.
+    call_account: Option<AccountId>,
+    /// The other side's name and picture, read from the call's account when it
+    /// rang, for while another account is on screen.
+    call_peer: Option<(String, Option<PathBuf>)>,
     /// When a finished call's surface should disappear.
     call_surface_until: Option<Instant>,
     /// The microphones and speakers the call screen offers.
@@ -826,7 +759,7 @@ pub enum Pending {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct ComposerMention {
+pub(crate) struct ComposerMention {
     id: String,
     name: String,
 }
@@ -984,15 +917,50 @@ impl Default for AppOptions {
     }
 }
 
+impl std::ops::Deref for App {
+    type Target = Account;
+
+    fn deref(&self) -> &Account {
+        &self.accounts[self.active]
+    }
+}
+
+impl std::ops::DerefMut for App {
+    fn deref_mut(&mut self) -> &mut Account {
+        &mut self.accounts[self.active]
+    }
+}
+
 impl App {
-    pub fn new(waker: &Waker, dirs: AppDirs, settings: Settings, options: AppOptions) -> Self {
+    pub fn new(
+        waker: &Waker,
+        dirs: AppDirs,
+        settings: Settings,
+        options: AppOptions,
+    ) -> std::io::Result<Self> {
         crate::proxy::configure(&settings.proxy);
-        let backend = Backend::spawn(
-            dirs.clone(),
-            waker.clone(),
-            settings.attachment_limit_bytes(),
-        );
-        let mut app = Self::with_backend(dirs, settings, backend, waker.clone());
+        let mut roster = AccountRoster::load(&dirs.accounts_file())?;
+        if roster.order.is_empty() {
+            roster = AccountRoster::default();
+        }
+        let mut accounts = Vec::new();
+        for id in &roster.order {
+            let Some(id) = AccountId::parse(id) else {
+                continue;
+            };
+            accounts.push(Account::spawn(&dirs, id, &settings, waker)?);
+        }
+        if accounts.is_empty() {
+            accounts.push(Account::spawn(&dirs, AccountId::first(), &settings, waker)?);
+            roster = AccountRoster::default();
+        }
+        let active = roster
+            .order
+            .iter()
+            .position(|id| id == &roster.active)
+            .unwrap_or(0)
+            .min(accounts.len() - 1);
+        let mut app = Self::with_accounts(dirs, settings, roster, accounts, active, waker.clone());
         app.pauses_media = true;
         app.call_sounds.enable();
         app.badge = Some(Default::default());
@@ -1019,20 +987,9 @@ impl App {
                 crate::util::twelve_hour_clock();
             })
             .ok();
-        app.backend.send(Command::SetDownloadFolder(
-            app.settings.download_folder.clone(),
-        ));
-        app.backend.send(Command::SetKeepDeletedMessages(
-            app.settings.keep_deleted_messages,
-        ));
-        app.backend.send(Command::SetKeepChatsArchived(
-            app.settings.keep_chats_archived,
-        ));
-        // The call devices the last session used, so a call opened now starts on them.
-        app.backend.send(Command::SetCallDevices {
-            microphone: app.settings.call_microphone.clone(),
-            speaker: app.settings.call_speaker.clone(),
-        });
+        for account in &app.accounts {
+            app.configure_backend(&account.backend);
+        }
         if crate::autostart::supported() {
             // Rewrites the login entry so its argument follows "Start
             // minimized", including entries saved before that option.
@@ -1053,7 +1010,8 @@ impl App {
             }
             app.whatsapp_links = Some(crate::wa_link::handler::registered());
         }
-        app
+        let _ = app.roster.save(&app.dirs.accounts_file());
+        Ok(app)
     }
 
     /// Single-instance guard used by later launches.
@@ -1063,11 +1021,18 @@ impl App {
 
     /// Creates a disconnected app and event sender for demos and tests.
     pub fn headless(dirs: AppDirs, settings: Settings) -> (Self, std::sync::mpsc::Sender<Event>) {
-        let (backend, events) = Backend::detached();
-        (
-            Self::with_backend(dirs, settings, backend, Waker::default()),
-            events,
+        let (account, events) = Account::detached(
+            &dirs,
+            AccountId::first(),
+            crate::settings::AccountSettings::from_legacy(&settings),
         )
+        .expect("test account folders");
+        let roster = AccountRoster {
+            active: account.id.0.clone(),
+            ..AccountRoster::default()
+        };
+        let app = Self::with_accounts(dirs, settings, roster, vec![account], 0, Waker::default());
+        (app, events)
     }
 
     /// Starts without a window (`--start-hidden`). The link and the archive
@@ -1080,16 +1045,47 @@ impl App {
         if let Some(tray) = &mut self.tray {
             tray.create_item();
         }
-        if let Some(startup) = self.backend.take_startup() {
-            let _ = startup.send(());
+        for account in &mut self.accounts {
+            if let Some(startup) = account.backend.take_startup() {
+                let _ = startup.send(());
+            }
         }
     }
 
+    #[cfg_attr(not(test), expect(dead_code))]
     fn with_backend(dirs: AppDirs, settings: Settings, backend: Backend, waker: Waker) -> Self {
+        let (account, _) = {
+            let id = AccountId::first();
+            let account_dirs = dirs.account(&id);
+            let _ = account_dirs.ensure();
+            (
+                Account::new(
+                    id,
+                    account_dirs,
+                    crate::settings::AccountSettings::from_legacy(&settings),
+                    backend,
+                ),
+                (),
+            )
+        };
+        let roster = AccountRoster {
+            active: account.id.0.clone(),
+            ..AccountRoster::default()
+        };
+        Self::with_accounts(dirs, settings, roster, vec![account], 0, waker)
+    }
+
+    fn with_accounts(
+        dirs: AppDirs,
+        settings: Settings,
+        roster: AccountRoster,
+        accounts: Vec<Account>,
+        active: usize,
+        waker: Waker,
+    ) -> Self {
         let palette = settings
             .cached_palette()
             .unwrap_or_else(|| settings.theme.palette(settings.theme != ThemeChoice::Light));
-        let open_chat = settings.last_chat.clone();
         let locale = crate::i18n::resolve(settings.interface_language);
         crate::i18n::set_current(locale);
         let transcriber = crate::transcribe::Transcriber::new(dirs.whisper_dir(), waker.clone());
@@ -1101,7 +1097,12 @@ impl App {
             locale,
             settings_dirty: false,
             last_settings_save: Instant::now(),
-            backend,
+            roster,
+            accounts,
+            active,
+            adding_account: false,
+            account_before_adding: None,
+            account_menu: false,
             palette,
             custom_themes: theme::Catalog::default(),
             applied_dark: None,
@@ -1109,21 +1110,7 @@ impl App {
             reveal_theme_changes: !cfg!(test),
             zoom_applied: false,
             wallpaper_image: crate::wallpaper::CustomImage::default(),
-            link: LinkStatus::Starting,
-            syncing: false,
-            sync_percent: None,
-            me: None,
-            me_lid: None,
-            me_name: None,
-            me_about: None,
-            chats: Vec::new(),
-            contacts: HashMap::new(),
-            conversations: HashMap::new(),
-            open_chat,
-            scroll_chat_into_view: None,
             scroll_chats_to_top: false,
-            drafts: HashMap::new(),
-            draft_mentions: HashMap::new(),
             composer: String::new(),
             composer_menu_selection: None,
             primary_paste: None,
@@ -1141,9 +1128,6 @@ impl App {
             unsent_voice: None,
             composing: false,
             last_keystroke: None,
-            search: String::new(),
-            search_selected: None,
-            search_hits: Vec::new(),
             chat_search_open: false,
             chat_search: String::new(),
             chat_search_hits: Vec::new(),
@@ -1161,12 +1145,6 @@ impl App {
             chat_lock_error: false,
             new_chat_search: String::new(),
             chat_lock_check: Default::default(),
-            typing: HashMap::new(),
-            presence: HashMap::new(),
-            account_receipts_off: false,
-            account_privacy: crate::privacy::Snapshot::default(),
-            blocklist: None,
-            blocking: HashSet::new(),
             blocked_list_open: false,
             message_receipts: None,
             receipts_watch: None,
@@ -1174,10 +1152,6 @@ impl App {
             unread_divider: None,
             selection: None,
             selection_anchor: None,
-            avatars: HashMap::new(),
-            avatar_requests: HashSet::new(),
-            avatars_full: HashMap::new(),
-            avatar_full_requests: HashSet::new(),
             dropping: false,
             drag_pos: None,
             drag_over_chat: None,
@@ -1194,7 +1168,6 @@ impl App {
             emoji_recent_shown: None,
             reaction_target: None,
             reaction_anchor: None,
-            pin_limit: crate::backend::PINNED_CHATS,
             reaction_beside_menu: false,
             open_message_menu: None,
             #[cfg(any(test, feature = "demo"))]
@@ -1220,20 +1193,12 @@ impl App {
             call_sounds: Default::default(),
             lid_phones: HashMap::new(),
             image_preview: None,
-            played_told: HashSet::new(),
             copy_rows: Default::default(),
             selection_view: Default::default(),
             gif_query: String::new(),
             gif_results: Vec::new(),
             gif_pending: false,
             gif_error: None,
-            stickers: Vec::new(),
-            stickers_received: Vec::new(),
-            stickers_saved: Vec::new(),
-            sticker_packs: Vec::new(),
-            stickers_pending: false,
-            sticker_import_pending: false,
-            sticker_link: String::new(),
             sticker_shelf: StickerShelf::default(),
             sticker_search: String::new(),
             sticker_emojis: std::collections::HashMap::new(),
@@ -1252,25 +1217,9 @@ impl App {
             forward_max_chats: 5,
             forward_max_groups: 5,
             pending_forward: None,
-            poll_draft: Default::default(),
-            poll_creating: false,
-            poll_voting: HashSet::new(),
-            interactive_sending: HashSet::new(),
-            media_sending: HashSet::new(),
-            media_progress: HashMap::new(),
-            contact_edit: None,
             group_name_edit: None,
-            group_saving: HashSet::new(),
-            new_contact_phone: String::new(),
-            new_contact_name: String::new(),
-            new_contact_last: String::new(),
-            new_contact_pending: false,
             new_contact_to_phone: true,
-            pair_phone: String::new(),
             sidebar_visible: true,
-            show_archived: false,
-            chat_filter: ChatFilter::All,
-            labels: Vec::new(),
             label_name: String::new(),
             label_color: crate::archive::DEFAULT_COLOR.to_owned(),
             label_editing: None,
@@ -1278,6 +1227,8 @@ impl App {
             unread_kept: HashSet::new(),
             toasts: Vec::new(),
             actions: Vec::new(),
+            deferred_account_actions: Vec::new(),
+            events_hidden: false,
             update: None,
             last_update_check: None,
             show_update: false,
@@ -1304,8 +1255,9 @@ impl App {
             focus_lost_at: None,
             tray_clicked_at: None,
             refocus_frames: 0,
-            reported_online: None,
             call: None,
+            call_account: None,
+            call_peer: None,
             call_surface_until: None,
             call_devices: crate::calls::DeviceList::default(),
             call_windowed: None,
@@ -1341,6 +1293,272 @@ impl App {
         app
     }
 
+    pub fn account(&self) -> &Account {
+        &self.accounts[self.active]
+    }
+
+    pub fn account_mut(&mut self) -> &mut Account {
+        &mut self.accounts[self.active]
+    }
+
+    pub fn any_linked(&self) -> bool {
+        self.accounts.iter().any(Account::is_linked)
+    }
+
+    /// Whether more than one number is (or is being) linked here, so the
+    /// window names which one it shows.
+    pub fn has_several_accounts(&self) -> bool {
+        self.accounts.len() >= 2
+    }
+
+    /// Unread chats across every account, for the taskbar and the tray.
+    pub fn unread_chat_count_everywhere(&self) -> u32 {
+        self.accounts
+            .iter()
+            .map(Account::unread_chat_count)
+            .fold(0, u32::saturating_add)
+    }
+
+    /// Unread chats in the accounts that are not on screen, for the mark on
+    /// the account switcher.
+    pub fn unread_chat_count_elsewhere(&self) -> u32 {
+        self.accounts
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != self.active)
+            .map(|(_, account)| account.unread_chat_count())
+            .fold(0, u32::saturating_add)
+    }
+
+    fn save_roster(&mut self) {
+        self.roster.active = self.account().id.0.clone();
+        self.roster.order = self
+            .accounts
+            .iter()
+            .map(|account| account.id.0.clone())
+            .collect();
+        if let Err(error) = self.roster.save(&self.dirs.accounts_file()) {
+            log::warn!("could not save accounts.json: {error}");
+        }
+    }
+
+    fn park_composer(&mut self) {
+        if let Some(previous) = self.open_chat.clone() {
+            let draft = std::mem::take(&mut self.composer);
+            if self.editing.take().is_some() || draft.trim().is_empty() {
+                self.drafts.remove(&previous);
+                self.draft_mentions.remove(&previous);
+                self.composer_mentions.clear();
+            } else {
+                let mentions = std::mem::take(&mut self.composer_mentions);
+                self.drafts.insert(previous.clone(), draft);
+                self.draft_mentions.insert(previous.clone(), mentions);
+            }
+            self.stop_composing(&previous);
+        }
+        self.picker = None;
+        self.pending.clear();
+        self.reply_to = None;
+        self.editing = None;
+        self.recording = None;
+        self.emoji_start = None;
+        self.mention_start = None;
+    }
+
+    fn restore_composer(&mut self) {
+        if let Some(id) = self.open_chat.clone() {
+            self.composer = self.drafts.remove(&id).unwrap_or_default();
+            self.composer_mentions = self.draft_mentions.remove(&id).unwrap_or_default();
+        } else {
+            self.composer.clear();
+            self.composer_mentions.clear();
+        }
+        self.focus_composer = self.open_chat.is_some();
+    }
+
+    fn switch_account(&mut self, id: &AccountId) {
+        let Some(index) = self.accounts.iter().position(|account| &account.id == id) else {
+            return;
+        };
+        if index == self.active {
+            return;
+        }
+        // An account left before it was linked was never really added.
+        let abandoned =
+            (self.adding_account && !self.is_linked()).then(|| self.account().id.clone());
+        self.park_composer();
+        self.clear_account_ui();
+        self.active = index;
+        self.adding_account = false;
+        if let Some(abandoned) = abandoned {
+            self.remove_account(abandoned);
+        }
+        self.restore_composer();
+        self.page = Page::Chats;
+        self.save_roster();
+        self.wallpaper_image.reload();
+        self.report_presence();
+    }
+
+    /// Drops App-owned pointers into the previous account's chats and media.
+    fn clear_account_ui(&mut self) {
+        // The locked folder and the picker show the previous account's chats
+        // and stickers.
+        if self.locked_folder {
+            self.close_locked_folder();
+        }
+        self.sticker_shelf = StickerShelf::default();
+        self.sticker_emojis.clear();
+        self.sticker_pack_created = None;
+        self.account_menu = false;
+        self.chat_search_open = false;
+        self.chat_search.clear();
+        self.chat_search_hits.clear();
+        self.chat_search_selected = None;
+        self.chat_search_pending = false;
+        self.selection = None;
+        self.selection_anchor = None;
+        self.reply_to = None;
+        self.editing = None;
+        self.reaction_target = None;
+        self.reaction_anchor = None;
+        self.picker = None;
+        self.pending.clear();
+        self.invite = None;
+        self.message_receipts = None;
+        self.receipts_watch = None;
+        self.unread_divider = None;
+        self.scroll_anchor = None;
+        self.dialog = None;
+        self.player.stop();
+        self.video.stop();
+        self.video_chat = None;
+        self.video_wanted = None;
+        self.voice_chat = None;
+        self.voice_wanted = None;
+        self.recording = None;
+        self.image_preview = None;
+    }
+
+    /// Tells an account's backend the window-wide settings it works with:
+    /// every account at start, and one added later.
+    fn configure_backend(&self, backend: &Backend) {
+        backend.send(Command::SetDownloadFolder(
+            self.settings.download_folder.clone(),
+        ));
+        backend.send(Command::SetKeepDeletedMessages(
+            self.settings.keep_deleted_messages,
+        ));
+        backend.send(Command::SetKeepChatsArchived(
+            self.settings.keep_chats_archived,
+        ));
+        // The call devices the last session used, so a call opened now
+        // starts on them.
+        backend.send(Command::SetCallDevices {
+            microphone: self.settings.call_microphone.clone(),
+            speaker: self.settings.call_speaker.clone(),
+        });
+    }
+
+    fn add_account(&mut self) {
+        let id = self.roster.allocate();
+        let account = if self
+            .accounts
+            .iter()
+            .all(|account| account.backend.is_offline())
+        {
+            match Account::detached(&self.dirs, id, crate::settings::AccountSettings::default()) {
+                Ok((account, _)) => account,
+                Err(error) => {
+                    self.toast_error(format!("{}: {error}", tr("Could not add an account")));
+                    return;
+                }
+            }
+        } else {
+            match Account::spawn(&self.dirs, id, &self.settings, &self.waker) {
+                Ok(account) => account,
+                Err(error) => {
+                    self.toast_error(format!("{}: {error}", tr("Could not add an account")));
+                    return;
+                }
+            }
+        };
+        self.configure_backend(&account.backend);
+        self.account_before_adding = Some(self.account().id.clone());
+        self.park_composer();
+        self.clear_account_ui();
+        self.accounts.push(account);
+        self.active = self.accounts.len() - 1;
+        self.adding_account = true;
+        self.page = Page::Chats;
+        self.restore_composer();
+        self.save_roster();
+        self.report_presence();
+    }
+
+    /// Unlinks an account and, once its backend has stopped, deletes its
+    /// folders. The last account is only unlinked: the window always shows
+    /// one, even if it is waiting to be linked.
+    fn remove_account(&mut self, id: AccountId) {
+        let Some(index) = self.accounts.iter().position(|account| account.id == id) else {
+            return;
+        };
+        if self.accounts.len() <= 1 {
+            self.accounts[index].backend.send(Command::Unlink);
+            return;
+        }
+        self.accounts[index].backend.send(Command::RemoveAccount);
+    }
+
+    fn finish_removed(&mut self, index: usize) {
+        if self.accounts.len() <= 1 {
+            // Another removal got there first. Keep this one listed and
+            // linkable instead of leaving the window on a stopped backend.
+            self.accounts[index].backend.send(Command::Unlink);
+            return;
+        }
+        let removing_active = index == self.active;
+        if removing_active {
+            self.park_composer();
+            self.clear_account_ui();
+        }
+        self.accounts[index].backend.shutdown();
+        let dirs = self.accounts[index].dirs.clone();
+        // The key outlives the archive only by mistake: forget it once the
+        // archive is gone, never before.
+        let key = crate::archive::archive_key_identity(&dirs.archive_db()).ok();
+        let state_error = std::fs::remove_dir_all(&dirs.state).err();
+        let cache_error = std::fs::remove_dir_all(&dirs.cache)
+            .err()
+            .filter(|error| error.kind() != std::io::ErrorKind::NotFound);
+        if let Some(identity) = key
+            && !dirs.archive_db().exists()
+            && cfg!(not(test))
+            && let Err(error) = crate::archive::forget_archive_key(&identity)
+        {
+            log::warn!("could not delete a removed account's archive key: {error:#}");
+        }
+        self.accounts.remove(index);
+        if index < self.active {
+            self.active -= 1;
+        } else if self.active >= self.accounts.len() {
+            self.active = self.accounts.len() - 1;
+        }
+        if removing_active {
+            self.adding_account = false;
+            self.restore_composer();
+            self.page = Page::Chats;
+            self.wallpaper_image.reload();
+        }
+        self.save_roster();
+        self.report_presence();
+        if let Some(error) = state_error.or(cache_error) {
+            let message =
+                crate::i18n::gettext(self.locale, "Could not delete the removed account's files");
+            self.toast_error(format!("{message}: {error}"));
+        }
+    }
+
     /// Updates the linked app while no window exists.
     pub fn window_gone(&mut self) {
         self.flush_open_draft();
@@ -1366,6 +1584,7 @@ impl App {
             color: self.settings.wallpaper_background(&self.palette),
             doodles: self.settings.show_wallpaper,
             image: self
+                .account()
                 .settings
                 .wallpaper_image
                 .is_some()
@@ -1492,8 +1711,17 @@ impl App {
                 .unwrap_or_else(|p| p.into_inner()),
         );
         for target in opened {
-            // A call notification carries no message: bringing the window up is enough, since the
-            // call surface is drawn over whatever is open and is waiting for Accept or Decline.
+            // Behind the app lock nothing changes yet: the message, with its
+            // account, opens once unlocked.
+            if self.app_lock.is_locked() {
+                self.app_lock.deferred = Some(target);
+                self.actions.push(Action::ShowWindow);
+                continue;
+            }
+            self.switch_account(&target.account);
+            // A call notification carries no message: bringing the window up
+            // is enough, since the call surface is drawn over whatever is
+            // open and is waiting for Accept or Decline.
             if let Some(message) = target.message {
                 self.actions.push(Action::OpenMessage {
                     chat: target.chat,
@@ -1504,9 +1732,14 @@ impl App {
         }
     }
 
+    fn clear_chat_notifications(&mut self, chat: &str) {
+        let account = self.account().id.clone();
+        self.notifications.clear(&account, chat);
+    }
+
     /// Sends a desktop notification for an unseen incoming message.
     fn maybe_notify(&mut self, chat_id: &str, message: &Message) {
-        if !self.settings.notifications {
+        if !self.account().settings.notifications {
             return;
         }
         let Some(chat) = self.chat(chat_id) else {
@@ -1516,7 +1749,8 @@ impl App {
         if !notification_eligible(chat, now, message.timestamp) {
             return;
         }
-        let reading = !self.window_hidden
+        let reading = !self.events_hidden
+            && !self.window_hidden
             && self.window_focused
             && self.page == Page::Chats
             && self.open_chat.as_deref() == Some(chat_id);
@@ -1549,6 +1783,7 @@ impl App {
             picture,
             sound,
             crate::notify::NotificationTarget {
+                account: self.account().id.clone(),
                 chat: chat_id.to_owned(),
                 message: Some(message.id.clone()),
             },
@@ -1573,6 +1808,7 @@ impl App {
             None,
             sound,
             crate::notify::NotificationTarget {
+                account: self.account().id.clone(),
                 chat: chat_id.to_owned(),
                 message: Some(message.to_owned()),
             },
@@ -1741,6 +1977,10 @@ impl App {
         if self.settings.last_chat.as_deref() == Some(id) {
             self.settings.last_chat = None;
         }
+        if self.account().settings.last_chat.as_deref() == Some(id) {
+            self.account_mut().settings.last_chat = None;
+            self.account_mut().mark_settings_dirty();
+        }
     }
 
     /// Takes everything on screen away from a chat the user can no longer
@@ -1748,8 +1988,14 @@ impl App {
     /// hits and dialogs, and, when it is open, the conversation with its
     /// composer, recording and playback. Keeping a draft is up to the caller.
     fn leave_chat(&mut self, id: &str) {
-        self.notifications.clear(id);
+        self.clear_chat_notifications(id);
         self.search_hits.retain(|message| message.chat != id);
+        if self.events_hidden {
+            if self.open_chat.as_deref() == Some(id) {
+                self.open_chat = None;
+            }
+            return;
+        }
         if matches!(
             &self.dialog,
             Some(
@@ -2033,6 +2279,13 @@ impl App {
     /// as the phone shows it, and "Unknown caller" only when WhatsApp gave neither. A locked chat
     /// says nothing until the folder is open.
     pub fn call_name(&self, id: &str) -> String {
+        if let Some((name, _)) = self.call_peer_elsewhere(id) {
+            return name.clone();
+        }
+        self.peer_name(id)
+    }
+
+    fn peer_name(&self, id: &str) -> String {
         if self.chat_is_private(id) {
             return crate::i18n::gettext(self.locale, "Locked chat").into_owned();
         }
@@ -2124,6 +2377,31 @@ impl App {
     /// The picture a call may show for the other side: none while the chat is locked, because a
     /// contact photo is the same disclosure the name is.
     pub fn call_avatar(&mut self, id: &str) -> Option<std::path::PathBuf> {
+        if let Some((_, picture)) = self.call_peer_elsewhere(id) {
+            return picture.clone();
+        }
+        self.peer_avatar(id)
+    }
+
+    /// What was read about the call's other side, when the call is on an
+    /// account that is not on screen.
+    fn call_peer_elsewhere(&self, id: &str) -> Option<&(String, Option<PathBuf>)> {
+        self.call.as_ref().filter(|call| call.chat == id)?;
+        let account = self.call_account.as_ref()?;
+        (*account != self.account().id)
+            .then_some(self.call_peer.as_ref())
+            .flatten()
+    }
+
+    /// The backend of the account the call belongs to.
+    fn call_backend(&self) -> &Backend {
+        self.call_account
+            .as_ref()
+            .and_then(|id| self.accounts.iter().find(|account| account.id == *id))
+            .map_or(&self.backend, |account| &account.backend)
+    }
+
+    fn peer_avatar(&mut self, id: &str) -> Option<std::path::PathBuf> {
         if self.chat_is_private(id) {
             return None;
         }
@@ -2494,20 +2772,12 @@ impl App {
     /// The taskbar count: unarchived, unmuted, unlocked chats that look
     /// unread. WhatsApp counts chats here, not the messages inside them.
     pub fn unread_chat_count(&self) -> u32 {
-        let now = crate::util::now();
-        let chats = self
-            .chats
-            .iter()
-            .filter(|chat| {
-                !chat.archived && !chat.locked && !chat.muted(now) && chat.looks_unread()
-            })
-            .count();
-        u32::try_from(chats).unwrap_or(u32::MAX)
+        self.account().unread_chat_count()
     }
 
     /// Returns or requests a cached profile picture.
     fn cached_avatar(&self, id: &str) -> Option<PathBuf> {
-        let path = self.dirs.avatar_file(id, false);
+        let path = self.account().dirs.avatar_file(id, false);
         path.metadata()
             .ok()
             .filter(|metadata| metadata.len() > 0)
@@ -2520,16 +2790,7 @@ impl App {
     }
 
     pub fn avatar(&mut self, id: &str) -> Option<PathBuf> {
-        if let Some(known) = self.avatars.get(id) {
-            return known.clone();
-        }
-        if self.avatar_requests.insert(id.to_owned()) {
-            self.backend.send(Command::FetchAvatar {
-                id: id.to_owned(),
-                full: false,
-            });
-        }
-        None
+        self.account_mut().avatar(id)
     }
 
     /// Returns or requests a full-size profile picture.
@@ -2618,447 +2879,499 @@ impl App {
     }
 
     pub(crate) fn handle_events(&mut self) {
-        for event in self.backend.poll() {
-            match event {
-                Event::ForwardInspected {
-                    from_chat,
-                    messages,
-                    limits,
-                } => self.forward_inspected(from_chat, messages, limits),
-                Event::Link(status) => self.handle_link(status),
-                Event::Me {
-                    id,
-                    lid,
-                    name,
-                    about,
-                } => {
-                    self.me = Some(id);
-                    self.me_lid = lid;
-                    self.me_name = name;
-                    self.me_about = about;
+        let mut removed = Vec::new();
+        let mut deferred = Vec::new();
+        let real_active = self.active;
+        for index in 0..self.accounts.len() {
+            let events = self.accounts[index].backend.poll();
+            if events.is_empty() {
+                continue;
+            }
+            let origin = self.accounts[index].id.clone();
+            let live = index == real_active;
+            let pending_before = self.actions.len();
+            self.active = index;
+            for event in events {
+                if matches!(event, Event::AccountRemoved) {
+                    removed.push(index);
+                    continue;
                 }
-                Event::Labels(labels) => {
-                    self.labels = labels;
-                    self.prune_labels();
+                self.events_hidden = !live;
+                self.apply_backend_event(event, live);
+                self.events_hidden = false;
+            }
+            let queued: Vec<_> = self.actions.drain(pending_before..).collect();
+            deferred.extend(queued.into_iter().map(|action| (origin.clone(), action)));
+            self.active = real_active;
+        }
+        self.deferred_account_actions.extend(deferred);
+        for index in removed.into_iter().rev() {
+            self.finish_removed(index);
+        }
+    }
+
+    fn apply_backend_event(&mut self, event: Event, live: bool) {
+        match event {
+            Event::ForwardInspected {
+                from_chat,
+                messages,
+                limits,
+            } => {
+                if live {
+                    self.forward_inspected(from_chat, messages, limits);
                 }
-                Event::Call(update) => self.handle_call_update(*update),
-                Event::CallDevices(devices) => self.call_devices = *devices,
-                Event::Drafts(drafts) => {
-                    // Unsent text stored by an earlier session. Text typed in
-                    // this session wins over the stored copy.
-                    for (chat, text) in drafts {
-                        // The chat reopened at startup shows its draft at once.
-                        if self.open_chat.as_deref() == Some(chat.as_str())
-                            && self.editing.is_none()
-                            && self.composer.is_empty()
-                        {
-                            self.composer = text;
-                        } else {
-                            self.drafts.entry(chat).or_insert(text);
-                        }
-                    }
-                }
-                Event::Transcripts(transcripts) => {
-                    // Stored by an earlier session; one made since wins.
-                    for (chat, message, transcript) in transcripts {
-                        self.transcripts
-                            .entry((chat, message))
-                            .or_insert(transcript);
-                    }
-                }
-                Event::Chats(chats) => {
-                    for chat in &chats {
-                        if chat.unread == 0 {
-                            self.notifications.clear(&chat.id);
-                        }
-                    }
-                    self.chats = chats;
-                    // A chat begun under a privacy id joins its number's chat once that is known,
-                    // and the reader stays in it.
-                    if let Some(open) = self.open_chat.clone()
-                        && self.chat(&open).is_none()
-                        && let Some(phone) = self.lid_phones.get(&open)
+            }
+            Event::Link(status) => self.handle_link(status, live),
+            Event::Me {
+                id,
+                lid,
+                name,
+                about,
+            } => {
+                self.me = Some(id);
+                self.me_lid = lid;
+                self.me_name = name;
+                self.me_about = about;
+            }
+            Event::Labels(labels) => {
+                self.labels = labels;
+                self.prune_labels();
+            }
+            Event::Call(update) => self.handle_call_update(*update),
+            Event::CallDevices(devices) => self.call_devices = *devices,
+            Event::Drafts(drafts) => {
+                // Unsent text stored by an earlier session. Text typed in
+                // this session wins over the stored copy.
+                for (chat, text) in drafts {
+                    // The chat reopened at startup shows its draft at once.
+                    if live
+                        && self.open_chat.as_deref() == Some(chat.as_str())
+                        && self.editing.is_none()
+                        && self.composer.is_empty()
                     {
-                        let moved = format!("{phone}@s.whatsapp.net");
-                        if self.chat(&moved).is_some() {
-                            self.open_chat = Some(moved);
-                        }
-                    }
-                    if let Some(open) = self.open_chat.clone() {
-                        if self.chat(&open).is_none_or(|chat| chat.locked) {
-                            self.open_chat = None;
-                        } else {
-                            // Show archived messages immediately, including offline.
-                            self.ensure_loaded(&open);
-                        }
+                        self.composer = text;
+                    } else {
+                        self.drafts.entry(chat).or_insert(text);
                     }
                 }
-                Event::ChatUpdated(chat) => self.handle_chat_updated(*chat),
-                Event::Messages {
-                    chat,
-                    messages,
-                    older,
-                    complete,
-                } => {
-                    let conversation = self.conversations.entry(chat.clone()).or_default();
-                    let was_empty = conversation.messages.is_empty();
-                    let progress = !messages.is_empty();
-                    if older && progress {
-                        conversation.phone_delivered = true;
+            }
+            Event::Transcripts(transcripts) => {
+                // Stored by an earlier session; one made since wins.
+                for (chat, message, transcript) in transcripts {
+                    self.transcripts
+                        .entry((chat, message))
+                        .or_insert(transcript);
+                }
+            }
+            Event::Chats(chats) => {
+                for chat in &chats {
+                    if chat.unread == 0 {
+                        self.clear_chat_notifications(&chat.id);
                     }
-                    conversation.merge(messages, older);
-                    if older {
-                        conversation.loading_older = false;
-                        conversation.complete = complete;
-                        // A jump that was waiting for this page asks on.
+                }
+                self.chats = chats;
+                // A chat begun under a privacy id joins its number's chat once that is known,
+                // and the reader stays in it.
+                if let Some(open) = self.open_chat.clone()
+                    && self.chat(&open).is_none()
+                    && let Some(phone) = self.lid_phones.get(&open)
+                {
+                    let moved = format!("{phone}@s.whatsapp.net");
+                    if self.chat(&moved).is_some() {
+                        self.open_chat = Some(moved);
+                    }
+                }
+                if let Some(open) = self.open_chat.clone() {
+                    if self.chat(&open).is_none_or(|chat| chat.locked) {
+                        self.open_chat = None;
+                    } else {
+                        // Show archived messages immediately, including offline.
+                        self.ensure_loaded(&open);
+                    }
+                }
+            }
+            Event::ChatUpdated(chat) => self.handle_chat_updated(*chat, live),
+            Event::Messages {
+                chat,
+                messages,
+                older,
+                complete,
+            } => {
+                let conversation = self.conversations.entry(chat.clone()).or_default();
+                let was_empty = conversation.messages.is_empty();
+                let progress = !messages.is_empty();
+                if older && progress {
+                    conversation.phone_delivered = true;
+                }
+                conversation.merge(messages, older);
+                if older {
+                    conversation.loading_older = false;
+                    conversation.complete = complete;
+                    // A jump that was waiting for this page asks on.
+                    if live {
                         self.continue_jump(&chat, progress);
-                    } else if was_empty {
-                        conversation.complete = complete;
                     }
-                    if self.open_chat.as_deref() == Some(chat.as_str()) {
-                        if !older && (self.at_bottom || was_empty) {
-                            self.scroll_to_bottom = true;
-                        }
-                        // After the first page, load toward a pending search anchor once.
-                        if !older
-                            && let Some(anchor) = self.scroll_anchor.clone()
-                            && let Some(conversation) = self.conversations.get_mut(&chat)
-                            && conversation.message(&anchor).is_none()
-                            && !conversation.loading_older
-                            && let Some(oldest) = conversation.messages.first()
-                        {
-                            conversation.loading_older = true;
+                } else if was_empty {
+                    conversation.complete = complete;
+                }
+                if live && self.open_chat.as_deref() == Some(chat.as_str()) {
+                    if !older && (self.at_bottom || was_empty) {
+                        self.scroll_to_bottom = true;
+                    }
+                    // After the first page, load toward a pending search anchor once.
+                    if !older && let Some(anchor) = self.scroll_anchor.clone() {
+                        let load = self.conversations.get_mut(&chat).and_then(|conversation| {
+                            if conversation.message(&anchor).is_none()
+                                && !conversation.loading_older
+                            {
+                                conversation.messages.first().map(|oldest| {
+                                    conversation.loading_older = true;
+                                    (oldest.timestamp, oldest.id.clone())
+                                })
+                            } else {
+                                None
+                            }
+                        });
+                        if let Some(before) = load {
                             self.backend.send(Command::LoadUntil {
                                 chat,
                                 id: anchor,
-                                before: (oldest.timestamp, oldest.id.clone()),
+                                before,
                             });
                         }
                     }
                 }
-                Event::ChatHits {
-                    chat,
-                    query,
-                    from,
-                    until,
-                    messages,
-                    truncated,
-                } => {
-                    // Hits for another chat, for a query the user has already
-                    // replaced, or for a day they have already moved off,
-                    // arrive too late to matter.
-                    let (want_from, want_until) = self.chat_search_range();
-                    if self.open_chat.as_deref() == Some(chat.as_str())
-                        && query == self.chat_search.trim()
-                        && from == want_from
-                        && until == want_until
-                    {
-                        self.chat_search_hits = messages;
-                        self.chat_search_truncated = truncated;
-                        self.chat_search_pending = false;
-                        self.chat_search_selected = None;
-                    }
+            }
+            Event::ChatHits {
+                chat,
+                query,
+                from,
+                until,
+                messages,
+                truncated,
+            } => {
+                // Hits for another chat, for a query the user has already
+                // replaced, or for a day they have already moved off,
+                // arrive too late to matter.
+                let (want_from, want_until) = self.chat_search_range();
+                if live
+                    && self.open_chat.as_deref() == Some(chat.as_str())
+                    && query == self.chat_search.trim()
+                    && from == want_from
+                    && until == want_until
+                {
+                    self.chat_search_hits = messages;
+                    self.chat_search_truncated = truncated;
+                    self.chat_search_pending = false;
+                    self.chat_search_selected = None;
                 }
-                Event::SearchHits { query, messages } => {
-                    if query == self.search.trim() {
-                        // Locked chats' messages stay out of plain search.
-                        self.search_hits = messages
-                            .into_iter()
-                            .filter(|message| {
-                                self.chat(&message.chat).is_none_or(|chat| !chat.locked)
-                            })
-                            .collect();
-                    }
+            }
+            Event::SearchHits { query, messages } => {
+                if query == self.search.trim() {
+                    // Locked chats' messages stay out of plain search.
+                    self.search_hits = messages
+                        .into_iter()
+                        .filter(|message| self.chat(&message.chat).is_none_or(|chat| !chat.locked))
+                        .collect();
                 }
-                Event::Incoming { chat, message } => self.maybe_notify(&chat, &message),
-                Event::Picked { chat, paths } => {
-                    if self.open_chat.as_deref() == Some(chat.as_str()) {
-                        self.stage_files(paths);
-                    }
+            }
+            Event::Incoming { chat, message } => self.maybe_notify(&chat, &message),
+            Event::Picked { chat, paths } => {
+                if live && self.open_chat.as_deref() == Some(chat.as_str()) {
+                    self.stage_files(paths);
                 }
-                Event::InteractiveReplyState {
-                    chat,
-                    message,
-                    pending,
-                } => {
-                    if pending {
-                        self.interactive_sending.insert((chat, message));
-                    } else {
-                        self.interactive_sending.remove(&(chat, message));
-                    }
+            }
+            Event::InteractiveReplyState {
+                chat,
+                message,
+                pending,
+            } => {
+                if pending {
+                    self.interactive_sending.insert((chat, message));
+                } else {
+                    self.interactive_sending.remove(&(chat, message));
                 }
-                Event::MediaSending {
-                    chat,
-                    message,
-                    sending,
-                } => {
-                    self.media_progress.remove(&(chat.clone(), message.clone()));
-                    if sending {
-                        self.media_sending.insert((chat, message));
-                    } else {
-                        self.media_sending.remove(&(chat, message));
-                    }
+            }
+            Event::MediaSending {
+                chat,
+                message,
+                sending,
+            } => {
+                self.media_progress.remove(&(chat.clone(), message.clone()));
+                if sending {
+                    self.media_sending.insert((chat, message));
+                } else {
+                    self.media_sending.remove(&(chat, message));
                 }
-                Event::MediaProgress {
-                    chat,
-                    message,
-                    percent,
-                } => {
-                    if self
-                        .media_sending
-                        .contains(&(chat.clone(), message.clone()))
-                    {
-                        self.media_progress.insert((chat, message), percent);
-                    }
+            }
+            Event::MediaProgress {
+                chat,
+                message,
+                percent,
+            } => {
+                if self
+                    .media_sending
+                    .contains(&(chat.clone(), message.clone()))
+                {
+                    self.media_progress.insert((chat, message), percent);
                 }
-                Event::PollCreated { chat, error } => {
-                    self.poll_creating = false;
-                    if let Some(error) = error {
-                        self.toast_error(error);
-                    } else if self.dialog == Some(Dialog::CreatePoll(chat)) {
-                        self.dialog = None;
-                        self.poll_draft = Default::default();
-                    }
+            }
+            Event::PollCreated { chat, error } => {
+                self.poll_creating = false;
+                if let Some(error) = error {
+                    self.toast_error(error);
+                } else if live && self.dialog == Some(Dialog::CreatePoll(chat)) {
+                    self.dialog = None;
+                    self.poll_draft = Default::default();
                 }
-                Event::PollVoted {
-                    chat,
-                    message,
-                    error,
-                } => {
-                    self.poll_voting.remove(&(chat, message));
-                    if let Some(error) = error {
-                        self.toast_error(error);
-                    }
+            }
+            Event::PollVoted {
+                chat,
+                message,
+                error,
+            } => {
+                self.poll_voting.remove(&(chat, message));
+                if let Some(error) = error {
+                    self.toast_error(error);
                 }
-                Event::MessageUpdated(message) => {
-                    let message = *message;
-                    if let Some(conversation) = self.conversations.get_mut(&message.chat)
-                        && let Some(existing) = conversation.message_mut(&message.id)
-                    {
-                        let state = existing.content.media().map(|media| media.state.clone());
-                        let carousel_states = match &existing.content {
-                            Content::Interactive {
-                                card: Some(card), ..
-                            } => card
-                                .carousel
-                                .iter()
-                                .map(|card| card.image.as_ref().map(|media| media.state.clone()))
-                                .collect::<Vec<_>>(),
-                            _ => Vec::new(),
-                        };
-                        *existing = message;
-                        for (index, state) in carousel_states.into_iter().enumerate() {
-                            if let (Some(state), Some(media)) =
-                                (state, existing.content.media_at_mut(Some(index)))
-                            {
-                                media.state = state;
-                            }
-                        }
-                        if let (Some(state), Some(media)) = (state, existing.content.media_mut()) {
+            }
+            Event::MessageUpdated(message) => {
+                let message = *message;
+                if let Some(conversation) = self.conversations.get_mut(&message.chat)
+                    && let Some(existing) = conversation.message_mut(&message.id)
+                {
+                    let state = existing.content.media().map(|media| media.state.clone());
+                    let carousel_states = match &existing.content {
+                        Content::Interactive {
+                            card: Some(card), ..
+                        } => card
+                            .carousel
+                            .iter()
+                            .map(|card| card.image.as_ref().map(|media| media.state.clone()))
+                            .collect::<Vec<_>>(),
+                        _ => Vec::new(),
+                    };
+                    *existing = message;
+                    for (index, state) in carousel_states.into_iter().enumerate() {
+                        if let (Some(state), Some(media)) =
+                            (state, existing.content.media_at_mut(Some(index)))
+                        {
                             media.state = state;
                         }
                     }
-                }
-                Event::Contacts(contacts) => {
-                    for contact in contacts {
-                        self.contacts.insert(contact.id.clone(), contact);
+                    if let (Some(state), Some(media)) = (state, existing.content.media_mut()) {
+                        media.state = state;
                     }
                 }
-                Event::Phones(phones) => self.lid_phones = phones.into_iter().collect(),
-                Event::Typing {
-                    chat,
-                    sender,
-                    composing,
-                } => {
-                    let typers = self.typing.entry(chat).or_default();
-                    typers.retain(|(who, _)| *who != sender);
-                    if composing {
-                        typers.push((sender, Instant::now()));
-                    }
+            }
+            Event::Contacts(contacts) => {
+                for contact in contacts {
+                    self.contacts.insert(contact.id.clone(), contact);
                 }
-                Event::Presence {
-                    id,
-                    online,
-                    last_seen,
-                } => {
-                    self.presence.insert(id, Presence { online, last_seen });
+            }
+            Event::Phones(phones) => self.lid_phones = phones.into_iter().collect(),
+            Event::Typing {
+                chat,
+                sender,
+                composing,
+            } => {
+                let typers = self.typing.entry(chat).or_default();
+                typers.retain(|(who, _)| *who != sender);
+                if composing {
+                    typers.push((sender, Instant::now()));
                 }
-                Event::Avatar { id, full, path } => {
-                    if full {
-                        self.avatar_full_requests.remove(&id);
-                        self.avatars_full.insert(id, path);
-                    } else {
-                        self.avatar_requests.remove(&id);
-                        self.avatars.insert(id, path);
-                    }
+            }
+            Event::Presence {
+                id,
+                online,
+                last_seen,
+            } => {
+                self.presence.insert(id, Presence { online, last_seen });
+            }
+            Event::Avatar { id, full, path } => {
+                if full {
+                    self.avatar_full_requests.remove(&id);
+                    self.avatars_full.insert(id, path);
+                } else {
+                    self.avatar_requests.remove(&id);
+                    self.avatars.insert(id, path);
                 }
-                Event::LinkPreview { link, card } => {
-                    if let Some(current) = &mut self.composer_link
-                        && current.link == link
-                    {
-                        current.card = Some(card);
-                    }
+            }
+            Event::LinkPreview { link, card } => {
+                if let Some(current) = &mut self.composer_link
+                    && current.link == link
+                {
+                    current.card = Some(card);
                 }
-                Event::Gifs { query, results } => {
-                    if query == self.gif_query {
-                        self.gif_pending = false;
-                        match results {
-                            Ok(results) => {
-                                self.gif_results = results;
-                                self.gif_error = None;
-                            }
-                            Err(error) => {
-                                self.gif_results.clear();
-                                self.gif_error = Some(error);
-                            }
+            }
+            Event::Gifs { query, results } => {
+                if query == self.gif_query {
+                    self.gif_pending = false;
+                    match results {
+                        Ok(results) => {
+                            self.gif_results = results;
+                            self.gif_error = None;
+                        }
+                        Err(error) => {
+                            self.gif_results.clear();
+                            self.gif_error = Some(error);
                         }
                     }
                 }
-                Event::Stickers {
-                    favorites,
-                    packs,
-                    recent,
-                    received,
-                    emojis,
-                } => {
-                    self.stickers_saved = favorites;
-                    self.sticker_packs = packs;
-                    self.stickers = recent;
-                    self.stickers_received = received;
-                    self.sticker_emojis = emojis;
-                    // Show a pack made here as soon as it exists. Packs list
-                    // newest first, so the first match is the new one.
-                    if let Some(name) = self.sticker_pack_created.take() {
-                        match self
-                            .sticker_packs
-                            .iter()
-                            .find(|pack| pack.local && pack.name == name)
-                        {
-                            Some(pack) => self.sticker_shelf = StickerShelf::Pack(pack.dir.clone()),
-                            None => self.sticker_pack_created = Some(name),
-                        }
-                    }
-                    // A pack deleted on another surface cannot stay selected.
-                    if matches!(self.sticker_shelf, StickerShelf::Pack(_))
-                        && self.selected_pack().is_none()
+            }
+            Event::Stickers {
+                favorites,
+                packs,
+                recent,
+                received,
+                emojis,
+            } => {
+                self.stickers_saved = favorites;
+                self.sticker_packs = packs;
+                self.stickers = recent;
+                self.stickers_received = received;
+                self.stickers_pending = false;
+                self.sticker_import_pending = false;
+                // The picker belongs to the account on screen.
+                if !live {
+                    return;
+                }
+                self.sticker_emojis = emojis;
+                // Show a pack made here as soon as it exists. Packs list
+                // newest first, so the first match is the new one.
+                if let Some(name) = self.sticker_pack_created.take() {
+                    match self
+                        .sticker_packs
+                        .iter()
+                        .find(|pack| pack.local && pack.name == name)
                     {
-                        self.sticker_shelf = StickerShelf::Recent;
-                    }
-                    self.stickers_pending = false;
-                    self.sticker_import_pending = false;
-                }
-                Event::MessageDeleted { chat, id } => {
-                    if let Some(conversation) = self.conversations.get_mut(&chat) {
-                        conversation.messages.retain(|message| message.id != id);
-                    }
-                    if self.editing.as_deref() == Some(id.as_str()) {
-                        self.editing = None;
-                        self.composer.clear();
+                        Some(pack) => self.sticker_shelf = StickerShelf::Pack(pack.dir.clone()),
+                        None => self.sticker_pack_created = Some(name),
                     }
                 }
-                Event::ChatRemoved { chat } => self.forget_chat(&chat),
-                Event::ChatCleared { chat, through } => self.handle_chat_cleared(&chat, through),
-                Event::Media {
-                    card,
-                    chat,
-                    message,
-                    result,
-                } => self.handle_media(&chat, &message, card, result),
-                Event::Syncing(syncing) => {
-                    if self.syncing && !syncing {
-                        self.toast(tr("History loaded"));
-                    }
-                    self.syncing = syncing;
-                    if !syncing {
-                        self.sync_percent = None;
-                    }
+                // A pack deleted on another surface cannot stay selected.
+                if matches!(self.sticker_shelf, StickerShelf::Pack(_))
+                    && self.selected_pack().is_none()
+                {
+                    self.sticker_shelf = StickerShelf::Recent;
                 }
-                Event::SyncProgress(percent) => self.sync_percent = Some(percent),
-                Event::OlderFetched { chat, more, silent } => {
-                    let conversation = self.conversations.entry(chat).or_default();
-                    conversation.fetching_phone = false;
-                    conversation.phone_silent = silent;
-                    conversation.phone_exhausted = !more;
-                    conversation.phone_answered = Some(Instant::now());
-                    if conversation.phone_delivered {
-                        conversation.phone_misses = 0;
+            }
+            Event::MessageDeleted { chat, id } => {
+                if let Some(conversation) = self.conversations.get_mut(&chat) {
+                    conversation.messages.retain(|message| message.id != id);
+                }
+                if live && self.editing.as_deref() == Some(id.as_str()) {
+                    self.editing = None;
+                    self.composer.clear();
+                }
+            }
+            Event::ChatRemoved { chat } => self.forget_chat(&chat),
+            Event::ChatCleared { chat, through } => self.handle_chat_cleared(&chat, through, live),
+            Event::Media {
+                card,
+                chat,
+                message,
+                result,
+            } => self.handle_media(&chat, &message, card, result),
+            Event::Syncing(syncing) => {
+                if self.syncing && !syncing {
+                    self.toast(tr("History loaded"));
+                }
+                self.syncing = syncing;
+                if !syncing {
+                    self.sync_percent = None;
+                }
+            }
+            Event::SyncProgress(percent) => self.sync_percent = Some(percent),
+            Event::OlderFetched { chat, more, silent } => {
+                let conversation = self.conversations.entry(chat).or_default();
+                conversation.fetching_phone = false;
+                conversation.phone_silent = silent;
+                conversation.phone_exhausted = !more;
+                conversation.phone_answered = Some(Instant::now());
+                if conversation.phone_delivered {
+                    conversation.phone_misses = 0;
+                } else {
+                    conversation.phone_misses = (conversation.phone_misses + 1).min(7);
+                }
+                conversation.phone_delivered = false;
+                // Page the archive again after phone history arrives. A phone
+                // that sent nothing left it as it was, and the chat says so.
+                if !silent {
+                    conversation.complete = false;
+                }
+            }
+            Event::ReceiptsPrivacy { disabled } => self.account_receipts_off = disabled,
+            Event::AccountPrivacy { values, failed } => {
+                self.account_privacy.apply_fetch(values, failed);
+                // The account value wins over the local switch: it is what
+                // the phone and the other linked devices enforce.
+                if let Some(choice) = self
+                    .account_privacy
+                    .get(crate::privacy::PrivacyKind::ReadReceipts)
+                {
+                    self.account_receipts_off = choice != crate::privacy::PrivacyChoice::Everyone;
+                }
+            }
+            Event::AccountPrivacySaved { kind } => {
+                // A confirmation nothing waits for belongs to an account
+                // that has since been unlinked.
+                if self.account_privacy.finish_set(kind)
+                    && kind == crate::privacy::PrivacyKind::ReadReceipts
+                {
+                    self.account_receipts_off = self.account_privacy.get(kind)
+                        != Some(crate::privacy::PrivacyChoice::Everyone);
+                }
+            }
+            Event::AccountPrivacyFailed { kind } => self.account_privacy.fail_set(kind),
+            Event::PinLimit(limit) => self.pin_limit = limit,
+            Event::Blocklist(blocked) => self.blocklist = Some(blocked),
+            Event::BlockDone { chat, blocked, ok } => {
+                self.blocking.remove(&chat);
+                if !ok {
+                    self.toast_error(if blocked {
+                        tr("Could not block this contact. Try again in a moment.")
                     } else {
-                        conversation.phone_misses = (conversation.phone_misses + 1).min(7);
-                    }
-                    conversation.phone_delivered = false;
-                    // Page the archive again after phone history arrives. A phone
-                    // that sent nothing left it as it was, and the chat says so.
-                    if !silent {
-                        conversation.complete = false;
-                    }
-                }
-                Event::ReceiptsPrivacy { disabled } => self.account_receipts_off = disabled,
-                Event::AccountPrivacy { values, failed } => {
-                    self.account_privacy.apply_fetch(values, failed);
-                    // The account value wins over the local switch: it is what
-                    // the phone and the other linked devices enforce.
-                    if let Some(choice) = self
-                        .account_privacy
-                        .get(crate::privacy::PrivacyKind::ReadReceipts)
-                    {
-                        self.account_receipts_off =
-                            choice != crate::privacy::PrivacyChoice::Everyone;
-                    }
-                }
-                Event::AccountPrivacySaved { kind } => {
-                    // A confirmation nothing waits for belongs to an account
-                    // that has since been unlinked.
-                    if self.account_privacy.finish_set(kind)
-                        && kind == crate::privacy::PrivacyKind::ReadReceipts
-                    {
-                        self.account_receipts_off = self.account_privacy.get(kind)
-                            != Some(crate::privacy::PrivacyChoice::Everyone);
-                    }
-                }
-                Event::AccountPrivacyFailed { kind } => self.account_privacy.fail_set(kind),
-                Event::PinLimit(limit) => self.pin_limit = limit,
-                Event::Blocklist(blocked) => self.blocklist = Some(blocked),
-                Event::BlockDone { chat, blocked, ok } => {
-                    self.blocking.remove(&chat);
-                    if !ok {
-                        self.toast_error(if blocked {
-                            tr("Could not block this contact. Try again in a moment.")
-                        } else {
-                            tr("Could not unblock this contact. Try again in a moment.")
-                        });
-                    }
-                }
-                Event::Receipts(receipts) => {
-                    // A late answer for a dialog that has since closed is stale.
-                    if self.receipts_watch.as_ref().is_some_and(|(chat, message)| {
-                        *chat == receipts.chat && *message == receipts.message
-                    }) {
-                        self.message_receipts = Some(receipts);
-                    }
-                }
-                Event::ChatSoundPicked { chat, path } => {
-                    crate::notify::play_sound(crate::settings::NotificationSound::Custom(
-                        path.clone(),
-                    ));
-                    self.actions.push(Action::SetChatSound {
-                        chat,
-                        sound: Some(crate::settings::NotificationSound::Custom(path)),
+                        tr("Could not unblock this contact. Try again in a moment.")
                     });
                 }
-                Event::DownloadFolderPicked(path) => {
+            }
+            Event::Receipts(receipts) => {
+                // A late answer for a dialog that has since closed is stale.
+                if live
+                    && self.receipts_watch.as_ref().is_some_and(|(chat, message)| {
+                        *chat == receipts.chat && *message == receipts.message
+                    })
+                {
+                    self.message_receipts = Some(receipts);
+                }
+            }
+            Event::ChatSoundPicked { chat, path } => {
+                crate::notify::play_sound(crate::settings::NotificationSound::Custom(path.clone()));
+                self.actions.push(Action::SetChatSound {
+                    chat,
+                    sound: Some(crate::settings::NotificationSound::Custom(path)),
+                });
+            }
+            Event::DownloadFolderPicked(path) => {
+                if live {
                     self.actions.push(Action::SetDownloadFolder(Some(path)));
                 }
-                Event::WallpaperImagePicked(Ok(path)) => {
-                    // The copy may keep the earlier one's name: decode it anew.
+            }
+            Event::WallpaperImagePicked(Ok(path)) => {
+                // The copy may keep the earlier one's name: decode it anew.
+                self.account_mut().settings.wallpaper_image = Some(path);
+                self.account_mut().mark_settings_dirty();
+                if live {
                     self.wallpaper_image.reload();
-                    self.settings.wallpaper_image = Some(path);
-                    self.mark_settings_dirty();
                 }
-                Event::WallpaperImagePicked(Err(error)) => {
-                    let message = crate::i18n::gettext(self.locale, "Could not use this image");
-                    self.toast_error(format!("{message}: {error}"));
-                }
-                Event::NotificationSoundPicked { mention, path } => {
+            }
+            Event::WallpaperImagePicked(Err(error)) => {
+                let message = crate::i18n::gettext(self.locale, "Could not use this image");
+                self.toast_error(format!("{message}: {error}"));
+            }
+            Event::NotificationSoundPicked { mention, path } => {
+                if live {
                     crate::notify::play_sound(crate::settings::NotificationSound::Custom(
                         path.clone(),
                     ));
@@ -3067,142 +3380,143 @@ impl App {
                         sound: crate::settings::NotificationSound::Custom(path),
                     });
                 }
-                Event::InvitePreview { code, result } => {
-                    use crate::model::InviteState;
-                    if let Some(invite) = self.invite.as_mut().filter(|invite| invite.code == code)
-                    {
-                        invite.state = match result {
-                            Ok(info) => InviteState::Ready(info),
-                            Err(error) => InviteState::Failed(error),
-                        };
-                    }
+            }
+            Event::InvitePreview { code, result } => {
+                use crate::model::InviteState;
+                if let Some(invite) = self.invite.as_mut().filter(|invite| invite.code == code) {
+                    invite.state = match result {
+                        Ok(info) => InviteState::Ready(info),
+                        Err(error) => InviteState::Failed(error),
+                    };
                 }
-                Event::InviteJoined { code, result } => {
-                    if self
-                        .invite
-                        .as_ref()
-                        .is_some_and(|invite| invite.code == code)
-                    {
-                        match result {
-                            Ok((id, pending)) => {
-                                self.invite = None;
-                                if self.dialog == Some(Dialog::JoinGroup) {
-                                    self.dialog = None;
-                                }
-                                if pending {
-                                    self.toast(tr(
-                                        "Request sent. An admin must approve it before you join.",
-                                    ));
-                                } else {
-                                    self.actions.push(Action::OpenChat(id));
-                                }
+            }
+            Event::InviteJoined { code, result } => {
+                if self
+                    .invite
+                    .as_ref()
+                    .is_some_and(|invite| invite.code == code)
+                {
+                    match result {
+                        Ok((id, pending)) => {
+                            self.invite = None;
+                            if live && self.dialog == Some(Dialog::JoinGroup) {
+                                self.dialog = None;
                             }
-                            Err(error) => {
-                                if let Some(invite) = self.invite.as_mut() {
-                                    invite.state = crate::model::InviteState::Failed(error);
-                                }
+                            if pending {
+                                self.toast(tr(
+                                    "Request sent. An admin must approve it before you join.",
+                                ));
+                            } else if live {
+                                self.actions.push(Action::OpenChat(id));
+                            }
+                        }
+                        Err(error) => {
+                            if let Some(invite) = self.invite.as_mut() {
+                                invite.state = crate::model::InviteState::Failed(error);
                             }
                         }
                     }
                 }
-                Event::ContactReady { id, name } => {
-                    self.new_contact_pending = false;
-                    if self.dialog == Some(Dialog::NewContact) {
-                        self.dialog = None;
-                    }
-                    let name = name
-                        .filter(|name| !name.is_empty())
-                        .unwrap_or_else(|| crate::util::phone(&id));
+            }
+            Event::ContactReady { id, name } => {
+                self.new_contact_pending = false;
+                if live && self.dialog == Some(Dialog::NewContact) {
+                    self.dialog = None;
+                }
+                let name = name
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or_else(|| crate::util::phone(&id));
+                if live {
                     self.actions.push(Action::StartChat { id, name });
                 }
-                Event::Info(message) => self.toast(message),
-                Event::ClipboardImage(result) => {
-                    self.handle_clipboard_image(result, write_clipboard_image);
-                }
-                Event::StickerPicture {
-                    path,
+            }
+            Event::Info(message) => self.toast(message),
+            Event::ClipboardImage(result) => {
+                self.handle_clipboard_image(result, write_clipboard_image);
+            }
+            Event::StickerPicture {
+                path,
+                width,
+                height,
+                transparent,
+            } => {
+                self.sticker_draft = Some(crate::model::StickerDraft {
+                    source: path,
                     width,
                     height,
                     transparent,
-                } => {
-                    self.sticker_draft = Some(crate::model::StickerDraft {
-                        source: path,
-                        width,
-                        height,
-                        transparent,
-                        crop: crate::model::StickerCrop::centered(width, height),
-                        keep_transparent: transparent,
-                        emojis: String::new(),
-                    });
+                    crop: crate::model::StickerCrop::centered(width, height),
+                    keep_transparent: transparent,
+                    emojis: String::new(),
+                });
+                if live {
                     self.picker = None;
                     self.dialog = Some(Dialog::StickerMaker);
                 }
-                Event::StickerPackPreview(result) => {
-                    self.sticker_preview_pending = false;
-                    match result {
-                        Ok(preview) => self.sticker_preview = Some(preview),
-                        Err(error) => {
-                            if self.dialog == Some(Dialog::StickerPack) {
-                                self.dialog = None;
-                            }
-                            self.toast_error(error);
-                        }
-                    }
-                }
-                Event::UpdateAvailable { version, url } => {
-                    let notice = crate::updates::Release { version, url };
-                    if self.update.as_ref() != Some(&notice) {
-                        self.toast(
-                            tr("ZapFast {version} is available")
-                                .replace("{version}", &notice.version),
-                        );
-                    }
-                    self.update = Some(notice);
-                }
-                Event::UpdateSupport(result) => {
-                    self.update_support = Some(result);
-                    self.update_inspecting = false;
-                    self.maybe_download_update();
-                }
-                Event::UpdateProgress { received, total } => {
-                    self.update_download =
-                        crate::updates::DownloadState::Downloading { received, total };
-                }
-                Event::UpdateDownloaded(result) => {
-                    self.update_download = match result {
-                        Ok(prepared) => crate::updates::DownloadState::Ready(prepared),
-                        Err(error) => crate::updates::DownloadState::Failed(error),
-                    };
-                }
-                Event::UpdateInstalling(result) => match result {
-                    Ok(()) => self.actions.push(Action::Quit),
+            }
+            Event::StickerPackPreview(result) => {
+                self.sticker_preview_pending = false;
+                match result {
+                    Ok(preview) => self.sticker_preview = Some(preview),
                     Err(error) => {
-                        self.update_download = crate::updates::DownloadState::Failed(error)
+                        if live && self.dialog == Some(Dialog::StickerPack) {
+                            self.dialog = None;
+                        }
+                        self.toast_error(error);
                     }
-                },
-                Event::SendRefused {
-                    chat,
-                    quoting,
-                    unsent,
-                    reason,
-                } => self.send_refused(chat, quoting, unsent, reason),
-                Event::GroupSaving { chat, saving } => {
-                    if saving {
-                        self.group_saving.insert(chat);
-                    } else {
-                        self.group_saving.remove(&chat);
-                    }
-                }
-                Event::Error(message) => {
-                    self.sticker_import_pending = false;
-                    self.new_contact_pending = false;
-                    self.toast_error(message);
                 }
             }
+            Event::UpdateAvailable { version, url } => {
+                let notice = crate::updates::Release { version, url };
+                if self.update.as_ref() != Some(&notice) {
+                    self.toast(
+                        tr("ZapFast {version} is available").replace("{version}", &notice.version),
+                    );
+                }
+                self.update = Some(notice);
+            }
+            Event::UpdateSupport(result) => {
+                self.update_support = Some(result);
+                self.update_inspecting = false;
+                self.maybe_download_update();
+            }
+            Event::UpdateProgress { received, total } => {
+                self.update_download =
+                    crate::updates::DownloadState::Downloading { received, total };
+            }
+            Event::UpdateDownloaded(result) => {
+                self.update_download = match result {
+                    Ok(prepared) => crate::updates::DownloadState::Ready(prepared),
+                    Err(error) => crate::updates::DownloadState::Failed(error),
+                };
+            }
+            Event::UpdateInstalling(result) => match result {
+                Ok(()) => self.actions.push(Action::Quit),
+                Err(error) => self.update_download = crate::updates::DownloadState::Failed(error),
+            },
+            Event::SendRefused {
+                chat,
+                quoting,
+                unsent,
+                reason,
+            } => self.send_refused(chat, quoting, unsent, reason),
+            Event::GroupSaving { chat, saving } => {
+                if saving {
+                    self.group_saving.insert(chat);
+                } else {
+                    self.group_saving.remove(&chat);
+                }
+            }
+            Event::Error(message) => {
+                self.sticker_import_pending = false;
+                self.new_contact_pending = false;
+                self.toast_error(message);
+            }
+            Event::AccountRemoved => {}
         }
     }
 
-    fn handle_link(&mut self, status: LinkStatus) {
+    fn handle_link(&mut self, status: LinkStatus, live: bool) {
         match &status {
             LinkStatus::Connected => {
                 for conversation in self.conversations.values_mut() {
@@ -3216,22 +3530,25 @@ impl App {
                 if matches!(self.link, LinkStatus::Disconnected { .. }) {
                     self.toast(tr("Back online"));
                 }
-                self.dialog = match self.dialog.take() {
-                    Some(Dialog::PairWithPhone) => None,
-                    other => other,
-                };
+                if live {
+                    self.dialog = match self.dialog.take() {
+                        Some(Dialog::PairWithPhone) => None,
+                        other => other,
+                    };
+                }
                 if let Some(open) = self.open_chat.clone() {
                     self.ensure_loaded(&open);
                 }
             }
             LinkStatus::LoggedOut => {
+                let account = self.account().id.clone();
                 self.poll_voting.clear();
                 self.interactive_sending.clear();
                 self.media_sending.clear();
                 self.media_progress.clear();
                 self.poll_creating = false;
                 self.poll_draft = Default::default();
-                self.notifications.clear_all();
+                self.notifications.clear_account(&account);
                 self.chats.clear();
                 self.conversations.clear();
                 self.contacts.clear();
@@ -3244,12 +3561,18 @@ impl App {
                 // Unsent text belongs to the account that was unlinked.
                 self.drafts.clear();
                 self.draft_mentions.clear();
-                self.composer.clear();
-                self.composer_mentions.clear();
+                if live {
+                    self.composer.clear();
+                    self.composer_mentions.clear();
+                }
+                self.link = status;
                 // The password guarded chats that are gone now; a forgotten
-                // one is recovered exactly this way.
-                self.forget_app_lock();
+                // one is recovered exactly this way, once no number remains.
+                if !self.any_linked() {
+                    self.forget_app_lock();
+                }
                 self.toast_error("This device was unlinked from your phone");
+                return;
             }
             LinkStatus::Failed(message) => self.toast_error(message.clone()),
             _ => {}
@@ -3257,12 +3580,14 @@ impl App {
         self.link = status;
     }
 
-    fn handle_chat_updated(&mut self, chat: Chat) {
-        let is_open =
-            self.open_chat.as_deref() == Some(chat.id.as_str()) && self.page == Page::Chats;
+    fn handle_chat_updated(&mut self, chat: Chat, live: bool) {
+        // A hidden account's remembered chat is not being read: marking it
+        // read would send receipts for messages nobody has seen.
+        let remembered = self.open_chat.as_deref() == Some(chat.id.as_str());
+        let is_open = live && remembered && self.page == Page::Chats;
         let mut chat = chat;
         if chat.unread == 0 {
-            self.notifications.clear(&chat.id);
+            self.clear_chat_notifications(&chat.id);
         }
         if is_open
             && (!chat.locked || self.locked_folder_open())
@@ -3282,8 +3607,15 @@ impl App {
         // so this is where the open conversation closes, not before. Only a
         // chat that just became archived: a message arriving in one that was
         // already archived does not close it.
-        if is_open && chat.archived && self.chat(&chat.id).is_none_or(|known| !known.archived) {
-            self.actions.push(Action::CloseChat);
+        if (is_open || (!live && remembered))
+            && chat.archived
+            && self.chat(&chat.id).is_none_or(|known| !known.archived)
+        {
+            if live {
+                self.actions.push(Action::CloseChat);
+            } else {
+                self.open_chat = None;
+            }
         }
         match self.chats.iter_mut().find(|known| known.id == chat.id) {
             Some(existing) => *existing = chat,
@@ -3328,49 +3660,54 @@ impl App {
     /// Empties a chat that stays listed. Search hits and anything pointing at
     /// one of its messages would otherwise refer to rows that are gone, and a
     /// pending edit would send `EditText` for a message that no longer exists.
-    fn handle_chat_cleared(&mut self, id: &str, through: i64) {
+    fn handle_chat_cleared(&mut self, id: &str, through: i64, live: bool) {
         // A confirmation that is open for this chat is about messages that are
         // already gone: clearing again would take what arrived since.
         if matches!(&self.dialog, Some(Dialog::ConfirmClearChat(chat)) if chat == id) {
             self.dialog = None;
         }
-        self.notifications.clear(id);
+        self.clear_chat_notifications(id);
         // Clearing a chat also removes its stored draft.
         self.drafts.remove(id);
         self.draft_mentions.remove(id);
         self.search_hits
             .retain(|message| message.chat != id || message.timestamp > through);
         // Nothing earlier is left here, and the phone no longer has it either.
-        let conversation = self.conversations.entry(id.to_owned()).or_default();
-        conversation
-            .messages
-            .retain(|message| message.timestamp > through);
-        conversation.requested = true;
-        conversation.complete = true;
-        conversation.phone_exhausted = true;
-        conversation.loading_older = false;
-        if self.open_chat.as_deref() == Some(id) {
-            if self
-                .editing
-                .as_ref()
-                .is_some_and(|id| conversation.message(id).is_none())
-            {
+        let open = self.open_chat.as_deref() == Some(id);
+        let editing = self.editing.clone();
+        let reply = self.reply_to.clone();
+        let reaction = self.reaction_target.clone();
+        let (editing_gone, reply_gone, reaction_gone) = {
+            let conversation = self.conversations.entry(id.to_owned()).or_default();
+            conversation
+                .messages
+                .retain(|message| message.timestamp > through);
+            conversation.requested = true;
+            conversation.complete = true;
+            conversation.phone_exhausted = true;
+            conversation.loading_older = false;
+            (
+                editing
+                    .as_ref()
+                    .is_some_and(|edit| conversation.message(edit).is_none()),
+                reply
+                    .as_ref()
+                    .is_some_and(|reply| conversation.message(reply).is_none()),
+                reaction
+                    .as_ref()
+                    .is_some_and(|(_, target)| conversation.message(target).is_none()),
+            )
+        };
+        if open && live {
+            if editing_gone {
                 self.editing = None;
                 self.composer.clear();
                 self.composer_mentions.clear();
             }
-            if self
-                .reply_to
-                .as_ref()
-                .is_some_and(|id| conversation.message(id).is_none())
-            {
+            if reply_gone {
                 self.reply_to = None;
             }
-            if self
-                .reaction_target
-                .as_ref()
-                .is_some_and(|(_, id)| conversation.message(id).is_none())
-            {
+            if reaction_gone {
                 self.reaction_target = None;
                 self.reaction_anchor = None;
                 self.picker = None;
@@ -3455,7 +3792,12 @@ impl App {
 
     fn hide_locked_chat(&mut self, id: &str) {
         // A locked chat still exists, so its unsent text waits as a draft.
-        // Text emptied in the composer clears the stored copy too.
+        // Text emptied in the composer clears the stored copy too. A hidden
+        // account's composer text is already parked among its drafts.
+        if self.events_hidden {
+            self.leave_chat(id);
+            return;
+        }
         if self.open_chat.as_deref() == Some(id)
             && self.editing.is_none()
             && self.composer.is_empty()
@@ -3466,10 +3808,10 @@ impl App {
             && self.editing.is_none()
             && !self.composer.is_empty()
         {
-            self.drafts
-                .insert(id.to_owned(), std::mem::take(&mut self.composer));
-            self.draft_mentions
-                .insert(id.to_owned(), std::mem::take(&mut self.composer_mentions));
+            let draft = std::mem::take(&mut self.composer);
+            let mentions = std::mem::take(&mut self.composer_mentions);
+            self.drafts.insert(id.to_owned(), draft);
+            self.draft_mentions.insert(id.to_owned(), mentions);
             self.store_draft(
                 id,
                 self.drafts.get(id).map(String::as_str).unwrap_or_default(),
@@ -3579,39 +3921,59 @@ impl App {
         card: Option<usize>,
         result: Result<PathBuf, String>,
     ) {
-        let Some(message) = self
-            .conversations
-            .get_mut(chat)
-            .and_then(|conversation| conversation.message_mut(id))
-        else {
-            return;
+        let want_video = self
+            .video_wanted
+            .as_ref()
+            .is_some_and(|(wanted_chat, wanted)| wanted_chat == chat && wanted == id);
+        let want_voice = self
+            .voice_wanted
+            .as_ref()
+            .is_some_and(|(wanted_chat, wanted, _)| wanted_chat == chat && wanted == id);
+        let open = self.open_chat.as_deref() == Some(chat);
+        // Playback waits belong to the account on screen.
+        let want_video = want_video && !self.events_hidden;
+        let want_voice = want_voice && !self.events_hidden;
+        let applied = {
+            let Some(message) = self
+                .conversations
+                .get_mut(chat)
+                .and_then(|conversation| conversation.message_mut(id))
+            else {
+                return;
+            };
+            let Some(media) = message.content.media_at_mut(card) else {
+                return;
+            };
+            match result {
+                Ok(path) => {
+                    media.path = Some(path.clone());
+                    media.state = MediaState::Idle;
+                    Ok(path)
+                }
+                Err(error) => {
+                    // Show expired-file failures in the bubble, not as a toast.
+                    let notice = if error.contains("403") || error.contains("404") {
+                        tr("No longer available on WhatsApp's servers").to_owned()
+                    } else {
+                        error
+                    };
+                    log::warn!("attachment download failed; details are shown in the bubble");
+                    media.state = MediaState::Failed(notice);
+                    Err(())
+                }
+            }
         };
-        let Some(media) = message.content.media_at_mut(card) else {
-            return;
-        };
-        match result {
+        match applied {
             Ok(path) => {
-                media.path = Some(path.clone());
-                media.state = MediaState::Idle;
-                if self
-                    .video_wanted
-                    .as_ref()
-                    .is_some_and(|(wanted_chat, wanted)| wanted_chat == chat && wanted == id)
-                {
+                if want_video {
                     self.video_wanted = None;
                     self.actions.push(Action::PlayVideo {
                         message: id.to_owned(),
                         path,
                     });
-                } else if self
-                    .voice_wanted
-                    .as_ref()
-                    .is_some_and(|(wanted_chat, wanted, _)| wanted_chat == chat && wanted == id)
-                {
+                } else if want_voice {
                     self.voice_wanted = None;
-                    // Leaving the chat ended the run, so a clip that lands
-                    // after that is not started.
-                    if self.open_chat.as_deref() == Some(chat) {
+                    if open {
                         self.actions.push(Action::PlayVoice {
                             message: id.to_owned(),
                             path,
@@ -3619,30 +3981,25 @@ impl App {
                     }
                 }
             }
-            Err(error) => {
-                if self
-                    .voice_wanted
-                    .as_ref()
-                    .is_some_and(|(wanted_chat, wanted, _)| wanted_chat == chat && wanted == id)
-                {
+            Err(()) => {
+                if want_voice {
                     self.voice_wanted = None;
                 }
-                // Show expired-file failures in the bubble, not as a toast.
-                let notice = if error.contains("403") || error.contains("404") {
-                    tr("No longer available on WhatsApp's servers").to_owned()
-                } else {
-                    error
-                };
-                log::warn!("attachment download failed; details are shown in the bubble");
-                media.state = MediaState::Failed(notice);
             }
         }
     }
 
     fn ensure_loaded(&mut self, chat: &str) {
-        let conversation = self.conversations.entry(chat.to_owned()).or_default();
-        if !conversation.requested {
-            conversation.requested = true;
+        let request = {
+            let conversation = self.conversations.entry(chat.to_owned()).or_default();
+            if conversation.requested {
+                false
+            } else {
+                conversation.requested = true;
+                true
+            }
+        };
+        if request {
             self.backend.send(Command::LoadChat {
                 chat: chat.to_owned(),
                 before: None,
@@ -3654,7 +4011,8 @@ impl App {
     /// already in flight is not aimed at it: the jump waits in `jump_load` and
     /// `continue_jump` asks again when that page lands.
     fn load_toward(&mut self, chat: &str, id: &str) {
-        let conversation = self.conversations.entry(chat.to_owned()).or_default();
+        let account = &mut self.accounts[self.active];
+        let conversation = account.conversations.entry(chat.to_owned()).or_default();
         if conversation.message(id).is_some() {
             self.jump_load = None;
             return;
@@ -3669,7 +4027,7 @@ impl App {
         {
             conversation.loading_older = true;
             jump.requested = true;
-            self.backend.send(Command::LoadUntil {
+            account.backend.send(Command::LoadUntil {
                 chat: chat.to_owned(),
                 id: id.to_owned(),
                 before: (oldest.timestamp, oldest.id.clone()),
@@ -3685,7 +4043,8 @@ impl App {
         let Some(jump) = self.jump_load.clone().filter(|jump| jump.chat == chat) else {
             return;
         };
-        let Some(conversation) = self.conversations.get_mut(chat) else {
+        let account = &mut self.accounts[self.active];
+        let Some(conversation) = account.conversations.get_mut(chat) else {
             self.jump_load = None;
             return;
         };
@@ -3702,7 +4061,7 @@ impl App {
                 if let Some(pending) = self.jump_load.as_mut() {
                     pending.requested = true;
                 }
-                self.backend.send(Command::LoadUntil {
+                account.backend.send(Command::LoadUntil {
                     chat: chat.to_owned(),
                     id: jump.id,
                     before,
@@ -3721,7 +4080,10 @@ impl App {
     }
 
     pub fn load_older(&mut self, chat: &str) {
-        let Some(conversation) = self.conversations.get_mut(chat) else {
+        // The account's fields directly, so the window's scroll anchor can
+        // change while its conversation is borrowed.
+        let account = &mut self.accounts[self.active];
+        let Some(conversation) = account.conversations.get_mut(chat) else {
             return;
         };
         if conversation.loading_older {
@@ -3744,7 +4106,7 @@ impl App {
             self.scroll_anchor = Some(oldest.id.clone());
             self.scroll_anchor_at_top = true;
         }
-        self.backend.send(Command::LoadChat {
+        account.backend.send(Command::LoadChat {
             chat: chat.to_owned(),
             before: Some(before),
         });
@@ -3754,14 +4116,15 @@ impl App {
     /// `asked` is the reader pressing the button for it, which also tries a
     /// phone that did not answer last time and skips the cooldown.
     pub fn fetch_older(&mut self, chat: &str, asked: bool) {
-        let Some(conversation) = self.conversations.get_mut(chat) else {
+        let account = &mut self.accounts[self.active];
+        let Some(conversation) = account.conversations.get_mut(chat) else {
             return;
         };
         if conversation.fetching_phone || (conversation.phone_exhausted && !asked) {
             return;
         }
         // Only a connected phone can answer.
-        if !matches!(self.link, LinkStatus::Connected) {
+        if !matches!(account.link, LinkStatus::Connected) {
             return;
         }
         if !asked {
@@ -3781,19 +4144,19 @@ impl App {
         }
         conversation.fetching_phone = true;
         conversation.phone_silent = false;
+        let oldest = conversation
+            .messages
+            .first()
+            .map(|oldest| oldest.id.clone());
+        account.backend.send(Command::FetchOlder(chat.to_owned()));
         if !self.jump_pending(chat) {
-            self.scroll_anchor = self
-                .conversations
-                .get(chat)
-                .and_then(|conversation| conversation.messages.first())
-                .map(|oldest| oldest.id.clone());
+            self.scroll_anchor = oldest;
             self.scroll_anchor_at_top = true;
         }
-        self.backend.send(Command::FetchOlder(chat.to_owned()));
     }
 
     fn mark_read(&mut self, chat: &str) {
-        self.notifications.clear(chat);
+        self.clear_chat_notifications(chat);
         if let Some(known) = self.chat_mut(chat) {
             known.unread = 0;
             known.marked_unread = false;
@@ -3801,7 +4164,7 @@ impl App {
         // Clear local unread state regardless of receipt settings.
         self.backend.send(Command::MarkRead {
             chat: chat.to_owned(),
-            receipts: self.settings.send_read_receipts,
+            receipts: self.account().settings.send_read_receipts,
         });
     }
 
@@ -3845,10 +4208,8 @@ impl App {
                     self.composer_mentions.clear();
                 } else {
                     self.drafts.insert(previous.clone(), draft);
-                    self.draft_mentions.insert(
-                        previous.clone(),
-                        std::mem::take(&mut self.composer_mentions),
-                    );
+                    let mentions = std::mem::take(&mut self.composer_mentions);
+                    self.draft_mentions.insert(previous.clone(), mentions);
                 }
                 self.stop_composing(&previous);
                 let draft = self.drafts.get(&previous).cloned().unwrap_or_default();
@@ -3904,8 +4265,12 @@ impl App {
             self.mark_read(&id);
         }
         if self.settings.last_chat.as_deref() != Some(id.as_str()) {
-            self.settings.last_chat = Some(id);
+            self.settings.last_chat = Some(id.clone());
             self.mark_settings_dirty();
+        }
+        if self.account().settings.last_chat.as_deref() != Some(id.as_str()) {
+            self.account_mut().settings.last_chat = Some(id);
+            self.account_mut().mark_settings_dirty();
         }
     }
 
@@ -3944,7 +4309,7 @@ impl App {
     pub fn note_keystroke(&mut self) {
         self.last_keystroke = Some(Instant::now());
         if !self.composing
-            && self.settings.send_typing
+            && self.account().settings.send_typing
             && let Some(chat) = self.open_chat.clone()
         {
             self.composing = true;
@@ -4172,7 +4537,8 @@ impl App {
             && self.call_notified == Some(update.generation)
         {
             self.call_notified = None;
-            self.notifications.clear(&update.chat);
+            let account = self.account().id.clone();
+            self.notifications.clear(&account, &update.chat);
         }
         if !update.phase.is_live() {
             if self.call.is_none() {
@@ -4203,7 +4569,11 @@ impl App {
                 .call
                 .as_ref()
                 .is_none_or(|current| current.generation != update.generation);
+        let chat = update.chat.clone();
         self.call = Some(update);
+        // Events run with their account on screen, so this is the call's.
+        self.call_account = Some(self.account().id.clone());
+        self.call_peer = Some((self.peer_name(&chat), self.peer_avatar(&chat)));
         self.call_repaint = true;
         if ringing && let Some(call) = self.call.clone() {
             self.call_raise = true;
@@ -4218,7 +4588,7 @@ impl App {
     /// until they happened to look. The click only brings the window up, because the call surface is
     /// drawn over whatever is open and is already waiting for Accept or Decline.
     fn notify_incoming_call(&mut self, call: &crate::calls::CallUpdate) {
-        if !self.settings.notifications {
+        if !self.account().settings.notifications {
             return;
         }
         let now = crate::util::now();
@@ -4260,6 +4630,7 @@ impl App {
             picture,
             sound,
             crate::notify::NotificationTarget {
+                account: self.account().id.clone(),
                 chat: call.chat.clone(),
                 message: None,
             },
@@ -4322,6 +4693,11 @@ impl App {
         self.maybe_download_update();
         if self.settings_dirty && self.last_settings_save.elapsed() > Duration::from_secs(2) {
             self.save_settings();
+        }
+        for account in &mut self.accounts {
+            if account.settings_dirty {
+                account.save_settings();
+            }
         }
         if !self.typing.is_empty() || self.composing {
             ctx.request_repaint_after(Duration::from_secs(1));
@@ -4489,6 +4865,16 @@ impl App {
     }
 
     fn apply_actions(&mut self, ctx: &egui::Context) {
+        let deferred = std::mem::take(&mut self.deferred_account_actions);
+        for (id, action) in deferred {
+            let Some(index) = self.accounts.iter().position(|account| account.id == id) else {
+                continue;
+            };
+            let previous = self.active;
+            self.active = index;
+            self.apply(action, ctx);
+            self.active = previous;
+        }
         let mut actions = std::mem::take(&mut self.actions);
         while !actions.is_empty() {
             for action in actions.drain(..) {
@@ -4504,6 +4890,7 @@ impl App {
             // rest would show or change what the lock hides.
             if let Action::OpenMessage { chat, message } = action {
                 self.app_lock.deferred = Some(crate::notify::NotificationTarget {
+                    account: self.account().id.clone(),
                     chat,
                     message: Some(message),
                 });
@@ -4599,23 +4986,24 @@ impl App {
                 self.load_toward(&chat, &message);
             }
             Action::StartCall(chat) => {
+                self.call_account = Some(self.account().id.clone());
                 self.backend.send(Command::StartCall { chat });
             }
-            Action::AnswerCall => self.backend.send(Command::AnswerCall),
-            Action::DeclineCall => self.backend.send(Command::DeclineCall),
-            Action::HangupCall => self.backend.send(Command::HangupCall),
-            Action::SetCallMuted(muted) => self.backend.send(Command::SetCallMuted(muted)),
+            Action::AnswerCall => self.call_backend().send(Command::AnswerCall),
+            Action::DeclineCall => self.call_backend().send(Command::DeclineCall),
+            Action::HangupCall => self.call_backend().send(Command::HangupCall),
+            Action::SetCallMuted(muted) => self.call_backend().send(Command::SetCallMuted(muted)),
             Action::SetCallMicrophone(device) => {
                 // Picked here means preferred from now on, so it is written to the settings the
                 // same moment the live call is rebound.
                 self.settings.call_microphone = device.clone();
                 self.mark_settings_dirty();
-                self.backend.send(Command::SetCallMicrophone(device));
+                self.call_backend().send(Command::SetCallMicrophone(device));
             }
             Action::SetCallSpeaker(device) => {
                 self.settings.call_speaker = device.clone();
                 self.mark_settings_dirty();
-                self.backend.send(Command::SetCallSpeaker(device));
+                self.call_backend().send(Command::SetCallSpeaker(device));
             }
             Action::CloseChat => {
                 if let Some(chat) = self.open_chat.take() {
@@ -4623,8 +5011,8 @@ impl App {
                     let draft = std::mem::take(&mut self.composer);
                     if self.editing.take().is_none() && !draft.trim().is_empty() {
                         self.drafts.insert(chat.clone(), draft);
-                        self.draft_mentions
-                            .insert(chat, std::mem::take(&mut self.composer_mentions));
+                        let mentions = std::mem::take(&mut self.composer_mentions);
+                        self.draft_mentions.insert(chat, mentions);
                     } else {
                         self.composer_mentions.clear();
                     }
@@ -4731,6 +5119,7 @@ impl App {
                 chat,
                 message,
             } => {
+                let limit = self.settings.attachment_limit_bytes();
                 let Some(media) = self
                     .conversations
                     .get_mut(&chat)
@@ -4739,7 +5128,7 @@ impl App {
                 else {
                     return;
                 };
-                if !media.is_within_download_limit(self.settings.attachment_limit_bytes()) {
+                if !media.is_within_download_limit(limit) {
                     media.state = MediaState::Failed(
                         tr("This attachment exceeds the configured download size limit").into(),
                     );
@@ -4987,7 +5376,7 @@ impl App {
                 }
             }
             Action::SelectRange(id) => {
-                let Some((chat, ids)) = self.selection.as_mut() else {
+                let Some((chat, ids)) = self.selection.clone() else {
                     return;
                 };
                 let Some(conversation) = self.conversations.get(chat.as_str()) else {
@@ -5000,6 +5389,7 @@ impl App {
                         .position(|message| message.id == id)
                 };
                 let anchor = self.selection_anchor.clone().unwrap_or_else(|| id.clone());
+                let mut ids = ids;
                 if let (Some(from), Some(to)) = (position(&anchor), position(&id)) {
                     let (from, to) = (from.min(to), from.max(to));
                     for message in &conversation.messages[from..=to] {
@@ -5016,16 +5406,17 @@ impl App {
                     }
                     ids.sort_by_key(|id| position(id).unwrap_or(usize::MAX));
                 }
+                self.selection = Some((chat, ids));
                 self.selection_anchor = Some(id);
             }
             Action::ToggleSelected(id) => {
                 self.selection_anchor = Some(id.clone());
-                if let Some((chat, ids)) = self.selection.as_mut() {
+                let mut next = self.selection.clone();
+                if let Some((chat, ids)) = next.as_mut() {
                     if let Some(index) = ids.iter().position(|selected| *selected == id) {
                         ids.remove(index);
                     } else {
                         ids.push(id);
-                        // Keep the chat's order, so forwards arrive as they were sent.
                         if let Some(conversation) = self.conversations.get(chat.as_str()) {
                             let position = |id: &String| {
                                 conversation
@@ -5037,9 +5428,14 @@ impl App {
                             ids.sort_by_key(position);
                         }
                     }
-                    if ids.is_empty() {
-                        self.selection = None;
-                    }
+                }
+                self.selection = next;
+                if self
+                    .selection
+                    .as_ref()
+                    .is_some_and(|(_, ids)| ids.is_empty())
+                {
+                    self.selection = None;
                 }
             }
             Action::CancelSelection => self.selection = None,
@@ -5631,7 +6027,7 @@ impl App {
                     self.pair_phone.clear();
                 }
                 if dialog == Dialog::NewContact {
-                    self.new_contact_to_phone = self.settings.save_contacts_to_phone;
+                    self.new_contact_to_phone = self.account().settings.save_contacts_to_phone;
                     self.new_contact_phone.clear();
                     self.new_contact_name.clear();
                     self.new_contact_last.clear();
@@ -5667,7 +6063,7 @@ impl App {
                     id,
                     full_name,
                     first_name,
-                    to_phone: self.settings.save_contacts_to_phone,
+                    to_phone: self.account().settings.save_contacts_to_phone,
                 });
             }
             Action::NewContact {
@@ -5681,16 +6077,16 @@ impl App {
                 // The dialog's choice starts the next one.
                 if let Some(to_phone) = to_phone
                     && full_name.is_some()
-                    && to_phone != self.settings.save_contacts_to_phone
+                    && to_phone != self.account().settings.save_contacts_to_phone
                 {
-                    self.settings.save_contacts_to_phone = to_phone;
-                    self.mark_settings_dirty();
+                    self.account_mut().settings.save_contacts_to_phone = to_phone;
+                    self.account_mut().mark_settings_dirty();
                 }
                 self.backend.send(Command::NewContact {
                     phone,
                     full_name,
                     first_name,
-                    to_phone: to_phone.unwrap_or(self.settings.save_contacts_to_phone),
+                    to_phone: to_phone.unwrap_or(self.account().settings.save_contacts_to_phone),
                 });
             }
             Action::ToggleSidebar => self.sidebar_visible = !self.sidebar_visible,
@@ -5707,17 +6103,20 @@ impl App {
             }
             Action::JoinGroup => {
                 use crate::model::InviteState;
-                if let Some(invite) = self.invite.as_mut()
-                    && let InviteState::Ready(info) = &invite.state
-                {
-                    if self.chats.iter().any(|chat| chat.id == info.id) {
-                        let id = info.id.clone();
+                let ready = self.invite.as_ref().and_then(|invite| match &invite.state {
+                    InviteState::Ready(info) => {
+                        Some((info.id.clone(), invite.code.clone(), info.clone()))
+                    }
+                    _ => None,
+                });
+                if let Some((id, code, info)) = ready {
+                    if self.chats.iter().any(|chat| chat.id == id) {
                         self.invite = None;
                         self.dialog = None;
                         self.actions.push(Action::OpenChat(id));
-                    } else {
-                        invite.state = InviteState::Joining(info.clone());
-                        self.backend.send(Command::JoinInvite(invite.code.clone()));
+                    } else if let Some(invite) = self.invite.as_mut() {
+                        invite.state = InviteState::Joining(info);
+                        self.backend.send(Command::JoinInvite(code));
                     }
                 }
             }
@@ -5947,8 +6346,8 @@ impl App {
             }
             Action::PickWallpaperImage => self.backend.send(Command::PickWallpaperImage),
             Action::RemoveWallpaperImage => {
-                if self.settings.wallpaper_image.take().is_some() {
-                    self.mark_settings_dirty();
+                if self.account_mut().settings.wallpaper_image.take().is_some() {
+                    self.account_mut().mark_settings_dirty();
                 }
                 crate::wallpaper::forget_image(ctx);
                 self.backend.send(Command::RemoveWallpaperImage);
@@ -6022,12 +6421,15 @@ impl App {
                     self.settings.whatsapp_emoji,
                     &self.dirs.emoji_font_dir(),
                 );
-                self.backend.send(Command::SetAttachmentLimit(
-                    self.settings.attachment_limit_bytes(),
-                ));
-                self.backend.send(Command::SetKeepDeletedMessages(
-                    self.settings.keep_deleted_messages,
-                ));
+                // Window-wide settings, so every account's backend follows.
+                for account in &self.accounts {
+                    account.backend.send(Command::SetAttachmentLimit(
+                        self.settings.attachment_limit_bytes(),
+                    ));
+                    account.backend.send(Command::SetKeepDeletedMessages(
+                        self.settings.keep_deleted_messages,
+                    ));
+                }
             }
             Action::SetAccountPrivacy { kind, choice } => {
                 // The value lives on the phone: nothing is written without a
@@ -6079,12 +6481,18 @@ impl App {
             Action::SetDownloadFolder(folder) => {
                 self.settings.download_folder = folder.clone();
                 self.mark_settings_dirty();
-                self.backend.send(Command::SetDownloadFolder(folder));
+                for account in &self.accounts {
+                    account
+                        .backend
+                        .send(Command::SetDownloadFolder(folder.clone()));
+                }
             }
             Action::SetKeepChatsArchived(keep) => {
                 self.settings.keep_chats_archived = keep;
                 self.mark_settings_dirty();
-                self.backend.send(Command::SetKeepChatsArchived(keep));
+                for account in &self.accounts {
+                    account.backend.send(Command::SetKeepChatsArchived(keep));
+                }
             }
             Action::SetProxy(value) => {
                 let value = value.trim().to_owned();
@@ -6100,7 +6508,9 @@ impl App {
                 self.settings.proxy = value.clone();
                 self.mark_settings_dirty();
                 crate::proxy::configure(&value);
-                self.backend.send(Command::SetProxy(value));
+                for account in &self.accounts {
+                    account.backend.send(Command::SetProxy(value.clone()));
+                }
             }
             Action::SetStartMinimized(minimized) => {
                 self.settings.start_minimized = minimized;
@@ -6178,9 +6588,12 @@ impl App {
             Action::UnlinkLockedApp => {
                 // The lock lifts only once WhatsApp has unlinked and the
                 // chats are gone (`LinkStatus::LoggedOut`), never before.
+                // Every number linked here goes: the lock guards them all.
                 if self.app_lock.is_locked() {
                     self.app_lock.forgetting = crate::app_lock::Forgetting::Unlinking;
-                    self.backend.send(Command::Unlink);
+                    for account in &self.accounts {
+                        account.backend.send(Command::Unlink);
+                    }
                 }
             }
             Action::AppLockForm(mode) => {
@@ -6269,6 +6682,23 @@ impl App {
             }
             // Route through the configured window-close behavior.
             Action::CloseWindow => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            Action::SwitchAccount(id) => self.switch_account(&id),
+            Action::AddAccount => self.add_account(),
+            Action::CancelAddAccount => {
+                // Back to the account the window showed before; leaving an
+                // unlinked new account removes it.
+                if self.adding_account
+                    && let Some(back) = self.account_before_adding.clone().or_else(|| {
+                        self.accounts
+                            .iter()
+                            .find(|account| account.id != self.account().id)
+                            .map(|account| account.id.clone())
+                    })
+                {
+                    self.switch_account(&back);
+                }
+            }
+            Action::RemoveAccount(id) => self.remove_account(id),
         }
     }
 
@@ -6334,10 +6764,14 @@ impl App {
     /// Tells the backend whether the person is looking at the app, so the
     /// phone keeps its notifications while they are not.
     fn report_presence(&mut self) {
-        let online = self.window_focused && !self.window_hidden;
-        if self.reported_online != Some(online) {
-            self.reported_online = Some(online);
-            self.backend.send(Command::SetOnline(online));
+        let looking = self.window_focused && !self.window_hidden;
+        let active = self.active;
+        for (index, account) in self.accounts.iter_mut().enumerate() {
+            let online = looking && index == active;
+            if account.reported_online != Some(online) {
+                account.reported_online = Some(online);
+                account.backend.send(Command::SetOnline(online));
+            }
         }
     }
 
@@ -6360,8 +6794,8 @@ impl App {
         self.actions.extend(crate::macos::drain(self.window_hidden));
         self.handle_control_commands();
         self.poll_custom_themes();
-        self.wallpaper_image
-            .sync(self.settings.wallpaper_image.as_deref(), &self.waker);
+        let wallpaper = self.account().settings.wallpaper_image.clone();
+        self.wallpaper_image.sync(wallpaper.as_deref(), &self.waker);
         self.handle_notification_opens();
         self.handle_events();
         self.tick(ctx);
@@ -6450,14 +6884,14 @@ impl App {
                     return;
                 }
                 self.app_lock.unlocked(matched);
-                if matched
-                    && let Some(target) = self.app_lock.deferred.take()
-                    && let Some(message) = target.message
-                {
-                    self.actions.push(Action::OpenMessage {
-                        chat: target.chat,
-                        message,
-                    });
+                if matched && let Some(target) = self.app_lock.deferred.take() {
+                    self.switch_account(&target.account);
+                    if let Some(message) = target.message {
+                        self.actions.push(Action::OpenMessage {
+                            chat: target.chat,
+                            message,
+                        });
+                    }
                 }
             }
             Outcome::WrongCurrent => {
@@ -6500,7 +6934,7 @@ impl App {
     /// Mirrors the unread chat count onto the taskbar icon, where the desktop
     /// reads it. The badge ignores repeats, so calling this each frame is cheap.
     fn sync_badge(&mut self) {
-        let count = self.unread_chat_count();
+        let count = self.unread_chat_count_everywhere();
         if let Some(badge) = &mut self.badge {
             badge.set(count);
         }
@@ -6668,7 +7102,7 @@ impl App {
             chat,
             message,
             sender,
-            receipts: self.settings.send_read_receipts,
+            receipts: self.account().settings.send_read_receipts,
         });
     }
 
@@ -7135,6 +7569,11 @@ impl App {
         if self.settings_dirty {
             self.save_settings();
         }
+        for account in &mut self.accounts {
+            if account.settings_dirty {
+                account.save_settings();
+            }
+        }
     }
 
     pub fn shutdown(&mut self) {
@@ -7145,7 +7584,9 @@ impl App {
         if self.media_hold.take().is_some() {
             crate::media_pause::settle(Duration::from_secs(2));
         }
-        self.backend.shutdown();
+        for account in &mut self.accounts {
+            account.backend.shutdown();
+        }
     }
 
     /// Stores the open chat's unsent text, which otherwise only moves into
@@ -7529,6 +7970,267 @@ mod tests {
         App::headless(AppDirs::under(&root), Settings::default()).0
     }
 
+    #[test]
+    fn a_second_account_is_remembered_with_the_one_on_screen() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = App::headless(AppDirs::under(directory.path()), Settings::default()).0;
+        assert!(!app.has_several_accounts());
+        let ctx = egui::Context::default();
+        app.apply(Action::AddAccount, &ctx);
+        assert!(app.has_several_accounts());
+        assert_eq!(app.account().id.as_str(), "2");
+        assert!(app.adding_account);
+        app.link = LinkStatus::Connected;
+        let first = AccountId::first();
+        app.apply(Action::SwitchAccount(first.clone()), &ctx);
+        assert_eq!(app.account().id, first);
+        let roster = AccountRoster::load(&app.dirs.accounts_file()).unwrap();
+        assert_eq!(roster.order, ["1".to_string(), "2".to_string()]);
+        assert_eq!(roster.active, "1");
+    }
+
+    /// Two accounts, the second with a recording backend; the first on screen.
+    fn two_accounts(
+        directory: &std::path::Path,
+    ) -> (App, tokio::sync::mpsc::UnboundedReceiver<Command>) {
+        let dirs = AppDirs::under(directory);
+        let mut app = App::headless(dirs.clone(), Settings::default()).0;
+        let mut second = Account::detached(
+            &dirs,
+            AccountId::parse("2").unwrap(),
+            crate::settings::AccountSettings::default(),
+        )
+        .unwrap()
+        .0;
+        let (backend, commands) = Backend::recording();
+        second.backend = backend;
+        second.link = LinkStatus::Connected;
+        app.accounts.push(second);
+        app.active = 0;
+        (app, commands)
+    }
+
+    #[test]
+    fn a_call_on_a_hidden_account_is_answered_by_that_account() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, mut commands) = two_accounts(directory.path());
+        let ctx = egui::Context::default();
+        // The second account's events run with it on screen for a moment.
+        app.active = 1;
+        app.handle_call_update(incoming_call(1, crate::calls::CallPhase::Incoming));
+        let name = app.call_name("1@s.whatsapp.net");
+        app.active = 0;
+        assert_eq!(app.call_name("1@s.whatsapp.net"), name);
+        app.apply(Action::AnswerCall, &ctx);
+        assert!(
+            std::iter::from_fn(|| commands.try_recv().ok())
+                .any(|command| matches!(command, Command::AnswerCall)),
+            "the answer goes to the account that rang"
+        );
+    }
+
+    #[test]
+    fn leaving_an_account_before_it_is_linked_removes_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = App::headless(AppDirs::under(directory.path()), Settings::default()).0;
+        let ctx = egui::Context::default();
+        app.apply(Action::AddAccount, &ctx);
+        let (backend, mut commands) = Backend::recording();
+        app.backend = backend;
+        app.link = LinkStatus::Unlinked {
+            qr: None,
+            pair_code: None,
+            pairing_phone: None,
+        };
+        app.apply(Action::CancelAddAccount, &ctx);
+        assert_eq!(app.account().id, AccountId::first());
+        assert!(!app.adding_account);
+        assert!(
+            std::iter::from_fn(|| commands.try_recv().ok())
+                .any(|command| matches!(command, Command::RemoveAccount)),
+            "the unlinked account is removed"
+        );
+    }
+
+    #[test]
+    fn a_hidden_account_never_marks_its_remembered_chat_read() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, mut commands) = two_accounts(directory.path());
+        app.window_focused = true;
+        app.window_hidden = false;
+        let chat = "15550003333@s.whatsapp.net";
+        app.accounts[1].open_chat = Some(chat.into());
+        app.accounts[1].settings.notifications = true;
+        let mut update = Chat::new(chat.into(), "Grace".into());
+        update.unread = 1;
+        app.active = 1;
+        app.events_hidden = true;
+        app.handle_chat_updated(update, false);
+        app.events_hidden = false;
+        app.active = 0;
+        let kept = app.accounts[1].chats.iter().find(|known| known.id == chat);
+        assert_eq!(kept.unwrap().unread, 1);
+        assert!(
+            !std::iter::from_fn(|| commands.try_recv().ok())
+                .any(|command| matches!(command, Command::MarkRead { .. })),
+            "no read receipt for a chat nobody is looking at"
+        );
+    }
+
+    #[test]
+    fn the_taskbar_counts_every_account_and_the_switcher_the_others() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _commands) = two_accounts(directory.path());
+        let mut mine = Chat::new("15550004444@s.whatsapp.net".into(), "Ada".into());
+        mine.unread = 1;
+        app.accounts[0].chats.push(mine);
+        for id in ["15550005555@s.whatsapp.net", "15550006666@s.whatsapp.net"] {
+            let mut theirs = Chat::new(id.into(), "Grace".into());
+            theirs.unread = 3;
+            app.accounts[1].chats.push(theirs);
+        }
+        assert_eq!(app.unread_chat_count(), 1);
+        assert_eq!(app.unread_chat_count_everywhere(), 3);
+        assert_eq!(app.unread_chat_count_elsewhere(), 2);
+    }
+
+    #[test]
+    fn global_settings_reach_every_account() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, mut commands) = two_accounts(directory.path());
+        let ctx = egui::Context::default();
+        let folder = directory.path().join("Downloads");
+        app.apply(Action::SetDownloadFolder(Some(folder.clone())), &ctx);
+        assert!(
+            std::iter::from_fn(|| commands.try_recv().ok()).any(|command| matches!(
+                command,
+                Command::SetDownloadFolder(Some(ref chosen)) if *chosen == folder
+            )),
+            "the hidden account downloads there too"
+        );
+    }
+
+    #[test]
+    fn a_notification_behind_the_lock_keeps_its_account() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _commands) = two_accounts(directory.path());
+        app.app_lock = crate::app_lock::AppLock::new(true);
+        app.notification_opens
+            .lock()
+            .unwrap()
+            .push(crate::notify::NotificationTarget {
+                account: AccountId::parse("2").unwrap(),
+                chat: "15550003333@s.whatsapp.net".into(),
+                message: Some("m1".into()),
+            });
+        app.handle_notification_opens();
+        assert_eq!(
+            app.account().id,
+            AccountId::first(),
+            "nothing changes while locked"
+        );
+        assert_eq!(
+            app.app_lock
+                .deferred
+                .as_ref()
+                .map(|target| target.account.as_str()),
+            Some("2")
+        );
+    }
+
+    #[test]
+    fn removing_an_earlier_account_keeps_the_open_one() {
+        let directory = tempfile::tempdir().unwrap();
+        let dirs = AppDirs::under(directory.path());
+        let mut app = App::headless(dirs.clone(), Settings::default()).0;
+        let second = Account::detached(
+            &dirs,
+            AccountId::parse("2").unwrap(),
+            crate::settings::AccountSettings::default(),
+        )
+        .unwrap()
+        .0;
+        let third = Account::detached(
+            &dirs,
+            AccountId::parse("3").unwrap(),
+            crate::settings::AccountSettings::default(),
+        )
+        .unwrap()
+        .0;
+        app.accounts.push(second);
+        app.accounts.push(third);
+        app.active = 1;
+        app.composer = "keep typing".into();
+        let kept = app.account().id.clone();
+        app.finish_removed(0);
+        assert_eq!(app.account().id, kept);
+        assert_eq!(app.accounts.len(), 2);
+        assert_eq!(app.composer, "keep typing");
+    }
+
+    #[test]
+    fn a_hidden_account_draft_does_not_fill_the_open_composer() {
+        let directory = tempfile::tempdir().unwrap();
+        let dirs = AppDirs::under(directory.path());
+        let mut app = App::headless(dirs.clone(), Settings::default()).0;
+        let (second, events) = Account::detached(
+            &dirs,
+            AccountId::parse("2").unwrap(),
+            crate::settings::AccountSettings::default(),
+        )
+        .unwrap();
+        app.accounts.push(second);
+        app.active = 0;
+        app.composer = "visible".into();
+        app.accounts[1].open_chat = Some("1@s.whatsapp.net".into());
+        events
+            .send(crate::backend::Event::Drafts(vec![(
+                "1@s.whatsapp.net".into(),
+                "from work".into(),
+            )]))
+            .unwrap();
+        app.handle_events();
+        assert_eq!(app.composer, "visible");
+        assert_eq!(
+            app.accounts[1]
+                .drafts
+                .get("1@s.whatsapp.net")
+                .map(String::as_str),
+            Some("from work")
+        );
+    }
+
+    #[test]
+    fn a_notification_action_keeps_its_account_when_another_emits() {
+        let directory = tempfile::tempdir().unwrap();
+        let dirs = AppDirs::under(directory.path());
+        let mut app = App::headless(dirs.clone(), Settings::default()).0;
+        let (second, events) = Account::detached(
+            &dirs,
+            AccountId::parse("2").unwrap(),
+            crate::settings::AccountSettings::default(),
+        )
+        .unwrap();
+        app.accounts.push(second);
+        app.active = 0;
+        app.actions.push(Action::ShowWindow);
+        events
+            .send(crate::backend::Event::ChatSoundPicked {
+                chat: "1@s.whatsapp.net".into(),
+                path: directory.path().join("ding.ogg"),
+            })
+            .unwrap();
+        app.handle_events();
+        assert!(
+            app.actions
+                .iter()
+                .any(|action| matches!(action, Action::ShowWindow)),
+            "a click waiting before the batch stays untagged"
+        );
+        assert_eq!(app.deferred_account_actions.len(), 1);
+        assert_eq!(app.deferred_account_actions[0].0.as_str(), "2");
+    }
+
     /// A trackpad gesture keeps its pane while fastframe-scroll says it goes
     /// on: a frame that is slow to draw is no pause, and the gesture's glide
     /// stays with the pane too. A pause in the input itself ends the gesture.
@@ -7753,14 +8455,14 @@ mod tests {
         };
         app.apply(add(Some(false), "Ada"), &ctx);
         assert!(!to_phone(&mut commands));
-        assert!(!app.settings.save_contacts_to_phone);
-        assert!(app.settings_dirty);
+        assert!(!app.account().settings.save_contacts_to_phone);
+        assert!(app.account().settings_dirty);
         app.apply(Action::ShowDialog(Dialog::NewContact), &ctx);
         assert!(!app.new_contact_to_phone, "the next dialog starts from it");
         // Opening a chat without a name saves nothing, so it keeps the choice.
         app.apply(add(Some(true), ""), &ctx);
         assert!(to_phone(&mut commands));
-        assert!(!app.settings.save_contacts_to_phone);
+        assert!(!app.account().settings.save_contacts_to_phone);
         // A shared contact's Add follows the last choice.
         app.apply(add(None, "Bob"), &ctx);
         assert!(!to_phone(&mut commands));
@@ -8478,7 +9180,7 @@ mod tests {
         // The phone agreed, so the archive lands and the open chat closes.
         let mut confirmed = chat.clone();
         confirmed.archived = true;
-        app.handle_chat_updated(confirmed);
+        app.handle_chat_updated(confirmed, true);
         app.apply_actions(&ctx);
         assert!(app.chat(&id).expect("chat").archived);
         assert!(app.open_chat.is_none(), "the confirmed archive closes it");
@@ -8507,7 +9209,7 @@ mod tests {
         );
         // The worker could not reach the phone, so it sends the archive row
         // back untouched. The mark has to go with it.
-        app.handle_chat_updated(chat);
+        app.handle_chat_updated(chat, true);
         let chat = app.chat(&id).expect("chat");
         assert!(!chat.read_only, "the refused leave is rolled back");
         assert!(!chat.left, "and so is the leave itself");
@@ -8554,7 +9256,7 @@ mod tests {
         // The phone agreed, so the archive lands and the open chat closes.
         let mut confirmed = chat.clone();
         confirmed.archived = true;
-        app.handle_chat_updated(confirmed);
+        app.handle_chat_updated(confirmed, true);
         app.apply_actions(&ctx);
         assert!(app.chat(&id).expect("chat").archived);
         assert!(app.open_chat.is_none(), "the confirmed archive closes it");
@@ -8969,14 +9671,14 @@ mod tests {
         app.window_gone();
         assert!(!app.window_focused);
         chat.unread = 2;
-        app.handle_chat_updated(chat.clone());
+        app.handle_chat_updated(chat.clone(), true);
         assert_eq!(app.chat(&chat.id).unwrap().unread, 2);
         // Focus left over from a window callback is insufficient while hidden.
         app.window_focused = true;
-        app.handle_chat_updated(chat.clone());
+        app.handle_chat_updated(chat.clone(), true);
         assert_eq!(app.chat(&chat.id).unwrap().unread, 2);
         app.window_hidden = false;
-        app.handle_chat_updated(chat.clone());
+        app.handle_chat_updated(chat.clone(), true);
         assert_eq!(app.chat(&chat.id).unwrap().unread, 0);
     }
 
@@ -9641,7 +10343,7 @@ mod tests {
             .entry(chat.into())
             .or_default()
             .merge(vec![message(chat, "voice", 100)], false);
-        app.settings.send_read_receipts = false;
+        app.account_mut().settings.send_read_receipts = false;
         app.mark_read(chat);
         assert!(matches!(
             commands.try_recv().unwrap(),
@@ -9658,7 +10360,7 @@ mod tests {
                 ..
             }
         ));
-        app.settings.send_read_receipts = true;
+        app.account_mut().settings.send_read_receipts = true;
         app.played_told.clear();
         app.tell_played("voice".into());
         assert!(matches!(
@@ -9683,6 +10385,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .push(crate::notify::NotificationTarget {
+                account: crate::model::AccountId::first(),
                 chat: chat.into(),
                 message: Some("secret".into()),
             });
@@ -9708,6 +10411,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .push(crate::notify::NotificationTarget {
+                account: crate::model::AccountId::first(),
                 chat: chat.into(),
                 message: Some("second".into()),
             });
@@ -11897,7 +12601,7 @@ mod tests {
         let mut chat = app.chats[0].clone();
         chat.archived = true;
         chat.locked = true;
-        app.handle_chat_updated(chat);
+        app.handle_chat_updated(chat, true);
         assert!(app.open_chat.is_none());
         assert!(app.search_hits.is_empty());
         assert!(app.composer.is_empty());
@@ -12969,6 +13673,7 @@ mod app_lock_tests {
             .lock()
             .unwrap()
             .push(crate::notify::NotificationTarget {
+                account: crate::model::AccountId::first(),
                 chat: CHAT.into(),
                 message: Some("m1".into()),
             });
@@ -13010,7 +13715,7 @@ mod app_lock_tests {
         app.background_frame(&ctx);
         let mut chat = Chat::new(CHAT.into(), "Ada".into());
         chat.unread = 1;
-        app.handle_chat_updated(chat);
+        app.handle_chat_updated(chat, true);
         assert_eq!(app.chat(CHAT).unwrap().unread, 1);
     }
 
@@ -13086,7 +13791,7 @@ mod app_lock_tests {
             crate::app_lock::Forgetting::Unlinking
         );
         assert!(app.app_lock.is_locked(), "still locked until unlinked");
-        app.handle_link(LinkStatus::LoggedOut);
+        app.handle_link(LinkStatus::LoggedOut, true);
         assert!(!app.app_lock.is_locked());
         assert_eq!(app.settings.app_lock_hash, None);
     }

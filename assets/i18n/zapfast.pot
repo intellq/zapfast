@@ -4857,3 +4857,45 @@ msgstr ""
 #: src/ui/settings.rs
 msgid "Your profile picture and the archive, hide list, new chat and Settings buttons in a column left of the chats, with the search field at the top."
 msgstr ""
+
+#: src/ui/dialogs.rs:1
+msgid "Remove this account?"
+msgstr ""
+
+#: src/ui/dialogs.rs:1
+msgid "This unlinks the number on this computer and deletes its local chats. Other accounts stay."
+msgstr ""
+
+#: src/ui/settings.rs:1 src/ui/accounts.rs:1
+msgid "Add account"
+msgstr ""
+
+#: src/ui/settings.rs:1
+msgid "Remove this account"
+msgstr ""
+
+#: src/app.rs:1
+msgid "Could not delete the removed account's files"
+msgstr ""
+
+#: src/app.rs:1
+msgid "Could not add an account"
+msgstr ""
+
+#: src/account.rs:1
+#, rust-format
+msgid "Account {id}"
+msgstr ""
+
+#: src/ui/accounts.rs:1
+msgid "Switch account"
+msgstr ""
+
+#: src/ui/accounts.rs:1
+msgid "Not linked"
+msgstr ""
+
+#: src/ui/accounts.rs:1
+#, rust-format
+msgid "{count} unread chats"
+msgstr ""
