@@ -648,6 +648,21 @@ pub fn initials(name: &str) -> String {
     initials
 }
 
+/// Whether a name is the masked number the server renders for a stranger in a group, such as
+/// `+55∙∙∙∙∙∙∙∙∙01`: a plus sign, digits, and runs of bullets standing in for the hidden ones.
+pub fn is_masked_number(name: &str) -> bool {
+    const MASKS: [char; 5] = ['\u{2219}', '\u{2022}', '\u{00B7}', '\u{25CF}', '*'];
+    let name = name.trim();
+    name.starts_with('+')
+        && name.chars().any(|c| MASKS.contains(&c))
+        && name.chars().any(|c| c.is_ascii_digit())
+        && name.chars().all(|c| {
+            c.is_ascii_digit()
+                || MASKS.contains(&c)
+                || matches!(c, '+' | ' ' | '-' | '(' | ')' | '.')
+        })
+}
+
 /// Formats a phone number with a plus sign and country-appropriate grouping.
 pub fn phone(digits: &str) -> String {
     let digits: String = digits.chars().filter(char::is_ascii_digit).collect();
@@ -800,6 +815,15 @@ mod tests {
         assert_eq!(names("山田太郎", None), pair("山田太郎", ""));
         assert_eq!(names("山田太郎", Some("太郎")), pair("山田太郎", ""));
         assert_eq!(names("محمد علي", Some("محمد")), pair("محمد", "علي"));
+    }
+
+    #[test]
+    fn masked_numbers_are_told_from_names() {
+        assert!(is_masked_number("+55\u{2219}\u{2219}\u{2219}\u{2219}01"));
+        assert!(is_masked_number("+55 \u{2022}\u{2022}\u{2022}\u{2022} 01"));
+        assert!(!is_masked_number("+55 (94) 8807-2301"));
+        assert!(!is_masked_number("~José da Silva"));
+        assert!(!is_masked_number("+\u{2219}\u{2219}"));
     }
 
     #[test]

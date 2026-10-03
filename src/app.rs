@@ -1910,7 +1910,23 @@ impl App {
     fn person_name(&self, id: &str, hint: Option<&str>) -> String {
         self.known_name(id, hint)
             .or_else(|| self.phone_name(id))
+            .or_else(|| self.masked_name(id))
             .unwrap_or_else(|| tr("Unknown").to_owned())
+    }
+
+    /// The masked number the server gave a stranger in a group (`+55∙∙∙∙∙∙∙∙∙01`), the last
+    /// resort when no full number is known for them.
+    fn masked_name(&self, id: &str) -> Option<String> {
+        let contact = self.contacts.get(id);
+        [
+            contact.and_then(|contact| contact.full_name.as_deref()),
+            contact.and_then(|contact| contact.push_name.as_deref()),
+            self.chat(id).map(|chat| chat.name.as_str()),
+        ]
+        .into_iter()
+        .flatten()
+        .find(|name| crate::util::is_masked_number(name))
+        .map(str::to_owned)
     }
 
     /// The phone number a person goes by when nothing names them, as on the phone: the number in
@@ -1925,6 +1941,9 @@ impl App {
     fn known_name(&self, id: &str, hint: Option<&str>) -> Option<String> {
         let contact = self.contacts.get(id);
         let present = |name: Option<&str>| name.filter(|name| !name.is_empty()).map(str::to_owned);
+        // A masked number is no name: the full one, when known, says more.
+        let present =
+            |name: Option<&str>| present(name.filter(|name| !crate::util::is_masked_number(name)));
         let saved = present(contact.and_then(|contact| contact.full_name.as_deref()));
         let called = present(contact.and_then(|contact| contact.push_name.as_deref()))
             .or_else(|| present(hint));
@@ -1935,6 +1954,7 @@ impl App {
         if let Some(chat) = self.chat(id)
             && !chat.name.is_empty()
             && !chat.name.chars().all(|c| c.is_ascii_digit())
+            && !crate::util::is_masked_number(&chat.name)
         {
             return Some(chat.name.clone());
         }
@@ -1956,6 +1976,7 @@ impl App {
         }
         self.known_name(id, None)
             .or_else(|| self.phone_name(id))
+            .or_else(|| self.masked_name(id))
             .unwrap_or_else(|| crate::i18n::gettext(self.locale, "Unknown caller").into_owned())
     }
 
@@ -2337,7 +2358,9 @@ impl App {
                 .get(&chat.id)
                 .is_some_and(|draft| !draft.trim().is_empty());
         kept || match chat.kind {
-            crate::model::ChatKind::Direct => self.known_name(&chat.id, None).is_some(),
+            crate::model::ChatKind::Direct => {
+                self.known_name(&chat.id, None).is_some() || self.masked_name(&chat.id).is_some()
+            }
             crate::model::ChatKind::Group => {
                 chat.group_subject_known || !matches!(chat.name.trim(), "" | "Group")
             }
@@ -7688,6 +7711,23 @@ mod tests {
             },
         );
         assert_eq!(app.call_name(id), "Ada");
+    }
+
+    #[test]
+    fn a_masked_number_gives_way_to_the_full_one_when_it_is_known() {
+        let mut app = app();
+        let lid = "42@lid";
+        let masked =
+            "+55\u{2219}\u{2219}\u{2219}\u{2219}\u{2219}\u{2219}\u{2219}\u{2219}\u{2219}01";
+        app.chats.push(Chat::new(lid.into(), masked.into()));
+        // Without the number, the mask is all there is.
+        assert_eq!(app.display_name(lid), masked);
+        assert_eq!(app.call_name(lid), masked);
+        // With it, the number reads as on the phone.
+        app.lid_phones.insert(lid.into(), "5594988072301".into());
+        assert_eq!(app.display_name(lid), crate::util::phone("5594988072301"));
+        // A profile name still wins over both.
+        assert_eq!(app.display_name_or(lid, Some("José")), "~José");
     }
 
     #[test]
