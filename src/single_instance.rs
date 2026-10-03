@@ -85,7 +85,11 @@ pub fn acquire(dir: &Path, waker: &crate::backend::Waker, verb: &str) -> Outcome
     let claim = match claim(dir, verb, &commands, waker) {
         fastframe_instance::Claim::First(claim) => claim,
         fastframe_instance::Claim::Running(_) => return Outcome::Surfaced,
-        fastframe_instance::Claim::Unanswered => return Outcome::Unanswered,
+        // A copy that refuses the verb is reported as before, when it
+        // simply did not answer.
+        fastframe_instance::Claim::Unanswered | fastframe_instance::Claim::Declined => {
+            return Outcome::Unanswered;
+        }
     };
     if legacy_instance_answers(verb) {
         return Outcome::Surfaced;
@@ -123,7 +127,7 @@ pub fn send(dir: &Path, verb: &str) -> std::io::Result<()> {
     slot(dir).send(verb).map(drop)
 }
 
-/// The verbs another launch may send. Anything else is refused unanswered.
+/// The verbs another launch may send. Anything else is declined.
 fn parse(verb: &str) -> Option<ControlCommand> {
     match verb {
         "show" => Some(ControlCommand::Show),
@@ -318,7 +322,8 @@ mod tests {
     /// A second launch reaches the first, whether it is this version or one
     /// from before fastframe-instance, which writes and expects the same
     /// lines: `fastsapp:show` in, `fastsapp:ok` out. Themes reload without a
-    /// window. Unknown verbs and, on Windows, a wrong token get no reply.
+    /// window. Unknown verbs are declined, and on Windows a wrong token gets
+    /// no reply.
     #[test]
     fn a_second_launch_reaches_the_queue_on_the_old_wire() {
         let home = tempfile::tempdir().unwrap();
@@ -333,11 +338,20 @@ mod tests {
         let second = claim(&dir, "show", &Queue::default(), &waker);
         assert!(matches!(second, fastframe_instance::Claim::Running(reply) if reply == OK));
         send(&dir, "reload-themes").expect("themes reload without a window");
-        assert!(send(&dir, "frobnicate").is_err());
+        let declined = send(&dir, "frobnicate").unwrap_err();
+        assert_eq!(declined.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(matches!(
+            claim(&dir, "frobnicate", &Queue::default(), &waker),
+            fastframe_instance::Claim::Declined
+        ));
 
         // A launch of an older version.
         assert_eq!(raw_request(&dir, "fastsapp:show", None), "fastsapp:ok\n");
-        assert_eq!(raw_request(&dir, "fastsapp:frobnicate", None), "");
+        assert_eq!(
+            raw_request(&dir, "fastsapp:frobnicate", None),
+            "fastsapp!declined\n",
+            "which an older copy reads as no answer"
+        );
         #[cfg(not(unix))]
         assert_eq!(
             raw_request(&dir, "fastsapp:show", Some(&"0".repeat(64))),

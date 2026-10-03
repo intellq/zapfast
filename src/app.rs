@@ -1043,6 +1043,11 @@ impl App {
     /// only draws once the tray or another launch shows the window.
     pub fn start_hidden(&mut self) {
         self.hide_intent = true;
+        // No window will attach the tray, which makes the macOS item; make
+        // it now without bringing ZapFast forward.
+        if let Some(tray) = &mut self.tray {
+            tray.create_item();
+        }
         if let Some(startup) = self.backend.take_startup() {
             let _ = startup.send(());
         }

@@ -244,12 +244,14 @@ protocol. These notes are for coding agents and new contributors.
   hands its menu events to `fastframe_tray::claim_menu_event` first.
   Closing keeps ZapFast running, and a hidden start stays hidden, only while
   `Tray::is_shown`: on Linux the item exists before a panel shows it (a
-  start at login beats the panel) and registers once one appears.
+  start at login beats the panel) and registers once one appears. A
+  hidden start makes the macOS item with `Tray::create_item`, which does not
+  bring ZapFast forward; a window's `attach` makes it otherwise.
   `src/single_instance.rs` claims fastframe-instance's slot in the runtime
   directory (`Slot::at(runtime, "fastsapp")`, so requests and replies stay
   `fastsapp:show` and `fastsapp:ok` for older copies), and a second launch
   asks the first to surface over a private socket (a token-checked loopback
-  port on Windows); the handler queues `ControlCommand`s and refuses unknown
+  port on Windows); the handler queues `ControlCommand`s and declines unknown
   verbs. The fixed port 47119 that 0.15-era copies look for stays in ZapFast,
   answered once the slot is claimed. `src/notify.rs` sends desktop notifications
   for `Event::Incoming` (live messages from others, not history) when the
