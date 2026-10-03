@@ -23,7 +23,7 @@ See **[zapfast.rocks](https://zapfast.rocks)** for downloads and guides.
 ## Alterações deste fork (`intellq`)
 
 Este fork acompanha o [projeto original](https://github.com/crmne/zapfast)
-até o commit [`4279245`](https://github.com/crmne/zapfast/commit/4279245)
+até o commit [`c05333e`](https://github.com/crmne/zapfast/commit/c05333e)
 (versão 0.18.2 e ajustes seguintes).
 Além das novidades do upstream, esta branch inclui as seguintes mudanças:
 
@@ -550,6 +550,20 @@ Da sincronização com o upstream 0.18.2:
 - **Responder (citar)** uma mensagem de qualquer ponto do histórico rola até o
   fim ao enviar, para mostrá-la. `Shift+Insert` cola, como `Ctrl+V`, no
   compositor.
+
+Na 0.18.205 (do upstream):
+
+- **Bandeja no Linux:** se nenhum painel mostra o ícone do ZapFast, fechar a
+  janela encerra o programa em vez de escondê-lo sem caminho de volta, e o
+  início minimizado abre a janela. O ícone aparece assim que um painel
+  começa, mesmo um que inicie depois do ZapFast.
+- **Windows:** uma falha ao iniciar que não seja a falta de OpenGL (que já
+  tinha o aviso do fork) aparece numa caixa de mensagem com os detalhes e o
+  caminho do registro, em vez de o programa fechar sem nada na tela (#349).
+- A rolagem (roda, touchpad, deslizamento e eixo travado) e a garantia de uma
+  só cópia aberta passam a vir do fastframe (`fastframe-scroll` e
+  `fastframe-instance`, v0.4.1), sem mudança de comportamento; abrir um link
+  do WhatsApp com o ZapFast já aberto continua levando o link à janela.
 
 Na 0.18.204:
 
