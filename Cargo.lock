@@ -2188,6 +2188,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "fastframe-scroll"
+version = "0.4.0"
+source = "git+https://github.com/crmne/fastframe?tag=v0.4.0#53bfeea16e0ba6129e2ded0bd2ed75195819b9a6"
+dependencies = [
+ "egui",
+]
+
+[[package]]
 name = "fastframe-shell"
 version = "0.4.0"
 source = "git+https://github.com/crmne/fastframe?tag=v0.4.0#53bfeea16e0ba6129e2ded0bd2ed75195819b9a6"
@@ -8295,6 +8303,7 @@ dependencies = [
  "fastframe-icons",
  "fastframe-log",
  "fastframe-macos",
+ "fastframe-scroll",
  "fastframe-shell",
  "fastframe-text",
  "fastframe-theme",

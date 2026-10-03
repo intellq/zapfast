@@ -144,6 +144,8 @@ fastframe-tray = { git = "https://github.com/crmne/fastframe", tag = "v0.4.0" }
 fastframe-shell = { git = "https://github.com/crmne/fastframe", tag = "v0.4.0" }
 # Centres the macOS traffic lights on ZapFast's own header.
 fastframe-macos = { git = "https://github.com/crmne/fastframe", tag = "v0.4.0" }
+# The wheel step, and on Linux touchpad scale, glide and axis lock.
+fastframe-scroll = { git = "https://github.com/crmne/fastframe", tag = "v0.4.0" }
 # Self-update from GitHub releases with signed checksums, a helper and rollback.
 # intellq fork: a copy that also updates a Linux copy in ~/.local/bin
 # without a marker file (vendor/fastframe-update/VENDORED.md).

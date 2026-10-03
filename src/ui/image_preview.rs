@@ -54,7 +54,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                     {
                         state.set_fit_scale(size.x / texture.size.x);
                     }
-                    let trackpad = app.scroll_from_trackpad();
+                    let trackpad = app.scrolling.from_trackpad();
                     // Read before the scroll area, which would otherwise take the
                     // wheel. The zoom itself is applied by `App` after the frame.
                     let zoom = zoom_input(ui, area, trackpad).and_then(|(factor, pointer)| {

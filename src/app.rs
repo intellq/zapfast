@@ -31,23 +31,11 @@ pub const EDIT_WINDOW: Duration = Duration::from_secs(15 * 60);
 /// WhatsApp revoke-for-everyone window.
 pub const REVOKE_WINDOW: Duration = Duration::from_secs(2 * 24 * 60 * 60);
 
-/// Pause, in seconds, after which a trackpad gesture ends: a new one selects
-/// its own axis and pane, and a lifted one starts to glide. Measured on the
-/// frame's input clock (`InputState::time`), not on the wall clock, so a
-/// slow frame is not taken for a pause and tests can run it at their pace.
+/// Pause, in seconds, after which a trackpad gesture ends and a new one
+/// picks its own pane, as fastframe-scroll ends one. Measured on the frame's
+/// input clock (`InputState::time`), not on the wall clock, so a slow frame
+/// is not taken for a pause and tests can run it at their pace.
 const SCROLL_GESTURE_GAP: f64 = 0.15;
-/// Linux trackpad scroll multiplier.
-const TRACKPAD_SCALE: f32 = 1.8;
-/// Trackpad glide decay, minimum start speed, and stop speed.
-const GLIDE_DECAY: f32 = 0.35;
-const GLIDE_START: f32 = 120.0;
-const GLIDE_STOP: f32 = 40.0;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ScrollAxis {
-    Horizontal,
-    Vertical,
-}
 
 /// A pane that scrolls on its own, which a scroll gesture stays with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -112,7 +100,7 @@ impl ScrollRoute {
 
     /// Picks the gesture's pane and takes its scrolling from elsewhere.
     /// `moved` is whether wheel input arrived this frame, `lifted` whether
-    /// the fingers left the trackpad, and `gliding` whether the app's own
+    /// the fingers left the trackpad, and `gliding` whether fastframe-scroll's
     /// glide is still adding to the scroll.
     fn route(&mut self, ctx: &egui::Context, moved: bool, lifted: bool, gliding: bool) {
         self.placed = std::mem::take(self.placing.get_mut().unwrap_or_else(|p| p.into_inner()));
@@ -605,14 +593,9 @@ pub struct App {
     pub sticker_preview_pending: bool,
     /// A pack just created here, selected once the backend lists it.
     sticker_pack_created: Option<String>,
-    /// The locked axis and when its gesture last moved, in egui input time.
-    scroll_lock: Option<(ScrollAxis, f64)>,
-    scroll_from_trackpad: bool,
-    scroll_history: egui::util::History<egui::Vec2>,
-    scroll_accum: egui::Vec2,
-    glide: Option<egui::Vec2>,
-    /// When the trackpad gesture last moved, in egui input time.
-    scroll_last_event: Option<f64>,
+    /// The wheel step, and on Linux the touchpad's scale, glide and axis
+    /// lock.
+    pub(crate) scrolling: fastframe_scroll::Scrolling,
     /// Keeps a scroll gesture with the pane it began over.
     pub scroll_route: ScrollRoute,
 
@@ -1225,13 +1208,8 @@ impl App {
             sticker_preview: None,
             sticker_preview_pending: false,
             sticker_draft: None,
-            scroll_lock: None,
-            scroll_from_trackpad: false,
-            scroll_history: egui::util::History::new(2..16, 0.1),
-            scroll_accum: egui::Vec2::ZERO,
-            glide: None,
+            scrolling: fastframe_scroll::Scrolling::default(),
             scroll_route: ScrollRoute::default(),
-            scroll_last_event: None,
             page: Page::Chats,
             dialog: None,
             forward_search: String::new(),
@@ -1619,8 +1597,6 @@ impl App {
         }
         crate::theme::set_font(ctx, self.settings.font);
         crate::theme::install(ctx);
-        // Use a faster wheel speed for short chat rows.
-        ctx.options_mut(|options| options.input_options.line_scroll_speed = 120.0);
         // A keystroke that wraps the draft is applied in one pass, and the
         // bottom panel holding the composer only takes the new height in
         // the next: three passes keep it from showing a frame out of place.
@@ -6765,7 +6741,7 @@ impl App {
             // Files dropped or pasted on the lock screen go nowhere.
             self.dropping = false;
         } else {
-            self.lock_scroll_axis(ctx);
+            self.scrolling.apply(ctx);
             self.route_scroll(ctx);
             self.take_drops_and_pastes(ctx);
         }
@@ -7025,113 +7001,8 @@ impl App {
         }
     }
 
-    /// Locks trackpad scrolling to one axis, scales Linux deltas, and adds glide.
-    fn lock_scroll_axis(&mut self, ctx: &egui::Context) {
-        let (raw, from_trackpad, ended) = ctx.input(|input| {
-            let mut sum = egui::Vec2::ZERO;
-            let mut pointish = false;
-            let mut ended = false;
-            for event in &input.events {
-                if let egui::Event::MouseWheel {
-                    unit, delta, phase, ..
-                } = event
-                {
-                    sum += *delta;
-                    pointish |= *unit == egui::MouseWheelUnit::Point;
-                    ended |= matches!(phase, egui::TouchPhase::End | egui::TouchPhase::Cancel);
-                }
-            }
-            // Precision wheels can report points too. If egui has remapped
-            // their vertical input to horizontal (Shift, including the rest
-            // of an active gesture), keep that direction and native smoothing.
-            let remapped = sum.y != 0.0
-                && input.smooth_scroll_delta.x != 0.0
-                && input.smooth_scroll_delta.y == 0.0;
-            (sum, pointish && !remapped, ended)
-        });
-        let now = ctx.input(|input| input.time);
-        if raw != egui::Vec2::ZERO {
-            self.scroll_from_trackpad = from_trackpad;
-        }
-        let trackpad_here = cfg!(target_os = "linux") && self.scroll_from_trackpad;
-        if trackpad_here {
-            ctx.input_mut(|input| input.smooth_scroll_delta *= TRACKPAD_SCALE);
-        }
-        if trackpad_here && raw != egui::Vec2::ZERO {
-            self.glide = None;
-            self.scroll_accum += raw * TRACKPAD_SCALE;
-            self.scroll_history.add(now, self.scroll_accum);
-            self.scroll_last_event = Some(now);
-            ctx.request_repaint_after(Duration::from_millis(60));
-        } else if raw != egui::Vec2::ZERO || ctx.input(|input| input.pointer.any_down()) {
-            self.glide = None;
-            self.scroll_history.clear();
-            self.scroll_last_event = None;
-        }
-        // A pass that is redone (a discarded pass, such as the transcript's
-        // after rows above it were measured) gets no input events. That is
-        // not a pause in the gesture, even when the first pass took longer
-        // than the pause, and the frame's glide step was already taken.
-        let first_pass = ctx.current_pass_index() == 0;
-        let quiet = first_pass
-            && self
-                .scroll_last_event
-                .is_some_and(|at| now - at > SCROLL_GESTURE_GAP);
-        if ended || quiet {
-            let mut velocity = self.scroll_history.velocity().unwrap_or(egui::Vec2::ZERO);
-            if let Some((axis, _)) = self.scroll_lock {
-                match axis {
-                    ScrollAxis::Horizontal => velocity.y = 0.0,
-                    ScrollAxis::Vertical => velocity.x = 0.0,
-                }
-            }
-            self.glide = (velocity.length() > GLIDE_START).then_some(velocity);
-            self.scroll_history.clear();
-            self.scroll_accum = egui::Vec2::ZERO;
-            self.scroll_last_event = None;
-        }
-        if let Some(velocity) = self.glide {
-            if raw == egui::Vec2::ZERO && first_pass {
-                let dt = ctx.input(|input| input.stable_dt).clamp(0.001, 0.05);
-                ctx.input_mut(|input| input.smooth_scroll_delta += velocity * dt);
-                let slower = velocity * (-dt / GLIDE_DECAY).exp();
-                self.glide = (slower.length() > GLIDE_STOP).then_some(slower);
-            }
-            ctx.request_repaint_after(Duration::from_millis(8));
-        }
-        // egui already maps Shift + mouse wheel to the horizontal axis. The
-        // raw wheel event still has a vertical delta, so applying the trackpad
-        // axis lock to it would discard the remapped input (including its
-        // smoothing tail). Discrete mouse-wheel input needs no gesture lock.
-        if !self.scroll_from_trackpad {
-            self.scroll_lock = None;
-            return;
-        }
-        let held = self
-            .scroll_lock
-            .filter(|(_, at)| now - *at < SCROLL_GESTURE_GAP)
-            .map(|(axis, _)| axis);
-        let moved = raw != egui::Vec2::ZERO;
-        let axis = match held {
-            Some(axis) => axis,
-            None if moved && raw.x.abs() > raw.y.abs() * 1.2 => ScrollAxis::Horizontal,
-            None if moved => ScrollAxis::Vertical,
-            None => {
-                self.scroll_lock = None;
-                return;
-            }
-        };
-        if moved {
-            self.scroll_lock = Some((axis, now));
-        }
-        ctx.input_mut(|input| match axis {
-            ScrollAxis::Horizontal => input.smooth_scroll_delta.y = 0.0,
-            ScrollAxis::Vertical => input.smooth_scroll_delta.x = 0.0,
-        });
-    }
-
     /// Keeps this frame's scrolling with the pane its gesture began over,
-    /// after the axis lock and glide have had their say.
+    /// after fastframe-scroll's axis lock and glide have had their say.
     fn route_scroll(&mut self, ctx: &egui::Context) {
         let (moved, lifted) = ctx.input(|input| {
             input
@@ -7145,14 +7016,8 @@ impl App {
                     _ => (moved, lifted),
                 })
         });
-        let gliding = self.glide.is_some();
+        let gliding = self.scrolling.gliding();
         self.scroll_route.route(ctx, moved, lifted, gliding);
-    }
-
-    /// Whether the latest wheel input came in points (a trackpad), which the
-    /// image preview pans with instead of zooming.
-    pub fn scroll_from_trackpad(&self) -> bool {
-        self.scroll_from_trackpad
     }
 
     pub fn save_state(&mut self) {
@@ -7553,57 +7418,12 @@ mod tests {
         App::headless(AppDirs::under(&root), Settings::default()).0
     }
 
-    /// egui redoes a discarded pass without the frame's input events. However
-    /// long the first pass took, that is no pause in a trackpad gesture: the
-    /// redone pass must not end it and glide on top of the scroll.
+    /// A trackpad gesture keeps its pane while fastframe-scroll says it goes
+    /// on: a frame that is slow to draw is no pause, and the gesture's glide
+    /// stays with the pane too. A pause in the input itself ends the gesture.
     #[cfg(target_os = "linux")]
     #[test]
-    fn a_redone_pass_does_not_end_a_trackpad_gesture() {
-        let mut app = app();
-        let ctx = egui::Context::default();
-        for frame in 0..4 {
-            let events = (0..50)
-                .map(|_| egui::Event::MouseWheel {
-                    unit: egui::MouseWheelUnit::Point,
-                    delta: egui::vec2(0.0, 3.0),
-                    modifiers: egui::Modifiers::NONE,
-                    phase: egui::TouchPhase::Move,
-                })
-                .collect();
-            let mut output = ctx.run_ui(
-                egui::RawInput {
-                    events,
-                    ..Default::default()
-                },
-                |ui| {
-                    let ctx = ui.ctx().clone();
-                    let redone = ctx.current_pass_index() > 0;
-                    if frame == 3 && !redone {
-                        ctx.request_discard("measured rows above the view");
-                    }
-                    if redone {
-                        // As if the first pass had taken a second.
-                        app.scroll_last_event = app.scroll_last_event.map(|at| at - 1.0);
-                    }
-                    app.lock_scroll_axis(&ctx);
-                    if redone {
-                        let delta = ctx.input(|input| input.smooth_scroll_delta.y);
-                        assert_eq!(delta, 0.0, "the redone pass scrolls again");
-                    }
-                },
-            );
-            output.textures_delta.clear();
-        }
-        assert!(app.glide.is_none(), "the gesture glides while it goes on");
-        assert!(app.scroll_last_event.is_some(), "the gesture goes on");
-    }
-
-    /// A trackpad gesture's pauses are measured on the frames' input clock.
-    /// A frame that is slow to draw is no pause: the gesture keeps its axis,
-    /// its pane, and its fingers on the pad. A pause in the input ends it.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_trackpad_gesture_pauses_on_the_input_clock() {
+    fn a_trackpad_gesture_keeps_its_pane_through_a_slow_frame_and_its_glide() {
         let mut app = app();
         let ctx = egui::Context::default();
         let run = |app: &mut App, time: f64, delta: egui::Vec2| {
@@ -7625,7 +7445,7 @@ mod tests {
                 },
                 |ui| {
                     let ctx = ui.ctx().clone();
-                    app.lock_scroll_axis(&ctx);
+                    app.scrolling.apply(&ctx);
                     app.route_scroll(&ctx);
                 },
             );
@@ -7634,36 +7454,40 @@ mod tests {
         for frame in 0..6 {
             run(&mut app, f64::from(frame) / 60.0, egui::vec2(0.0, 30.0));
         }
+        assert!(app.scrolling.from_trackpad());
         app.scroll_route.owner = Some(ScrollPane::Messages);
         // A frame that takes a quarter of a second to draw, 16 ms of input
         // time after the last: nothing about the gesture has changed.
         std::thread::sleep(Duration::from_millis(250));
         run(&mut app, 6.0 / 60.0, egui::Vec2::ZERO);
-        assert!(app.glide.is_none(), "a slow frame lets the gesture glide");
         assert!(
-            app.scroll_last_event.is_some(),
-            "a slow frame ends the gesture"
+            !app.scrolling.gliding(),
+            "a slow frame lets the gesture glide"
         );
         assert_eq!(
             app.scroll_route.owner,
             Some(ScrollPane::Messages),
             "a slow frame lets go of the gesture's pane"
         );
-        // Sideways input just after keeps the vertical axis.
-        run(&mut app, 7.0 / 60.0, egui::vec2(30.0, 0.0));
-        let held = app.scroll_lock.map(|(axis, _)| axis);
-        assert_eq!(held, Some(ScrollAxis::Vertical), "the axis is held");
-        // A pause in the input itself ends the gesture, which glides.
-        run(&mut app, 7.0 / 60.0 + 0.2, egui::Vec2::ZERO);
-        assert!(
-            app.scroll_last_event.is_none(),
-            "the pause ends the gesture"
+        // A pause in the input itself ends the gesture, which glides, still
+        // with its pane.
+        run(&mut app, 6.0 / 60.0 + 0.2, egui::Vec2::ZERO);
+        assert!(app.scrolling.gliding(), "the lifted gesture glides");
+        run(&mut app, 6.0 / 60.0 + 0.25, egui::Vec2::ZERO);
+        assert_eq!(
+            app.scroll_route.owner,
+            Some(ScrollPane::Messages),
+            "the glide lets go of the gesture's pane"
         );
-        assert!(app.glide.is_some(), "the lifted gesture glides");
-        run(&mut app, 2.0, egui::Vec2::ZERO);
-        run(&mut app, 3.0, egui::vec2(30.0, 0.0));
-        let held = app.scroll_lock.map(|(axis, _)| axis);
-        assert_eq!(held, Some(ScrollAxis::Horizontal), "a new gesture picks");
+        // Once the glide is over, the pane is free for the next gesture.
+        let mut time = 6.0 / 60.0 + 0.25;
+        while app.scrolling.gliding() && time < 10.0 {
+            time += 1.0 / 60.0;
+            run(&mut app, time, egui::Vec2::ZERO);
+        }
+        assert!(!app.scrolling.gliding(), "the glide stops");
+        run(&mut app, time + 1.0, egui::Vec2::ZERO);
+        assert_eq!(app.scroll_route.owner, None, "the next gesture picks");
     }
 
     /// A chat that is gone or emptied takes its confirmation with it: a modal

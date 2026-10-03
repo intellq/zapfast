@@ -281,6 +281,13 @@ protocol. These notes are for coding agents and new contributors.
   `Client::fetch_message_history` → a `HistorySync` chunk with
   `sync_type == ON_DEMAND`); the archive is paged first, the phone only
   when it is exhausted.
+- Scrolling comes from fastframe-scroll: `App::scrolling.apply` runs first
+  in each unlocked frame and sets the wheel step (120 points a notch), and on
+  Linux scales touchpad gestures, glides after the lift, and holds a gesture
+  to its axis (Shift turns it sideways). `App::route_scroll` then keeps a
+  gesture, glide included, with the pane it began over (`ScrollRoute`, #274),
+  asking `Scrolling::gliding`; the image preview pans with a touchpad and
+  zooms with a wheel by `Scrolling::from_trackpad`.
 - Platform-specific code belongs behind `cfg` blocks; a change for one
   platform must keep the other two compiling.
 
