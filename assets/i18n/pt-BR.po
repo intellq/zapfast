@@ -4042,6 +4042,10 @@ msgstr "Conversa anterior / próxima"
 msgid "Previous / next chat, as in WhatsApp"
 msgstr "Conversa anterior / próxima, como no WhatsApp"
 
+#: src/ui/keys.rs
+msgid "Open a chat by its position in the chat list"
+msgstr "Abrir uma conversa pela posição na lista"
+
 #: src/ui/keys.rs:353
 msgid "Edit the previous message (when the input is empty)"
 msgstr "Editar a mensagem anterior (com o campo vazio)"

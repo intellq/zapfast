@@ -1144,7 +1144,9 @@ de sincronizar a exclusão "para mim" com o celular é uma extensão deste fork.
   and Enter jumps to one; with no chat open it searches your chats, and in
   Settings it searches the settings), `Alt+↑/↓` or WhatsApp's
   `Ctrl+Shift+[`/`Ctrl+Shift+]` switches chats and
-  keeps the active chat visible in the list, `Ctrl+↑` edits your previous
+  keeps the active chat visible in the list, `Ctrl+1` through `Ctrl+9` opens
+  the chat at that position in the current chat list, following its pins,
+  search, and filter (a missing position does nothing), `Ctrl+↑` edits your previous
   message, `↑`/`↓` scroll the open chat a few lines (when the history has focus
   or the input is empty), `PgUp`/`PgDn` scroll the open chat by about a page,
   `Home`/`End` jump to the top or newest message of the open chat (when the
