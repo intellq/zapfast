@@ -245,9 +245,13 @@ protocol. These notes are for coding agents and new contributors.
   Closing keeps ZapFast running, and a hidden start stays hidden, only while
   `Tray::is_shown`: on Linux the item exists before a panel shows it (a
   start at login beats the panel) and registers once one appears.
-  `src/single_instance.rs` holds a lock file in the runtime
-  directory, and a second launch asks the first to surface over a private
-  socket (a token-checked loopback port on Windows). `src/notify.rs` sends desktop notifications
+  `src/single_instance.rs` claims fastframe-instance's slot in the runtime
+  directory (`Slot::at(runtime, "fastsapp")`, so requests and replies stay
+  `fastsapp:show` and `fastsapp:ok` for older copies), and a second launch
+  asks the first to surface over a private socket (a token-checked loopback
+  port on Windows); the handler queues `ControlCommand`s and refuses unknown
+  verbs. The fixed port 47119 that 0.15-era copies look for stays in ZapFast,
+  answered once the slot is claimed. `src/notify.rs` sends desktop notifications
   for `Event::Incoming` (live messages from others, not history) when the
   reader is away from that chat; a click carries the chat and the message
   id, so the reader lands on the announced message. macOS has no title bar:
