@@ -288,10 +288,15 @@ protocol. These notes are for coding agents and new contributors.
   `sync_type == ON_DEMAND`); the archive is paged first, the phone only
   when it is exhausted.
   `ReloadHistory` requests before a selected archived message to repair gaps
-  inside existing history. History keeps same-key edited snapshots and uses
-  `HistorySyncMsg.msg_order_id` to break timestamp ties in the archive, paging,
-  and interface. A replay without order metadata must not erase it, and an
-  unedited replay must not undo an edit.
+  inside existing history. History keeps
+  edited snapshots under the protocol target id, even when the outer envelope
+  names a different edit id. It uses `HistorySyncMsg.msg_order_id` to break
+  timestamp ties in the archive, paging, and interface. A replay without order
+  metadata must not erase it, and an unedited replay must not undo an edit.
+  History `MESSAGE_EDIT` entries carry full snapshots, unlike live edit events:
+  keep their envelope timestamp/order and normalize the body and target id.
+  Do not require a separate original or create a bubble under the edit id.
+  Count-only diagnostics can distinguish malformed snapshots from storage failures.
 - Scrolling comes from fastframe-scroll: `App::scrolling.apply` runs first
   in each unlocked frame and sets the wheel step (120 points a notch), and on
   Linux scales touchpad gestures, glides after the lift, and holds a gesture

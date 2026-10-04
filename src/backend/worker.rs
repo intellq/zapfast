@@ -1040,6 +1040,7 @@ struct ParsedHistory {
 }
 
 struct ParsedChat {
+    diagnostics: HistoryDiagnostics,
     id: String,
     name: Option<String>,
     unread: Option<u32>,
@@ -1063,6 +1064,27 @@ struct ParsedChat {
     revoked: Vec<String>,
     poll_updates: Vec<HistoryPollUpdate>,
     reactions: Vec<HistoryReaction>,
+}
+
+/// Counts only. Never put message keys, bodies, names, or raw protobufs here:
+/// this summary is safe to request from a user's ordinary application log.
+#[derive(Debug, Default)]
+struct HistoryDiagnostics {
+    entries: usize,
+    missing_envelope: usize,
+    missing_key: usize,
+    missing_body: usize,
+    ciphertext_stubs: usize,
+    futureproof_body: usize,
+    edited_wrappers: usize,
+    edit_snapshots: usize,
+    rekeyed_edit_snapshots: usize,
+    invalid_edits: usize,
+    edit_without_key: usize,
+    edit_without_body: usize,
+    encrypted_edits: usize,
+    other_protocol: usize,
+    unclassified: usize,
 }
 
 struct HistoryPollUpdate {
@@ -4038,6 +4060,16 @@ impl Worker {
                             .map(|chat| chat.poll_updates.len())
                             .sum::<usize>()
                     );
+                    for chat in &parsed.chats {
+                        log::info!(
+                            "history reload: parsed entries={}, visible={}, reactions={}, votes={}, counts={:?}",
+                            chat.diagnostics.entries,
+                            chat.messages.len(),
+                            chat.reactions.len(),
+                            chat.poll_updates.len(),
+                            chat.diagnostics,
+                        );
+                    }
                 }
                 let filed = self.apply_history(parsed, !on_demand);
                 if on_demand {
@@ -4209,6 +4241,9 @@ impl Worker {
                 self.request_group_info(&id, false);
             }
             let count = chat.messages.len();
+            let mut added = 0;
+            let mut repeated = 0;
+            let mut failed = 0;
             let mut secrets = HashMap::new();
             for message in chat.messages {
                 if let Some(secret) = message
@@ -4318,7 +4353,9 @@ impl Worker {
                 // History replays and on-demand chunks can repeat a message the
                 // archive already holds; keep the files it already downloaded.
                 let mut keep_raw = false;
+                let mut existed = false;
                 if let Ok(Some(existing)) = self.archive.message(&id, &row.id) {
+                    existed = true;
                     row.content.keep_local_paths(&existing.content);
                     // A repeated original must not undo a later edit or revoke.
                     if (existing.edited && !row.edited)
@@ -4336,7 +4373,12 @@ impl Worker {
                     .archive
                     .insert_message(&row, (!keep_raw).then_some(raw.as_slice()))
                 {
+                    failed += 1;
                     log::warn!("could not store a history message: {error}");
+                } else if existed {
+                    repeated += 1;
+                } else {
+                    added += 1;
                 }
                 if group {
                     self.file_history_receipts(&id, &row.id, &message.receipts);
@@ -4348,6 +4390,11 @@ impl Worker {
                     }
                     self.emit_message(&id, &row.id);
                 }
+            }
+            if !metadata && self.pending_older.contains_key(&id) {
+                log::info!(
+                    "history reload: archived added={added}, repeated={repeated}, failed={failed}"
+                );
             }
             for reaction in chat.reactions {
                 self.apply_history_reaction(&id, reaction, &secrets);
@@ -4440,6 +4487,7 @@ impl Worker {
                 .messages(&chat, Some((before_time, &before_id)), 500)
             {
                 Ok(mut messages) => {
+                    log::info!("history reload: displaying rows={}", messages.len());
                     for message in &mut messages {
                         self.polish(message);
                     }
@@ -10072,6 +10120,10 @@ fn parse_history(compressed: &[u8]) -> Result<ParsedHistory, String> {
 }
 
 fn parse_conversation(conversation: wa::Conversation) -> ParsedChat {
+    let mut diagnostics = HistoryDiagnostics {
+        entries: conversation.messages.len(),
+        ..Default::default()
+    };
     let mut messages = Vec::new();
     let mut revoked = Vec::new();
     let mut poll_updates = Vec::new();
@@ -10079,34 +10131,81 @@ fn parse_conversation(conversation: wa::Conversation) -> ParsedChat {
     let mut newest = 0;
     for entry in &conversation.messages {
         let Some(info) = entry.message.as_option() else {
+            diagnostics.missing_envelope += 1;
             continue;
         };
         let Some(key) = info.key.as_option() else {
+            diagnostics.missing_key += 1;
             continue;
         };
         let Some(id) = key.id.clone().filter(|id| !id.is_empty()) else {
+            diagnostics.missing_key += 1;
             continue;
         };
         let Some(original) = info.message.as_option() else {
+            diagnostics.missing_body += 1;
+            diagnostics.ciphertext_stubs += usize::from(
+                info.message_stub_type == Some(wa::web_message_info::StubType::CIPHERTEXT),
+            );
+            diagnostics.futureproof_body += usize::from(info.futureproof_data.is_some());
             continue;
         };
         let from_me = key.from_me.unwrap_or(false);
         let timestamp = info.message_timestamp.unwrap_or(0) as i64;
         newest = newest.max(timestamp);
         let base = original.get_base_message();
-        // History can carry the edited snapshot under the original message's
-        // key. A separate edit event has a different outer key and must not
-        // become a new message at the edit time.
+        if let Some(protocol) = base.protocol_message.as_option()
+            && protocol.r#type == Some(wa::message::protocol_message::Type::MESSAGE_EDIT)
+        {
+            diagnostics.edit_without_key += usize::from(
+                protocol
+                    .key
+                    .as_option()
+                    .and_then(|key| key.id.as_ref())
+                    .is_none_or(String::is_empty),
+            );
+            diagnostics.edit_without_body += usize::from(protocol.edited_message.is_unset());
+        }
+        diagnostics.edited_wrappers += usize::from(original.edited_message.is_set());
+        diagnostics.encrypted_edits += usize::from(
+            base.secret_encrypted_message
+                .as_option()
+                .is_some_and(|envelope| {
+                    envelope.secret_enc_type
+                        == Some(wa::message::secret_encrypted_message::SecretEncType::MESSAGE_EDIT)
+                }),
+        );
+        // In history MESSAGE_EDIT is a complete snapshot: the outer key is
+        // the latest edit's key, while protocol.key names the original bubble.
+        // Keep the history envelope's timestamp/order and use the target id.
+        // WA Web does this in WAWebParseHistorySyncProtocolMessageEditProto.
         let snapshot = base.protocol_message.as_option().and_then(|protocol| {
-            (protocol.r#type == Some(wa::message::protocol_message::Type::MESSAGE_EDIT)
-                && protocol.key.as_option().and_then(|key| key.id.as_deref()) == Some(&id))
-            .then(|| protocol.edited_message.as_option())
-            .flatten()
+            (protocol.r#type == Some(wa::message::protocol_message::Type::MESSAGE_EDIT))
+                .then_some(protocol)
+                .and_then(|protocol| {
+                    let target = protocol
+                        .key
+                        .as_option()?
+                        .id
+                        .as_deref()
+                        .filter(|id| !id.is_empty())?;
+                    Some((target, protocol.edited_message.as_option()?))
+                })
+        });
+        diagnostics.rekeyed_edit_snapshots +=
+            usize::from(snapshot.is_some_and(|(target, _)| target != id));
+        let (id, message) = snapshot.map_or((id, original), |(target, edited)| {
+            (target.to_owned(), edited)
         });
         let edited = snapshot.is_some() || original.edited_message.is_set();
-        let message = snapshot.unwrap_or(original);
+        diagnostics.edit_snapshots += usize::from(snapshot.is_some());
         let base = message.get_base_message();
         if let Some(protocol) = base.protocol_message.as_option() {
+            if protocol.r#type == Some(wa::message::protocol_message::Type::MESSAGE_EDIT) {
+                diagnostics.invalid_edits += 1;
+            } else {
+                diagnostics.other_protocol += 1;
+            }
             if protocol.r#type == Some(wa::message::protocol_message::Type::REVOKE)
                 && let Some(target) = protocol.key.as_option().and_then(|key| key.id.clone())
             {
@@ -10168,6 +10267,7 @@ fn parse_conversation(conversation: wa::Conversation) -> ParsedChat {
             continue;
         }
         let Some(mut content) = classify(message) else {
+            diagnostics.unclassified += 1;
             continue;
         };
         // Normalizing an edit must not remove an outer view-once restriction.
@@ -10309,6 +10409,7 @@ fn parse_conversation(conversation: wa::Conversation) -> ParsedChat {
             | End::COMPLETE_ON_DEMAND_SYNC_WITH_MORE_MSG_ON_PRIMARY_BUT_NO_ACCESS => false,
         });
     ParsedChat {
+        diagnostics,
         id: conversation.id.clone(),
         name: non_empty(&conversation.display_name).or_else(|| non_empty(&conversation.name)),
         unread: conversation.unread_count,
@@ -13667,6 +13768,61 @@ mod receipt_tests {
     }
 
     #[test]
+    fn history_diagnostics_describe_edit_snapshots_without_personal_data() {
+        let edit = wa::Message {
+            protocol_message: MessageField::some(wa::message::ProtocolMessage {
+                r#type: Some(wa::message::protocol_message::Type::MESSAGE_EDIT),
+                key: MessageField::some(wa::MessageKey {
+                    id: Some("private-parent-id".into()),
+                    ..Default::default()
+                }),
+                edited_message: MessageField::some(wa::Message::text("Private fixture body")),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut absent = history_entry(
+            PEER,
+            "private-missing-id",
+            false,
+            None,
+            wa::Message::default(),
+            Vec::new(),
+            None,
+        );
+        let absent_info = absent.message.as_option_mut().unwrap();
+        absent_info.message = MessageField::none();
+        absent_info.message_stub_type = Some(wa::web_message_info::StubType::CIPHERTEXT);
+        let parsed = parse_conversation(wa::Conversation {
+            id: PEER.into(),
+            messages: vec![
+                history_entry(PEER, "private-edit-id", false, None, edit, Vec::new(), None),
+                history_entry(
+                    PEER,
+                    "private-visible-id",
+                    false,
+                    None,
+                    wa::Message::text("Private fixture body"),
+                    Vec::new(),
+                    None,
+                ),
+                absent,
+            ],
+            ..Default::default()
+        });
+        assert_eq!(parsed.diagnostics.entries, 3);
+        assert_eq!(parsed.diagnostics.rekeyed_edit_snapshots, 1);
+        assert_eq!(parsed.diagnostics.edit_snapshots, 1);
+        assert_eq!(parsed.diagnostics.missing_body, 1);
+        assert_eq!(parsed.diagnostics.ciphertext_stubs, 1);
+        assert_eq!(parsed.messages.len(), 2);
+        let report = format!("{:?}", parsed.diagnostics);
+        assert!(!report.contains("private-"));
+        assert!(!report.contains("Private fixture body"));
+        assert!(!report.contains(PEER));
+    }
+
+    #[test]
     fn history_fidelity_keeps_the_phones_order_within_one_second() {
         let (mut worker, _events, _inbox, _wa) = worker();
         let entries = [("third", 3), ("first", 1), ("second", 2)]
@@ -13847,7 +14003,7 @@ mod receipt_tests {
     }
 
     #[test]
-    fn history_fidelity_does_not_create_a_bubble_for_a_separate_edit_event() {
+    fn history_fidelity_rekeys_an_edited_history_snapshot_to_its_original() {
         let raw = wa::Message {
             protocol_message: MessageField::some(wa::message::ProtocolMessage {
                 r#type: Some(wa::message::protocol_message::Type::MESSAGE_EDIT),
@@ -13873,7 +14029,139 @@ mod receipt_tests {
             )],
             ..Default::default()
         });
-        assert!(parsed.messages.is_empty());
+        assert_eq!(parsed.messages.len(), 1);
+        assert_eq!(parsed.messages[0].id, "original-id");
+        assert_eq!(parsed.messages[0].content, Content::text("Updated fixture"));
+        assert!(parsed.messages[0].edited);
+        assert_eq!(parsed.messages[0].timestamp, 100);
+    }
+
+    // WA Web 2.3000.1045368834, whatspec 1a441f0329c941fcdb238490a6c604550d8a9939:
+    // WAWebParseHistorySyncProtocolMessageEditProto keeps base metadata, parses
+    // editedMessage, then replaces id with protocol.key. The outer key identifies
+    // the latest edit; it need not identify a separate event or an archived row.
+    #[test]
+    fn history_fidelity_restores_rekeyed_reply_without_an_original() {
+        for original_present in [false, true] {
+            let (mut worker, _events, _inbox, _wa) = worker();
+            if original_present {
+                file_history_entries(
+                    &mut worker,
+                    vec![history_entry(
+                        PEER,
+                        "original-reply",
+                        false,
+                        None,
+                        wa::Message::text("Before editing"),
+                        Vec::new(),
+                        None,
+                    )],
+                );
+            }
+            let snapshot = || {
+                let body = wa::Message::text_with_context(
+                    "Updated fixture reply",
+                    wa::ContextInfo {
+                        stanza_id: Some("quoted-fixture".into()),
+                        participant: Some(ME.into()),
+                        quoted_message: MessageField::some(wa::Message::text("Earlier fixture")),
+                        ..Default::default()
+                    },
+                );
+                let mut entry = history_entry(
+                    PEER,
+                    "latest-edit-id",
+                    false,
+                    None,
+                    wa::Message {
+                        protocol_message: MessageField::some(wa::message::ProtocolMessage {
+                            r#type: Some(wa::message::protocol_message::Type::MESSAGE_EDIT),
+                            key: MessageField::some(wa::MessageKey {
+                                id: Some("original-reply".into()),
+                                // Inner keys may use the sender's perspective.
+                                from_me: Some(true),
+                                ..Default::default()
+                            }),
+                            edited_message: MessageField::some(body),
+                            timestamp_ms: Some(115_000),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                    Vec::new(),
+                    Some(vec![7; 32]),
+                );
+                entry.msg_order_id = Some(5);
+                entry
+            };
+            // Replaying the same snapshot must also keep a single original row.
+            for _ in 0..2 {
+                file_history_entries(&mut worker, vec![snapshot()]);
+                let messages = worker.archive.messages(PEER, None, 10).unwrap();
+                assert_eq!(messages.len(), 1);
+                let row = &messages[0];
+                assert_eq!(row.id, "original-reply");
+                assert_eq!(
+                    row.timestamp, 100,
+                    "history envelope supplies the send time"
+                );
+                assert_eq!(row.history_order, Some(5));
+                assert_eq!(row.sender, PEER);
+                assert!(!row.from_me);
+                assert!(row.edited);
+                assert_eq!(row.content, Content::text("Updated fixture reply"));
+                assert_eq!(row.quoted.as_ref().unwrap().id, "quoted-fixture");
+                let raw = worker.archive.raw(PEER, &row.id).unwrap().unwrap();
+                assert_eq!(
+                    classify(&wa::Message::decode_from_slice(&raw).unwrap()),
+                    Some(row.content.clone())
+                );
+                assert_eq!(message_secret_from_raw(&raw), Some(vec![7; 32]));
+                assert!(
+                    worker
+                        .archive
+                        .message(PEER, "latest-edit-id")
+                        .unwrap()
+                        .is_none()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn history_fidelity_rejects_edit_snapshots_without_a_target_or_body() {
+        for (target, body) in [
+            (None, Some(wa::Message::text("Fixture"))),
+            (Some(""), Some(wa::Message::text("Fixture"))),
+            (Some("original"), None),
+        ] {
+            let parsed = parse_conversation(wa::Conversation {
+                id: PEER.into(),
+                messages: vec![history_entry(
+                    PEER,
+                    "edit-id",
+                    false,
+                    None,
+                    wa::Message {
+                        protocol_message: MessageField::some(wa::message::ProtocolMessage {
+                            r#type: Some(wa::message::protocol_message::Type::MESSAGE_EDIT),
+                            key: MessageField::some(wa::MessageKey {
+                                id: target.map(str::to_owned),
+                                ..Default::default()
+                            }),
+                            edited_message: body.into(),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                    Vec::new(),
+                    None,
+                )],
+                ..Default::default()
+            });
+            assert!(parsed.messages.is_empty());
+            assert_eq!(parsed.diagnostics.invalid_edits, 1);
+        }
     }
 
     #[test]
@@ -15461,6 +15749,7 @@ mod chat_removal_tests {
     fn history(chat: &str, timestamps: &[i64]) -> ParsedHistory {
         ParsedHistory {
             chats: vec![ParsedChat {
+                diagnostics: HistoryDiagnostics::default(),
                 id: chat.to_owned(),
                 name: Some("Somebody".into()),
                 unread: None,
