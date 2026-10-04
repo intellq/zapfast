@@ -51,3 +51,4 @@ pub mod video;
 pub mod voice;
 pub mod wa_link;
 pub mod wallpaper;
+pub mod window;
