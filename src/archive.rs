@@ -135,6 +135,7 @@ const CHAT_COLUMNS: &str =
 
 /// Adds columns introduced after the initial schema when missing.
 const MIGRATIONS: &[(&str, &str, &str)] = &[
+    ("messages", "history_order", "INTEGER"),
     ("messages", "thumbnail", "BLOB"),
     ("messages", "mentions", "TEXT NOT NULL DEFAULT '[]'"),
     ("chats", "participants", "TEXT NOT NULL DEFAULT '[]'"),
@@ -164,7 +165,7 @@ const MIGRATIONS: &[(&str, &str, &str)] = &[
 ];
 const CHAT_JOIN: &str = "FROM chats c
              LEFT JOIN messages m ON m.chat = c.id AND m.rowid = (
-                 SELECT rowid FROM messages WHERE chat = c.id ORDER BY timestamp DESC, rowid DESC LIMIT 1
+                 SELECT rowid FROM messages WHERE chat = c.id ORDER BY timestamp DESC, COALESCE(history_order, 9223372036854775807) DESC, rowid DESC LIMIT 1
              )";
 
 fn chat_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Chat> {
@@ -222,7 +223,7 @@ fn chat_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Chat> {
 }
 
 /// The columns [`searched_message`] reads, in its order.
-const SEARCH_COLUMNS: &str = "chat, id, sender, sender_name, from_me, timestamp, content, status, quoted, reactions, edited, thumbnail, mentions, forwarded, delivered_at, read_at";
+const SEARCH_COLUMNS: &str = "chat, id, sender, sender_name, from_me, timestamp, content, status, quoted, reactions, edited, thumbnail, mentions, forwarded, delivered_at, read_at, history_order";
 
 /// The lowercased text a search matches: text, captions, file names, poll
 /// questions, contact names and places, one per line.
@@ -272,6 +273,7 @@ fn searched_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
         read_at: row.get(15)?,
         quoted: quoted.and_then(|quoted| serde_json::from_str(&quoted).ok()),
         reactions: serde_json::from_str(&reactions).unwrap_or_default(),
+        history_order: row.get(16)?,
         edited: row.get(10)?,
         mentions: serde_json::from_str(&mentions).unwrap_or_default(),
         forwarded: row.get(13)?,
@@ -635,7 +637,9 @@ impl Archive {
                  JOIN messages boundary ON boundary.chat = m.chat AND boundary.id = ?2
                  WHERE m.chat = ?1 AND m.from_me = 0
                  AND (m.timestamp > boundary.timestamp
-                      OR (m.timestamp = boundary.timestamp AND m.rowid > boundary.rowid))))
+                      OR (m.timestamp = boundary.timestamp AND
+                          (COALESCE(m.history_order, 9223372036854775807), m.rowid) >
+                          (COALESCE(boundary.history_order, 9223372036854775807), boundary.rowid)))))
              WHERE id = ?1 AND EXISTS(SELECT 1 FROM messages WHERE chat = ?1 AND id = ?2)",
             params![chat, message],
         )?;
@@ -788,7 +792,7 @@ impl Archive {
         let mut statement = self.connection.prepare(
             "SELECT id, sender FROM messages WHERE chat = ?1 AND from_me = 0
              AND timestamp >= COALESCE((SELECT read_through FROM chats WHERE id = ?1), -1)
-             ORDER BY timestamp DESC, rowid DESC LIMIT ?2",
+             ORDER BY timestamp DESC, COALESCE(history_order, 9223372036854775807) DESC, rowid DESC LIMIT ?2",
         )?;
         let rows = statement.query_map(params![chat, i64::from(limit)], |row| {
             Ok((row.get(0)?, row.get(1)?))
@@ -926,9 +930,10 @@ impl Archive {
     /// write instead of a read followed by a write.
     pub fn insert_message(&self, message: &Message, raw: Option<&[u8]>) -> Result<()> {
         self.connection.execute(
-            "INSERT INTO messages (chat, id, sender, sender_name, from_me, timestamp, content, status, quoted, reactions, edited, raw, thumbnail, mentions, forwarded, delivered_at, read_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+            "INSERT INTO messages (chat, id, sender, sender_name, from_me, timestamp, content, status, quoted, reactions, edited, raw, thumbnail, mentions, forwarded, delivered_at, read_at, history_order)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?19)
              ON CONFLICT(chat, id) DO UPDATE SET
+                history_order = COALESCE(excluded.history_order, messages.history_order),
                 sender_name = COALESCE(excluded.sender_name, sender_name),
                 content = excluded.content,
                 status = CASE
@@ -971,6 +976,7 @@ impl Archive {
                 message.read_at,
                 // An explicit failure still writes over a further state.
                 status_rank(Delivery::Failed),
+                message.history_order,
             ],
         )?;
         self.connection.execute(
@@ -989,11 +995,12 @@ impl Archive {
         limit: usize,
     ) -> Result<Vec<Message>> {
         let mut statement = self.connection.prepare(
-            "SELECT id, sender, sender_name, from_me, timestamp, content, status, quoted, reactions, edited, thumbnail, mentions, forwarded, delivered_at, read_at
+            "SELECT id, sender, sender_name, from_me, timestamp, content, status, quoted, reactions, edited, thumbnail, mentions, forwarded, delivered_at, read_at, history_order
              FROM messages
-             WHERE chat = ?1 AND (timestamp < ?2 OR (timestamp = ?2 AND rowid <
-                 (SELECT rowid FROM messages WHERE chat = ?1 AND id = ?3)))
-             ORDER BY timestamp DESC, rowid DESC
+             WHERE chat = ?1 AND (timestamp < ?2 OR (timestamp = ?2 AND (COALESCE(history_order, 9223372036854775807), rowid) <
+                 (SELECT COALESCE(history_order, 9223372036854775807), rowid
+                  FROM messages WHERE chat = ?1 AND id = ?3)))
+             ORDER BY timestamp DESC, COALESCE(history_order, 9223372036854775807) DESC, rowid DESC
              LIMIT ?4",
         )?;
         let (before_time, before_id) = before.unwrap_or((i64::MAX, ""));
@@ -1018,6 +1025,7 @@ impl Archive {
                     read_at: row.get(14)?,
                     quoted: quoted.and_then(|quoted| serde_json::from_str(&quoted).ok()),
                     reactions: serde_json::from_str(&reactions).unwrap_or_default(),
+                    history_order: row.get(15)?,
                     edited: row.get(9)?,
                     mentions: serde_json::from_str(&mentions).unwrap_or_default(),
                     forwarded: row.get(12)?,
@@ -1050,7 +1058,7 @@ impl Archive {
              WHERE chat = ?1 AND timestamp >= ?2 AND timestamp < ?3
              AND json_valid(content)
              AND (?4 IS NULL OR {SEARCHED_TEXT} LIKE ?4 ESCAPE '\\')
-             ORDER BY timestamp DESC, rowid DESC
+             ORDER BY timestamp DESC, COALESCE(history_order, 9223372036854775807) DESC, rowid DESC
              LIMIT ?5"
         );
         let mut statement = self.connection.prepare(&sql)?;
@@ -1074,7 +1082,7 @@ impl Archive {
             "SELECT {SEARCH_COLUMNS}
              FROM messages
              WHERE json_valid(content) AND {SEARCHED_TEXT} LIKE ?1 ESCAPE '\\'
-             ORDER BY timestamp DESC, rowid DESC
+             ORDER BY timestamp DESC, COALESCE(history_order, 9223372036854775807) DESC, rowid DESC
              LIMIT ?2"
         );
         let mut statement = self.connection.prepare(&sql)?;
@@ -1094,11 +1102,12 @@ impl Archive {
         limit: usize,
     ) -> Result<Vec<Message>> {
         let mut statement = self.connection.prepare(
-            "SELECT id, sender, sender_name, from_me, timestamp, content, status, quoted, reactions, edited, thumbnail, mentions, forwarded, delivered_at, read_at
+            "SELECT id, sender, sender_name, from_me, timestamp, content, status, quoted, reactions, edited, thumbnail, mentions, forwarded, delivered_at, read_at, history_order
              FROM messages
-             WHERE chat = ?1 AND timestamp >= ?2 AND (timestamp < ?3 OR (timestamp = ?3 AND rowid <
-                 (SELECT rowid FROM messages WHERE chat = ?1 AND id = ?4)))
-             ORDER BY timestamp DESC, rowid DESC
+             WHERE chat = ?1 AND timestamp >= ?2 AND (timestamp < ?3 OR (timestamp = ?3 AND (COALESCE(history_order, 9223372036854775807), rowid) <
+                 (SELECT COALESCE(history_order, 9223372036854775807), rowid
+                  FROM messages WHERE chat = ?1 AND id = ?4)))
+             ORDER BY timestamp DESC, COALESCE(history_order, 9223372036854775807) DESC, rowid DESC
              LIMIT ?5",
         )?;
         let rows = statement.query_map(
@@ -1123,6 +1132,7 @@ impl Archive {
                     read_at: row.get(14)?,
                     quoted: quoted.and_then(|quoted| serde_json::from_str(&quoted).ok()),
                     reactions: serde_json::from_str(&reactions).unwrap_or_default(),
+                    history_order: row.get(15)?,
                     edited: row.get(9)?,
                     mentions: serde_json::from_str(&mentions).unwrap_or_default(),
                     forwarded: row.get(12)?,
@@ -1463,7 +1473,7 @@ impl Archive {
         self.connection
             .query_row(
                 "SELECT id FROM messages WHERE chat = ?1 AND sender = ?2
-                 ORDER BY timestamp DESC, rowid DESC LIMIT 1",
+                 ORDER BY timestamp DESC, COALESCE(history_order, 9223372036854775807) DESC, rowid DESC LIMIT 1",
                 params![chat, sender],
                 |row| row.get(0),
             )
@@ -1472,7 +1482,7 @@ impl Archive {
 
     pub fn message(&self, chat: &str, id: &str) -> Result<Option<Message>> {
         let mut statement = self.connection.prepare(
-            "SELECT sender, sender_name, from_me, timestamp, content, status, quoted, reactions, edited, thumbnail, mentions, forwarded, delivered_at, read_at
+            "SELECT sender, sender_name, from_me, timestamp, content, status, quoted, reactions, edited, thumbnail, mentions, forwarded, delivered_at, read_at, history_order
              FROM messages WHERE chat = ?1 AND id = ?2",
         )?;
         statement
@@ -1496,6 +1506,7 @@ impl Archive {
                     read_at: row.get(13)?,
                     quoted: quoted.and_then(|quoted| serde_json::from_str(&quoted).ok()),
                     reactions: serde_json::from_str(&reactions).unwrap_or_default(),
+                    history_order: row.get(14)?,
                     edited: row.get(8)?,
                     mentions: serde_json::from_str(&mentions).unwrap_or_default(),
                     forwarded: row.get(11)?,
@@ -1510,7 +1521,7 @@ impl Archive {
         let id: Option<String> = self
             .connection
             .query_row(
-                "SELECT id FROM messages WHERE chat = ?1 ORDER BY timestamp ASC, rowid ASC LIMIT 1",
+                "SELECT id FROM messages WHERE chat = ?1 ORDER BY timestamp ASC, COALESCE(history_order, 9223372036854775807) ASC, rowid ASC LIMIT 1",
                 params![chat],
                 |row| row.get(0),
             )
@@ -1812,6 +1823,7 @@ pub(crate) mod tests {
             read_at: None,
             quoted: None,
             reactions: Vec::new(),
+            history_order: None,
             edited: false,
             mentions: Vec::new(),
             forwarded: false,
@@ -3014,6 +3026,55 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn history_fidelity_pages_and_receipts_follow_phone_order() {
+        let archive = Archive::in_memory().unwrap();
+        let chat = "fixture@s.whatsapp.net";
+        archive.ensure_chat(chat, "Fixture").unwrap();
+        // Initial insertion order is deliberately different. Replay repairs it
+        // in place, without deleting rows or changing their local row ids.
+        for (id, order) in [("third", 3), ("first", 1), ("second", 2)] {
+            let mut row = message(chat, id, 100, false);
+            archive.insert_message(&row, None).unwrap();
+            row.history_order = Some(order);
+            archive.insert_message(&row, None).unwrap();
+            row.history_order = None;
+            archive.insert_message(&row, None).unwrap();
+            assert_eq!(
+                archive.message(chat, id).unwrap().unwrap().history_order,
+                Some(order)
+            );
+        }
+        archive
+            .insert_message(&message(chat, "live", 100, false), None)
+            .unwrap();
+        let ids = |rows: Vec<Message>| rows.into_iter().map(|m| m.id).collect::<Vec<_>>();
+        assert_eq!(
+            ids(archive.messages(chat, None, 2).unwrap()),
+            ["third", "live"]
+        );
+        assert_eq!(
+            ids(archive.messages(chat, Some((100, "third")), 2).unwrap()),
+            ["first", "second"]
+        );
+        assert_eq!(
+            ids(archive
+                .messages_range(chat, 100, (100, "third"), 10)
+                .unwrap()),
+            ["first", "second"]
+        );
+        assert_eq!(archive.oldest(chat).unwrap().unwrap().id, "first");
+        assert_eq!(
+            ids(archive
+                .search_chat_messages(chat, "", Some(0), Some(200), 10)
+                .unwrap()),
+            ["live", "third", "second", "first"]
+        );
+        archive.set_unread(chat, 4).unwrap();
+        archive.mark_read_to(chat, "second").unwrap();
+        assert_eq!(archive.chat(chat).unwrap().unwrap().unread, 2);
+    }
+
+    #[test]
     fn paging_keeps_every_message_of_a_second() {
         // Cover messages sharing one timestamp across page boundaries.
         let archive = Archive::in_memory().expect("opens");
@@ -3344,6 +3405,7 @@ mod sticker_tests {
             read_at: None,
             quoted: None,
             reactions: Vec::new(),
+            history_order: None,
             edited: false,
             mentions: Vec::new(),
             forwarded: false,
@@ -3520,6 +3582,7 @@ mod media_path_tests {
             read_at: None,
             quoted: None,
             reactions: Vec::new(),
+            history_order: None,
             edited: false,
             mentions: Vec::new(),
             forwarded: false,

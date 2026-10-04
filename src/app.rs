@@ -260,44 +260,46 @@ pub struct JumpLoad {
 
 impl Conversation {
     fn merge(&mut self, incoming: Vec<Message>, older: bool) {
-        if older {
-            let known: HashSet<String> = self.messages.iter().map(|m| m.id.clone()).collect();
-            let mut fresh: Vec<Message> = incoming
-                .into_iter()
-                .filter(|message| !known.contains(&message.id))
-                .collect();
-            fresh.append(&mut self.messages);
-            self.messages = fresh;
-        } else {
-            for message in incoming {
-                match self.messages.iter_mut().find(|m| m.id == message.id) {
-                    Some(existing) => {
-                        // A reload or scroll delivers a freshly classified copy
-                        // of an already-loaded message whose Media has no local
-                        // path and a default state. Replacing it would throw
-                        // away an in-flight download and re-fetch media already
-                        // on disk, so keep the runtime-only fields (as
-                        // `MessageUpdated` already does for the state).
-                        let media = existing
-                            .content
-                            .media()
-                            .map(|media| (media.state.clone(), media.path.clone()));
-                        *existing = message;
-                        // A copy that carries its own path is newer, for
-                        // example after the archive relocated the file.
-                        if let (Some((state, path)), Some(media)) =
-                            (media, existing.content.media_mut())
-                            && media.path.is_none()
-                        {
-                            media.state = state;
-                            media.path = path;
-                        }
+        // Prepend new older rows, but refresh duplicates too: on-demand
+        // history can supply edits and phone ordering absent from our archive.
+        let old_len = self.messages.len();
+        let mut positions: HashMap<String, usize> = self
+            .messages
+            .iter()
+            .enumerate()
+            .map(|(index, message)| (message.id.clone(), index))
+            .collect();
+        for message in incoming {
+            match positions.get(&message.id) {
+                Some(&index) => {
+                    let existing = &mut self.messages[index];
+                    let media = existing
+                        .content
+                        .media()
+                        .map(|media| (media.state.clone(), media.path.clone()));
+                    *existing = message;
+                    // Keep downloads in flight and files absent from a freshly
+                    // classified copy. An incoming path takes precedence.
+                    if let (Some((state, path)), Some(media)) =
+                        (media, existing.content.media_mut())
+                        && media.path.is_none()
+                    {
+                        media.state = state;
+                        media.path = path;
                     }
-                    None => self.messages.push(message),
+                }
+                None => {
+                    positions.insert(message.id.clone(), self.messages.len());
+                    self.messages.push(message);
                 }
             }
         }
-        self.messages.sort_by_key(|message| message.timestamp);
+        if older {
+            let added = self.messages.len() - old_len;
+            self.messages.rotate_right(added);
+        }
+        self.messages
+            .sort_by_key(|message| (message.timestamp, message.history_order.unwrap_or(i64::MAX)));
     }
 
     pub fn message_mut(&mut self, id: &str) -> Option<&mut Message> {
@@ -4712,6 +4714,24 @@ impl App {
             Action::MarkUnread(chat) => self.mark_unread(&chat),
             Action::LoadOlder(chat) => self.load_older(&chat),
             Action::FetchOlder(chat) => self.fetch_older(&chat, true),
+            Action::ReloadHistory { chat, message } => {
+                if !self.is_connected() {
+                    return;
+                }
+                let Some(conversation) = self.conversations.get_mut(&chat) else {
+                    return;
+                };
+                if conversation.fetching_phone {
+                    self.toast(tr("History is already being requested for this chat"));
+                    return;
+                }
+                if conversation.message(&message).is_none() {
+                    return;
+                }
+                conversation.fetching_phone = true;
+                self.backend.send(Command::ReloadHistory { chat, message });
+                self.toast(tr("Requesting earlier messages from your phone"));
+            }
             Action::Download {
                 card,
                 chat,
@@ -10051,6 +10071,7 @@ mod tests {
             read_at: None,
             quoted: None,
             reactions: Vec::new(),
+            history_order: None,
             edited: false,
             mentions: Vec::new(),
             forwarded: false,
@@ -10091,6 +10112,7 @@ mod tests {
         // A reload delivers the same message freshly classified, without the
         // local path or the runtime state.
         conversation.merge(vec![image(None, MediaState::Idle)], false);
+        conversation.merge(vec![image(None, MediaState::Idle)], true);
         let media = conversation
             .message("picture")
             .and_then(|message| message.content.media().cloned())
@@ -10817,6 +10839,39 @@ mod tests {
             app.media_of(chat, "picture").map(|media| &media.state),
             Some(MediaState::Failed(_))
         ));
+    }
+
+    #[test]
+    fn history_fidelity_reload_repairs_loaded_order_and_content() {
+        let mut conversation = Conversation::default();
+        conversation.merge(
+            vec![message("c", "third", 100), message("c", "first", 100)],
+            false,
+        );
+        let refreshed = [("second", 2), ("first", 1), ("third", 3)]
+            .into_iter()
+            .map(|(id, order)| Message {
+                history_order: Some(order),
+                content: Content::text(format!("updated {id}")),
+                edited: true,
+                ..message("c", id, 100)
+            })
+            .collect::<Vec<_>>();
+        conversation.merge(refreshed.clone(), true);
+        conversation.merge(refreshed, true);
+        assert_eq!(
+            conversation
+                .messages
+                .iter()
+                .map(|m| m.id.as_str())
+                .collect::<Vec<_>>(),
+            ["first", "second", "third"]
+        );
+        assert!(conversation.messages.iter().all(|m| m.edited));
+        assert_eq!(
+            conversation.messages[0].content,
+            Content::text("updated first")
+        );
     }
 
     #[test]
@@ -12676,6 +12731,7 @@ mod name_tests {
             read_at: None,
             quoted: None,
             reactions: Vec::new(),
+            history_order: None,
             edited: false,
             mentions: vec![MentionRef {
                 user: "15550001111".into(),
@@ -12789,6 +12845,7 @@ mod app_lock_tests {
             read_at: None,
             quoted: None,
             reactions: Vec::new(),
+            history_order: None,
             edited: false,
             mentions: Vec::new(),
             forwarded: false,

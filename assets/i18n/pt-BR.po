@@ -4997,3 +4997,19 @@ msgstr "A barra com Todas, Não lidas, Privadas e os demais filtros, abaixo do c
 #: src/ui/chats.rs
 msgid "Close archived chats"
 msgstr "Fechar as conversas arquivadas"
+
+#: src/ui/conversation.rs
+msgid "Reload earlier messages"
+msgstr "Recarregar mensagens anteriores"
+
+#: src/backend/worker.rs
+msgid "This message is no longer in the archive"
+msgstr "Esta mensagem não está mais no arquivo"
+
+#: src/app.rs
+msgid "History is already being requested for this chat"
+msgstr "O histórico desta conversa já está sendo pedido"
+
+#: src/app.rs
+msgid "Requesting earlier messages from your phone"
+msgstr "Pedindo mensagens anteriores ao celular"

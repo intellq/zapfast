@@ -291,6 +291,7 @@ fn message(chat: &str, id: &str, from_me: bool, timestamp: i64, content: Content
         read_at: None,
         quoted: None,
         reactions: Vec::new(),
+        history_order: None,
         edited: false,
         mentions: Vec::new(),
         forwarded: false,
@@ -6177,6 +6178,39 @@ mod tests {
         };
         click(&mut app, copy);
         assert!(app.toasts.iter().any(|toast| toast.message == "Copied"));
+    }
+
+    #[test]
+    fn history_fidelity_message_menu_requests_before_the_chosen_message() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut app = app();
+        apply_flags(&mut app, Some("react-menu"));
+        app.attach(&ctx);
+        app.backend.record_demo_commands();
+        render(&mut app, &ctx);
+        let nodes = accessible_nodes(&mut app, &ctx, Vec::new());
+        let (_, _, pos) = nodes
+            .into_iter()
+            .find(|(label, _, _)| label == "Reload earlier messages")
+            .expect("reload action");
+        let press = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        accessible_nodes(
+            &mut app,
+            &ctx,
+            vec![egui::Event::PointerMoved(pos), press(true)],
+        );
+        accessible_nodes(&mut app, &ctx, vec![press(false)]);
+        let commands = app.backend.take_demo_commands();
+        assert!(commands.iter().any(|command| matches!(command,
+            crate::backend::Command::ReloadHistory { chat, message }
+            if Some(chat) == app.open_chat.as_ref() && message == "ada-link")));
+        assert!(app.conversations[app.open_chat.as_ref().unwrap()].fetching_phone);
     }
 
     /// Opening the log hands it to the worker, which waits to see it open or

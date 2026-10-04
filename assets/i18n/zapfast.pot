@@ -4828,3 +4828,19 @@ msgstr ""
 #: src/ui/chats.rs
 msgid "Close archived chats"
 msgstr ""
+
+#: src/ui/conversation.rs
+msgid "Reload earlier messages"
+msgstr ""
+
+#: src/backend/worker.rs
+msgid "This message is no longer in the archive"
+msgstr ""
+
+#: src/app.rs
+msgid "History is already being requested for this chat"
+msgstr ""
+
+#: src/app.rs
+msgid "Requesting earlier messages from your phone"
+msgstr ""

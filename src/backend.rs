@@ -233,6 +233,12 @@ pub enum Command {
     },
     /// Requests messages before the archive's earliest message.
     FetchOlder(ChatId),
+    /// Requests phone history immediately before an archived message to repair
+    /// gaps or ordering inside an already loaded conversation.
+    ReloadHistory {
+        chat: ChatId,
+        message: String,
+    },
     Download {
         card: Option<usize>,
         chat: ChatId,
