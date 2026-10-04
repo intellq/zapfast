@@ -1833,6 +1833,8 @@ pub enum Action {
     RemoveGroupPicture(ChatId),
     /// Sets or resets (`None`) the folder for new downloads.
     SetDownloadFolder(Option<PathBuf>),
+    /// Keeps archived chats archived when a new message comes, or not.
+    SetKeepChatsArchived(bool),
     /// Saves the proxy setting and reconnects. Empty follows the environment.
     SetProxy(String),
     /// Plays a notification sound once, as a preview.

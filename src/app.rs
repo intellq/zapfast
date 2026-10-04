@@ -1023,6 +1023,9 @@ impl App {
         app.backend.send(Command::SetKeepDeletedMessages(
             app.settings.keep_deleted_messages,
         ));
+        app.backend.send(Command::SetKeepChatsArchived(
+            app.settings.keep_chats_archived,
+        ));
         // The call devices the last session used, so a call opened now starts on them.
         app.backend.send(Command::SetCallDevices {
             microphone: app.settings.call_microphone.clone(),
@@ -6055,6 +6058,11 @@ impl App {
                 self.settings.download_folder = folder.clone();
                 self.mark_settings_dirty();
                 self.backend.send(Command::SetDownloadFolder(folder));
+            }
+            Action::SetKeepChatsArchived(keep) => {
+                self.settings.keep_chats_archived = keep;
+                self.mark_settings_dirty();
+                self.backend.send(Command::SetKeepChatsArchived(keep));
             }
             Action::SetProxy(value) => {
                 let value = value.trim().to_owned();

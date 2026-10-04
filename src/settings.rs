@@ -470,6 +470,10 @@ pub struct Settings {
     /// Folder for new downloads. `None` keeps them in the cache. Files
     /// already downloaded stay where they are when this changes.
     pub download_folder: Option<std::path::PathBuf>,
+    /// Archived chats stay archived when a message arrives or is sent, as
+    /// with the phone's "Keep chats archived". Off, a new message brings the
+    /// chat back to the list.
+    pub keep_chats_archived: bool,
     /// Proxy for WhatsApp, media, and updates, such as
     /// `socks5h://127.0.0.1:9050`. Empty follows `ALL_PROXY` / `HTTPS_PROXY`.
     pub proxy: String,
@@ -569,6 +573,7 @@ impl Default for Settings {
             mention_sound: NotificationSound::Alert,
             group_sounds: true,
             download_folder: None,
+            keep_chats_archived: true,
             proxy: String::new(),
             check_for_updates: true,
             download_updates_automatically: true,

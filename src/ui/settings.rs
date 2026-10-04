@@ -590,6 +590,30 @@ fn sections(app: &App) -> Vec<Section> {
         );
     }
     chats.row(
+        translated(locale, "Keep chats archived"),
+        translated(
+            locale,
+            "When off, a new message brings an archived chat back to the list.",
+        ),
+        move |ui, app| {
+            let mut keep = app.settings.keep_chats_archived;
+            let response = widgets::switch(ui, &palette, &mut keep);
+            theme::reveal_focus(&response);
+            let label = crate::i18n::gettext(app.locale, "Keep chats archived");
+            response.widget_info(|| {
+                egui::WidgetInfo::selected(
+                    egui::WidgetType::Checkbox,
+                    ui.is_enabled(),
+                    keep,
+                    label.as_ref(),
+                )
+            });
+            if response.changed() {
+                app.actions.push(Action::SetKeepChatsArchived(keep));
+            }
+        },
+    );
+    chats.row(
         translated(locale, "Locked chats code"),
         translated(
             locale,

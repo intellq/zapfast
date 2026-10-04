@@ -699,7 +699,10 @@ de sincronizar a exclusão "para mim" com o celular é uma extensão deste fork.
   filters; right-click it to mute or unmute every channel at once. The archive
   button, left of the one that hides the chat list, opens the archived chats (it
   shows nothing for unread ones: open it to look); inside, the gear is a red X that
-  returns to the chat list. **Hide the chat filters** in Settings, Appearance,
+  returns to the chat list. Archived chats stay there when new messages arrive;
+  turn off **Keep chats archived** in Settings to have a new message, received or
+  sent, bring the chat back to the list (ZapFast does not read the phone's own
+  setting yet, so set it here to match). **Hide the chat filters** in Settings, Appearance,
   removes the row of chips (off by default) and lists every chat. Right-click a chat and choose **Mark as unread**
   to put an empty dot on it, as on the phone; the mark syncs with your phone
   both ways, and opening the chat or a new message clears it. Opening a chat with

@@ -1720,6 +1720,14 @@ msgstr ""
 msgid "Music and videos in other apps resume afterwards."
 msgstr ""
 
+#: src/ui/settings.rs:421 src/ui/settings.rs:430
+msgid "Keep chats archived"
+msgstr ""
+
+#: src/ui/settings.rs:424
+msgid "When off, a new message brings an archived chat back to the list."
+msgstr ""
+
 #: src/ui/settings.rs:550
 msgid "Locked chats code"
 msgstr ""

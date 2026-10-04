@@ -501,6 +501,18 @@ impl Archive {
         Ok(())
     }
 
+    /// Brings an archived chat back for a message sent at `timestamp`
+    /// (milliseconds), as the phone does with "Keep chats archived" off. A
+    /// message from before the chat was archived leaves it there.
+    pub fn unarchive_for_message(&self, id: &str, timestamp: i64) -> Result<()> {
+        self.connection.execute(
+            "UPDATE chats SET archived = 0, archive_updated_at = ?2 WHERE id = ?1
+                AND archived AND (archive_updated_at IS NULL OR archive_updated_at < ?2)",
+            params![id, timestamp],
+        )?;
+        Ok(())
+    }
+
     /// A chat's own notification sound; `None` follows Settings.
     pub fn set_notification_sound(
         &self,
