@@ -17,6 +17,12 @@ Mudança de comportamento (`src/platform_impl/linux/wayland/seat/dnd.rs`):
   contato da lista.
 - Só o Wayland foi mudado. No X11 e no Windows o arrasto continua sem posição
   (o ZapFast então mostra o aviso de envio como antes).
+- No Windows a posição chegou a ser repassada (`drop_handler.rs`) e foi
+  retirada: com ela o Windows deixava de chamar `Drop` e `DragLeave` (testado
+  em 03/10/2026, com a posição entregue na hora, postada na fila, guardada numa
+  variável ou com todos os eventos do arrasto adiados). O arquivo não era
+  enviado e a borda ficava presa. Sem posição, soltar envia para a conversa
+  aberta, como no upstream.
 
 Quando o `Cargo.toml` mudar o commit do fork, copiar de novo e reaplicar. Se
 o fork passar a repassar a posição do arrasto, apagar esta cópia e voltar à

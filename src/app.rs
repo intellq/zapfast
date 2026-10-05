@@ -692,6 +692,19 @@ pub struct App {
     pub focus_settings_search: bool,
     pub quit_requested: bool,
     pub window_focused: bool,
+    /// Whether the window had the system's focus last frame, lock screen or not.
+    system_focused: bool,
+    /// When the window last lost the system's focus. A click on the Windows
+    /// tray takes the focus before the click arrives, so a window that had it
+    /// a moment ago was the one in front.
+    focus_lost_at: Option<Instant>,
+    /// When the last left click on the Windows tray was taken. Each release of
+    /// a double-click arrives on its own, and the second would undo the first.
+    tray_clicked_at: Option<Instant>,
+    /// Frames left in which to ask for the focus again. Windows shows a new
+    /// window only after its first frame, so the focus asked for when it was
+    /// made lands on an invisible window, and a restored one may stay behind.
+    refocus_frames: u8,
     /// Presence last reported to the backend.
     reported_online: Option<bool>,
     /// The live call, or the outcome of the one that just ended.
@@ -898,13 +911,27 @@ impl fastframe_shell::Resident for App {
 const TRAY_SHOW: &str = "show";
 const TRAY_LOCK: &str = "lock";
 const TRAY_QUIT: &str = "quit";
+/// How long after losing the focus a window still counts as the one in front
+/// for a Windows tray click, which takes the focus before it arrives.
+const TRAY_FOCUS_GRACE: Duration = Duration::from_millis(700);
+/// A second left click on the Windows tray within this is part of the first.
+const TRAY_DOUBLE_CLICK: Duration = Duration::from_millis(500);
+
+/// Frames in which a new or restored window asks for the focus again.
+const REFOCUS_FRAMES: u8 = 3;
 
 /// What a tray click asks for: a left click on Linux and macOS, or the menu's
-/// first entry, toggles the window; a left click on Windows and a Dock click
-/// on macOS show it.
-fn tray_action(event: fastframe_tray::Event, window_hidden: bool) -> Option<Action> {
+/// first entry, toggles the window; a Dock click on macOS shows it. A left
+/// click on Windows shows it too, unless the window was the one in front
+/// (`in_front`), which it hides, as the taskbar button does.
+fn tray_action(
+    event: fastframe_tray::Event,
+    window_hidden: bool,
+    in_front: bool,
+) -> Option<Action> {
     use fastframe_tray::Event;
     Some(match event {
+        Event::Show if in_front && !window_hidden => Action::HideWindow,
         Event::Show => Action::ShowWindow,
         Event::Toggle | Event::Menu(TRAY_SHOW) if window_hidden => Action::ShowWindow,
         Event::Toggle | Event::Menu(TRAY_SHOW) => Action::HideWindow,
@@ -1271,6 +1298,10 @@ impl App {
             focus_settings_search: false,
             quit_requested: false,
             window_focused: false,
+            system_focused: false,
+            focus_lost_at: None,
+            tray_clicked_at: None,
+            refocus_frames: 0,
             reported_online: None,
             call: None,
             call_surface_until: None,
@@ -1365,11 +1396,24 @@ impl App {
             return;
         };
         let hidden = self.window_hidden;
-        self.actions.extend(
-            events
-                .into_iter()
-                .filter_map(|event| tray_action(event, hidden)),
-        );
+        let now = Instant::now();
+        let in_front = cfg!(windows)
+            && (self.system_focused
+                || self
+                    .focus_lost_at
+                    .is_some_and(|at| now.duration_since(at) < TRAY_FOCUS_GRACE));
+        for event in events {
+            if cfg!(windows) && event == fastframe_tray::Event::Show {
+                if self
+                    .tray_clicked_at
+                    .is_some_and(|at| now.duration_since(at) < TRAY_DOUBLE_CLICK)
+                {
+                    continue;
+                }
+                self.tray_clicked_at = Some(now);
+            }
+            self.actions.extend(tray_action(event, hidden, in_front));
+        }
     }
 
     fn handle_control_commands(&mut self) {
@@ -1584,6 +1628,13 @@ impl App {
 
     /// Initializes a newly created window.
     pub fn attach(&mut self, ctx: &egui::Context) {
+        // Windows shows the window after its first frame: ask for the focus
+        // again once it can take it.
+        if cfg!(windows) {
+            self.refocus_frames = REFOCUS_FRAMES;
+        }
+        self.system_focused = false;
+        self.focus_lost_at = None;
         // Register transcript copy formatting once per egui context.
         ctx.add_plugin(crate::transcript::CopyAnnotator {
             rows: std::sync::Arc::clone(&self.copy_rows),
@@ -6160,6 +6211,11 @@ impl App {
                     // Windows, so restore it first.
                     ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    // A restored window may still come up behind the others
+                    // on Windows: ask again once it is back.
+                    if cfg!(windows) {
+                        self.refocus_frames = REFOCUS_FRAMES;
+                    }
                     // Wayland ignores both. winit asks for attention there
                     // with an xdg-activation token, which the compositor
                     // (KWin among them) takes as a request to restore and
@@ -6713,7 +6769,17 @@ impl App {
         let locked = self.app_lock.is_locked();
         // Behind the lock screen nobody is reading; unlocking counts as
         // coming back to the window.
-        let focused = ctx.input(|input| input.viewport().focused.unwrap_or(true)) && !locked;
+        let system_focused = ctx.input(|input| input.viewport().focused.unwrap_or(true));
+        if self.system_focused && !system_focused {
+            self.focus_lost_at = Some(Instant::now());
+        }
+        self.system_focused = system_focused;
+        if self.refocus_frames > 0 {
+            self.refocus_frames -= 1;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            ctx.request_repaint();
+        }
+        let focused = system_focused && !locked;
         let regained_focus = focused && !self.window_focused;
         // Mark messages received while hidden as read on window return.
         if regained_focus
@@ -6836,7 +6902,16 @@ impl App {
             (
                 dropped,
                 hovering,
-                input.pointer.hover_pos().or(input.pointer.latest_pos()),
+                // Only where the pointer is now: its last place before the
+                // drag (over the chat list, say) would send the drop nowhere.
+                // Windows gets no position during a drag (reporting one kept
+                // the drop from arriving), and a stale one would misplace the
+                // drop, so there a drop goes to the open chat wherever it lands.
+                if cfg!(windows) {
+                    None
+                } else {
+                    input.pointer.hover_pos()
+                },
                 input.time,
             )
         });
@@ -8677,24 +8752,34 @@ mod tests {
     fn tray_clicks_show_hide_and_quit() {
         use fastframe_tray::Event;
         assert!(matches!(
-            super::tray_action(Event::Show, false),
+            super::tray_action(Event::Show, false, false),
             Some(Action::ShowWindow)
         ));
         for event in [Event::Toggle, Event::Menu(super::TRAY_SHOW)] {
             assert!(matches!(
-                super::tray_action(event, true),
+                super::tray_action(event, true, false),
                 Some(Action::ShowWindow)
             ));
             assert!(matches!(
-                super::tray_action(event, false),
+                super::tray_action(event, false, false),
                 Some(Action::HideWindow)
             ));
         }
         assert!(matches!(
-            super::tray_action(Event::Menu(super::TRAY_QUIT), false),
+            super::tray_action(Event::Menu(super::TRAY_QUIT), false, false),
             Some(Action::Quit)
         ));
-        assert!(super::tray_action(Event::Menu("other"), false).is_none());
+        assert!(super::tray_action(Event::Menu("other"), false, false).is_none());
+        // A Windows left click on the window in front hides it, and on a
+        // hidden window shows it.
+        assert!(matches!(
+            super::tray_action(Event::Show, false, true),
+            Some(Action::HideWindow)
+        ));
+        assert!(matches!(
+            super::tray_action(Event::Show, true, true),
+            Some(Action::ShowWindow)
+        ));
         let menu = super::tray_config(false).menu;
         assert_eq!(
             menu,
@@ -8705,7 +8790,7 @@ mod tests {
             ]
         );
         assert!(matches!(
-            super::tray_action(Event::Menu(super::TRAY_LOCK), false),
+            super::tray_action(Event::Menu(super::TRAY_LOCK), false, false),
             Some(Action::LockApp)
         ));
         assert_eq!(

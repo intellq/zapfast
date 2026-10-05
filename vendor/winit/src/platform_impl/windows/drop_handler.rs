@@ -5,8 +5,7 @@ use std::ptr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use windows_sys::core::{IUnknown, GUID, HRESULT};
-use windows_sys::Win32::Foundation::{DV_E_FORMATETC, HWND, POINT, POINTL, S_OK};
-use windows_sys::Win32::Graphics::Gdi::ScreenToClient;
+use windows_sys::Win32::Foundation::{DV_E_FORMATETC, HWND, POINTL, S_OK};
 use windows_sys::Win32::System::Com::{IDataObject, DVASPECT_CONTENT, FORMATETC, TYMED_HGLOBAL};
 use windows_sys::Win32::System::Ole::{CF_HDROP, DROPEFFECT_COPY, DROPEFFECT_NONE};
 use windows_sys::Win32::UI::Shell::{DragFinish, DragQueryFileW, HDROP};
@@ -18,8 +17,7 @@ use crate::platform_impl::platform::definitions::{
 };
 use crate::platform_impl::platform::WindowId;
 
-use crate::dpi::PhysicalPosition;
-use crate::event::{Event, WindowEvent};
+use crate::event::Event;
 use crate::window::WindowId as RootWindowId;
 
 #[repr(C)]
@@ -82,7 +80,7 @@ impl FileDropHandler {
         this: *mut IDropTarget,
         pDataObj: *const IDataObject,
         _grfKeyState: u32,
-        pt: *const POINTL,
+        _pt: *const POINTL,
         pdwEffect: *mut u32,
     ) -> HRESULT {
         use crate::event::WindowEvent::HoveredFile;
@@ -101,9 +99,6 @@ impl FileDropHandler {
         unsafe {
             *pdwEffect = drop_handler.cursor_effect;
         }
-        if drop_handler.hovered_is_valid {
-            unsafe { drop_handler.cursor_moved(pt) };
-        }
 
         S_OK
     }
@@ -111,15 +106,12 @@ impl FileDropHandler {
     pub unsafe extern "system" fn DragOver(
         this: *mut IDropTarget,
         _grfKeyState: u32,
-        pt: *const POINTL,
+        _pt: *const POINTL,
         pdwEffect: *mut u32,
     ) -> HRESULT {
         let drop_handler = unsafe { Self::from_interface(this) };
         unsafe {
             *pdwEffect = drop_handler.cursor_effect;
-        }
-        if drop_handler.hovered_is_valid {
-            unsafe { drop_handler.cursor_moved(pt) };
         }
 
         S_OK
@@ -133,7 +125,6 @@ impl FileDropHandler {
                 window_id: RootWindowId(WindowId(drop_handler.window)),
                 event: HoveredFileCancelled,
             });
-            drop_handler.cursor_left();
         }
 
         S_OK
@@ -143,12 +134,11 @@ impl FileDropHandler {
         this: *mut IDropTarget,
         pDataObj: *const IDataObject,
         _grfKeyState: u32,
-        pt: *const POINTL,
+        _pt: *const POINTL,
         _pdwEffect: *mut u32,
     ) -> HRESULT {
         use crate::event::WindowEvent::DroppedFile;
         let drop_handler = unsafe { Self::from_interface(this) };
-        unsafe { drop_handler.cursor_moved(pt) };
         let hdrop = unsafe {
             Self::iterate_filenames(pDataObj, |filename| {
                 drop_handler.send_event(Event::WindowEvent {
@@ -160,8 +150,6 @@ impl FileDropHandler {
         if let Some(hdrop) = hdrop {
             unsafe { DragFinish(hdrop) };
         }
-        // The pointer, which was away for the drag, comes back with its own events.
-        drop_handler.cursor_left();
 
         S_OK
     }
@@ -225,34 +213,6 @@ impl FileDropHandler {
 impl FileDropHandlerData {
     fn send_event(&self, event: Event<()>) {
         (self.send_event)(event);
-    }
-
-    /// Reports where a file drag is over the window as the pointer moving there. Windows
-    /// sends the window no mouse messages during a drag, so without this it never learns where
-    /// the files are held.
-    unsafe fn cursor_moved(&self, pt: *const POINTL) {
-        if pt.is_null() {
-            return;
-        }
-        let mut location = POINT { x: unsafe { (*pt).x }, y: unsafe { (*pt).y } };
-        if unsafe { ScreenToClient(self.window, &mut location) } == false.into() {
-            return;
-        }
-        let position = PhysicalPosition::new(location.x as f64, location.y as f64);
-        self.send_event(Event::WindowEvent {
-            window_id: RootWindowId(WindowId(self.window)),
-            event: WindowEvent::CursorMoved {
-                device_id: crate::platform_impl::platform::DEVICE_ID,
-                position,
-            },
-        });
-    }
-
-    fn cursor_left(&self) {
-        self.send_event(Event::WindowEvent {
-            window_id: RootWindowId(WindowId(self.window)),
-            event: WindowEvent::CursorLeft { device_id: crate::platform_impl::platform::DEVICE_ID },
-        });
     }
 }
 

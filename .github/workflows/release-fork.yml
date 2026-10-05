@@ -96,6 +96,13 @@ jobs:
       # The C runtime inside the executable, so it needs no Visual C++
       # Redistributable.
       RUSTFLAGS: -C target-feature=+crt-static
+      # whisper.cpp with the AVX2 that transcription requires (see supported()
+      # in src/transcribe.rs). Under MSVC, GGML_NATIVE=OFF alone built ggml
+      # without it, and a voice message took minutes instead of seconds.
+      GGML_AVX: "ON"
+      GGML_AVX2: "ON"
+      GGML_FMA: "ON"
+      GGML_F16C: "ON"
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
