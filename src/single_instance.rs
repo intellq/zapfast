@@ -381,7 +381,10 @@ mod tests {
         let fastframe_instance::Claim::First(first) = claim(&dir, "show", &commands, &waker) else {
             panic!("the first launch takes the slot");
         };
-        let link = format!("whatsapp://send?phone=559492777990&text={}", "a".repeat(4000));
+        let link = format!(
+            "whatsapp://send?phone=559492777990&text={}",
+            "a".repeat(4000)
+        );
         let second = claim(&dir, &format!("{OPEN}{link}"), &Queue::default(), &waker);
         assert!(matches!(second, fastframe_instance::Claim::Running(reply) if reply == OK));
         assert_eq!(*commands.lock().unwrap(), vec![ControlCommand::Open(link)]);

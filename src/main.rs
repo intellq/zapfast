@@ -417,9 +417,11 @@ fn report_missing_opengl() {
 /// dialog so it is tested on every platform.
 #[cfg(any(windows, test))]
 fn startup_failure_text(details: &str, log: &std::path::Path) -> String {
-    zapfast::i18n::tr("ZapFast could not start.\n\nDetails: {details}\n\nThe log may say more: {log}")
-        .replace("{details}", details)
-        .replace("{log}", &log.display().to_string())
+    zapfast::i18n::tr(
+        "ZapFast could not start.\n\nDetails: {details}\n\nThe log may say more: {log}",
+    )
+    .replace("{details}", details)
+    .replace("{log}", &log.display().to_string())
 }
 
 /// Explains a failed start in a message box, the only thing a release
