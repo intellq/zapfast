@@ -149,6 +149,65 @@ impl Palette {
         }
     }
 
+    /// ZapZap's dark theme, read from its screenshots: neutral greys instead
+    /// of the blue-grey of [`Palette::dark`], and its deep green for our
+    /// bubbles.
+    pub fn zapzap_dark() -> Self {
+        Self {
+            dark: true,
+            window: Color32::from_rgb(0x14, 0x16, 0x15),
+            panel: Color32::from_rgb(0x16, 0x18, 0x17),
+            surface: Color32::from_rgb(0x24, 0x26, 0x25),
+            surface_hover: Color32::from_rgb(0x29, 0x2b, 0x2a),
+            surface_active: Color32::from_rgb(0x2e, 0x30, 0x2f),
+            outline: Color32::from_rgb(0x22, 0x24, 0x23),
+            text: Color32::from_rgb(0xe6, 0xe8, 0xe7),
+            secondary: Color32::from_rgb(0x9c, 0x9e, 0x9d),
+            dim: Color32::from_rgb(0x91, 0x93, 0x92),
+            accent: Color32::from_rgb(0x21, 0xc0, 0x63),
+            accent_hover: Color32::from_rgb(0x3f, 0xd4, 0x7d),
+            on_accent: Color32::from_rgb(0x10, 0x12, 0x11),
+            danger: Color32::from_rgb(0xf1, 0x5c, 0x6d),
+            warning: Color32::from_rgb(0xff, 0xd2, 0x79),
+            overlay: Color32::from_rgb(0x23, 0x25, 0x24),
+            shadow: Color32::from_black_alpha(140),
+            chat: Color32::from_rgb(0x16, 0x18, 0x17),
+            bubble_in: Color32::from_rgb(0x24, 0x26, 0x25),
+            bubble_out: Color32::from_rgb(0x13, 0x4d, 0x37),
+            link: Color32::from_rgb(0x53, 0xbd, 0xeb),
+            read: Color32::from_rgb(0x53, 0xbd, 0xeb),
+        }
+    }
+
+    /// The light companion of [`Palette::zapzap_dark`]: WhatsApp's current
+    /// light colours, neutral rather than blue-grey.
+    pub fn zapzap_light() -> Self {
+        Self {
+            dark: false,
+            window: Color32::from_rgb(0xf7, 0xf5, 0xf3),
+            panel: Color32::from_rgb(0xff, 0xff, 0xff),
+            surface: Color32::from_rgb(0xf3, 0xf2, 0xf1),
+            surface_hover: Color32::from_rgb(0xeb, 0xea, 0xe9),
+            surface_active: Color32::from_rgb(0xe2, 0xe1, 0xe0),
+            outline: Color32::from_rgb(0xe9, 0xe8, 0xe7),
+            text: Color32::from_rgb(0x11, 0x11, 0x11),
+            secondary: Color32::from_rgb(0x5a, 0x5a, 0x5a),
+            dim: Color32::from_rgb(0x63, 0x63, 0x63),
+            accent: Color32::from_rgb(0x15, 0x7a, 0x47),
+            accent_hover: Color32::from_rgb(0x10, 0x6b, 0x3d),
+            on_accent: Color32::WHITE,
+            danger: Color32::from_rgb(0xea, 0x00, 0x38),
+            warning: Color32::from_rgb(0xa0, 0x6b, 0x00),
+            overlay: Color32::from_rgb(0xff, 0xff, 0xff),
+            shadow: Color32::from_black_alpha(LIGHT_SHADOW_ALPHA),
+            chat: Color32::from_rgb(0xf5, 0xf1, 0xeb),
+            bubble_in: Color32::from_rgb(0xff, 0xff, 0xff),
+            bubble_out: Color32::from_rgb(0xd9, 0xfd, 0xd3),
+            link: Color32::from_rgb(0x02, 0x7e, 0xb5),
+            read: Color32::from_rgb(0x02, 0x7e, 0xb5),
+        }
+    }
+
     /// The palette for a message bubble's contents. Secondary and dim text,
     /// and the read ticks, move toward the text colour just far enough to
     /// stay readable on the bubble: a grey that reads on the panel can vanish
@@ -1220,6 +1279,8 @@ mod tests {
             mid,
             Palette::light(),
             preset("Catppuccin Latte.json"),
+            Palette::zapzap_dark(),
+            Palette::zapzap_light(),
         ];
         let luminance = |color: Color32| contrast(color, Color32::BLACK);
         for palette in palettes {
@@ -1291,7 +1352,12 @@ mod tests {
     /// hints. They must reach WCAG AA wherever the built-in themes put them.
     #[test]
     fn built_in_text_colours_reach_aa() {
-        for (name, p) in [("dark", Palette::dark()), ("light", Palette::light())] {
+        for (name, p) in [
+            ("dark", Palette::dark()),
+            ("light", Palette::light()),
+            ("zapzap dark", Palette::zapzap_dark()),
+            ("zapzap light", Palette::zapzap_light()),
+        ] {
             let mut pairs = Vec::new();
             for (surface, background) in [
                 ("window", p.window),
@@ -1328,10 +1394,15 @@ mod tests {
     /// Bubble contents stay readable for every palette, custom ones included.
     #[test]
     fn bubble_text_is_readable_in_every_palette() {
-        let palettes = [("dark", Palette::dark()), ("light", Palette::light())]
-            .into_iter()
-            .map(|(name, palette)| (name.to_owned(), palette))
-            .chain(presets().map(|theme| (theme.filename.clone(), theme.palette)));
+        let palettes = [
+            ("dark", Palette::dark()),
+            ("light", Palette::light()),
+            ("zapzap dark", Palette::zapzap_dark()),
+            ("zapzap light", Palette::zapzap_light()),
+        ]
+        .into_iter()
+        .map(|(name, palette)| (name.to_owned(), palette))
+        .chain(presets().map(|theme| (theme.filename.clone(), theme.palette)));
         for (name, palette) in palettes {
             for own in [false, true] {
                 let fill = if own {

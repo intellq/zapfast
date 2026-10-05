@@ -4844,3 +4844,19 @@ msgstr ""
 #: src/app.rs
 msgid "Requesting earlier messages from your phone"
 msgstr ""
+
+#: src/settings.rs
+msgid "ZapZap dark"
+msgstr ""
+
+#: src/settings.rs
+msgid "ZapZap light"
+msgstr ""
+
+#: src/ui/settings.rs
+msgid "Side bar"
+msgstr ""
+
+#: src/ui/settings.rs
+msgid "Your profile picture and the archive, hide list, new chat and Settings buttons in a column left of the chats, with the search field at the top."
+msgstr ""

@@ -2322,6 +2322,15 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
             "light" => {
                 app.settings.theme = ThemeChoice::Light;
             }
+            "zapzap" => {
+                app.settings.theme = ThemeChoice::ZapZapDark;
+            }
+            "zapzap-light" => {
+                app.settings.theme = ThemeChoice::ZapZapLight;
+            }
+            "side-bar" => {
+                app.settings.side_bar = true;
+            }
             "login" => {
                 unlink(app);
                 app.link = LinkStatus::Unlinked {

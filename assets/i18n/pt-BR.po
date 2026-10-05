@@ -5013,3 +5013,19 @@ msgstr "O histórico desta conversa já está sendo pedido"
 #: src/app.rs
 msgid "Requesting earlier messages from your phone"
 msgstr "Pedindo mensagens anteriores ao celular"
+
+#: src/settings.rs
+msgid "ZapZap dark"
+msgstr "ZapZap escuro"
+
+#: src/settings.rs
+msgid "ZapZap light"
+msgstr "ZapZap claro"
+
+#: src/ui/settings.rs
+msgid "Side bar"
+msgstr "Barra lateral"
+
+#: src/ui/settings.rs
+msgid "Your profile picture and the archive, hide list, new chat and Settings buttons in a column left of the chats, with the search field at the top."
+msgstr "Sua foto de perfil e os botões de arquivadas, ocultar a lista, nova conversa e configurações numa coluna à esquerda das conversas, com o campo de busca no topo."

@@ -7627,7 +7627,11 @@ impl Worker {
             self.emit(Event::Error(tr("Not connected to WhatsApp").to_owned()));
             return;
         };
-        let content = Content::text(text.clone());
+        let existing = self.archive.message(&chat, &id).ok().flatten();
+        let content = match &existing {
+            Some(row) => row.content.edited(text.clone()),
+            None => Content::text(text.clone()),
+        };
         let mention_rows = self.mentions_of(&mentions);
         if let Ok(true) = self
             .archive
@@ -7636,7 +7640,15 @@ impl Worker {
             self.emit_message(&chat, &id);
             self.emit_chat(&chat);
         }
-        let mut message = outgoing_text(text, None, &mentions);
+        // A caption goes out as the whole photo, video or document with the
+        // new caption, as the phone sends it; text goes out as text.
+        let captioned = !matches!(content, Content::Text { .. });
+        let mut message = captioned
+            .then(|| self.archive.raw(&chat, &id).ok().flatten())
+            .flatten()
+            .and_then(|raw| wa::Message::decode_from_slice(&raw).ok())
+            .and_then(|original| edited_caption(&original, text.clone(), &mentions))
+            .unwrap_or_else(|| outgoing_text(text, None, &mentions));
         self.apply_ephemeral(&chat, &mut message);
         let commands = self.commands.clone();
         tokio::spawn(async move {
@@ -8440,6 +8452,27 @@ fn clear_forwarded(message: &mut wa::Message) {
         context.forwarding_score = None;
         message.set_context_info(context);
     }
+}
+
+/// A photo, video or document of ours with `caption` in place of its own,
+/// for the edit that changes it. `None` when the message carries none of them.
+fn edited_caption(
+    original: &wa::Message,
+    caption: String,
+    mentions: &[String],
+) -> Option<wa::Message> {
+    let mut message = original.get_base_message().clone();
+    if let Some(image) = message.image_message.as_option_mut() {
+        image.caption = Some(caption);
+    } else if let Some(video) = message.video_message.as_option_mut() {
+        video.caption = Some(caption);
+    } else {
+        message.document_message.as_option_mut()?.caption = Some(caption);
+    }
+    let mut context = context_of(&message).cloned().unwrap_or_default();
+    context.mentioned_jid = mentions.to_vec();
+    message.set_context_info(context);
+    Some(message)
 }
 
 /// Takes the caption, and the mentions in it, off a photo, video or document.
@@ -12414,6 +12447,29 @@ mod tests {
         let context = context_of(&message).expect("context");
         assert_eq!(context.stanza_id.as_deref(), Some("quoted"));
         assert_eq!(context.expiration, Some(604_800));
+    }
+
+    #[test]
+    fn a_caption_edit_sends_the_photo_with_the_new_caption() {
+        let original = wa::Message {
+            image_message: MessageField::some(wa::message::ImageMessage {
+                caption: Some("old".to_owned()),
+                url: Some("https://mmg.whatsapp.net/photo".to_owned()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mentions = vec!["5511999999999@s.whatsapp.net".to_owned()];
+
+        let edited = edited_caption(&original, "new".to_owned(), &mentions).expect("photo");
+
+        let image = edited.image_message.as_option().expect("image");
+        assert_eq!(image.caption.as_deref(), Some("new"));
+        assert_eq!(image.url, original.image_message.as_option().unwrap().url);
+        assert_eq!(context_of(&edited).unwrap().mentioned_jid, mentions);
+        assert!(
+            edited_caption(&wa::Message::text("plain".to_owned()), "x".to_owned(), &[]).is_none()
+        );
     }
 
     #[test]

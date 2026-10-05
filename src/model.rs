@@ -702,6 +702,59 @@ impl Content {
         }
     }
 
+    /// What an edit changes: a text message's text, or the caption of a
+    /// photo, video or document, empty when it has none. `None` for what
+    /// WhatsApp does not edit.
+    pub fn editable_text(&self) -> Option<&str> {
+        match self {
+            Self::Text { text, .. } => Some(text),
+            Self::Image { caption, .. }
+            | Self::Video {
+                caption,
+                note: false,
+                ..
+            }
+            | Self::Document { caption, .. } => Some(caption.as_deref().unwrap_or("")),
+            _ => None,
+        }
+    }
+
+    /// The content after an edit to `text`: new text, or the media with its
+    /// new caption.
+    pub fn edited(&self, text: String) -> Self {
+        match self {
+            Self::Image { media, .. } => Self::Image {
+                caption: Some(text),
+                media: media.clone(),
+            },
+            Self::Video {
+                media,
+                seconds,
+                gif,
+                note,
+                ..
+            } => Self::Video {
+                caption: Some(text),
+                media: media.clone(),
+                seconds: *seconds,
+                gif: *gif,
+                note: *note,
+            },
+            Self::Document {
+                media,
+                file_name,
+                pages,
+                ..
+            } => Self::Document {
+                media: media.clone(),
+                file_name: file_name.clone(),
+                caption: Some(text),
+                pages: *pages,
+            },
+            _ => Self::text(text),
+        }
+    }
+
     /// The first line of the text the archive search looks at that contains
     /// `query`, trimmed, or `None` when no line has it.
     pub fn text_matching(&self, query: &str) -> Option<String> {

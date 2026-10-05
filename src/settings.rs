@@ -32,16 +32,42 @@ pub enum ThemeChoice {
     Dark,
     Light,
     System,
+    /// The dark colours of ZapZap, the Linux WhatsApp client: neutral grey
+    /// rather than ZapFast's blue-grey.
+    #[serde(rename = "zapzap-dark")]
+    ZapZapDark,
+    #[serde(rename = "zapzap-light")]
+    ZapZapLight,
 }
 
 impl ThemeChoice {
-    pub const ALL: [ThemeChoice; 3] = [Self::System, Self::Light, Self::Dark];
+    pub const ALL: [ThemeChoice; 5] = [
+        Self::System,
+        Self::Light,
+        Self::Dark,
+        Self::ZapZapLight,
+        Self::ZapZapDark,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Dark => crate::i18n::n_("Dark"),
             Self::Light => crate::i18n::n_("Light"),
             Self::System => crate::i18n::n_("Follow system"),
+            Self::ZapZapDark => crate::i18n::n_("ZapZap dark"),
+            Self::ZapZapLight => crate::i18n::n_("ZapZap light"),
+        }
+    }
+
+    /// The palette this choice draws with, `dark` saying what the system
+    /// asks for when following it.
+    pub fn palette(self, dark: bool) -> crate::theme::Palette {
+        use crate::theme::Palette;
+        match self {
+            Self::ZapZapDark => Palette::zapzap_dark(),
+            Self::ZapZapLight => Palette::zapzap_light(),
+            _ if dark => Palette::dark(),
+            _ => Palette::light(),
         }
     }
 }
@@ -444,6 +470,9 @@ pub struct Settings {
     /// Hides the row of chat filters (All, Unread, Private, ...) under the
     /// search field. The list then shows every chat.
     pub hide_chat_filters: bool,
+    /// Moves the profile picture and the chat list's buttons into a column
+    /// left of the list, which then starts with the search field.
+    pub side_bar: bool,
     /// Recently used emoji, newest first.
     pub recent_emoji: Vec<String>,
     /// Emoji reaction usage on this device, most-used first (recent breaks ties).
@@ -575,6 +604,7 @@ impl Default for Settings {
             last_chat: None,
             show_shortcut_hints: true,
             hide_chat_filters: false,
+            side_bar: false,
             recent_emoji: Vec::new(),
             reaction_emoji: Vec::new(),
             giphy_key: String::new(),

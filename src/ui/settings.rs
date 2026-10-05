@@ -478,6 +478,14 @@ fn sections(app: &App) -> Vec<Section> {
         ),
         |settings| &mut settings.hide_chat_filters,
     );
+    appearance.toggle(
+        translated(locale, "Side bar"),
+        translated(
+            locale,
+            "Your profile picture and the archive, hide list, new chat and Settings buttons in a column left of the chats, with the search field at the top.",
+        ),
+        |settings| &mut settings.side_bar,
+    );
     if crate::emoji::whatsapp_font_file(&app.dirs.emoji_font_dir()).is_some() {
         appearance.toggle(
             translated(locale, "WhatsApp emoji"),

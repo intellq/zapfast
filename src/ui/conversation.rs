@@ -4789,7 +4789,7 @@ fn context_menu(ui: &mut egui::Ui, view: &View<'_>, message: &Message, actions: 
     }
     let age = view.now - message.timestamp;
     let can_edit = message.from_me
-        && matches!(message.content, Content::Text { .. })
+        && message.content.editable_text().is_some()
         && age <= crate::app::EDIT_WINDOW.as_secs() as i64;
     let can_revoke = if group.len() > 1 {
         view.selection_revocable

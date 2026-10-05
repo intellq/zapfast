@@ -1088,10 +1088,7 @@ impl App {
     fn with_backend(dirs: AppDirs, settings: Settings, backend: Backend, waker: Waker) -> Self {
         let palette = settings
             .cached_palette()
-            .unwrap_or_else(|| match settings.theme {
-                ThemeChoice::Light => Palette::light(),
-                _ => Palette::dark(),
-            });
+            .unwrap_or_else(|| settings.theme.palette(settings.theme != ThemeChoice::Light));
         let open_chat = settings.last_chat.clone();
         let locale = crate::i18n::resolve(settings.interface_language);
         crate::i18n::set_current(locale);
@@ -2552,7 +2549,7 @@ impl App {
     /// Whether an outgoing message is still editable.
     pub fn can_edit(&self, message: &Message) -> bool {
         message.from_me
-            && matches!(message.content, Content::Text { .. })
+            && message.content.editable_text().is_some()
             && crate::util::now() - message.timestamp <= EDIT_WINDOW.as_secs() as i64
     }
 
@@ -4003,7 +4000,7 @@ impl App {
                 .get_mut(&chat)
                 .and_then(|conversation| conversation.message_mut(&id))
             {
-                message.content = Content::text(text.clone());
+                message.content = message.content.edited(text.clone());
                 message.edited = true;
                 message.mentions = mention_refs(&mentions);
             }
@@ -4439,8 +4436,8 @@ impl App {
     fn apply_theme(&mut self, ctx: &egui::Context) {
         let preference = self.settings.cached_palette().map_or_else(
             || match self.settings.theme {
-                ThemeChoice::Dark => egui::ThemePreference::Dark,
-                ThemeChoice::Light => egui::ThemePreference::Light,
+                ThemeChoice::Dark | ThemeChoice::ZapZapDark => egui::ThemePreference::Dark,
+                ThemeChoice::Light | ThemeChoice::ZapZapLight => egui::ThemePreference::Light,
                 ThemeChoice::System => egui::ThemePreference::System,
             },
             |palette| {
@@ -4466,13 +4463,10 @@ impl App {
                     == egui::Theme::Dark
             }
         };
-        let palette = self.settings.cached_palette().unwrap_or_else(|| {
-            if dark {
-                Palette::dark()
-            } else {
-                Palette::light()
-            }
-        });
+        let palette = self
+            .settings
+            .cached_palette()
+            .unwrap_or_else(|| self.settings.theme.palette(dark));
         if crate::theme::apply_text_rendering_change(ctx) {
             self.applied_dark = None;
         }
@@ -5055,10 +5049,7 @@ impl App {
                     .as_deref()
                     .and_then(|chat| self.conversations.get(chat))
                     .and_then(|conversation| conversation.message(&id))
-                    .and_then(|message| match &message.content {
-                        Content::Text { text, .. } => Some(text.clone()),
-                        _ => None,
-                    });
+                    .and_then(|message| message.content.editable_text().map(str::to_owned));
                 if let Some(text) = text {
                     self.editing = Some(id);
                     self.composer_tools_open = false;

@@ -22,21 +22,52 @@ pub fn resize_handle_id() -> egui::Id {
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     search_keyboard(app, ui);
     let palette = app.palette;
-    let panel = egui::Panel::left(PANEL)
+    // The saved width is the list's, so the side bar adds to it.
+    let extra = if side_bar(app, ui.ctx()) {
+        SIDE_BAR_WIDTH
+    } else {
+        0.0
+    };
+    let panel = egui::Panel::left(PANEL.to_owned() + if extra > 0.0 { "-side-bar" } else { "" })
         .resizable(true)
-        .default_size(app.settings.sidebar_width)
+        .default_size(app.settings.sidebar_width + extra)
         .size_range(if theme::macos_chrome(ui.ctx()) {
             (theme::traffic_light_inset(ui.ctx()) + 210.0).max(280.0)..=520.0
+        } else if side_bar(app, ui.ctx()) {
+            260.0 + SIDE_BAR_WIDTH..=520.0 + SIDE_BAR_WIDTH
         } else {
             260.0..=520.0
         })
         .show_separator_line(false)
         .frame(Frame::new().fill(palette.panel).inner_margin(Margin::ZERO));
+    let side_bar = side_bar(app, ui.ctx());
     let response = panel.show(ui, |ui| {
-        header(app, ui);
-        list(app, ui);
+        if !side_bar {
+            header(app, ui);
+            list(app, ui);
+            return;
+        }
+        let full = ui.max_rect();
+        let (column, rest) = full.split_left_right_at_x(full.min.x + SIDE_BAR_WIDTH);
+        ui.painter()
+            .rect_filled(column, 0.0, theme::blend(palette.panel, palette.text, 0.03));
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(column)
+                .layout(Layout::top_down(Align::Center)),
+            |ui| side_bar_column(app, ui),
+        );
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(rest)
+                .layout(Layout::top_down(Align::Min)),
+            |ui| {
+                header(app, ui);
+                list(app, ui);
+            },
+        );
     });
-    let width = response.response.rect.width();
+    let width = response.response.rect.width() - extra;
     if (width - app.settings.sidebar_width).abs() > 1.0 {
         app.settings.sidebar_width = width;
         app.actions.push(Action::SettingsChanged);
@@ -106,6 +137,7 @@ fn header(app: &mut App, ui: &mut egui::Ui) {
         return;
     }
     let palette = app.palette;
+    let side_bar = side_bar(app, ui.ctx());
     Frame::new()
         .inner_margin(Margin {
             left: 14,
@@ -114,130 +146,59 @@ fn header(app: &mut App, ui: &mut egui::Ui) {
             bottom: 8,
         })
         .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                if app.show_archived || app.locked_folder {
-                    if theme::icon_button(
-                        ui,
-                        Icon::ArrowLeft,
-                        18.0,
-                        palette.secondary,
-                        palette.text,
-                        tr("Back to chats"),
-                    )
-                    .tab_stop(Stop::Back)
-                    .clicked()
-                    {
-                        app.show_archived = false;
-                        if app.locked_folder {
-                            app.actions.push(Action::CloseLockedFolder);
-                        }
-                    }
-                    theme::text(
-                        ui,
-                        if app.locked_folder {
-                            tr("Locked chats")
-                        } else {
-                            tr("Archived")
-                        },
-                        theme::bold(20.0),
-                        palette.text,
-                    );
-                } else {
-                    let me = app.me.clone().unwrap_or_default();
-                    let name = app.me_name.clone().unwrap_or_else(|| tr("You").to_owned());
-                    let picture = app.avatar(&me);
-                    let tooltip = match &app.me_about {
-                        Some(about) => format!("{name}\n{about}"),
-                        None => name.clone(),
-                    };
-                    let response = widgets::clickable_avatar(
-                        ui,
-                        &palette,
-                        &name,
-                        &me,
-                        34.0,
-                        picture.as_deref(),
-                        // The label follows the action: while Settings are
-                        // showing, this click closes them.
-                        if app.page == Page::Settings {
-                            tr("Close settings")
-                        } else {
-                            tr("Your profile and settings")
-                        },
-                    )
-                    .tab_stop(Stop::Profile)
-                    .on_hover_text(tooltip)
-                    .on_hover_cursor(egui::CursorIcon::PointingHand);
-                    if response.clicked() {
-                        app.actions.push(Action::ToggleSettings);
-                    }
-                    ui.add_space(2.0);
-                    theme::text(
-                        ui,
-                        crate::i18n::gettext(app.locale, "Chats"),
-                        theme::bold(20.0),
-                        palette.text,
-                    );
-                }
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let settings_open = app.page == Page::Settings;
-                    // The archive works as Settings do: the gear is a solid
-                    // red X while it is open, and the X leaves it.
-                    let archive_open = app.show_archived && !settings_open;
-                    let response = if settings_open {
-                        // Same as the avatar: the label says what the click
-                        // does now, not what it opened.
-                        theme::close_button(ui, 18.0, tr("Close settings (Ctrl+,)"))
-                    } else if archive_open {
-                        theme::close_button(ui, 18.0, tr("Close archived chats"))
-                    } else {
-                        theme::icon_button(
+            // With the side bar the buttons live there, and the list starts
+            // with the search field unless the archive needs its way back.
+            let folder = app.show_archived || app.locked_folder;
+            if !side_bar || folder {
+                ui.horizontal(|ui| {
+                    if folder {
+                        if theme::icon_button(
                             ui,
-                            Icon::Settings,
+                            Icon::ArrowLeft,
                             18.0,
                             palette.secondary,
                             palette.text,
-                            tr("Settings (Ctrl+,)"),
+                            tr("Back to chats"),
                         )
-                    };
-                    if response.tab_stop(Stop::Settings).clicked() {
-                        app.actions.push(if archive_open {
-                            Action::ShowArchived(false)
-                        } else {
-                            Action::ToggleSettings
+                        .tab_stop(Stop::Back)
+                        .clicked()
+                        {
+                            app.show_archived = false;
+                            if app.locked_folder {
+                                app.actions.push(Action::CloseLockedFolder);
+                            }
+                        }
+                        theme::text(
+                            ui,
+                            if app.locked_folder {
+                                tr("Locked chats")
+                            } else {
+                                tr("Archived")
+                            },
+                            theme::bold(20.0),
+                            palette.text,
+                        );
+                    } else {
+                        profile_button(app, ui);
+                        ui.add_space(2.0);
+                        theme::text(
+                            ui,
+                            crate::i18n::gettext(app.locale, "Chats"),
+                            theme::bold(20.0),
+                            palette.text,
+                        );
+                    }
+                    if !side_bar {
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            settings_button(app, ui);
+                            new_chat_button(app, ui);
+                            hide_list_button(app, ui);
+                            archived_button(app, ui);
                         });
                     }
-                    if theme::icon_button(
-                        ui,
-                        Icon::SquarePen,
-                        18.0,
-                        palette.secondary,
-                        palette.text,
-                        tr("New chat"),
-                    )
-                    .tab_stop(Stop::NewChat)
-                    .clicked()
-                    {
-                        app.actions
-                            .push(Action::ShowDialog(crate::model::Dialog::NewChat));
-                    }
-                    if theme::icon_button(
-                        ui,
-                        Icon::PanelLeft,
-                        18.0,
-                        palette.secondary,
-                        palette.text,
-                        tr("Hide the chat list (Ctrl+B)"),
-                    )
-                    .tab_stop(Stop::Sidebar)
-                    .clicked()
-                    {
-                        app.actions.push(Action::ToggleSidebar);
-                    }
-                    archived_button(app, ui);
                 });
-            });
-            ui.add_space(6.0);
+                ui.add_space(6.0);
+            }
             let id = egui::Id::new("chat-search");
             let width = ui.available_width();
             let mut text = app.search.clone();
@@ -259,6 +220,130 @@ fn header(app: &mut App, ui: &mut egui::Ui) {
             }
             filter_chips(app, ui);
         });
+}
+
+/// Width of the side bar left of the chat list.
+const SIDE_BAR_WIDTH: f32 = 52.0;
+
+/// Whether the profile picture and the list's buttons stand in a column
+/// left of the list. macOS keeps its own header beside the traffic lights.
+fn side_bar(app: &App, ctx: &egui::Context) -> bool {
+    app.settings.side_bar && !theme::macos_chrome(ctx)
+}
+
+/// The side bar: the profile picture, then the archive, hide-the-list, new
+/// chat and Settings buttons, top to bottom, in the header's tab order.
+fn side_bar_column(app: &mut App, ui: &mut egui::Ui) {
+    ui.add_space(12.0);
+    profile_button(app, ui);
+    ui.add_space(10.0);
+    let gap = 6.0;
+    archived_button(app, ui);
+    ui.add_space(gap);
+    hide_list_button(app, ui);
+    ui.add_space(gap);
+    new_chat_button(app, ui);
+    ui.add_space(gap);
+    settings_button(app, ui);
+}
+
+/// The profile picture, which opens Settings or closes them.
+fn profile_button(app: &mut App, ui: &mut egui::Ui) {
+    let palette = app.palette;
+    let me = app.me.clone().unwrap_or_default();
+    let name = app.me_name.clone().unwrap_or_else(|| tr("You").to_owned());
+    let picture = app.avatar(&me);
+    let tooltip = match &app.me_about {
+        Some(about) => format!("{name}\n{about}"),
+        None => name.clone(),
+    };
+    let response = widgets::clickable_avatar(
+        ui,
+        &palette,
+        &name,
+        &me,
+        34.0,
+        picture.as_deref(),
+        // The label follows the action: while Settings are showing, this
+        // click closes them.
+        if app.page == Page::Settings {
+            tr("Close settings")
+        } else {
+            tr("Your profile and settings")
+        },
+    )
+    .tab_stop(Stop::Profile)
+    .on_hover_text(tooltip)
+    .on_hover_cursor(egui::CursorIcon::PointingHand);
+    if response.clicked() {
+        app.actions.push(Action::ToggleSettings);
+    }
+}
+
+fn settings_button(app: &mut App, ui: &mut egui::Ui) {
+    let palette = app.palette;
+    let settings_open = app.page == Page::Settings;
+    // The archive works as Settings do: the gear is a solid red X while it
+    // is open, and the X leaves it.
+    let archive_open = app.show_archived && !settings_open;
+    let response = if settings_open {
+        // Same as the avatar: the label says what the click does now, not
+        // what it opened.
+        theme::close_button(ui, 18.0, tr("Close settings (Ctrl+,)"))
+    } else if archive_open {
+        theme::close_button(ui, 18.0, tr("Close archived chats"))
+    } else {
+        theme::icon_button(
+            ui,
+            Icon::Settings,
+            18.0,
+            palette.secondary,
+            palette.text,
+            tr("Settings (Ctrl+,)"),
+        )
+    };
+    if response.tab_stop(Stop::Settings).clicked() {
+        app.actions.push(if archive_open {
+            Action::ShowArchived(false)
+        } else {
+            Action::ToggleSettings
+        });
+    }
+}
+
+fn new_chat_button(app: &mut App, ui: &mut egui::Ui) {
+    let palette = app.palette;
+    if theme::icon_button(
+        ui,
+        Icon::SquarePen,
+        18.0,
+        palette.secondary,
+        palette.text,
+        tr("New chat"),
+    )
+    .tab_stop(Stop::NewChat)
+    .clicked()
+    {
+        app.actions
+            .push(Action::ShowDialog(crate::model::Dialog::NewChat));
+    }
+}
+
+fn hide_list_button(app: &mut App, ui: &mut egui::Ui) {
+    let palette = app.palette;
+    if theme::icon_button(
+        ui,
+        Icon::PanelLeft,
+        18.0,
+        palette.secondary,
+        palette.text,
+        tr("Hide the chat list (Ctrl+B)"),
+    )
+    .tab_stop(Stop::Sidebar)
+    .clicked()
+    {
+        app.actions.push(Action::ToggleSidebar);
+    }
 }
 
 /// The button to the archive, left of the one that hides the chat list. It is
