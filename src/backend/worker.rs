@@ -2116,6 +2116,36 @@ impl Worker {
         }
     }
 
+    /// Removes a message deleted "for me" on the phone or another linked
+    /// device. The chat may be filed under its number or a privacy id, so each
+    /// known name of it is tried; a message that is not here is no news.
+    fn delete_message_from_elsewhere(&mut self, chat: &str, jid: &str, id: &str) {
+        let mut aliases = vec![chat.to_owned(), jid.to_owned()];
+        if let Some(pn) = chat.strip_suffix("@s.whatsapp.net") {
+            aliases.extend(
+                self.lid_to_pn
+                    .iter()
+                    .filter(|(_, mapped)| mapped.as_str() == pn)
+                    .map(|(lid, _)| format!("{lid}@lid")),
+            );
+        }
+        aliases.sort_unstable();
+        aliases.dedup();
+        for alias in aliases {
+            match self.archive.delete_message(&alias, id) {
+                Ok(true) => {
+                    self.emit(Event::MessageDeleted {
+                        chat: alias.clone(),
+                        id: id.to_owned(),
+                    });
+                    self.emit_chat(&alias);
+                }
+                Ok(false) => {}
+                Err(error) => log::warn!("message removal: could not delete: {error}"),
+            }
+        }
+    }
+
     fn set_account_privacy(&self, kind: PrivacyKind, choice: PrivacyChoice) {
         let Some((category, value)) = privacy::wire_set(kind, choice) else {
             let _ = self.commands.send(Command::AccountPrivacyFailed { kind });
@@ -2766,6 +2796,15 @@ impl Worker {
                     update.timestamp.timestamp(),
                 );
                 let _ = self.empty_chat(&chat, through, update.delete_media);
+            }
+            E::DeleteMessageForMeUpdate(update) => {
+                log::info!("message removal: received delete-for-me update");
+                let chat = self.canonical_sync_chat(&update.chat_jid).await;
+                self.delete_message_from_elsewhere(
+                    &chat,
+                    &update.chat_jid.to_string(),
+                    &update.message_id,
+                );
             }
             E::MarkChatAsReadUpdate(update) => {
                 let chat = self.canonical(&update.jid);
@@ -15979,6 +16018,45 @@ mod chat_removal_tests {
         assert!(
             clear_boundary(Ok(empty)).is_some(),
             "an empty archive clears through now"
+        );
+    }
+}
+
+#[cfg(test)]
+mod delete_for_me_tests {
+    use super::*;
+
+    /// "Delete for me" on the phone removes the copy here too, wherever the
+    /// chat is filed: under its number or under the privacy id it once had.
+    #[test]
+    fn a_deletion_made_elsewhere_reaches_every_name_of_the_chat() {
+        let (mut worker, events, _, _) = receipt_tests::worker();
+        const PN: &str = "5511900000001@s.whatsapp.net";
+        const LID: &str = "123456789012345@lid";
+        worker.learn_lid("123456789012345", "5511900000001");
+        for (chat, id) in [(PN, "by-number"), (LID, "by-lid")] {
+            worker.archive.ensure_chat(chat, "Fixture").unwrap();
+            let row = Message {
+                chat: chat.into(),
+                ..receipt_tests::own_message(id, 100)
+            };
+            worker.archive.insert_message(&row, None).unwrap();
+        }
+        worker.delete_message_from_elsewhere(PN, LID, "by-lid");
+        worker.delete_message_from_elsewhere(PN, PN, "by-number");
+        assert!(worker.archive.message(LID, "by-lid").unwrap().is_none());
+        assert!(worker.archive.message(PN, "by-number").unwrap().is_none());
+        let deleted = events
+            .try_iter()
+            .filter(|event| matches!(event, Event::MessageDeleted { .. }))
+            .count();
+        assert_eq!(deleted, 2);
+        // A message that is not here is no news.
+        worker.delete_message_from_elsewhere(PN, PN, "unknown");
+        assert!(
+            !events
+                .try_iter()
+                .any(|event| matches!(event, Event::Error(_)))
         );
     }
 }
