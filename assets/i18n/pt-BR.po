@@ -5015,12 +5015,9 @@ msgid "Requesting earlier messages from your phone"
 msgstr "Pedindo mensagens anteriores ao celular"
 
 #: src/settings.rs
-msgid "ZapZap dark"
-msgstr "ZapZap escuro"
+msgid "WhatsApp dark"
+msgstr "WhatsApp escuro"
 
-#: src/settings.rs
-msgid "ZapZap light"
-msgstr "ZapZap claro"
 
 #: src/ui/settings.rs
 msgid "Side bar"

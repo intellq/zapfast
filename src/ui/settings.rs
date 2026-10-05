@@ -1464,9 +1464,6 @@ fn theme_picker(ui: &mut egui::Ui, app: &mut App) {
                         app.actions.push(Action::SetTheme(choice));
                     }
                 }
-                if app.custom_themes.picker_themes().next().is_some() {
-                    ui.separator();
-                }
                 for custom in app.custom_themes.picker_themes() {
                     if theme_option(
                         ui,

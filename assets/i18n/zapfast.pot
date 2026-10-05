@@ -4846,12 +4846,9 @@ msgid "Requesting earlier messages from your phone"
 msgstr ""
 
 #: src/settings.rs
-msgid "ZapZap dark"
+msgid "WhatsApp dark"
 msgstr ""
 
-#: src/settings.rs
-msgid "ZapZap light"
-msgstr ""
 
 #: src/ui/settings.rs
 msgid "Side bar"

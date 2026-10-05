@@ -2322,11 +2322,8 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
             "light" => {
                 app.settings.theme = ThemeChoice::Light;
             }
-            "zapzap" => {
-                app.settings.theme = ThemeChoice::ZapZapDark;
-            }
-            "zapzap-light" => {
-                app.settings.theme = ThemeChoice::ZapZapLight;
+            "whatsapp-dark" => {
+                app.settings.theme = ThemeChoice::WhatsAppDark;
             }
             "side-bar" => {
                 app.settings.side_bar = true;

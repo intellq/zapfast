@@ -149,10 +149,10 @@ impl Palette {
         }
     }
 
-    /// ZapZap's dark theme, read from its screenshots: neutral greys instead
-    /// of the blue-grey of [`Palette::dark`], and its deep green for our
-    /// bubbles.
-    pub fn zapzap_dark() -> Self {
+    /// WhatsApp's dark theme as ZapZap shows it, read from its screenshots:
+    /// neutral greys instead of the blue-grey of [`Palette::dark`], and its
+    /// deep green for our bubbles.
+    pub fn whatsapp_dark() -> Self {
         Self {
             dark: true,
             window: Color32::from_rgb(0x14, 0x16, 0x15),
@@ -176,35 +176,6 @@ impl Palette {
             bubble_out: Color32::from_rgb(0x13, 0x4d, 0x37),
             link: Color32::from_rgb(0x53, 0xbd, 0xeb),
             read: Color32::from_rgb(0x53, 0xbd, 0xeb),
-        }
-    }
-
-    /// The light companion of [`Palette::zapzap_dark`]: WhatsApp's current
-    /// light colours, neutral rather than blue-grey.
-    pub fn zapzap_light() -> Self {
-        Self {
-            dark: false,
-            window: Color32::from_rgb(0xf7, 0xf5, 0xf3),
-            panel: Color32::from_rgb(0xff, 0xff, 0xff),
-            surface: Color32::from_rgb(0xf3, 0xf2, 0xf1),
-            surface_hover: Color32::from_rgb(0xeb, 0xea, 0xe9),
-            surface_active: Color32::from_rgb(0xe2, 0xe1, 0xe0),
-            outline: Color32::from_rgb(0xe9, 0xe8, 0xe7),
-            text: Color32::from_rgb(0x11, 0x11, 0x11),
-            secondary: Color32::from_rgb(0x5a, 0x5a, 0x5a),
-            dim: Color32::from_rgb(0x63, 0x63, 0x63),
-            accent: Color32::from_rgb(0x15, 0x7a, 0x47),
-            accent_hover: Color32::from_rgb(0x10, 0x6b, 0x3d),
-            on_accent: Color32::WHITE,
-            danger: Color32::from_rgb(0xea, 0x00, 0x38),
-            warning: Color32::from_rgb(0xa0, 0x6b, 0x00),
-            overlay: Color32::from_rgb(0xff, 0xff, 0xff),
-            shadow: Color32::from_black_alpha(LIGHT_SHADOW_ALPHA),
-            chat: Color32::from_rgb(0xf5, 0xf1, 0xeb),
-            bubble_in: Color32::from_rgb(0xff, 0xff, 0xff),
-            bubble_out: Color32::from_rgb(0xd9, 0xfd, 0xd3),
-            link: Color32::from_rgb(0x02, 0x7e, 0xb5),
-            read: Color32::from_rgb(0x02, 0x7e, 0xb5),
         }
     }
 
@@ -1279,8 +1250,7 @@ mod tests {
             mid,
             Palette::light(),
             preset("Catppuccin Latte.json"),
-            Palette::zapzap_dark(),
-            Palette::zapzap_light(),
+            Palette::whatsapp_dark(),
         ];
         let luminance = |color: Color32| contrast(color, Color32::BLACK);
         for palette in palettes {
@@ -1355,8 +1325,7 @@ mod tests {
         for (name, p) in [
             ("dark", Palette::dark()),
             ("light", Palette::light()),
-            ("zapzap dark", Palette::zapzap_dark()),
-            ("zapzap light", Palette::zapzap_light()),
+            ("whatsapp dark", Palette::whatsapp_dark()),
         ] {
             let mut pairs = Vec::new();
             for (surface, background) in [
@@ -1397,8 +1366,7 @@ mod tests {
         let palettes = [
             ("dark", Palette::dark()),
             ("light", Palette::light()),
-            ("zapzap dark", Palette::zapzap_dark()),
-            ("zapzap light", Palette::zapzap_light()),
+            ("whatsapp dark", Palette::whatsapp_dark()),
         ]
         .into_iter()
         .map(|(name, palette)| (name.to_owned(), palette))

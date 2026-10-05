@@ -30,32 +30,25 @@ pub(crate) fn unhex(value: &str) -> Option<Vec<u8>> {
 pub enum ThemeChoice {
     #[default]
     Dark,
+    // A light ZapZap theme existed briefly before release; it reads as Light.
+    #[serde(alias = "zapzap-light")]
     Light,
     System,
-    /// The dark colours of ZapZap, the Linux WhatsApp client: neutral grey
-    /// rather than ZapFast's blue-grey.
-    #[serde(rename = "zapzap-dark")]
-    ZapZapDark,
-    #[serde(rename = "zapzap-light")]
-    ZapZapLight,
+    /// WhatsApp's dark colours as ZapZap, the Linux WhatsApp client, shows
+    /// them: neutral grey rather than ZapFast's blue-grey.
+    #[serde(rename = "whatsapp-dark", alias = "zapzap-dark")]
+    WhatsAppDark,
 }
 
 impl ThemeChoice {
-    pub const ALL: [ThemeChoice; 5] = [
-        Self::System,
-        Self::Light,
-        Self::Dark,
-        Self::ZapZapLight,
-        Self::ZapZapDark,
-    ];
+    pub const ALL: [ThemeChoice; 4] = [Self::System, Self::Light, Self::Dark, Self::WhatsAppDark];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Dark => crate::i18n::n_("Dark"),
             Self::Light => crate::i18n::n_("Light"),
             Self::System => crate::i18n::n_("Follow system"),
-            Self::ZapZapDark => crate::i18n::n_("ZapZap dark"),
-            Self::ZapZapLight => crate::i18n::n_("ZapZap light"),
+            Self::WhatsAppDark => crate::i18n::n_("WhatsApp dark"),
         }
     }
 
@@ -64,8 +57,7 @@ impl ThemeChoice {
     pub fn palette(self, dark: bool) -> crate::theme::Palette {
         use crate::theme::Palette;
         match self {
-            Self::ZapZapDark => Palette::zapzap_dark(),
-            Self::ZapZapLight => Palette::zapzap_light(),
+            Self::WhatsAppDark => Palette::whatsapp_dark(),
             _ if dark => Palette::dark(),
             _ => Palette::light(),
         }

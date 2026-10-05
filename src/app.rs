@@ -4436,8 +4436,8 @@ impl App {
     fn apply_theme(&mut self, ctx: &egui::Context) {
         let preference = self.settings.cached_palette().map_or_else(
             || match self.settings.theme {
-                ThemeChoice::Dark | ThemeChoice::ZapZapDark => egui::ThemePreference::Dark,
-                ThemeChoice::Light | ThemeChoice::ZapZapLight => egui::ThemePreference::Light,
+                ThemeChoice::Dark | ThemeChoice::WhatsAppDark => egui::ThemePreference::Dark,
+                ThemeChoice::Light => egui::ThemePreference::Light,
                 ThemeChoice::System => egui::ThemePreference::System,
             },
             |palette| {
