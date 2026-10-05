@@ -23,8 +23,8 @@ See **[zapfast.rocks](https://zapfast.rocks)** for downloads and guides.
 ## Alterações deste fork (`intellq`)
 
 Este fork acompanha o [projeto original](https://github.com/crmne/zapfast)
-até o commit [`c05333e`](https://github.com/crmne/zapfast/commit/c05333e)
-(versão 0.18.2 e ajustes seguintes).
+até o commit [`63ed17c`](https://github.com/crmne/zapfast/commit/63ed17c)
+(versão 0.19.0 e ajustes seguintes).
 Além das novidades do upstream, esta branch inclui as seguintes mudanças:
 
 ### Instalar este fork
@@ -550,6 +550,46 @@ Da sincronização com o upstream 0.18.2:
 - **Responder (citar)** uma mensagem de qualquer ponto do histórico rola até o
   fim ao enviar, para mostrá-la. `Shift+Insert` cola, como `Ctrl+V`, no
   compositor.
+
+Na 0.19.1:
+
+- **Várias contas do WhatsApp na mesma janela** (do upstream, #334). Clique na
+  sua foto no topo da lista para ver as contas, cada uma com as conversas não
+  lidas, trocar de conta ou **Adicionar conta**; uma bolinha na foto avisa que
+  outra conta tem não lidas. Cada número tem pasta, arquivo local, chave do
+  chaveiro e mídias próprias, e a conta que não está na tela não manda recibo
+  de leitura. Notificações, recibos de leitura e "digitando" valem por conta;
+  os downloads automáticos por tipo, a pasta de downloads, o limite de anexo e
+  os demais ajustes continuam valendo para a janela toda. Bloqueados e envios
+  de mídia em andamento ficam em cada conta. Uma ligação que chega numa conta
+  fora da tela toca, mostra o nome lido dessa conta e é atendida, recusada ou
+  encerrada por ela; a notificação clicada abre na conta certa, inclusive
+  depois de destrancar o app. Na primeira abertura, a conta que já existia
+  passa para `accounts/1/` (a chave do chaveiro é copiada e conferida antes).
+- **Tema WhatsApp escuro**, com as cores do WhatsApp Web, entre os temas
+  embutidos em **Configurações › Aparência**. O espaço grande que separava os
+  temas embutidos dos personalizados na lista saiu.
+- **Barra lateral** (**Configurações › Aparência**, desligada por padrão): sua
+  foto e os botões de arquivadas, ocultar a lista, nova conversa e
+  configurações numa coluna à esquerda das conversas, com o campo de busca no
+  topo. A largura da lista não muda ao ligá-la.
+- **Editar a legenda** de foto, vídeo ou documento já enviado, como já dava
+  para editar o texto de uma mensagem.
+- **"Apagar para mim" feito no celular** ou em outro dispositivo conectado
+  agora apaga a mensagem também aqui (a parte de entrada do upstream #384).
+- **Windows:** um clique no ícone da bandeja esconde a janela que está na
+  frente e mostra a que não está (o duplo clique conta como um só); a janela
+  que volta da bandeja recebe o foco; soltar arquivos arrastados envia para a
+  conversa aberta; a transcrição de áudio usa AVX2 e volta a levar segundos.
+- Do upstream: `Ctrl+1` a `Ctrl+9` abrem a conversa naquela posição da lista
+  (#345); a janela reabre com o mesmo zoom, tamanho, posição e estado
+  maximizado (#385); **Manter conversas arquivadas** em **Configurações ›
+  Conversas** (ligada por padrão): desligada, uma mensagem nova tira a
+  conversa das arquivadas, como no celular (#208); um recibo do histórico com
+  horário zero não marca mais a mensagem como lida nem a data em 1969 (#370);
+  edições do histórico do celular ficam na mensagem original, a ordem do
+  celular se mantém ao carregar páginas antigas, e **Recarregar mensagens
+  anteriores** pede de novo um trecho do histórico ao celular.
 
 Na 0.18.205 (do upstream):
 
