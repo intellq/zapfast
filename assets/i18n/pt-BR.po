@@ -513,16 +513,20 @@ msgid "Leave channel"
 msgstr "Sair do canal"
 
 #: src/ui/chats.rs:1038 src/ui/chats.rs:1433
-msgid "Mute for 8 hours"
-msgstr "Silenciar por 8 horas"
+msgid "Mute…"
+msgstr "Silenciar…"
+
+#: src/ui/chats.rs
+msgid "For 8 hours"
+msgstr "Por 8 horas"
 
 #: src/ui/chats.rs:1039 src/ui/chats.rs:1434
-msgid "Mute for a week"
-msgstr "Silenciar por uma semana"
+msgid "For a week"
+msgstr "Por uma semana"
 
 #: src/ui/chats.rs:1040 src/ui/chats.rs:1435
-msgid "Mute indefinitely"
-msgstr "Silenciar por tempo indeterminado"
+msgid "Indefinitely"
+msgstr "Por tempo indeterminado"
 
 #: src/ui/chats.rs:1041 src/ui/chats.rs:1453
 msgid "Unlock chat"
@@ -5068,3 +5072,15 @@ msgstr "Não conectada"
 #, rust-format
 msgid "{count} unread chats"
 msgstr "{count} conversas não lidas"
+
+#: src/ui/accounts.rs
+msgid "Silence this account"
+msgstr "Silenciar esta conta"
+
+#: src/ui/accounts.rs
+msgid "Let this account notify again"
+msgstr "Voltar a receber avisos desta conta"
+
+#: src/ui/accounts.rs
+msgid "silenced"
+msgstr "silenciada"

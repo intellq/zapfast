@@ -1841,7 +1841,8 @@ fn chat_info(app: &mut App, ui: &mut egui::Ui, id: &str) {
     let photo = (window * 0.34).clamp(120.0, 240.0);
     let picture = app.avatar_full(id).or_else(|| app.avatar(id));
     let mine = app.me.as_deref() == Some(id);
-    let editable = chat.phone().is_some() && !mine;
+    let phone = app.phone_of(id).map(str::to_owned);
+    let editable = phone.is_some() && !mine;
     // Saving or cancelling leaves the editor buffer checked out.
     let mut editing = app.contact_edit.take().filter(|_| editable);
     let mut saved = None;
@@ -1997,7 +1998,7 @@ fn chat_info(app: &mut App, ui: &mut egui::Ui, id: &str) {
         } else {
             super::widgets::selectable_rich_text(ui, &name, theme::bold(19.0), palette.text);
         }
-        if let Some(phone) = chat.phone() {
+        if let Some(phone) = &phone {
             theme::selectable_text(
                 ui,
                 crate::util::phone(phone),
@@ -2182,11 +2183,7 @@ fn chat_info(app: &mut App, ui: &mut egui::Ui, id: &str) {
         ));
     }
     if editable {
-        let known = app
-            .contacts
-            .get(id)
-            .and_then(|contact| contact.full_name.as_deref())
-            .is_some_and(|full| !full.is_empty());
+        let known = app.saved_name(id).is_some();
         buttons.push((
             Icon::User,
             if known {
@@ -2200,7 +2197,7 @@ fn chat_info(app: &mut App, ui: &mut egui::Ui, id: &str) {
             }],
         ));
     }
-    if let Some(phone) = chat.phone() {
+    if let Some(phone) = &phone {
         buttons.push((
             Icon::Copy,
             tr("Copy number"),

@@ -1324,6 +1324,7 @@ impl App {
     pub fn unread_chat_count_everywhere(&self) -> u32 {
         self.accounts
             .iter()
+            .filter(|account| !account.settings.silenced)
             .map(Account::unread_chat_count)
             .fold(0, u32::saturating_add)
     }
@@ -1334,7 +1335,7 @@ impl App {
         self.accounts
             .iter()
             .enumerate()
-            .filter(|(index, _)| *index != self.active)
+            .filter(|(index, account)| *index != self.active && !account.settings.silenced)
             .map(|(_, account)| account.unread_chat_count())
             .fold(0, u32::saturating_add)
     }
@@ -1749,7 +1750,7 @@ impl App {
 
     /// Sends a desktop notification for an unseen incoming message.
     fn maybe_notify(&mut self, chat_id: &str, message: &Message) {
-        if !self.account().settings.notifications {
+        if !self.account().settings.notifies() {
             return;
         }
         let Some(chat) = self.chat(chat_id) else {
@@ -2250,9 +2251,20 @@ impl App {
     /// The phone number a person goes by when nothing names them, as on the phone: the number in
     /// their id, or the one known for their privacy id.
     fn phone_name(&self, id: &str) -> Option<String> {
-        crate::model::phone_of(id)
-            .or_else(|| self.lid_phones.get(id).map(String::as_str))
-            .map(crate::util::phone)
+        self.phone_of(id).map(crate::util::phone)
+    }
+
+    /// The digits of a person's number: the one in their id, or the one known for their privacy id.
+    pub fn phone_of<'a>(&'a self, id: &'a str) -> Option<&'a str> {
+        crate::model::phone_of(id).or_else(|| self.lid_phones.get(id).map(String::as_str))
+    }
+
+    /// The name a person is saved under in the address book. A masked number is no name.
+    pub fn saved_name(&self, id: &str) -> Option<&str> {
+        self.contacts
+            .get(id)
+            .and_then(|contact| contact.full_name.as_deref())
+            .filter(|name| !name.trim().is_empty() && !crate::util::is_masked_number(name))
     }
 
     /// What a chat is known by, or nothing at all when only a number is left.
@@ -2262,7 +2274,7 @@ impl App {
         // A masked number is no name: the full one, when known, says more.
         let present =
             |name: Option<&str>| present(name.filter(|name| !crate::util::is_masked_number(name)));
-        let saved = present(contact.and_then(|contact| contact.full_name.as_deref()));
+        let saved = self.saved_name(id).map(str::to_owned);
         let called = present(contact.and_then(|contact| contact.push_name.as_deref()))
             .or_else(|| present(hint));
         // Saved names first, as WhatsApp does; a profile name wears a tilde.
@@ -4594,9 +4606,12 @@ impl App {
             .as_ref()
             .filter(|current| current.generation == update.generation)
             .map(|current| current.phase);
-        let ring = self
-            .chat(&update.chat)
-            .is_some_and(|chat| call_notification_eligible(chat, crate::util::now()));
+        // A silenced account takes the call without a sound or a raised window.
+        let silenced = self.account().settings.silenced;
+        let ring = !silenced
+            && self
+                .chat(&update.chat)
+                .is_some_and(|chat| call_notification_eligible(chat, crate::util::now()));
         self.call_sounds
             .follow(previous, &update, ring, update.speaker.as_deref());
         let ringing = update.phase == crate::calls::CallPhase::Incoming
@@ -4610,7 +4625,10 @@ impl App {
         self.call_account = Some(self.account().id.clone());
         self.call_peer = Some((self.peer_name(&chat), self.peer_avatar(&chat)));
         self.call_repaint = true;
-        if ringing && let Some(call) = self.call.clone() {
+        if ringing
+            && !silenced
+            && let Some(call) = self.call.clone()
+        {
             self.call_raise = true;
             self.notify_incoming_call(&call);
         }
@@ -4623,7 +4641,7 @@ impl App {
     /// until they happened to look. The click only brings the window up, because the call surface is
     /// drawn over whatever is open and is already waiting for Accept or Decline.
     fn notify_incoming_call(&mut self, call: &crate::calls::CallUpdate) {
-        if !self.account().settings.notifications {
+        if !self.account().settings.notifies() {
             return;
         }
         let now = crate::util::now();
@@ -6730,6 +6748,15 @@ impl App {
             // Route through the configured window-close behavior.
             Action::CloseWindow => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             Action::SwitchAccount(id) => self.switch_account(&id),
+            Action::SetAccountSilenced(id, silenced) => {
+                if let Some(account) = self.accounts.iter_mut().find(|account| account.id == id) {
+                    account.settings.silenced = silenced;
+                    account.mark_settings_dirty();
+                    if silenced {
+                        self.notifications.clear_account(&id);
+                    }
+                }
+            }
             Action::AddAccount => self.add_account(),
             Action::CancelAddAccount => {
                 // Back to the account the window showed before; leaving an
@@ -8166,6 +8193,28 @@ mod tests {
     }
 
     #[test]
+    fn a_silenced_account_neither_counts_nor_notifies() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _commands) = two_accounts(directory.path());
+        let ctx = egui::Context::default();
+        let chat = "15550005555@s.whatsapp.net";
+        let mut theirs = Chat::new(chat.into(), "Grace".into());
+        theirs.unread = 3;
+        app.accounts[1].chats.push(theirs);
+        app.accounts[1].settings.notifications = true;
+        let other = app.accounts[1].id.clone();
+        app.apply(Action::SetAccountSilenced(other.clone(), true), &ctx);
+        assert!(app.accounts[1].settings.silenced);
+        assert!(app.accounts[1].settings_dirty);
+        assert_eq!(app.unread_chat_count_elsewhere(), 0);
+        assert_eq!(app.unread_chat_count_everywhere(), 0);
+        assert!(!app.accounts[1].settings.notifies());
+        app.apply(Action::SetAccountSilenced(other, false), &ctx);
+        assert_eq!(app.unread_chat_count_elsewhere(), 1);
+        assert!(app.accounts[1].settings.notifies());
+    }
+
+    #[test]
     fn global_settings_reach_every_account() {
         let directory = tempfile::tempdir().unwrap();
         let (mut app, mut commands) = two_accounts(directory.path());
@@ -8472,6 +8521,42 @@ mod tests {
         assert_eq!(app.display_name(lid), crate::util::phone("5594988072301"));
         // A profile name still wins over both.
         assert_eq!(app.display_name_or(lid, Some("José")), "~José");
+    }
+
+    #[test]
+    fn adding_a_contact_from_the_chat_menu_opens_its_info_with_the_editor() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        let id = "5511999990000@s.whatsapp.net";
+        app.apply(Action::ShowDialog(Dialog::ChatInfo(id.into())), &ctx);
+        app.apply(
+            Action::EditContact {
+                id: id.into(),
+                name: "Jose".into(),
+            },
+            &ctx,
+        );
+        assert_eq!(app.dialog, Some(Dialog::ChatInfo(id.into())));
+        assert!(app.contact_edit.is_some());
+    }
+
+    #[test]
+    fn a_masked_number_is_no_saved_name() {
+        let mut app = app();
+        let lid = "42@lid";
+        let masked =
+            "+55\u{2219}\u{2219}\u{2219}\u{2219}\u{2219}\u{2219}\u{2219}\u{2219}\u{2219}01";
+        app.contacts.insert(
+            lid.into(),
+            Contact {
+                id: lid.into(),
+                full_name: Some(masked.into()),
+                first_name: None,
+                push_name: Some("Jose".into()),
+            },
+        );
+        assert_eq!(app.saved_name(lid), None);
+        assert_eq!(app.display_name(lid), "~Jose");
     }
 
     #[test]

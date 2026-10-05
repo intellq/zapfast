@@ -551,7 +551,7 @@ Da sincronização com o upstream 0.18.2:
   fim ao enviar, para mostrá-la. `Shift+Insert` cola, como `Ctrl+V`, no
   compositor.
 
-Desde a 0.19.1 (ainda sem release):
+Na 0.19.2:
 
 - **Fonte da interface** (**Configurações › Aparência**): o menu lista a Inter
   e, em ordem alfabética, as fontes desta seleção que estiverem instaladas
@@ -569,6 +569,18 @@ Desde a 0.19.1 (ainda sem release):
   (como acontece com teclados virtuais de acesso remoto).
 - "Apagar para mim" não mostra mais "A mensagem não está mais disponível"
   quando o eco da própria exclusão chega antes da confirmação do WhatsApp.
+- **Silenciar uma conta** pelo menu das contas: passe o mouse sobre a foto da
+  conta e clique no alto-falante. A conta silenciada não mostra notificações,
+  não toca sons nem chamadas, não traz a janela para a frente e sai da bolinha
+  da sua foto e da contagem da barra de tarefas; um alto-falante cortado fica
+  no canto da foto dela.
+- **Adicionar aos contatos** também no menu da conversa (botão direito na
+  lista) e para conversas que chegam pelo identificador de privacidade (LID)
+  quando o número é conhecido; o contato é salvo pelo número. Um número
+  mascarado (`+55∙∙∙∙∙∙∙01`) não conta mais como nome salvo, então o botão não
+  vira "Renomear" nesses casos.
+- **Silenciar…** no menu da conversa virou um submenu com "Por 8 horas", "Por
+  uma semana" e "Por tempo indeterminado".
 
 Na 0.19.1:
 

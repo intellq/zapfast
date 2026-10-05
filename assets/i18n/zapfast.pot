@@ -461,15 +461,19 @@ msgid "Leave channel"
 msgstr ""
 
 #: src/ui/chats.rs:1038 src/ui/chats.rs:1433
-msgid "Mute for 8 hours"
+msgid "Mute…"
+msgstr ""
+
+#: src/ui/chats.rs
+msgid "For 8 hours"
 msgstr ""
 
 #: src/ui/chats.rs:1039 src/ui/chats.rs:1434
-msgid "Mute for a week"
+msgid "For a week"
 msgstr ""
 
 #: src/ui/chats.rs:1040 src/ui/chats.rs:1435
-msgid "Mute indefinitely"
+msgid "Indefinitely"
 msgstr ""
 
 #: src/ui/chats.rs:1041 src/ui/chats.rs:1453
@@ -4898,4 +4902,16 @@ msgstr ""
 #: src/ui/accounts.rs:1
 #, rust-format
 msgid "{count} unread chats"
+msgstr ""
+
+#: src/ui/accounts.rs
+msgid "Silence this account"
+msgstr ""
+
+#: src/ui/accounts.rs
+msgid "Let this account notify again"
+msgstr ""
+
+#: src/ui/accounts.rs
+msgid "silenced"
 msgstr ""

@@ -1242,10 +1242,9 @@ fn row(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> egui::Response {
             tr("Unarchive"),
             &crate::i18n::gettext(app.locale, "Leave group"),
             &crate::i18n::gettext(app.locale, "Leave channel"),
-            tr("Mute for 8 hours"),
-            tr("Mute for a week"),
-            tr("Mute indefinitely"),
             tr("Unlock chat"),
+            tr("Add to contacts"),
+            tr("Rename"),
             tr("Block…"),
             tr("Unblock"),
             tr("Copy number"),
@@ -1258,6 +1257,7 @@ fn row(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> egui::Response {
             ui,
             &[
                 tr("Notification sound"),
+                tr("Mute…"),
                 &crate::i18n::gettext(app.locale, "Labels"),
             ],
             true,
@@ -1665,15 +1665,20 @@ fn context_menu(app: &mut App, ui: &mut egui::Ui, chat: &Chat, palette: &Palette
             app.actions.push(Action::SetMuted(chat.id.clone(), None));
         }
     } else {
-        for (label, until) in [
-            (tr("Mute for 8 hours"), Some(now + 8 * 3600)),
-            (tr("Mute for a week"), Some(now + 7 * 86_400)),
-            (tr("Mute indefinitely"), Some(0)),
-        ] {
-            if widgets::menu_item(ui, palette, Some(Icon::BellOff), label) {
-                app.actions.push(Action::SetMuted(chat.id.clone(), until));
+        let choices = [
+            (tr("For 8 hours"), Some(now + 8 * 3600)),
+            (tr("For a week"), Some(now + 7 * 86_400)),
+            (tr("Indefinitely"), Some(0)),
+        ];
+        let entries: Vec<&str> = choices.iter().map(|(label, _)| *label).collect();
+        widgets::submenu(ui, palette, Icon::BellOff, tr("Mute…"), &entries, |ui| {
+            for (label, until) in choices {
+                if widgets::menu_item(ui, palette, None, label) {
+                    app.actions.push(Action::SetMuted(chat.id.clone(), until));
+                    ui.close();
+                }
             }
-        }
+        });
     }
     sound_menu(app, ui, palette, chat);
     labels::chat_menu(app, ui, chat, palette);
@@ -1698,6 +1703,27 @@ fn context_menu(app: &mut App, ui: &mut egui::Ui, chat: &Chat, palette: &Palette
         });
     }
     block_menu_item(app, ui, palette, chat);
+    // The same as in the chat's info: it opens there, with the name being edited.
+    if !chat.is_group()
+        && !chat.is_channel()
+        && app.me.as_deref() != Some(chat.id.as_str())
+        && app.phone_of(&chat.id).is_some()
+    {
+        let label = if app.saved_name(&chat.id).is_some() {
+            tr("Rename")
+        } else {
+            tr("Add to contacts")
+        };
+        if widgets::menu_item(ui, palette, Some(Icon::User), label) {
+            let name = app.chat_title(chat);
+            app.actions
+                .push(Action::ShowDialog(Dialog::ChatInfo(chat.id.clone())));
+            app.actions.push(Action::EditContact {
+                id: chat.id.clone(),
+                name: name.trim_start_matches('~').to_owned(),
+            });
+        }
+    }
     widgets::menu_separator(ui, palette);
     if let Some(phone) = chat.phone()
         && widgets::menu_item(ui, palette, Some(Icon::Copy), tr("Copy number"))

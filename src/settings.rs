@@ -907,6 +907,9 @@ pub struct AccountSettings {
     pub save_contacts_to_phone: bool,
     /// This account's copy of the chosen chat wallpaper image.
     pub wallpaper_image: Option<std::path::PathBuf>,
+    /// Silenced from the account switcher: no notification, sound or ringing, and no unread dot,
+    /// whatever `notifications` says.
+    pub silenced: bool,
 }
 
 impl Default for AccountSettings {
@@ -918,6 +921,7 @@ impl Default for AccountSettings {
             notifications: true,
             save_contacts_to_phone: true,
             wallpaper_image: None,
+            silenced: false,
         }
     }
 }
@@ -931,7 +935,13 @@ impl AccountSettings {
             notifications: settings.notifications,
             save_contacts_to_phone: settings.save_contacts_to_phone,
             wallpaper_image: settings.wallpaper_image.clone(),
+            silenced: false,
         }
+    }
+
+    /// Whether this account may notify at all.
+    pub fn notifies(&self) -> bool {
+        self.notifications && !self.silenced
     }
 
     pub fn load(path: &Path) -> Self {

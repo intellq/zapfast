@@ -5382,7 +5382,11 @@ impl Worker {
                 first_name,
                 to_phone,
             } => {
-                let (Some(client), Some(jid)) = (self.client.clone(), Self::jid_of(&id)) else {
+                // WhatsApp saves contacts by number; a privacy id goes by the number behind it.
+                let (Some(client), Some(jid)) = (
+                    self.client.clone(),
+                    Self::jid_of(&self.canonical_str(&id)),
+                ) else {
                     self.emit(Event::Error(tr("Not connected to WhatsApp").to_owned()));
                     return;
                 };
@@ -5412,22 +5416,33 @@ impl Worker {
                     self.emit(Event::Error(format!("Could not save contact: {error}")));
                     return;
                 }
-                let contact = Contact {
-                    id: id.clone(),
-                    full_name: Some(name.clone()),
-                    first_name: first_name.filter(|first| !first.is_empty()),
-                    push_name: None,
-                };
-                if let Err(error) = self.archive.upsert_contact(&contact) {
-                    log::warn!("could not store the contact: {error}");
+                // A chat under a privacy id is named too, not only its number.
+                let canonical = self.canonical_str(&id);
+                let mut ids = vec![id.clone()];
+                if canonical != id {
+                    ids.push(canonical);
                 }
-                // Preserve the stored push name during contact updates.
-                let stored = self.archive.contact(&id).ok().flatten().unwrap_or(contact);
-                self.emit(Event::Contacts(vec![stored]));
+                let mut stored = Vec::new();
+                for id in &ids {
+                    let contact = Contact {
+                        id: id.clone(),
+                        full_name: Some(name.clone()),
+                        first_name: first_name.clone().filter(|first| !first.is_empty()),
+                        push_name: None,
+                    };
+                    if let Err(error) = self.archive.upsert_contact(&contact) {
+                        log::warn!("could not store the contact: {error}");
+                    }
+                    // Preserve the stored push name during contact updates.
+                    stored.push(self.archive.contact(id).ok().flatten().unwrap_or(contact));
+                }
+                self.emit(Event::Contacts(stored));
                 self.emit(Event::Info(
                     tr("Added {name} to contacts").replace("{name}", &name),
                 ));
-                self.emit_chat(&id);
+                for id in &ids {
+                    self.emit_chat(id);
+                }
             }
             Command::NewContact {
                 phone,
@@ -16152,6 +16167,28 @@ mod delete_for_me_tests {
                 result: Ok(()),
             })
             .await;
+        assert!(
+            !events
+                .try_iter()
+                .any(|event| matches!(event, Event::Error(_)))
+        );
+    }
+    #[tokio::test]
+    async fn a_contact_saved_from_a_privacy_id_names_its_number_too() {
+        let (mut worker, events, _, _) = receipt_tests::worker();
+        worker.lid_to_pn.insert("42".into(), "5511999990000".into());
+        worker
+            .handle_command(Command::ContactSaved {
+                id: "42@lid".into(),
+                name: "Ana Souza".into(),
+                first_name: Some("Ana".into()),
+                error: None,
+            })
+            .await;
+        for id in ["42@lid", "5511999990000@s.whatsapp.net"] {
+            let contact = worker.archive.contact(id).unwrap().expect("stored");
+            assert_eq!(contact.full_name.as_deref(), Some("Ana Souza"));
+        }
         assert!(
             !events
                 .try_iter()

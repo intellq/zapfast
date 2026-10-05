@@ -67,6 +67,7 @@ struct Entry {
     picture: Option<std::path::PathBuf>,
     unread: u32,
     current: bool,
+    silenced: bool,
 }
 
 fn entries(app: &mut App) -> Vec<Entry> {
@@ -94,6 +95,7 @@ fn entries(app: &mut App) -> Vec<Entry> {
                 picture,
                 unread: account.unread_chat_count(),
                 current: index == active,
+                silenced: account.settings.silenced,
             }
         })
         .collect()
@@ -111,11 +113,21 @@ fn menu(app: &mut App, button: &egui::Response) {
         .id(popup_id)
         .width(MENU_WIDTH)
         .frame(widgets::menu_frame(&palette))
+        // Silencing an account from its picture leaves the menu open.
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show(|ui| {
             for entry in &entries {
-                if account_row(app, ui, entry) && !entry.current {
-                    app.actions.push(Action::SwitchAccount(entry.id.clone()));
-                    ui.close();
+                match account_row(app, ui, entry) {
+                    Some(RowClick::Row) => {
+                        if !entry.current {
+                            app.actions.push(Action::SwitchAccount(entry.id.clone()));
+                        }
+                        ui.close();
+                    }
+                    Some(RowClick::Sound) => app
+                        .actions
+                        .push(Action::SetAccountSilenced(entry.id.clone(), !entry.silenced)),
+                    _ => {}
                 }
             }
             widgets::menu_separator(ui, &palette);
@@ -126,16 +138,44 @@ fn menu(app: &mut App, button: &egui::Response) {
                 &gettext(app.locale, "Add account"),
             ) {
                 app.actions.push(Action::AddAccount);
+                ui.close();
             }
         });
 }
 
+/// Where an account row was clicked.
+enum RowClick {
+    /// Anywhere but the picture: show this account.
+    Row,
+    /// The picture: silence the account, or let it notify again.
+    Sound,
+}
+
 /// One account in the switcher: its picture, name and number, its unread
-/// chats, and a check on the one on screen. Returns whether it was clicked.
-fn account_row(app: &App, ui: &mut egui::Ui, entry: &Entry) -> bool {
+/// chats, and a check on the one on screen. Hovering the picture shows whether
+/// the account notifies, and a click there toggles it.
+fn account_row(app: &App, ui: &mut egui::Ui, entry: &Entry) -> Option<RowClick> {
     let palette = app.palette;
     let width = ui.available_width();
     let (rect, response) = ui.allocate_exact_size(vec2(width, ROW), Sense::click());
+    let avatar = Rect::from_center_size(
+        pos2(rect.left() + 8.0 + ROW_AVATAR / 2.0, rect.center().y),
+        Vec2::splat(ROW_AVATAR),
+    );
+    let sound_label = if entry.silenced {
+        gettext(app.locale, "Let this account notify again")
+    } else {
+        gettext(app.locale, "Silence this account")
+    };
+    let sound = ui.interact(avatar, response.id.with("sound"), Sense::click());
+    sound.widget_info(|| {
+        egui::WidgetInfo::selected(
+            egui::WidgetType::Checkbox,
+            ui.is_enabled(),
+            entry.silenced,
+            sound_label.as_ref(),
+        )
+    });
     theme::reveal_focus(&response);
     response.widget_info(|| {
         egui::WidgetInfo::selected(
@@ -146,18 +186,15 @@ fn account_row(app: &App, ui: &mut egui::Ui, entry: &Entry) -> bool {
         )
     });
     if ui.is_rect_visible(rect) {
-        if response.hovered() || entry.current {
-            let fill = if entry.current && !response.hovered() {
+        let hovered = response.hovered() || sound.hovered();
+        if hovered || entry.current {
+            let fill = if entry.current && !hovered {
                 palette.surface
             } else {
                 palette.surface_hover
             };
             ui.painter().rect_filled(rect, CornerRadius::same(6), fill);
         }
-        let avatar = Rect::from_center_size(
-            pos2(rect.left() + 8.0 + ROW_AVATAR / 2.0, rect.center().y),
-            Vec2::splat(ROW_AVATAR),
-        );
         widgets::paint_avatar(
             ui,
             &palette,
@@ -170,6 +207,27 @@ fn account_row(app: &App, ui: &mut egui::Ui, entry: &Entry) -> bool {
             },
             entry.picture.as_deref(),
         );
+        let icon = if entry.silenced {
+            Icon::VolumeX
+        } else {
+            Icon::Volume2
+        };
+        if sound.hovered() {
+            // Over the picture, the account's sound as it stands.
+            ui.painter().circle_filled(
+                avatar.center(),
+                ROW_AVATAR / 2.0,
+                egui::Color32::from_black_alpha(150),
+            );
+            icon.image(egui::Color32::WHITE, 18.0)
+                .paint_at(ui, Rect::from_center_size(avatar.center(), Vec2::splat(18.0)));
+        } else if entry.silenced {
+            // A silenced account keeps saying so in a corner of its picture.
+            let at = avatar.right_bottom() - vec2(3.0, 3.0);
+            ui.painter().circle_filled(at, 8.0, palette.panel);
+            icon.image(palette.secondary, 11.0)
+                .paint_at(ui, Rect::from_center_size(at, Vec2::splat(11.0)));
+        }
         // Room on the right for the check, or the unread count.
         let right = rect.right() - 10.0;
         let mut text_right = right;
@@ -215,11 +273,19 @@ fn account_row(app: &App, ui: &mut egui::Ui, entry: &Entry) -> bool {
             ui.painter().galley(pos2(x, y), detail, palette.secondary);
         }
     }
+    let sound_clicked = sound.clicked();
+    sound
+        .on_hover_text(sound_label.as_ref())
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
     let clicked = response.clicked();
     if !entry.current {
         response.on_hover_cursor(egui::CursorIcon::PointingHand);
     }
-    clicked
+    if sound_clicked {
+        Some(RowClick::Sound)
+    } else {
+        clicked.then_some(RowClick::Row)
+    }
 }
 
 /// What a screen reader says for an account row.
@@ -228,6 +294,10 @@ fn row_label(app: &App, entry: &Entry) -> String {
     if !entry.detail.is_empty() {
         label.push_str(", ");
         label.push_str(&entry.detail);
+    }
+    if entry.silenced {
+        label.push_str(", ");
+        label.push_str(&gettext(app.locale, "silenced"));
     }
     if entry.unread > 0 {
         label.push_str(", ");

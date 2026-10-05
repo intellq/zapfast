@@ -1981,6 +1981,8 @@ pub enum Action {
     CloseWindow,
     /// Shows another linked account in the window.
     SwitchAccount(AccountId),
+    /// Silences an account, or lets it notify again, from the account switcher.
+    SetAccountSilenced(AccountId, bool),
     /// Starts linking another number beside the ones already here.
     AddAccount,
     /// Leaves an account being added before it was linked.
