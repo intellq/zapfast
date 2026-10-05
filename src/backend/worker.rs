@@ -4993,6 +4993,9 @@ impl Worker {
                 });
             }
             Command::DeleteForMeSynced { chat, id, result } => match result {
+                // WhatsApp's echo of this very deletion may come first and
+                // remove the copy already.
+                Ok(()) if matches!(self.archive.message(&chat, &id), Ok(None)) => {}
                 Ok(()) => self.delete_for_me_local(chat, id),
                 Err(error) => self.emit(Event::Error(error)),
             },
@@ -16122,6 +16125,33 @@ mod delete_for_me_tests {
         assert_eq!(deleted, 2);
         // A message that is not here is no news.
         worker.delete_message_from_elsewhere(PN, PN, "unknown");
+        assert!(
+            !events
+                .try_iter()
+                .any(|event| matches!(event, Event::Error(_)))
+        );
+    }
+
+    /// WhatsApp echoes a "delete for me" from here back as an update, which
+    /// can remove the copy before the request's own answer arrives.
+    #[tokio::test]
+    async fn the_echo_of_an_own_deletion_is_no_error() {
+        let (mut worker, events, _, _) = receipt_tests::worker();
+        const CHAT: &str = "120363000000000001@g.us";
+        worker.archive.ensure_chat(CHAT, "Fixture").unwrap();
+        let row = Message {
+            chat: CHAT.into(),
+            ..receipt_tests::own_message("sticker", 100)
+        };
+        worker.archive.insert_message(&row, None).unwrap();
+        worker.delete_message_from_elsewhere(CHAT, CHAT, "sticker");
+        worker
+            .handle_command(Command::DeleteForMeSynced {
+                chat: CHAT.into(),
+                id: "sticker".into(),
+                result: Ok(()),
+            })
+            .await;
         assert!(
             !events
                 .try_iter()

@@ -1640,6 +1640,13 @@ pub enum Action {
     /// takes it, and says so when neither works.
     OpenLog(PathBuf),
     OpenFolder(PathBuf),
+    /// Downloads a document, then opens it or, with `save_as`, asks where
+    /// to save a copy.
+    DownloadDocument {
+        chat: ChatId,
+        message: String,
+        save_as: bool,
+    },
     /// Saves a copy of a downloaded attachment where the person chooses.
     SaveAttachmentAs {
         path: PathBuf,

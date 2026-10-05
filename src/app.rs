@@ -447,6 +447,10 @@ pub struct App {
     /// typed, to tell a Ctrl+V whose Ctrl came up before V from a typed V.
     command_seen_at: f64,
     text_typed_at: f64,
+    /// The V held down went down as typing: egui swallows a Ctrl+V press, so
+    /// a V press it reports was a typed V, and its release is no paste even
+    /// when Ctrl came down meanwhile.
+    v_typed: bool,
     /// Open emoji, GIF, or sticker picker tab.
     pub picker: Option<PickerTab>,
     /// Picker anchor at the composer button.
@@ -497,6 +501,9 @@ pub struct App {
     pub video_expanded: Option<String>,
     /// Video to play once its download finishes.
     video_wanted: Option<(ChatId, String)>,
+    /// Document to open, or to save a copy of (`true`), once its download
+    /// finishes.
+    document_wanted: Option<(ChatId, String, bool)>,
     /// Chat whose voice messages carry on into the next unheard one when a
     /// clip ends. Leaving the chat, or playing a video, ends the run.
     voice_chat: Option<ChatId>,
@@ -1160,6 +1167,7 @@ impl App {
             paste_before_release: false,
             command_seen_at: f64::NEG_INFINITY,
             text_typed_at: f64::NEG_INFINITY,
+            v_typed: false,
             picker: None,
             picker_anchor: None,
             picker_search: String::new(),
@@ -1185,6 +1193,7 @@ impl App {
             video_chat: None,
             video_expanded: None,
             video_wanted: None,
+            document_wanted: None,
             voice_chat: None,
             voice_wanted: None,
             recording: None,
@@ -1434,6 +1443,7 @@ impl App {
         self.video.stop();
         self.video_chat = None;
         self.video_wanted = None;
+        self.document_wanted = None;
         self.voice_chat = None;
         self.voice_wanted = None;
         self.recording = None;
@@ -1889,7 +1899,7 @@ impl App {
         if crate::transcript::HAS_PRIMARY_SELECTION {
             ctx.add_plugin(crate::transcript::PrimaryTranscript::default());
         }
-        crate::theme::set_font(ctx, self.settings.font);
+        crate::theme::set_font(ctx, &self.settings.font);
         crate::theme::install(ctx);
         // Zoom stays in the settings, so egui must not change it behind the
         // app's back: the shortcuts below go through `Action::ZoomBy`.
@@ -3929,10 +3939,17 @@ impl App {
             .voice_wanted
             .as_ref()
             .is_some_and(|(wanted_chat, wanted, _)| wanted_chat == chat && wanted == id);
+        let want_document = self
+            .document_wanted
+            .as_ref()
+            .filter(|(wanted_chat, wanted, _)| wanted_chat == chat && wanted == id)
+            .map(|(_, _, save_as)| *save_as);
         let open = self.open_chat.as_deref() == Some(chat);
         // Playback waits belong to the account on screen.
         let want_video = want_video && !self.events_hidden;
         let want_voice = want_voice && !self.events_hidden;
+        let want_document = want_document.filter(|_| !self.events_hidden);
+        let mut document_name = None;
         let applied = {
             let Some(message) = self
                 .conversations
@@ -3948,6 +3965,12 @@ impl App {
                 Ok(path) => {
                     media.path = Some(path.clone());
                     media.state = MediaState::Idle;
+                    if want_document.is_some() {
+                        document_name = Some(crate::ui::conversation::attachment_name(
+                            &message.content,
+                            &path,
+                        ));
+                    }
                     Ok(path)
                 }
                 Err(error) => {
@@ -3963,9 +3986,21 @@ impl App {
                 }
             }
         };
+        if want_document.is_some() {
+            self.document_wanted = None;
+        }
         match applied {
             Ok(path) => {
-                if want_video {
+                if let Some(save_as) = want_document {
+                    self.actions.push(if save_as {
+                        Action::SaveAttachmentAs {
+                            path,
+                            name: document_name.unwrap_or_default(),
+                        }
+                    } else {
+                        Action::OpenFile(path)
+                    });
+                } else if want_video {
                     self.video_wanted = None;
                     self.actions.push(Action::PlayVideo {
                         message: id.to_owned(),
@@ -5144,6 +5179,18 @@ impl App {
                     message,
                 });
             }
+            Action::DownloadDocument {
+                chat,
+                message,
+                save_as,
+            } => {
+                self.document_wanted = Some((chat.clone(), message.clone(), save_as));
+                self.actions.push(Action::Download {
+                    card: None,
+                    chat,
+                    message,
+                });
+            }
             Action::PreviewImage(path) => {
                 if crate::safety::can_preview_image(&path) && path.is_file() {
                     self.image_preview = Some(PreviewState::new(path));
@@ -6309,9 +6356,9 @@ impl App {
                 self.apply_theme(ctx);
             }
             Action::SetFont(choice) => {
+                crate::theme::set_font(ctx, &choice);
                 self.settings.font = choice;
                 self.mark_settings_dirty();
-                crate::theme::set_font(ctx, choice);
                 ctx.request_repaint();
             }
             Action::SetInterfaceLanguage(choice) => {
@@ -7469,13 +7516,23 @@ impl App {
         // Ctrl+V goes down, so the paste is taken when V comes up. A Ctrl let
         // go a moment before V still asked for one: a typed V always brings
         // text with it, and Ctrl+V never does.
-        let (now, typed) = ctx.input(|input| {
+        let (now, typed, v_pressed) = ctx.input(|input| {
             (
                 input.time,
                 input
                     .events
                     .iter()
                     .any(|event| matches!(event, egui::Event::Text(_))),
+                input.events.iter().any(|event| {
+                    matches!(
+                        event,
+                        egui::Event::Key {
+                            key: egui::Key::V,
+                            pressed: true,
+                            ..
+                        }
+                    )
+                }),
             )
         });
         if command {
@@ -7488,7 +7545,15 @@ impl App {
             && !command
             && now - self.command_seen_at < CTRL_V_GRACE
             && self.text_typed_at < self.command_seen_at;
-        let paste = paste || late_release;
+        // Typing "v" and pressing Ctrl before V comes up (Ctrl+Backspace
+        // right after the word) is not Ctrl+V.
+        let typed_v = self.v_typed || v_pressed;
+        let paste = text || (!typed_v && (paste || late_release));
+        if released || !focused {
+            self.v_typed = false;
+        } else if v_pressed {
+            self.v_typed = true;
+        }
         // Shift+Insert pastes like Ctrl+V in the composer, a binding the
         // hint bar and the shortcut list leave out. Taking the key keeps the
         // text field from also seeing it.
@@ -7519,6 +7584,12 @@ impl App {
                 .is_some_and(Chat::can_send)
             && let Some(contents) = read_clipboard()
         {
+            // Names what took the paste, should one arrive unasked.
+            log::info!(
+                "clipboard paste: event={text} release={released} ctrl={command} \
+                 since_ctrl={:.2}s shift_insert={insert}",
+                now - self.command_seen_at
+            );
             // A browser can offer both pixels and its source URL, and a file
             // manager both paths and their text. Consume the text before the
             // composer sees it, keeping any existing caption.
@@ -8677,6 +8748,76 @@ mod tests {
             1
         );
         assert_eq!(app.pending.len(), 2, "a later image-only paste still works");
+    }
+
+    /// Runs a frame with `modifiers` held, an image on the clipboard.
+    fn typing_frame(
+        app: &mut App,
+        ctx: &egui::Context,
+        modifiers: egui::Modifiers,
+        mut events: Vec<egui::Event>,
+    ) {
+        events.insert(0, egui::Event::ModifiersChanged(modifiers));
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                app.take_clipboard_paste(ui.ctx(), || {
+                    clipboard_contents(|| None, || Some((2, 2, vec![200; 16])))
+                });
+                ui.add(
+                    egui::TextEdit::singleline(&mut app.composer)
+                        .id(egui::Id::new("composer-text")),
+                );
+                app.apply_actions(ui.ctx());
+            },
+        );
+        output.textures_delta.clear();
+    }
+
+    fn v_key(pressed: bool, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key {
+            key: egui::Key::V,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    #[test]
+    fn a_typed_v_whose_release_comes_with_ctrl_is_not_a_paste() {
+        let none = egui::Modifiers::NONE;
+        let ctrl = egui::Modifiers::COMMAND;
+        let (mut app, ctx) = clipboard_app();
+        app.composer.clear();
+        // V comes up while Ctrl is held.
+        typing_frame(
+            &mut app,
+            &ctx,
+            none,
+            vec![v_key(true, none), egui::Event::Text("v".into())],
+        );
+        typing_frame(&mut app, &ctx, ctrl, vec![]);
+        typing_frame(&mut app, &ctx, ctrl, vec![v_key(false, ctrl)]);
+        typing_frame(&mut app, &ctx, none, vec![]);
+        assert!(app.pending.is_empty());
+        // Ctrl comes up a moment before V.
+        typing_frame(
+            &mut app,
+            &ctx,
+            none,
+            vec![v_key(true, none), egui::Event::Text("v".into())],
+        );
+        typing_frame(&mut app, &ctx, ctrl, vec![]);
+        typing_frame(&mut app, &ctx, none, vec![v_key(false, none)]);
+        assert!(app.pending.is_empty(), "a typed V is not Ctrl+V");
+        // A real Ctrl+V, whose press egui swallows, still pastes.
+        typing_frame(&mut app, &ctx, ctrl, vec![]);
+        typing_frame(&mut app, &ctx, ctrl, vec![v_key(false, ctrl)]);
+        assert_eq!(app.pending.len(), 1);
     }
 
     #[test]
@@ -10886,6 +11027,78 @@ mod tests {
     }
 
     #[test]
+    fn a_document_clicked_before_download_opens_or_saves_once_it_arrives() {
+        let chat = "fixture@s.whatsapp.net";
+        for save_as in [false, true] {
+            let mut app = app();
+            let (backend, mut commands) = Backend::recording();
+            app.backend = backend;
+            let mut document = message(chat, "report", 1);
+            document.content = Content::Document {
+                media: Media {
+                    mime: "application/pdf".into(),
+                    size: 100,
+                    width: None,
+                    height: None,
+                    path: None,
+                    state: MediaState::Idle,
+                },
+                file_name: "Report.pdf".into(),
+                caption: None,
+                pages: None,
+            };
+            app.conversations
+                .entry(chat.into())
+                .or_default()
+                .merge(vec![document], false);
+            let ctx = egui::Context::default();
+            app.apply(
+                Action::DownloadDocument {
+                    chat: chat.into(),
+                    message: "report".into(),
+                    save_as,
+                },
+                &ctx,
+            );
+            app.apply_actions(&ctx);
+            assert!(matches!(commands.try_recv(), Ok(Command::Download { .. })));
+            let (backend, events) = Backend::detached();
+            app.backend = backend;
+            let path = PathBuf::from("/fixture/media/report.pdf");
+            events
+                .send(Event::Media {
+                    card: None,
+                    chat: chat.into(),
+                    message: "report".into(),
+                    result: Ok(path.clone()),
+                })
+                .unwrap();
+            app.handle_events();
+            let wanted: Vec<_> = app
+                .deferred_account_actions
+                .iter()
+                .map(|(_, action)| action)
+                .filter(|action| {
+                    matches!(
+                        action,
+                        Action::OpenFile(_) | Action::SaveAttachmentAs { .. }
+                    )
+                })
+                .collect();
+            assert_eq!(wanted.len(), 1);
+            if save_as {
+                assert!(matches!(
+                    wanted[0],
+                    Action::SaveAttachmentAs { path: saved, name } if *saved == path && name == "Report.pdf"
+                ));
+            } else {
+                assert!(matches!(wanted[0], Action::OpenFile(opened) if *opened == path));
+            }
+            assert!(app.document_wanted.is_none());
+        }
+    }
+
+    #[test]
     fn repeated_download_clicks_do_not_queue_more_requests() {
         let mut app = app();
         let (backend, mut commands) = Backend::recording();
@@ -11246,10 +11459,14 @@ mod tests {
         assert_eq!(app.settings.font, FontChoice::System);
         app.apply(Action::SetFont(FontChoice::Inter), &ctx);
         assert_eq!(app.settings.font, FontChoice::Inter);
-        assert!(!crate::theme::system_font_chosen());
+        assert_eq!(crate::theme::chosen_font(), FontChoice::Inter);
+        let family = FontChoice::Family("Fixture Sans".into());
+        app.apply(Action::SetFont(family.clone()), &ctx);
+        assert_eq!(app.settings.font, family);
+        assert_eq!(crate::theme::chosen_font(), family);
         app.apply(Action::SetFont(FontChoice::System), &ctx);
         assert_eq!(app.settings.font, FontChoice::System);
-        assert!(crate::theme::system_font_chosen());
+        assert_eq!(crate::theme::chosen_font(), FontChoice::System);
     }
 
     #[test]

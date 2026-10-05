@@ -65,24 +65,57 @@ impl ThemeChoice {
     }
 }
 
-/// The typeface the interface is drawn with.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+/// The typeface the interface is drawn with. Saved as `"inter"`,
+/// `"system"` or a family name.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "String", into = "String")]
 pub enum FontChoice {
     /// The bundled Inter, the same on every machine.
     #[default]
     Inter,
-    /// The platform's own interface font.
+    /// The platform's own interface font, shown under its family name.
     System,
+    /// An installed family, by name.
+    Family(String),
+}
+
+impl From<String> for FontChoice {
+    fn from(saved: String) -> Self {
+        match saved.as_str() {
+            "inter" => Self::Inter,
+            "system" => Self::System,
+            _ => Self::Family(saved),
+        }
+    }
+}
+
+impl From<FontChoice> for String {
+    fn from(choice: FontChoice) -> Self {
+        match choice {
+            FontChoice::Inter => "inter".to_owned(),
+            FontChoice::System => "system".to_owned(),
+            FontChoice::Family(family) => family,
+        }
+    }
 }
 
 impl FontChoice {
-    pub const ALL: [FontChoice; 2] = [Self::Inter, Self::System];
+    /// The choice for a family in the font menu: the platform's own family
+    /// stays [`Self::System`], so it follows the desktop.
+    pub fn for_family(family: &str) -> Self {
+        if crate::fonts::system_family().is_some_and(|system| system.eq_ignore_ascii_case(family)) {
+            Self::System
+        } else {
+            Self::Family(family.to_owned())
+        }
+    }
 
-    pub fn label(self) -> &'static str {
+    /// The name the font menu shows.
+    pub fn label(&self) -> String {
         match self {
-            Self::Inter => "Inter",
-            Self::System => "System",
+            Self::Inter => "Inter".to_owned(),
+            Self::System => crate::fonts::system_family().unwrap_or("Inter").to_owned(),
+            Self::Family(family) => family.clone(),
         }
     }
 }
@@ -1053,6 +1086,12 @@ mod tests {
         assert_eq!(chosen.font, FontChoice::System);
         let saved = serde_json::to_value(&chosen).unwrap();
         assert_eq!(saved["font"], "system");
+        let family: Settings = serde_json::from_str(r#"{"font":"Noto Sans"}"#).unwrap();
+        assert_eq!(family.font, FontChoice::Family("Noto Sans".into()));
+        let saved = serde_json::to_value(&family).unwrap();
+        assert_eq!(saved["font"], "Noto Sans");
+        let inter: Settings = serde_json::from_str(r#"{"font":"inter"}"#).unwrap();
+        assert_eq!(inter.font, FontChoice::Inter);
     }
 
     #[test]

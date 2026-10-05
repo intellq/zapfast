@@ -7567,6 +7567,7 @@ fn attachment(
 ) {
     let palette = view.palette;
     let cancel_ring = std::cell::Cell::new(None);
+    let save_button = std::cell::Cell::new(None);
     let response = Frame::new()
         .fill(palette.window.gamma_multiply(0.35))
         .corner_radius(CornerRadius::same(8))
@@ -7604,14 +7605,16 @@ fn attachment(
                     theme::paint_icon(ui, Icon::X, ring, 11.0, palette.accent);
                     cancel_ring.set(Some(ring));
                 }
-                (Some(_), _) => {
-                    theme::icon(ui, Icon::ExternalLink, 18.0, palette.secondary);
-                }
                 (None, MediaState::Downloading) => {
                     theme::spinner(ui, 18.0, palette.accent);
                 }
-                (None, _) => {
-                    theme::icon(ui, Icon::Download, 18.0, palette.secondary);
+                // Saves a copy where the person chooses, downloading first
+                // when needed; the rest of the card opens the file.
+                _ => {
+                    // As wide as the icon: the row is laid out to the card's width.
+                    let (slot, _) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
+                    theme::paint_icon(ui, Icon::Download, slot, 18.0, palette.secondary);
+                    save_button.set(Some(slot));
                 }
             };
             let column = |ui: &mut egui::Ui| {
@@ -7685,22 +7688,34 @@ fn attachment(
         .on_hover_text(tr("Cancel sending"))
         .clicked()
     });
+    let save = !cancelled
+        && save_button.get().is_some_and(|slot| {
+            ui.interact(
+                slot.expand(6.0),
+                ui.id().with(("save-attachment", &message.id)),
+                Sense::click(),
+            )
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text(tr("Save as…"))
+            .clicked()
+        });
     if cancelled {
         actions.push(Action::CancelMedia {
             chat: view.chat.id.clone(),
             message: message.id.clone(),
         });
-    } else if response.clicked() && !auto && !media_sending(view, message) {
+    } else if (save || response.clicked()) && !media_sending(view, message) {
         match &media.path {
+            Some(path) if save => actions.push(Action::SaveAttachmentAs {
+                path: path.clone(),
+                name: attachment_name(&message.content, path),
+            }),
             Some(path) => actions.push(Action::OpenFile(path.clone())),
-            None if !matches!(media.state, MediaState::Downloading) => {
-                actions.push(Action::Download {
-                    card: None,
-                    chat: view.chat.id.clone(),
-                    message: message.id.clone(),
-                })
-            }
-            None => {}
+            None => actions.push(Action::DownloadDocument {
+                chat: view.chat.id.clone(),
+                message: message.id.clone(),
+                save_as: save,
+            }),
         }
     }
 }
@@ -8624,7 +8639,7 @@ fn selection_bar(app: &mut App, ui: &mut egui::Ui, chat: &str, selected: &[Strin
 /// The file name to suggest when saving an attachment: the sender's name for
 /// documents, the cached file's name otherwise. Path separators are dropped so
 /// a crafted name cannot point the dialog somewhere else.
-fn attachment_name(content: &Content, path: &Path) -> String {
+pub(crate) fn attachment_name(content: &Content, path: &Path) -> String {
     let name = match content {
         Content::Document { file_name, .. } if !file_name.trim().is_empty() => file_name.clone(),
         _ => path

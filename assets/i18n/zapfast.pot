@@ -4810,7 +4810,7 @@ msgid "Font"
 msgstr ""
 
 #: src/ui/settings.rs
-msgid "System is your desktop's interface font. Inter looks the same on every computer."
+msgid "Inter looks the same on every computer. The others are installed on this one."
 msgstr ""
 
 #: src/ui/chats.rs

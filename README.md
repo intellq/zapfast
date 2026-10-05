@@ -551,6 +551,25 @@ Da sincronização com o upstream 0.18.2:
   fim ao enviar, para mostrá-la. `Shift+Insert` cola, como `Ctrl+V`, no
   compositor.
 
+Desde a 0.19.1 (ainda sem release):
+
+- **Fonte da interface** (**Configurações › Aparência**): o menu lista a Inter
+  e, em ordem alfabética, as fontes desta seleção que estiverem instaladas
+  (Adwaita Sans, Cantarell, Carlito, Hack, Liberation Sans, Liberation Serif,
+  Nimbus Sans, Noto Sans, Noto Serif, Open Sans), mais a fonte padrão do
+  sistema pelo nome, se não for uma delas. Não há mais o item "Sistema"; numa
+  instalação nova vale a fonte padrão do sistema. No KDE ela é a fonte
+  configurada no Plasma (Noto Sans, se não foi trocada), e não a Adwaita Sans
+  que o fontconfig dá para `system-ui`, cujos dois pontos sobem antes de
+  maiúsculas e números.
+- **Documentos:** clicar no card baixa (se preciso) e abre o arquivo; o ícone
+  de download do card baixa (se preciso) e pergunta onde salvar a cópia.
+- A imagem copiada não aparece mais colada no meio da digitação: uma letra V
+  digitada não conta como `Ctrl+V` quando o Ctrl surge antes de soltá-la
+  (como acontece com teclados virtuais de acesso remoto).
+- "Apagar para mim" não mostra mais "A mensagem não está mais disponível"
+  quando o eco da própria exclusão chega antes da confirmação do WhatsApp.
+
 Na 0.19.1:
 
 - **Várias contas do WhatsApp na mesma janela** (do upstream, #334). Clique na

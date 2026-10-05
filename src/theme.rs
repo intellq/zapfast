@@ -507,42 +507,69 @@ pub fn apply(ctx: &egui::Context, palette: &Palette) {
     ctx.set_global_style(style);
 }
 
-/// Whether the interface is drawn in the platform's font instead of the
-/// bundled Inter (Settings, Appearance, Font).
-static SYSTEM_FONT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The interface's typeface (Settings, Appearance, Font).
+static FONT: std::sync::Mutex<crate::settings::FontChoice> =
+    std::sync::Mutex::new(crate::settings::FontChoice::Inter);
 
 /// Chooses the interface's typeface and installs it. Call it before
 /// [`install`] with the saved choice, and again when the choice changes.
-pub fn set_font(ctx: &egui::Context, font: crate::settings::FontChoice) {
-    let system = font == crate::settings::FontChoice::System;
-    if SYSTEM_FONT.swap(system, std::sync::atomic::Ordering::AcqRel) != system {
+pub fn set_font(ctx: &egui::Context, font: &crate::settings::FontChoice) {
+    let changed = FONT.lock().is_ok_and(|mut chosen| {
+        let changed = *chosen != *font;
+        chosen.clone_from(font);
+        changed
+    });
+    if changed {
         install_fonts(ctx);
     }
 }
 
-/// Whether the platform's font is the chosen typeface.
+/// The chosen typeface.
 #[cfg(test)]
-pub fn system_font_chosen() -> bool {
-    SYSTEM_FONT.load(std::sync::atomic::Ordering::Acquire)
+pub fn chosen_font() -> crate::settings::FontChoice {
+    FONT.lock().map(|chosen| chosen.clone()).unwrap_or_default()
 }
 
-/// The typeface the interface is asked to draw with: the setting's, and
-/// always Inter in tests, so layouts do not depend on the machine.
-fn primary_font() -> fastframe_fonts::Primary {
-    if !cfg!(test) && SYSTEM_FONT.load(std::sync::atomic::Ordering::Acquire) {
-        fastframe_fonts::Primary::System
-    } else {
-        fastframe_fonts::Primary::Inter
+/// What draws the interface: fastframe-fonts' face, and an installed
+/// family's weights put in its place. Always Inter in tests, so layouts do
+/// not depend on the machine.
+fn primary_font() -> (
+    fastframe_fonts::Primary,
+    Option<std::sync::Arc<Vec<std::sync::Arc<egui::FontData>>>>,
+) {
+    use crate::settings::FontChoice;
+    use fastframe_fonts::Primary;
+    let chosen = FONT.lock().map(|chosen| chosen.clone()).unwrap_or_default();
+    if cfg!(test) {
+        return (Primary::Inter, None);
+    }
+    match chosen {
+        FontChoice::Inter => (Primary::Inter, None),
+        // fastframe-fonts knows Windows' Segoe UI faces and the message font.
+        FontChoice::System if cfg!(windows) => (Primary::System, None),
+        FontChoice::System => match crate::fonts::system_family().and_then(crate::fonts::faces) {
+            Some(faces) => (Primary::Inter, Some(faces)),
+            None => (Primary::System, None),
+        },
+        FontChoice::Family(family) => (Primary::Inter, crate::fonts::faces(&family)),
     }
 }
 
-/// The chosen interface font at four weights (Inter, or the platform's
-/// where it can be found), egui's own fonts behind it, and installed fonts
-/// for the scripts it lacks, hinted as the desktop asks.
+/// The chosen interface font at four weights (Inter, the platform's, or an
+/// installed family, where it can be found), egui's own fonts behind it,
+/// and installed fonts for the scripts it lacks, hinted as the desktop asks.
 fn install_fonts(ctx: &egui::Context) {
+    let (primary, faces) = primary_font();
     let mut fonts = fastframe_fonts::FontSetup::default()
-        .primary(primary_font())
+        .primary(primary)
         .definitions();
+    if let Some(faces) = faces {
+        for (weight, data) in fastframe_fonts::Weight::ALL.iter().zip(faces.iter()) {
+            if let Some(slot) = fonts.font_data.get_mut(weight.name()) {
+                slot.clone_from(data);
+            }
+        }
+    }
     text_rendering().apply_to(&mut fonts);
     ctx.set_fonts(fonts);
 }

@@ -429,7 +429,7 @@ fn sections(app: &App) -> Vec<Section> {
         translated(locale, "Font"),
         translated(
             locale,
-            "System is your desktop's interface font. Inter looks the same on every computer.",
+            "Inter looks the same on every computer. The others are installed on this one.",
         ),
         220.0,
         font_picker,
@@ -1694,22 +1694,22 @@ fn windows_video_row(chats: &mut Section, locale: Locale) {
 /// The website's page on writing a theme.
 const THEMES_GUIDE: &str = "https://zapfast.rocks/themes/";
 
-/// The interface font menu.
+/// The interface font menu: Inter, then the families installed here.
 fn font_picker(ui: &mut egui::Ui, app: &mut App) {
     use crate::settings::FontChoice;
     let palette = app.palette;
-    let selected = app.settings.font;
-    // "Inter" is a name; "System" is a word.
-    let label = |choice: FontChoice| match choice {
-        FontChoice::System => crate::i18n::gettext(app.locale, choice.label()).into_owned(),
-        FontChoice::Inter => choice.label().to_owned(),
-    };
+    let selected = app.settings.font.clone();
     let response = egui::ComboBox::from_id_salt("interface_font")
-        .selected_text(label(selected))
+        .selected_text(selected.label())
         .width(200.0_f32.min(ui.available_width()))
         .show_ui(ui, |ui| {
-            for choice in FontChoice::ALL {
-                if theme_option(ui, &palette, &label(choice), selected == choice) {
+            let choices = std::iter::once(FontChoice::Inter).chain(
+                crate::fonts::installed()
+                    .iter()
+                    .map(|family| FontChoice::for_family(family)),
+            );
+            for choice in choices {
+                if theme_option(ui, &palette, &choice.label(), selected == choice) {
                     app.actions.push(Action::SetFont(choice));
                 }
             }
