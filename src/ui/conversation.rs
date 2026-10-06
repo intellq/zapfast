@@ -1394,7 +1394,9 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                                     labels.extend([learn.as_ref(), ignore.as_ref(), none.as_ref()]);
                                     labels.extend(suggestions.iter().map(String::as_str));
                                 }
-                                let menu_width = widgets::menu_width(ui, &labels, false);
+                                // "Add to dictionary" and "Ignore" carry icons.
+                                let menu_width =
+                                    widgets::menu_width(ui, &labels, spell_menu.is_some());
                                 egui::Popup::context_menu(&response)
                                     .width(menu_width)
                                     .frame(widgets::menu_frame(&palette))
