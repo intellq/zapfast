@@ -267,7 +267,13 @@ impl Buttons<'_> {
         } else {
             (Icon::ZoomOut, tr("Fit to the window (0)"), Action::FitImage)
         };
-        // Left to right: zoom, copy, open.
+        let name = self
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("image.png")
+            .to_owned();
+        // Left to right: zoom, copy, save, open.
         let buttons = [
             ("image-zoom", zoom_icon, zoom_hint.to_owned(), zoom_action),
             (
@@ -275,6 +281,15 @@ impl Buttons<'_> {
                 Icon::Copy,
                 copy_hint,
                 Action::CopyImage(self.path.to_owned()),
+            ),
+            (
+                "image-save",
+                Icon::Download,
+                crate::i18n::gettext(self.locale, "Save as…").into_owned(),
+                Action::SaveAttachmentAs {
+                    path: self.path.to_owned(),
+                    name,
+                },
             ),
             (
                 "image-open",

@@ -250,6 +250,20 @@ pub(crate) struct RowHeight {
     pub pass: Option<u64>,
 }
 
+/// Attachments of selected messages saved together: those already on disk,
+/// and the messages whose downloads are still running.
+#[derive(Debug, Default)]
+struct BatchSave {
+    chat: ChatId,
+    waiting: Vec<String>,
+    ready: Vec<(PathBuf, String)>,
+    /// The words of the selected messages without attachments, for a text
+    /// file: its name and contents.
+    text: Option<(String, String)>,
+    /// Attachments that could not be downloaded and are left out.
+    failed: usize,
+}
+
 /// A message the reader jumped to that is still on its way from the archive.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JumpLoad {
@@ -489,6 +503,11 @@ pub struct App {
     pub player: Player,
     /// Transcribes voice messages on this computer.
     pub transcriber: crate::transcribe::Transcriber,
+    /// The composer's spell checker.
+    pub spelling: crate::spell::Spelling,
+    /// The misspelled word the composer's menu opened on: its character range, the word, and
+    /// the corrections offered.
+    pub spell_menu: Option<(usize, usize, String, Vec<String>)>,
     /// Transcripts of voice messages, by chat and message id.
     pub transcripts: HashMap<crate::transcribe::Key, crate::transcribe::Transcript>,
     /// Transcripts folded away under their message.
@@ -504,6 +523,8 @@ pub struct App {
     /// Document to open, or to save a copy of (`true`), once its download
     /// finishes.
     document_wanted: Option<(ChatId, String, bool)>,
+    /// Attachments of selected messages being gathered to save together.
+    batch_save: Option<BatchSave>,
     /// Chat whose voice messages carry on into the next unheard one when a
     /// clip ends. Leaving the chat, or playing a video, ends the run.
     voice_chat: Option<ChatId>,
@@ -1096,6 +1117,7 @@ impl App {
         let locale = crate::i18n::resolve(settings.interface_language);
         crate::i18n::set_current(locale);
         let transcriber = crate::transcribe::Transcriber::new(dirs.whisper_dir(), waker.clone());
+        let spelling = crate::spell::Spelling::new(dirs.dictionary_dir());
         // With a password set, ZapFast starts locked.
         let app_lock = crate::app_lock::AppLock::new(settings.app_lock_hash.is_some());
         let mut app = Self {
@@ -1187,6 +1209,8 @@ impl App {
             composer_tools_open: false,
             player: Player::new(waker.clone()),
             transcriber,
+            spelling,
+            spell_menu: None,
             transcripts: HashMap::new(),
             transcripts_folded: HashSet::new(),
             video: crate::video::Player::new(waker.clone()),
@@ -1194,6 +1218,7 @@ impl App {
             video_expanded: None,
             video_wanted: None,
             document_wanted: None,
+            batch_save: None,
             voice_chat: None,
             voice_wanted: None,
             recording: None,
@@ -1299,6 +1324,9 @@ impl App {
         app.settings.voice_speed = app.player.set_speed(app.settings.voice_speed);
         app.video
             .use_ffmpeg(app.settings.ffmpeg_video, app.settings.ffmpeg_gpu);
+        if app.settings.spell_check {
+            app.spelling.start(app.waker.clone());
+        }
         app
     }
 
@@ -1445,6 +1473,7 @@ impl App {
         self.video_chat = None;
         self.video_wanted = None;
         self.document_wanted = None;
+        self.batch_save = None;
         self.voice_chat = None;
         self.voice_wanted = None;
         self.recording = None;
@@ -3961,7 +3990,13 @@ impl App {
         let want_video = want_video && !self.events_hidden;
         let want_voice = want_voice && !self.events_hidden;
         let want_document = want_document.filter(|_| !self.events_hidden);
+        let want_batch = card.is_none()
+            && self
+                .batch_save
+                .as_ref()
+                .is_some_and(|batch| batch.chat == chat && batch.waiting.iter().any(|w| w == id));
         let mut document_name = None;
+        let mut batch_name = None;
         let applied = {
             let Some(message) = self
                 .conversations
@@ -3983,6 +4018,12 @@ impl App {
                             &path,
                         ));
                     }
+                    if want_batch {
+                        batch_name = Some(crate::ui::conversation::attachment_name(
+                            &message.content,
+                            &path,
+                        ));
+                    }
                     Ok(path)
                 }
                 Err(error) => {
@@ -4000,6 +4041,14 @@ impl App {
         };
         if want_document.is_some() {
             self.document_wanted = None;
+        }
+        if want_batch && let Some(batch) = self.batch_save.as_mut() {
+            batch.waiting.retain(|waiting| waiting != id);
+            match (&applied, batch_name) {
+                (Ok(path), Some(name)) => batch.ready.push((path.clone(), name)),
+                _ => batch.failed += 1,
+            }
+            self.finish_batch_save();
         }
         match applied {
             Ok(path) => {
@@ -4033,6 +4082,37 @@ impl App {
                     self.voice_wanted = None;
                 }
             }
+        }
+    }
+
+    /// Once every selected attachment is on disk, asks where to save them,
+    /// with the text file when there is one: a file dialog for a single
+    /// item, a folder for several.
+    fn finish_batch_save(&mut self) {
+        if self
+            .batch_save
+            .as_ref()
+            .is_none_or(|batch| !batch.waiting.is_empty())
+        {
+            return;
+        }
+        let Some(mut batch) = self.batch_save.take() else {
+            return;
+        };
+        if batch.failed > 0 {
+            self.toast(
+                tr("Attachments left out because they could not be downloaded: {count}")
+                    .replace("{count}", &batch.failed.to_string()),
+            );
+        }
+        if batch.ready.len() == 1 && batch.text.is_none() {
+            let (path, name) = batch.ready.remove(0);
+            self.actions.push(Action::SaveAttachmentAs { path, name });
+        } else if !batch.ready.is_empty() || batch.text.is_some() {
+            self.backend.send(Command::SaveBatch {
+                files: batch.ready,
+                text: batch.text,
+            });
         }
     }
 
@@ -5208,6 +5288,54 @@ impl App {
                     chat,
                     message,
                 });
+            }
+            Action::SaveSelection { chat, messages } => {
+                let limit = self.settings.attachment_limit_bytes();
+                let transcript =
+                    crate::ui::conversation::selection_transcript(self, &chat, &messages);
+                let text = (!transcript.is_empty()).then(|| {
+                    let name = tr("Messages from {name}")
+                        .replace("{name}", &self.display_name(&chat))
+                        .replace(['/', '\\'], "_");
+                    (format!("{name}.txt"), transcript)
+                });
+                let Some(conversation) = self.conversations.get(&chat) else {
+                    return;
+                };
+                let mut batch = BatchSave {
+                    chat: chat.clone(),
+                    text,
+                    ..BatchSave::default()
+                };
+                // In chat order, so numbered names follow the conversation.
+                for message in conversation
+                    .messages
+                    .iter()
+                    .filter(|message| messages.contains(&message.id))
+                {
+                    let Some(media) = message.content.media() else {
+                        continue;
+                    };
+                    match &media.path {
+                        Some(path) => batch.ready.push((
+                            path.clone(),
+                            crate::ui::conversation::attachment_name(&message.content, path),
+                        )),
+                        None if media.is_within_download_limit(limit) => {
+                            batch.waiting.push(message.id.clone());
+                        }
+                        None => batch.failed += 1,
+                    }
+                }
+                for message in &batch.waiting {
+                    self.actions.push(Action::Download {
+                        card: None,
+                        chat: chat.clone(),
+                        message: message.clone(),
+                    });
+                }
+                self.batch_save = Some(batch);
+                self.finish_batch_save();
             }
             Action::PreviewImage(path) => {
                 if crate::safety::can_preview_image(&path) && path.is_file() {
@@ -6418,6 +6546,46 @@ impl App {
                 self.backend.send(Command::RemoveWallpaperImage);
             }
             Action::ReloadThemes => self.load_custom_themes(),
+            Action::OpenDictionaryFolder => {
+                let directory = self.dirs.dictionary_dir();
+                std::thread::spawn(move || {
+                    if std::fs::create_dir_all(&directory).is_ok() {
+                        let _ = open::that(directory);
+                    }
+                });
+            }
+            Action::ReplaceComposerWord { start, end, with } => {
+                let chars: Vec<char> = self.composer.chars().collect();
+                if start > end || end > chars.len() {
+                    return;
+                }
+                self.composer = chars[..start]
+                    .iter()
+                    .chain(with.chars().collect::<Vec<_>>().iter())
+                    .chain(chars[end..].iter())
+                    .collect();
+                let id = egui::Id::new("composer-text");
+                let mut state = egui::TextEdit::load_state(ctx, id).unwrap_or_default();
+                let caret = egui::text::CCursor::new(start + with.chars().count());
+                state
+                    .cursor
+                    .set_char_range(Some(egui::text::CCursorRange::one(caret)));
+                egui::TextEdit::store_state(ctx, id, state);
+                self.composer_menu_selection = None;
+                ctx.memory_mut(|memory| memory.request_focus(id));
+            }
+            Action::LearnWord(word) => {
+                if let Some(speller) = self.spelling.ready()
+                    && let Err(error) = speller.learn(&word)
+                {
+                    log::warn!("could not save the word to the personal dictionary: {error}");
+                }
+            }
+            Action::IgnoreWord(word) => {
+                if let Some(speller) = self.spelling.ready() {
+                    speller.ignore(&word);
+                }
+            }
             Action::OpenEmojiFontFolder => {
                 let directory = self.dirs.emoji_font_dir();
                 std::thread::spawn(move || {
@@ -6479,6 +6647,14 @@ impl App {
             }
             Action::SettingsChanged => {
                 self.mark_settings_dirty();
+                // Turning spell checking on looks for a dictionary again.
+                if self.settings.spell_check != self.spelling.is_started() {
+                    if self.settings.spell_check {
+                        self.spelling.start(self.waker.clone());
+                    } else {
+                        self.spelling.stop();
+                    }
+                }
                 self.video
                     .use_ffmpeg(self.settings.ffmpeg_video, self.settings.ffmpeg_gpu);
                 crate::emoji::use_whatsapp(
@@ -11181,6 +11357,70 @@ mod tests {
             }
             assert!(app.document_wanted.is_none());
         }
+    }
+
+    #[test]
+    fn saving_selected_pictures_saves_them_all_once_downloaded() {
+        let chat = "fixture@s.whatsapp.net";
+        let mut app = app();
+        let (backend, mut commands) = Backend::recording();
+        app.backend = backend;
+        let picture = |id: &str, at: i64, path: Option<&str>| {
+            let mut picture = message(chat, id, at);
+            picture.content = Content::Image {
+                media: Media {
+                    mime: "image/jpeg".into(),
+                    size: 100,
+                    width: None,
+                    height: None,
+                    path: path.map(PathBuf::from),
+                    state: MediaState::Idle,
+                },
+                caption: None,
+            };
+            picture
+        };
+        let text = message(chat, "words", 4);
+        app.conversations.entry(chat.into()).or_default().merge(
+            vec![
+                picture("one", 1, Some("/fixture/media/one.jpg")),
+                picture("two", 2, None),
+                picture("three", 3, Some("/fixture/media/three.jpg")),
+                text,
+                message(chat, "earliest", 0),
+            ],
+            false,
+        );
+        let ctx = egui::Context::default();
+        app.apply(
+            Action::SaveSelection {
+                chat: chat.into(),
+                messages: ["words", "one", "two", "three", "earliest"]
+                    .map(String::from)
+                    .to_vec(),
+            },
+            &ctx,
+        );
+        app.apply_actions(&ctx);
+        // The missing picture is fetched first; nothing is saved yet.
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(Command::Download { message, .. }) if message == "two"
+        ));
+        assert!(commands.try_recv().is_err());
+        app.handle_media(chat, "two", None, Ok(PathBuf::from("/fixture/media/two.jpg")));
+        let Ok(Command::SaveBatch { files, text }) = commands.try_recv() else {
+            panic!("the three pictures should be saved together");
+        };
+        let (name, words) = text.expect("the text message goes in a text file");
+        assert!(name.ends_with(".txt"), "{name}");
+        // Only the messages without attachments, oldest first.
+        let lines: Vec<_> = words.lines().collect();
+        assert_eq!(lines.len(), 2, "{words}");
+        assert!(lines[0].ends_with(": earliest") && lines[1].ends_with(": words"), "{words}");
+        let names: Vec<_> = files.iter().map(|(_, name)| name.as_str()).collect();
+        assert_eq!(names, ["one.jpg", "three.jpg", "two.jpg"]);
+        assert!(app.batch_save.is_none());
     }
 
     #[test]

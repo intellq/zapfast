@@ -1652,6 +1652,13 @@ pub enum Action {
         path: PathBuf,
         name: String,
     },
+    /// Saves the selected messages where the person chooses: their
+    /// attachments, downloading the missing ones first, and the words of
+    /// the others in one text file, in chat order.
+    SaveSelection {
+        chat: ChatId,
+        messages: Vec<String>,
+    },
     OpenUrl(String),
     CopyText(String),
     ComposerTextCommand(ComposerTextCommand),
@@ -1888,6 +1895,18 @@ pub enum Action {
     OpenThemesFolder,
     /// Opens the folder ZapFast reads a WhatsApp emoji font from.
     OpenEmojiFontFolder,
+    /// Opens the folder ZapFast reads a spelling dictionary from.
+    OpenDictionaryFolder,
+    /// Puts a correction in place of a word in the composer (character offsets).
+    ReplaceComposerWord {
+        start: usize,
+        end: usize,
+        with: String,
+    },
+    /// Adds a word to the personal dictionary.
+    LearnWord(String),
+    /// Lets a word pass the spell check until ZapFast closes.
+    IgnoreWord(String),
     SettingsChanged,
     /// Writes one WhatsApp account privacy category on the phone.
     SetAccountPrivacy {

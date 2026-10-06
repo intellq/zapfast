@@ -44,6 +44,9 @@ egui_extras = { version = "0.36", features = ["file", "image", "svg", "webp", "g
 # Reads the colour emoji font's bitmaps and ligatures. Keep skrifa aligned with
 # epaint to avoid compiling two versions.
 skrifa = "0.44"
+# Spell checking in the composer with Hunspell dictionaries the user or the
+# system provides.
+spellbook = "0.3"
 # Decodes JPEG, PNG, WebP, and GIF images.
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
 # WhatsApp Web protocol: pairing, encryption, history sync, and media. Version

@@ -498,6 +498,13 @@ pub enum Command {
         source: std::path::PathBuf,
         name: String,
     },
+    /// Saves attachments, and optionally a text file (name, contents): one
+    /// item asks for a file name, several for a folder, where each goes under
+    /// its name, numbering a name already taken.
+    SaveBatch {
+        files: Vec<(std::path::PathBuf, String)>,
+        text: Option<(String, String)>,
+    },
     /// Opens the log, or shows it in its folder, off the interface thread;
     /// only a failure reports back.
     OpenLog(PathBuf),

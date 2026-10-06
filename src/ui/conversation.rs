@@ -1267,6 +1267,34 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                                     let rect = bounds.translate(output.galley_pos.to_vec2());
                                     crate::emoji::paint_cluster(ui, cluster, rect);
                                 }
+                                // Misspelled words get a wavy underline, except the one
+                                // still being typed.
+                                let speller = app
+                                    .settings
+                                    .spell_check
+                                    .then(|| app.spelling.ready())
+                                    .flatten();
+                                if let Some(speller) = &speller {
+                                    let caret = output
+                                        .response
+                                        .response
+                                        .has_focus()
+                                        .then(|| output.cursor_range.map(|range| range.primary.index.0))
+                                        .flatten();
+                                    for (start, end) in speller.misspelled(&app.composer) {
+                                        if caret == Some(end) {
+                                            continue;
+                                        }
+                                        paint_misspelling(
+                                            ui,
+                                            &output.galley,
+                                            output.galley_pos,
+                                            start,
+                                            end,
+                                            palette.danger,
+                                        );
+                                    }
+                                }
                                 // The row was sized from last frame's text. When a
                                 // keystroke wraps or unwraps a line, lay the frame
                                 // out again instead of showing the field a frame
@@ -1317,6 +1345,34 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                                     app.composer_menu_selection =
                                         selection_before.filter(|range| !range.is_empty());
                                 }
+                                // The menu offers corrections for the misspelled word it
+                                // opened on.
+                                if secondary_press
+                                    || (response.secondary_clicked() && app.spell_menu.is_none())
+                                {
+                                    let pointer = ui.input(|input| input.pointer.latest_pos());
+                                    app.spell_menu = speller.as_ref().zip(pointer).and_then(
+                                        |(speller, pointer)| {
+                                            let at = output
+                                                .galley
+                                                .cursor_from_pos(pointer - output.galley_pos)
+                                                .index
+                                                .0;
+                                            let (start, end) = speller
+                                                .misspelled(&app.composer)
+                                                .into_iter()
+                                                .find(|&(start, end)| start <= at && at <= end)?;
+                                            let word: String = app
+                                                .composer
+                                                .chars()
+                                                .skip(start)
+                                                .take(end - start)
+                                                .collect();
+                                            let suggestions = speller.suggest(&word);
+                                            Some((start, end, word, suggestions))
+                                        },
+                                    );
+                                }
                                 if (secondary_press || response.secondary_clicked())
                                     && app.composer_menu_selection.is_some()
                                 {
@@ -1329,15 +1385,42 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                                 let copy = crate::i18n::gettext(app.locale, "Copy");
                                 let paste = crate::i18n::gettext(app.locale, "Paste");
                                 let select_all = crate::i18n::gettext(app.locale, "Select all");
-                                let menu_width = widgets::menu_width(
-                                    ui,
-                                    &[&cut, &copy, &paste, &select_all],
-                                    false,
-                                );
+                                let learn = crate::i18n::gettext(app.locale, "Add to dictionary");
+                                let ignore = crate::i18n::gettext(app.locale, "Ignore");
+                                let none = crate::i18n::gettext(app.locale, "No suggestions");
+                                let spell_menu = app.spell_menu.clone();
+                                let mut labels: Vec<&str> = vec![&cut, &copy, &paste, &select_all];
+                                if let Some((_, _, _, suggestions)) = &spell_menu {
+                                    labels.extend([learn.as_ref(), ignore.as_ref(), none.as_ref()]);
+                                    labels.extend(suggestions.iter().map(String::as_str));
+                                }
+                                let menu_width = widgets::menu_width(ui, &labels, false);
                                 egui::Popup::context_menu(&response)
                                     .width(menu_width)
                                     .frame(widgets::menu_frame(&palette))
                                     .show(|ui| {
+                                        if let Some((start, end, word, suggestions)) = &spell_menu {
+                                            for suggestion in suggestions {
+                                                if widgets::menu_item(ui, &palette, None, suggestion) {
+                                                    app.actions.push(Action::ReplaceComposerWord {
+                                                        start: *start,
+                                                        end: *end,
+                                                        with: suggestion.clone(),
+                                                    });
+                                                }
+                                            }
+                                            if suggestions.is_empty() {
+                                                widgets::menu_item_enabled(ui, &palette, None, &none, false);
+                                            }
+                                            widgets::menu_separator(ui, &palette);
+                                            if widgets::menu_item(ui, &palette, Some(Icon::Plus), &learn) {
+                                                app.actions.push(Action::LearnWord(word.clone()));
+                                            }
+                                            if widgets::menu_item(ui, &palette, Some(Icon::EyeOff), &ignore) {
+                                                app.actions.push(Action::IgnoreWord(word.clone()));
+                                            }
+                                            widgets::menu_separator(ui, &palette);
+                                        }
                                         for (label, command, enabled) in [
                                             (&cut, ComposerTextCommand::Cut, selected),
                                             (&copy, ComposerTextCommand::Copy, selected),
@@ -4846,9 +4929,16 @@ fn context_menu(ui: &mut egui::Ui, view: &View<'_>, message: &Message, actions: 
                     actions.push(Action::CopyImage(path.clone()));
                 }
                 if widgets::menu_item(ui, &palette, Some(Icon::Download), tr("Save as…")) {
-                    actions.push(Action::SaveAttachmentAs {
-                        path: path.clone(),
-                        name: attachment_name(&message.content, path),
+                    actions.push(if group.len() > 1 {
+                        Action::SaveSelection {
+                            chat: chat.clone(),
+                            messages: group.clone(),
+                        }
+                    } else {
+                        Action::SaveAttachmentAs {
+                            path: path.clone(),
+                            name: attachment_name(&message.content, path),
+                        }
                     });
                 }
                 if let Some(folder) = path.parent()
@@ -4874,6 +4964,16 @@ fn context_menu(ui: &mut egui::Ui, view: &View<'_>, message: &Message, actions: 
                         card: None,
                         chat: chat.clone(),
                         message: message.id.clone(),
+                    });
+                }
+                // Among several selected messages, saving still takes them
+                // all, downloading what is missing first.
+                if group.len() > 1
+                    && widgets::menu_item(ui, &palette, Some(Icon::Download), tr("Save as…"))
+                {
+                    actions.push(Action::SaveSelection {
+                        chat: chat.clone(),
+                        messages: group.clone(),
                     });
                 }
             }
@@ -8489,44 +8589,71 @@ pub(crate) fn selection_text(app: &App, chat: &str, selected: &[String]) -> Stri
         .iter()
         .filter(|message| selected.contains(&message.id))
         .collect();
-    let body = |message: &Message| -> String {
-        let mentions: Vec<markup::Mention> = message
-            .mentions
-            .iter()
-            .map(|mention| markup::Mention {
-                user: mention.user.clone(),
-                name: app.mention_name(&mention.id),
-            })
-            .collect();
-        let text = copyable_text(&message.content)
-            .map(|text| markup::plain(&text, &mentions))
-            .unwrap_or_default();
-        match (content_marker(&message.content), text.is_empty()) {
-            (Some(marker), true) => marker,
-            (Some(marker), false) => format!("{marker} {text}"),
-            (None, _) => text,
-        }
-    };
     if let [only] = picked.as_slice() {
-        return body(only);
+        return message_body(app, only);
     }
     picked
         .iter()
-        .map(|message| {
-            let who = if message.from_me {
-                app.mention_name(&message.sender)
-            } else {
-                app.display_name_or(&message.sender, message.sender_name.as_deref())
-            };
-            format!(
-                "[{}] {}: {}",
-                crate::util::copy_stamp(message.timestamp),
-                who,
-                body(message)
-            )
-        })
+        .map(|message| headed_line(app, message))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// The selected messages without an attachment, in chat order and headed
+/// with their time and sender, for the text file saved with a selection.
+/// Empty when none of them has words of its own.
+pub(crate) fn selection_transcript(app: &App, chat: &str, selected: &[String]) -> String {
+    let Some(conversation) = app.conversations.get(chat) else {
+        return String::new();
+    };
+    let lines: Vec<String> = conversation
+        .messages
+        .iter()
+        .filter(|message| selected.contains(&message.id) && message.content.media().is_none())
+        .filter(|message| !message_body(app, message).trim().is_empty())
+        .map(|message| headed_line(app, message))
+        .collect();
+    if lines.is_empty() {
+        String::new()
+    } else {
+        lines.join("\n") + "\n"
+    }
+}
+
+/// A message's words, with mentions spelled out and a marker such as
+/// "[photo]" for what is not text.
+fn message_body(app: &App, message: &Message) -> String {
+    let mentions: Vec<markup::Mention> = message
+        .mentions
+        .iter()
+        .map(|mention| markup::Mention {
+            user: mention.user.clone(),
+            name: app.mention_name(&mention.id),
+        })
+        .collect();
+    let text = copyable_text(&message.content)
+        .map(|text| markup::plain(&text, &mentions))
+        .unwrap_or_default();
+    match (content_marker(&message.content), text.is_empty()) {
+        (Some(marker), true) => marker,
+        (Some(marker), false) => format!("{marker} {text}"),
+        (None, _) => text,
+    }
+}
+
+/// "[time] sender: words", as a copy across several messages reads.
+fn headed_line(app: &App, message: &Message) -> String {
+    let who = if message.from_me {
+        app.mention_name(&message.sender)
+    } else {
+        app.display_name_or(&message.sender, message.sender_name.as_deref())
+    };
+    format!(
+        "[{}] {}: {}",
+        crate::util::copy_stamp(message.timestamp),
+        who,
+        message_body(app, message)
+    )
 }
 
 /// Replaces the composer while messages are selected.
@@ -8553,7 +8680,7 @@ fn selection_bar(app: &mut App, ui: &mut egui::Ui, chat: &str, selected: &[Strin
         };
         theme::text(ui, &count, theme::medium(14.5), palette.text);
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            // From the right: forward, copy, delete.
+            // From the right: forward, copy, delete, save.
             if theme::icon_button(
                 ui,
                 Icon::Forward,
@@ -8632,6 +8759,32 @@ fn selection_bar(app: &mut App, ui: &mut egui::Ui, chat: &str, selected: &[Strin
             } else if trash.clicked() {
                 confirm(app, false);
             }
+            // Attachments are saved as files; the words of the other
+            // messages go together in a text file.
+            let savable = app.conversations.get(chat).is_some_and(|conversation| {
+                selected.iter().any(|id| {
+                    conversation
+                        .message(id)
+                        .is_some_and(|message| message.content.media().is_some())
+                })
+            }) || !selection_transcript(app, chat, selected).is_empty();
+            ui.add_enabled_ui(savable, |ui| {
+                if theme::icon_button(
+                    ui,
+                    Icon::Download,
+                    18.0,
+                    palette.secondary,
+                    palette.text,
+                    tr("Save as…"),
+                )
+                .clicked()
+                {
+                    app.actions.push(Action::SaveSelection {
+                        chat: chat.to_owned(),
+                        messages: selected.to_vec(),
+                    });
+                }
+            });
         });
     });
 }
@@ -8672,6 +8825,43 @@ fn status_label(status: Delivery) -> &'static str {
 #[allow(dead_code)]
 fn chat_of(chat: &ChatId) -> &str {
     chat
+}
+
+
+/// A wavy underline below a misspelled word in the composer, row by row.
+fn paint_misspelling(
+    ui: &egui::Ui,
+    galley: &egui::Galley,
+    origin: egui::Pos2,
+    start: usize,
+    end: usize,
+    color: egui::Color32,
+) {
+    let mut rows: Vec<Rect> = Vec::new();
+    for index in start..end {
+        let Some(bounds) = crate::bidi::char_bounds(galley, index, index + 1) else {
+            continue;
+        };
+        match rows.last_mut() {
+            Some(row) if (row.bottom() - bounds.bottom()).abs() < 1.0 => *row = row.union(bounds),
+            _ => rows.push(bounds),
+        }
+    }
+    let stroke = egui::Stroke::new(1.0, color);
+    for row in rows {
+        let row = row.translate(origin.to_vec2());
+        let y = row.bottom() - 1.0;
+        let mut points = Vec::new();
+        let mut x = row.left();
+        let mut up = false;
+        while x < row.right() {
+            points.push(egui::pos2(x, if up { y - 1.5 } else { y }));
+            x += 2.0;
+            up = !up;
+        }
+        points.push(egui::pos2(row.right(), if up { y - 1.5 } else { y }));
+        ui.painter().add(egui::Shape::line(points, stroke));
+    }
 }
 
 #[cfg(test)]

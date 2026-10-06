@@ -556,6 +556,56 @@ fn sections(app: &App) -> Vec<Section> {
         ),
         |settings| &mut settings.emoji_shortcuts,
     );
+    chats.toggle(
+        translated(locale, "Check spelling"),
+        translated(
+            locale,
+            "Underlines misspelled words as you type, in Brazilian Portuguese. Right-click a word for corrections.",
+        ),
+        |settings| &mut settings.spell_check,
+    );
+    let (source, shown) = match app.spelling.status() {
+        crate::spell::Status::Off => {
+            let source = "Spell checking is off.";
+            (source, crate::i18n::gettext(locale, source).into_owned())
+        }
+        crate::spell::Status::Loading => {
+            let source = "Loading the dictionary…";
+            (source, crate::i18n::gettext(locale, source).into_owned())
+        }
+        crate::spell::Status::Ready(path) => {
+            let source = "Using {path}.";
+            (
+                source,
+                crate::i18n::gettext(locale, source).replace("{path}", &path.display().to_string()),
+            )
+        }
+        crate::spell::Status::Missing => {
+            let source = "No dictionary found, so spell checking is off. Put pt_BR.aff and pt_BR.dic in this folder, or install the system's Hunspell dictionary for Brazilian Portuguese, then turn spell checking off and on.";
+            (source, crate::i18n::gettext(locale, source).into_owned())
+        }
+        crate::spell::Status::Failed(error) => {
+            let source = "Could not read the dictionary: {error}";
+            (
+                source,
+                crate::i18n::gettext(locale, source).replace("{error}", &error),
+            )
+        }
+    };
+    chats.row_with_width(
+        translated(locale, "Dictionaries folder"),
+        Text {
+            shown: shown.into(),
+            source: source.into(),
+        },
+        160.0,
+        move |ui, app| {
+            let label = crate::i18n::gettext(app.locale, "Open folder");
+            if theme::soft_button(ui, &palette, Some(Icon::ExternalLink), &label, false).clicked() {
+                app.actions.push(Action::OpenDictionaryFolder);
+            }
+        },
+    );
     if cfg!(target_os = "linux") {
         ffmpeg_row(&mut chats, locale);
     }
@@ -2043,7 +2093,7 @@ fn account(app: &mut App, ui: &mut egui::Ui) {
             app.actions.push(Action::PickProfilePicture);
         }
         ui.vertical(|ui| {
-            ui.set_width((ui.available_width() - 380.0).max(160.0));
+            ui.set_width((ui.available_width() - 290.0).max(160.0));
             if let Some((draft_name, draft_about)) = &mut draft {
                 submitted |= profile_field(
                     ui,
@@ -2088,7 +2138,19 @@ fn account(app: &mut App, ui: &mut egui::Ui) {
                 theme::paragraph(ui, about, theme::regular(13.0), palette.secondary);
             }
         });
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+        // Stacked at the card's right edge: adding on top, unlinking below.
+        ui.with_layout(Layout::top_down(Align::Max), |ui| {
+            if theme::soft_button(
+                ui,
+                &palette,
+                Some(Icon::Plus),
+                &crate::i18n::gettext(app.locale, "Add account"),
+                false,
+            )
+            .clicked()
+            {
+                app.actions.push(Action::AddAccount);
+            }
             // With other numbers here, unlinking this one also takes it off
             // the switcher; the last one stays, waiting to be linked again.
             if app.has_several_accounts() {
@@ -2115,17 +2177,6 @@ fn account(app: &mut App, ui: &mut egui::Ui) {
             .clicked()
             {
                 app.actions.push(Action::ShowDialog(Dialog::ConfirmUnlink));
-            }
-            if theme::soft_button(
-                ui,
-                &palette,
-                Some(Icon::Plus),
-                &crate::i18n::gettext(app.locale, "Add account"),
-                false,
-            )
-            .clicked()
-            {
-                app.actions.push(Action::AddAccount);
             }
         });
     });

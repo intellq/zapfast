@@ -29,27 +29,30 @@ pub(crate) fn unhex(value: &str) -> Option<Vec<u8>> {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ThemeChoice {
-    #[default]
+    /// ZapFast's own blue-grey dark theme, "ZapFast dark". Saved as `dark`, so
+    /// whoever chose it before keeps it.
     Dark,
     // A light ZapZap theme existed briefly before release; it reads as Light.
     #[serde(alias = "zapzap-light")]
     Light,
     System,
     /// WhatsApp's dark colours as ZapZap, the Linux WhatsApp client, shows
-    /// them: neutral grey rather than ZapFast's blue-grey.
+    /// them: neutral grey rather than ZapFast's blue-grey. Listed as "Dark",
+    /// and the dark half of following the system.
+    #[default]
     #[serde(rename = "whatsapp-dark", alias = "zapzap-dark")]
     WhatsAppDark,
 }
 
 impl ThemeChoice {
-    pub const ALL: [ThemeChoice; 4] = [Self::System, Self::Light, Self::Dark, Self::WhatsAppDark];
+    pub const ALL: [ThemeChoice; 4] = [Self::System, Self::Light, Self::WhatsAppDark, Self::Dark];
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Dark => crate::i18n::n_("Dark"),
+            Self::Dark => crate::i18n::n_("ZapFast dark"),
             Self::Light => crate::i18n::n_("Light"),
             Self::System => crate::i18n::n_("Follow system"),
-            Self::WhatsAppDark => crate::i18n::n_("WhatsApp dark"),
+            Self::WhatsAppDark => crate::i18n::n_("Dark"),
         }
     }
 
@@ -58,9 +61,11 @@ impl ThemeChoice {
     pub fn palette(self, dark: bool) -> crate::theme::Palette {
         use crate::theme::Palette;
         match self {
+            Self::Dark => Palette::dark(),
             Self::WhatsAppDark => Palette::whatsapp_dark(),
-            _ if dark => Palette::dark(),
-            _ => Palette::light(),
+            Self::Light => Palette::light(),
+            Self::System if dark => Palette::whatsapp_dark(),
+            Self::System => Palette::light(),
         }
     }
 }
@@ -451,6 +456,8 @@ pub struct Settings {
     /// Whether typing `:` and a name suggests emoji that Enter or Tab puts in
     /// place of the text. Off, what is typed stays as typed.
     pub emoji_shortcuts: bool,
+    /// Whether the composer underlines misspelled words, when a dictionary is found.
+    pub spell_check: bool,
     /// Draw emoji with an installed WhatsApp emoji font instead of the
     /// desktop's (or the bundled) Noto Color Emoji.
     pub whatsapp_emoji: bool,
@@ -598,7 +605,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             version: SETTINGS_VERSION,
-            theme: ThemeChoice::Dark,
+            theme: ThemeChoice::WhatsAppDark,
             font: FontChoice::System,
             interface_language: None,
             custom_theme: None,
@@ -609,6 +616,7 @@ impl Default for Settings {
             search_pane_width: 380.0,
             enter_sends: true,
             emoji_shortcuts: false,
+            spell_check: true,
             whatsapp_emoji: false,
             ffmpeg_video: true,
             ffmpeg_gpu: true,
@@ -1088,6 +1096,31 @@ mod tests {
             serde_json::from_str(r#"{"font":"inter","message_sound":"receive"}"#).unwrap();
         assert_eq!(kept.font, FontChoice::Inter);
         assert_eq!(kept.message_sound, NotificationSound::Receive);
+    }
+
+    #[test]
+    fn dark_is_whatsapp_dark_and_zapfast_dark_keeps_its_saved_name() {
+        assert_eq!(
+            ThemeChoice::ALL,
+            [
+                ThemeChoice::System,
+                ThemeChoice::Light,
+                ThemeChoice::WhatsAppDark,
+                ThemeChoice::Dark
+            ]
+        );
+        assert_eq!(ThemeChoice::WhatsAppDark.label(), "Dark");
+        assert_eq!(ThemeChoice::Dark.label(), "ZapFast dark");
+        assert_eq!(
+            ThemeChoice::System.palette(true),
+            crate::theme::Palette::whatsapp_dark()
+        );
+        assert_eq!(ThemeChoice::System.palette(false), crate::theme::Palette::light());
+        assert_eq!(
+            serde_json::from_str::<ThemeChoice>("\"dark\"").unwrap(),
+            ThemeChoice::Dark
+        );
+        assert_eq!(Settings::default().theme, ThemeChoice::WhatsAppDark);
     }
 
     #[test]

@@ -5084,3 +5084,67 @@ msgstr "Voltar a receber avisos desta conta"
 #: src/ui/accounts.rs
 msgid "silenced"
 msgstr "silenciada"
+
+#: src/spell.rs
+msgid "Check spelling"
+msgstr "Verificar ortografia"
+
+#: src/spell.rs
+msgid "Underlines misspelled words as you type, in Brazilian Portuguese. Right-click a word for corrections."
+msgstr "Sublinha as palavras com erro enquanto você digita, em português do Brasil. Clique com o botão direito numa palavra para ver as correções."
+
+#: src/spell.rs
+msgid "Spell checking is off."
+msgstr "A verificação ortográfica está desligada."
+
+#: src/spell.rs
+msgid "Loading the dictionary…"
+msgstr "Carregando o dicionário…"
+
+#: src/spell.rs
+msgid "Using {path}."
+msgstr "Usando {path}."
+
+#: src/spell.rs
+msgid "No dictionary found, so spell checking is off. Put pt_BR.aff and pt_BR.dic in this folder, or install the system's Hunspell dictionary for Brazilian Portuguese, then turn spell checking off and on."
+msgstr "Nenhum dicionário encontrado; a verificação ortográfica fica desligada. Coloque pt_BR.aff e pt_BR.dic nesta pasta, ou instale o dicionário Hunspell de português do Brasil do sistema, e depois desligue e ligue a verificação."
+
+#: src/spell.rs
+msgid "Could not read the dictionary: {error}"
+msgstr "Não foi possível ler o dicionário: {error}"
+
+#: src/spell.rs
+msgid "Dictionaries folder"
+msgstr "Pasta de dicionários"
+
+#: src/spell.rs
+msgid "Add to dictionary"
+msgstr "Adicionar ao dicionário"
+
+#: src/spell.rs
+msgid "Ignore"
+msgstr "Ignorar"
+
+#: src/spell.rs
+msgid "No suggestions"
+msgstr "Sem sugestões"
+
+#: src/settings.rs
+msgid "ZapFast dark"
+msgstr "ZapFast escuro"
+
+#: src/backend/worker.rs
+msgid "Save attachments"
+msgstr "Salvar anexos"
+
+#: src/backend/worker.rs
+msgid "Files saved: {count}"
+msgstr "Arquivos salvos: {count}"
+
+#: src/app.rs
+msgid "Attachments left out because they could not be downloaded: {count}"
+msgstr "Anexos deixados de fora por não ter sido possível baixá-los: {count}"
+
+#: src/app.rs
+msgid "Messages from {name}"
+msgstr "Mensagens de {name}"

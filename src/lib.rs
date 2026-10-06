@@ -38,6 +38,7 @@ pub mod proxy;
 pub mod qr;
 pub mod safety;
 pub mod settings;
+pub mod spell;
 pub mod single_instance;
 pub mod sticker_meta;
 pub mod sticker_search;

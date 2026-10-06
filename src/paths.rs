@@ -92,6 +92,12 @@ impl AppDirs {
         self.config.join("fonts")
     }
 
+    /// Where the user puts a Hunspell dictionary (`pt_BR.aff` and `pt_BR.dic`)
+    /// for spell checking, and where learned words are kept.
+    pub fn dictionary_dir(&self) -> PathBuf {
+        self.config.join("dictionaries")
+    }
+
     /// Whisper models for transcribing voice messages, downloaded on first
     /// use.
     pub fn whisper_dir(&self) -> PathBuf {

@@ -112,7 +112,7 @@ pub fn prepare(app: &mut App) {
 /// local stickers and GIFs in place of downloads.
 fn common_setup(app: &mut App) {
     assert!(app.backend.is_offline(), "a tour requires an offline app");
-    app.settings.theme = ThemeChoice::Dark;
+    app.settings.theme = ThemeChoice::WhatsAppDark;
     app.settings.keep_running_in_background = false;
     // The tours type :shortcodes, which turn into emoji only when asked for.
     app.settings.emoji_shortcuts = true;
@@ -1243,6 +1243,7 @@ mod tests {
             "Follow system",
             "Light",
             "Dark",
+            "ZapFast dark",
             "Catppuccin Latte",
             "Catppuccin",
             "Nord",
@@ -1510,7 +1511,7 @@ mod tests {
         }
         let group = &app.conversations[super::super::SAMPLES[1].id];
         assert_eq!(group.messages.last().unwrap().mentions.len(), 1);
-        assert_eq!(app.settings.theme, ThemeChoice::Dark);
+        assert_eq!(app.settings.theme, ThemeChoice::WhatsAppDark);
         assert!(app.backend.is_offline());
         assert!(app.composer.is_empty());
         assert!(app.dialog.is_none());

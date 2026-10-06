@@ -5268,6 +5268,68 @@ impl Worker {
                     waker.wake();
                 });
             }
+            Command::SaveBatch { files, text } => {
+                let events = self.events.clone();
+                let waker = self.waker.clone();
+                tokio::task::spawn_blocking(move || {
+                    let single = files.len() + usize::from(text.is_some()) == 1;
+                    let mut dialog = rfd::FileDialog::new().set_title(if single {
+                        tr("Save attachment")
+                    } else {
+                        tr("Save attachments")
+                    });
+                    if let Some(downloads) = directories::UserDirs::new()
+                        .and_then(|dirs| dirs.download_dir().map(Path::to_path_buf))
+                    {
+                        dialog = dialog.set_directory(downloads);
+                    }
+                    // Cancelling the dialog saves nothing and says nothing.
+                    let mut saved = 0;
+                    let mut failure = None;
+                    let mut done = |result: std::io::Result<()>| match result {
+                        Ok(()) => saved += 1,
+                        Err(error) => failure = Some(error),
+                    };
+                    if single {
+                        let name = text
+                            .as_ref()
+                            .map(|(name, _)| name.clone())
+                            .or_else(|| files.first().map(|(_, name)| name.clone()))
+                            .unwrap_or_default();
+                        let Some(target) = dialog.set_file_name(&name).save_file() else {
+                            return;
+                        };
+                        match (&text, files.first()) {
+                            (Some((_, words)), _) => done(std::fs::write(&target, words)),
+                            (None, Some((source, _))) => {
+                                done(std::fs::copy(source, &target).map(|_| ()))
+                            }
+                            (None, None) => return,
+                        }
+                    } else {
+                        let Some(folder) = dialog.pick_folder() else {
+                            return;
+                        };
+                        for (source, name) in &files {
+                            done(std::fs::copy(source, free_path(&folder, name)).map(|_| ()));
+                        }
+                        if let Some((name, words)) = &text {
+                            done(std::fs::write(free_path(&folder, name), words));
+                        }
+                    }
+                    let event = match failure {
+                        None if single => Event::Info(tr("File saved").to_owned()),
+                        None => Event::Info(
+                            tr("Files saved: {count}").replace("{count}", &saved.to_string()),
+                        ),
+                        Some(error) => {
+                            Event::Error(format!("Could not save the attachments: {error}"))
+                        }
+                    };
+                    let _ = events.send(event);
+                    waker.wake();
+                });
+            }
             Command::OpenLog(path) => {
                 let events = self.events.clone();
                 let waker = self.waker.clone();
@@ -10589,10 +10651,49 @@ fn clear_boundary(read: crate::archive::Result<Vec<Message>>) -> Option<i64> {
     })
 }
 
+/// `name` inside `folder`, numbered "name (2).ext", "name (3).ext"… when a
+/// file by that name is already there, so a saved batch overwrites nothing.
+fn free_path(folder: &Path, name: &str) -> PathBuf {
+    let first = folder.join(name);
+    if !first.exists() {
+        return first;
+    }
+    let path = Path::new(name);
+    let stem = path
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_else(|| name.to_owned());
+    let extension = path
+        .extension()
+        .map(|extension| format!(".{}", extension.to_string_lossy()))
+        .unwrap_or_default();
+    (2..)
+        .map(|number| folder.join(format!("{stem} ({number}){extension}")))
+        .find(|candidate| !candidate.exists())
+        .unwrap_or(first)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn a_batch_save_numbers_a_name_already_in_the_folder() {
+        let folder = tempfile::tempdir().unwrap();
+        let fresh = free_path(folder.path(), "photo.jpg");
+        assert_eq!(fresh, folder.path().join("photo.jpg"));
+        std::fs::write(&fresh, b"1").unwrap();
+        let second = free_path(folder.path(), "photo.jpg");
+        assert_eq!(second, folder.path().join("photo (2).jpg"));
+        std::fs::write(&second, b"2").unwrap();
+        assert_eq!(
+            free_path(folder.path(), "photo.jpg"),
+            folder.path().join("photo (3).jpg")
+        );
+        std::fs::write(folder.path().join("notes"), b"3").unwrap();
+        assert_eq!(free_path(folder.path(), "notes"), folder.path().join("notes (2)"));
+    }
 
     #[test]
     fn only_phone_playable_audio_is_sent_as_an_audio_message() {

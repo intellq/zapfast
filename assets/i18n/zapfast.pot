@@ -4915,3 +4915,67 @@ msgstr ""
 #: src/ui/accounts.rs
 msgid "silenced"
 msgstr ""
+
+#: src/spell.rs
+msgid "Check spelling"
+msgstr ""
+
+#: src/spell.rs
+msgid "Underlines misspelled words as you type, in Brazilian Portuguese. Right-click a word for corrections."
+msgstr ""
+
+#: src/spell.rs
+msgid "Spell checking is off."
+msgstr ""
+
+#: src/spell.rs
+msgid "Loading the dictionary…"
+msgstr ""
+
+#: src/spell.rs
+msgid "Using {path}."
+msgstr ""
+
+#: src/spell.rs
+msgid "No dictionary found, so spell checking is off. Put pt_BR.aff and pt_BR.dic in this folder, or install the system's Hunspell dictionary for Brazilian Portuguese, then turn spell checking off and on."
+msgstr ""
+
+#: src/spell.rs
+msgid "Could not read the dictionary: {error}"
+msgstr ""
+
+#: src/spell.rs
+msgid "Dictionaries folder"
+msgstr ""
+
+#: src/spell.rs
+msgid "Add to dictionary"
+msgstr ""
+
+#: src/spell.rs
+msgid "Ignore"
+msgstr ""
+
+#: src/spell.rs
+msgid "No suggestions"
+msgstr ""
+
+#: src/settings.rs
+msgid "ZapFast dark"
+msgstr ""
+
+#: src/backend/worker.rs
+msgid "Save attachments"
+msgstr ""
+
+#: src/backend/worker.rs
+msgid "Files saved: {count}"
+msgstr ""
+
+#: src/app.rs
+msgid "Attachments left out because they could not be downloaded: {count}"
+msgstr ""
+
+#: src/app.rs
+msgid "Messages from {name}"
+msgstr ""

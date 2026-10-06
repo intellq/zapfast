@@ -551,6 +551,38 @@ Da sincronização com o upstream 0.18.2:
   fim ao enviar, para mostrá-la. `Shift+Insert` cola, como `Ctrl+V`, no
   compositor.
 
+Depois da 0.19.2 (ainda sem release):
+
+- **Verificação ortográfica em português do Brasil** no campo de mensagem:
+  palavras com erro ganham um sublinhado ondulado vermelho (a palavra sendo
+  digitada não é marcada; links, menções, trechos entre crases, palavras com
+  números e siglas ficam de fora). O botão direito numa palavra marcada mostra
+  até cinco sugestões, **Adicionar ao dicionário** (grava em `pessoal.dic`) e
+  **Ignorar** (até fechar o ZapFast). O dicionário **não vem embutido**: o
+  ZapFast procura `pt_BR.aff` e `pt_BR.dic` primeiro na pasta de dicionários
+  (`~/.config/zapfast/dictionaries` no Linux) e depois nas pastas Hunspell do
+  sistema (`/usr/share/hunspell`, `/usr/share/myspell`…; `/Library/Spelling`
+  no macOS); sem dicionário, a verificação fica desligada. Serve, por exemplo,
+  o VERO, dicionário do LibreOffice.
+  **Configurações › Conversas** tem **Verificar ortografia** e **Pasta de
+  dicionários**, que mostra o dicionário em uso e abre a pasta; desligar e
+  ligar a opção procura o dicionário de novo.
+- **Temas:** o antigo "WhatsApp escuro" passa a se chamar **Escuro** e é o tema
+  escuro de **Seguir o sistema** e o padrão de instalações novas; o antigo
+  "Escuro" agora é **ZapFast escuro** (quem o usava continua com ele). Ordem:
+  Seguir o sistema, Claro, Escuro, ZapFast escuro e os temas locais.
+- **Salvar mensagens selecionadas:** no modo **Selecionar**, a barra ganhou
+  **Salvar como…** (à esquerda de Apagar), e o mesmo item do menu do botão
+  direito, numa mensagem selecionada, vale para toda a seleção. Os anexos
+  (fotos, vídeos, áudios, documentos, figurinhas) são salvos como arquivos,
+  baixando antes os que faltam; as mensagens sem anexo vão juntas, em ordem
+  cronológica, para "Mensagens de <conversa>.txt". Um item só abre o diálogo
+  de salvar arquivo; vários pedem uma pasta, e nomes repetidos são numerados.
+- **Imagem aberta:** botão **Salvar como…** entre copiar e abrir em outro
+  aplicativo.
+- **Configurações › Conta:** "Adicionar conta" e o botão de desconectar ficam
+  empilhados na borda direita do card.
+
 Na 0.19.2:
 
 - **Fonte da interface** (**Configurações › Aparência**): o menu lista a Inter
