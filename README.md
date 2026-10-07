@@ -23,7 +23,7 @@ See **[zapfast.rocks](https://zapfast.rocks)** for downloads and guides.
 ## Alterações deste fork (`intellq`)
 
 Este fork acompanha o [projeto original](https://github.com/crmne/zapfast)
-até o commit [`63ed17c`](https://github.com/crmne/zapfast/commit/63ed17c)
+até o commit [`df01459`](https://github.com/crmne/zapfast/commit/df01459)
 (versão 0.19.0 e ajustes seguintes).
 Além das novidades do upstream, esta branch inclui as seguintes mudanças:
 
@@ -551,7 +551,7 @@ Da sincronização com o upstream 0.18.2:
   fim ao enviar, para mostrá-la. `Shift+Insert` cola, como `Ctrl+V`, no
   compositor.
 
-Depois da 0.19.2 (ainda sem release):
+Na 0.19.3:
 
 - **Verificação ortográfica em português do Brasil** no campo de mensagem:
   palavras com erro ganham um sublinhado ondulado vermelho (a palavra sendo
@@ -595,6 +595,22 @@ Depois da 0.19.2 (ainda sem release):
   marcada, os áudios vão até 3x, com 1.25x, 1.75x e 2.5x; desmarcada, só 1x,
   1.5x e 2x, como no WhatsApp (o indicador cicla 1x → 1.5x → 2x). Desmarcada
   em instalações novas; quem já usava o ZapFast continua com ela marcada.
+- **Selecionar mensagens com caixas de seleção**, como no WhatsApp Web: no modo
+  de seleção cada mensagem ganha uma caixa numa coluna à esquerda, a linha
+  inteira fica destacada e um clique em qualquer ponto dela marca ou desmarca.
+  **Selecionar mensagens** entrou no menu ⋮ da conversa. A seleção continua
+  aberta ao desmarcar tudo (com os botões desabilitados). Enquetes e mensagens
+  interativas podem ser selecionadas para apagar, copiar e salvar, mas
+  **Encaminhar** fica desabilitado enquanto houver uma delas na seleção.
+- **Janela estreita** (menos de 620 px): mostra a lista de conversas ou a
+  conversa aberta, que entra deslizando; **Voltar às conversas** no cabeçalho
+  traz a lista de volta. Com a barra lateral ligada, os botões dela voltam ao
+  cabeçalho da lista nesse modo.
+- **Notificações no Linux:** o ZapFast aparece nas configurações de
+  notificação do sistema (KDE, GNOME), o ícone na barra de tarefas pede
+  atenção quando chega uma mensagem com a janela aberta sem foco, o som do
+  sistema é o de mensagem instantânea (`message-new-instant`) e o servidor de
+  notificações reconhece as mensagens como de chat (`im.received`).
 
 Na 0.19.2:
 
