@@ -72,13 +72,43 @@ pub const SPEEDS: [f32; 7] = [1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0];
 /// The others are chosen from the message menu.
 pub const CYCLED_SPEEDS: [f32; 5] = [1.0, 1.5, 2.0, 2.5, 3.0];
 
+/// WhatsApp's own speeds, the only ones without extended speeds.
+pub const STANDARD_SPEEDS: [f32; 3] = [1.0, 1.5, 2.0];
+
+/// The speeds offered: all of them with `extended`, WhatsApp's otherwise.
+pub fn speeds(extended: bool) -> &'static [f32] {
+    if extended {
+        &SPEEDS
+    } else {
+        &STANDARD_SPEEDS
+    }
+}
+
 /// The speed after `speed` when the chip is clicked: the next faster cycled
-/// speed, wrapping from 3x back to 1x.
-pub fn next_cycled_speed(speed: f32) -> f32 {
-    CYCLED_SPEEDS
-        .into_iter()
+/// speed, wrapping back to 1x after the fastest one offered.
+pub fn next_cycled_speed(speed: f32, extended: bool) -> f32 {
+    let cycled: &[f32] = if extended {
+        &CYCLED_SPEEDS
+    } else {
+        &STANDARD_SPEEDS
+    };
+    cycled
+        .iter()
+        .copied()
         .find(|&candidate| candidate > speed)
-        .unwrap_or(CYCLED_SPEEDS[0])
+        .unwrap_or(cycled[0])
+}
+
+/// The offered speed nearest to `speed`; non-finite speeds give 1x.
+pub fn allowed_speed(speed: f32, extended: bool) -> f32 {
+    if !speed.is_finite() {
+        return SPEEDS[0];
+    }
+    speeds(extended)
+        .iter()
+        .copied()
+        .min_by(|a, b| (a - speed).abs().total_cmp(&(b - speed).abs()))
+        .unwrap_or(SPEEDS[0])
 }
 
 /// The supported speed nearest to `speed`; non-finite speeds give 1x.
@@ -338,6 +368,14 @@ impl Player {
     /// it to carry on with the next unplayed voice message.
     pub fn take_finished(&mut self) -> Option<String> {
         self.finished.take()
+    }
+
+    /// The message whose clip is loaded or being decoded, playing or paused.
+    pub fn current(&self) -> Option<&str> {
+        self.decoding
+            .as_ref()
+            .map(|decoding| decoding.message.as_str())
+            .or_else(|| self.loaded.as_ref().map(|loaded| loaded.message.as_str()))
     }
 
     /// Whether audio is currently playing.
@@ -757,14 +795,19 @@ mod tests {
 
     #[test]
     fn the_chip_cycles_like_the_phone() {
-        assert_eq!(next_cycled_speed(1.0), 1.5);
-        assert_eq!(next_cycled_speed(1.5), 2.0);
-        assert_eq!(next_cycled_speed(2.0), 2.5);
-        assert_eq!(next_cycled_speed(2.5), 3.0);
-        assert_eq!(next_cycled_speed(3.0), 1.0);
+        assert_eq!(next_cycled_speed(1.0, true), 1.5);
+        assert_eq!(next_cycled_speed(1.5, true), 2.0);
+        assert_eq!(next_cycled_speed(2.0, true), 2.5);
+        assert_eq!(next_cycled_speed(2.5, true), 3.0);
+        assert_eq!(next_cycled_speed(3.0, true), 1.0);
         // A speed chosen from the menu moves on to the next faster one.
-        assert_eq!(next_cycled_speed(1.25), 1.5);
-        assert_eq!(next_cycled_speed(1.75), 2.0);
+        assert_eq!(next_cycled_speed(1.25, true), 1.5);
+        assert_eq!(next_cycled_speed(1.75, true), 2.0);
+        // Without extended speeds, 2x wraps back to 1x, as on the phone.
+        assert_eq!(next_cycled_speed(1.0, false), 1.5);
+        assert_eq!(next_cycled_speed(1.5, false), 2.0);
+        assert_eq!(next_cycled_speed(2.0, false), 1.0);
+        assert_eq!(next_cycled_speed(3.0, false), 1.0);
     }
 
     #[test]

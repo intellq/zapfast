@@ -545,6 +545,8 @@ pub struct Settings {
     pub download_updates_automatically: bool,
     /// Voice and audio playback speed multiplier.
     pub voice_speed: f32,
+    /// Offers 1.25x, 1.75x, 2.5x and 3x besides WhatsApp's 1x, 1.5x and 2x.
+    pub extended_voice_speeds: bool,
     /// Pause other apps' media while recording, or while a voice message,
     /// audio, or video plays with sound.
     pub pause_other_media: bool,
@@ -656,6 +658,7 @@ impl Default for Settings {
             download_updates_automatically: true,
             save_contacts_to_phone: true,
             voice_speed: 1.0,
+            extended_voice_speeds: false,
             pause_other_media: true,
             transcribe_automatically: false,
             show_transcribe_button: true,
@@ -685,7 +688,9 @@ impl Default for Settings {
 ///
 /// 1. The wallpaper colours that were the defaults (Beige, and Black in dark
 ///    mode) become [`WallpaperColor::Theme`], the new default.
-pub const SETTINGS_VERSION: u32 = 1;
+/// 2. Extended playback speeds, off in new installations, stay on for those
+///    that already had them.
+pub const SETTINGS_VERSION: u32 = 2;
 
 /// Optional build-time GIPHY key from `ZAPFAST_GIPHY_KEY`.
 /// The previous name remains accepted for existing build setups.
@@ -818,6 +823,10 @@ impl Settings {
             if self.dark_wallpaper_color == WallpaperColor::Black {
                 self.dark_wallpaper_color = WallpaperColor::Theme;
             }
+        }
+        if self.version < 2 {
+            // Up to 3x was the only choice before the switch existed.
+            self.extended_voice_speeds = true;
         }
         self.version = self.version.max(SETTINGS_VERSION);
     }
@@ -1366,6 +1375,19 @@ mod tests {
             egui::Color32::from_rgb(15, 36, 36)
         );
         assert_eq!(chosen.wallpaper_background(&light), light.chat);
+    }
+
+    #[test]
+    fn extended_speeds_stay_on_for_existing_installations_only() {
+        assert!(!Settings::default().extended_voice_speeds);
+        for old in [r#"{}"#, r#"{"version":1}"#] {
+            let (settings, stored) = load_from(old);
+            assert!(settings.extended_voice_speeds, "{old}");
+            assert_eq!(stored["version"], SETTINGS_VERSION);
+        }
+        // Once migrated, turning them off sticks.
+        let (settings, _) = load_from(r#"{"version":2,"extended_voice_speeds":false}"#);
+        assert!(!settings.extended_voice_speeds);
     }
 
     #[test]

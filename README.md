@@ -588,6 +588,13 @@ Depois da 0.19.2 (ainda sem release):
   ícone vermelho. O reenvio usa o mesmo identificador, então não duplica se a
   primeira tentativa tiver chegado. Sobre fotos e vídeos, o "Não enviada"
   aparece em português.
+- **Áudio apagado para de tocar:** apagar (para mim ou para todos, aqui ou em
+  outro aparelho) o áudio que está tocando, pausado ou carregando encerra a
+  reprodução; antes a bolha sumia e o áudio seguia sem ter como pausar.
+- **Estender velocidade máxima dos áudios** (**Configurações › Conversas**):
+  marcada, os áudios vão até 3x, com 1.25x, 1.75x e 2.5x; desmarcada, só 1x,
+  1.5x e 2x, como no WhatsApp (o indicador cicla 1x → 1.5x → 2x). Desmarcada
+  em instalações novas; quem já usava o ZapFast continua com ela marcada.
 
 Na 0.19.2:
 

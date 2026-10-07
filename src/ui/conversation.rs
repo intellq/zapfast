@@ -3707,8 +3707,8 @@ fn speed_pill(
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// The message menu's row of every playback speed for a playable voice
-/// message, so 1.25x and 1.75x are reachable without cycling.
+/// The message menu's rows of every offered playback speed for a playable
+/// voice message, so 1.25x and 1.75x are reachable without cycling.
 fn speed_menu_row(
     ui: &mut egui::Ui,
     view: &View<'_>,
@@ -3718,9 +3718,11 @@ fn speed_menu_row(
     let speed = view.player.speed();
     let preparing = view.player.preparing_speed(&message.id);
     widgets::menu_separator(ui, &view.palette);
-    // The phone's speeds on the first row, 2.5x and 3x on the second.
-    let (phone, faster) = crate::audio::SPEEDS.split_at(5);
-    for row in [phone, faster] {
+    // With extended speeds, 1x to 2x on the first row and 2.5x and 3x on
+    // the second; WhatsApp's three on one row otherwise.
+    let speeds = crate::audio::speeds(view.download_settings.extended_voice_speeds);
+    let (first, faster) = speeds.split_at(speeds.len().min(5));
+    for row in [first, faster].into_iter().filter(|row| !row.is_empty()) {
         ui.allocate_ui_with_layout(
             vec2(ui.available_width(), 28.0),
             Layout::left_to_right(Align::Center),
@@ -8214,6 +8216,7 @@ fn voice_player(
                 if response.clicked() {
                     actions.push(Action::SetVoiceSpeed(crate::audio::next_cycled_speed(
                         speed,
+                        view.download_settings.extended_voice_speeds,
                     )));
                 }
                 response.on_hover_text(if preparing {

@@ -5156,3 +5156,11 @@ msgstr "Esta mensagem não pode mais ser reenviada"
 #: src/ui/conversation.rs
 msgid "This message could not be sent. Click to send it again."
 msgstr "Não foi possível enviar esta mensagem. Clique para enviar de novo."
+
+#: src/ui/settings.rs
+msgid "Extend the maximum voice message speed"
+msgstr "Estender velocidade máxima dos áudios"
+
+#: src/ui/settings.rs
+msgid "On, voice messages and audio can play at up to 3.0x, with 1.25x, 1.75x and 2.5x as well. Off, only WhatsApp's speeds: 1.0x, 1.5x and 2.0x."
+msgstr "Marcada, os áudios podem ser reproduzidos em até 3.0x, com 1.25x, 1.75x e 2.5x também. Desmarcada, ficam só as velocidades do WhatsApp: 1.0x, 1.5x e 2.0x."

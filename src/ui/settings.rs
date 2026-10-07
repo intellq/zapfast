@@ -612,6 +612,14 @@ fn sections(app: &App) -> Vec<Section> {
     #[cfg(windows)]
     windows_video_row(&mut chats, locale);
     chats.toggle(
+        translated(locale, "Extend the maximum voice message speed"),
+        translated(
+            locale,
+            "On, voice messages and audio can play at up to 3.0x, with 1.25x, 1.75x and 2.5x as well. Off, only WhatsApp's speeds: 1.0x, 1.5x and 2.0x.",
+        ),
+        |settings| &mut settings.extended_voice_speeds,
+    );
+    chats.toggle(
         translated(locale, "Download audio automatically"),
         translated(locale, "Includes voice messages."),
         |settings| &mut settings.auto_download_audio,

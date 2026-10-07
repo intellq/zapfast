@@ -113,6 +113,8 @@ pub fn prepare(app: &mut App) {
 fn common_setup(app: &mut App) {
     assert!(app.backend.is_offline(), "a tour requires an offline app");
     app.settings.theme = ThemeChoice::WhatsAppDark;
+    // The tours show 1.75x, one of the extended speeds.
+    app.settings.extended_voice_speeds = true;
     app.settings.keep_running_in_background = false;
     // The tours type :shortcodes, which turn into emoji only when asked for.
     app.settings.emoji_shortcuts = true;

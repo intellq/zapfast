@@ -1321,7 +1321,10 @@ impl App {
         };
         // A hand-edited speed snaps to a supported one, so a speed control
         // always shows the speed that plays.
-        app.settings.voice_speed = app.player.set_speed(app.settings.voice_speed);
+        app.settings.voice_speed = app.player.set_speed(crate::audio::allowed_speed(
+            app.settings.voice_speed,
+            app.settings.extended_voice_speeds,
+        ));
         app.video
             .use_ffmpeg(app.settings.ffmpeg_video, app.settings.ffmpeg_gpu);
         if app.settings.spell_check {
@@ -3188,6 +3191,9 @@ impl App {
             }
             Event::MessageUpdated(message) => {
                 let message = *message;
+                if matches!(message.content, Content::Revoked { .. }) {
+                    self.stop_deleted_voice(&message.chat, &message.id);
+                }
                 if let Some(conversation) = self.conversations.get_mut(&message.chat)
                     && let Some(existing) = conversation.message_mut(&message.id)
                 {
@@ -3308,6 +3314,7 @@ impl App {
                 }
             }
             Event::MessageDeleted { chat, id } => {
+                self.stop_deleted_voice(&chat, &id);
                 if let Some(conversation) = self.conversations.get_mut(&chat) {
                     conversation.messages.retain(|message| message.id != id);
                 }
@@ -4113,6 +4120,25 @@ impl App {
                 files: batch.ready,
                 text: batch.text,
             });
+        }
+    }
+
+    /// Stops the voice message or audio playing, paused or loading when it is
+    /// deleted, here or on another device: once gone from the chat, its
+    /// player is gone too, and nothing else could stop it.
+    fn stop_deleted_voice(&mut self, chat: &str, id: &str) {
+        if self.player.current() == Some(id) {
+            self.player.stop();
+            if self.voice_chat.as_deref() == Some(chat) {
+                self.voice_chat = None;
+            }
+        }
+        if self
+            .voice_wanted
+            .as_ref()
+            .is_some_and(|(wanted_chat, wanted, _)| wanted_chat == chat && wanted == id)
+        {
+            self.voice_wanted = None;
         }
     }
 
@@ -5659,6 +5685,7 @@ impl App {
                 }
             }
             Action::DeleteForEveryone { chat, id } => {
+                self.stop_deleted_voice(&chat, &id);
                 if let Some(message) = self
                     .conversations
                     .get_mut(&chat)
@@ -5674,6 +5701,7 @@ impl App {
                 on_phone,
             } => {
                 let on_phone = on_phone && !self.is_revoked(&chat, &message);
+                self.stop_deleted_voice(&chat, &message);
                 self.backend.send(Command::DeleteForMe {
                     chat,
                     id: message,
@@ -5745,7 +5773,10 @@ impl App {
                 }
             }
             Action::SetVoiceSpeed(speed) => {
-                self.settings.voice_speed = self.player.set_speed(speed);
+                self.settings.voice_speed = self.player.set_speed(crate::audio::allowed_speed(
+                    speed,
+                    self.settings.extended_voice_speeds,
+                ));
                 self.mark_settings_dirty();
             }
             Action::Transcribe {
@@ -6654,6 +6685,14 @@ impl App {
                     } else {
                         self.spelling.stop();
                     }
+                }
+                // Without extended speeds, a faster one falls back to 2x.
+                let speed = crate::audio::allowed_speed(
+                    self.settings.voice_speed,
+                    self.settings.extended_voice_speeds,
+                );
+                if speed != self.player.speed() {
+                    self.settings.voice_speed = self.player.set_speed(speed);
                 }
                 self.video
                     .use_ffmpeg(self.settings.ffmpeg_video, self.settings.ffmpeg_gpu);
@@ -13271,17 +13310,62 @@ mod tests {
         let root = std::env::temp_dir().join(format!("zapfast-speed-{}", std::process::id()));
         let settings = Settings {
             voice_speed: 1.3,
+            extended_voice_speeds: true,
             ..Settings::default()
         };
         let app = App::headless(AppDirs::under(&root), settings).0;
         assert_eq!(app.player.speed(), 1.25);
         assert_eq!(app.settings.voice_speed, 1.25);
+        // Without extended speeds, 3x falls back to WhatsApp's fastest.
+        let settings = Settings {
+            voice_speed: 3.0,
+            ..Settings::default()
+        };
+        let app = App::headless(AppDirs::under(&root), settings).0;
+        assert_eq!(app.settings.voice_speed, 2.0);
+    }
+
+    #[test]
+    fn turning_extended_speeds_off_brings_a_faster_speed_back_to_two() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.settings.extended_voice_speeds = true;
+        app.apply(Action::SetVoiceSpeed(2.5), &ctx);
+        assert_eq!(app.player.speed(), 2.5);
+        app.settings.extended_voice_speeds = false;
+        app.apply(Action::SettingsChanged, &ctx);
+        assert_eq!(app.player.speed(), 2.0);
+        assert_eq!(app.settings.voice_speed, 2.0);
+        app.apply(Action::SetVoiceSpeed(1.4), &ctx);
+        assert_eq!(app.settings.voice_speed, 1.5, "only WhatsApp's speeds");
+    }
+
+    #[test]
+    fn deleting_a_playing_voice_message_stops_it() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        let chat = "fixture@s.whatsapp.net";
+        let path = std::env::temp_dir().join(format!("zapfast-stop-{}.ogg", std::process::id()));
+        std::fs::write(&path, b"not really audio").unwrap();
+        let _ = app.player.toggle("voice", &path);
+        assert_eq!(app.player.current(), Some("voice"));
+        app.apply(
+            Action::DeleteForMe {
+                chat: chat.into(),
+                message: "voice".into(),
+                on_phone: false,
+            },
+            &ctx,
+        );
+        assert_eq!(app.player.current(), None);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
     fn direct_speed_selection_reaches_player_and_settings() {
         let mut app = app();
         let ctx = egui::Context::default();
+        app.settings.extended_voice_speeds = true;
 
         for speed in crate::audio::SPEEDS {
             app.apply(Action::SetVoiceSpeed(speed), &ctx);

@@ -5032,7 +5032,16 @@ mod tests {
 
     #[test]
     fn the_speed_chip_cycles_and_the_menu_offers_every_speed() {
+        for extended in [true, false] {
+            speed_chip_and_menu(extended);
+        }
+    }
+
+    /// Extended speeds cycle on to 3x and list seven in the menu; without
+    /// them, only WhatsApp's 1x, 1.5x and 2x.
+    fn speed_chip_and_menu(extended: bool) {
         let mut app = app();
+        app.settings.extended_voice_speeds = extended;
         let ctx = egui::Context::default();
         app.attach(&ctx);
         // The speed row only appears for a downloaded clip, so give the open
@@ -5070,14 +5079,20 @@ mod tests {
             frame_with(app, &ctx, Vec::new());
         };
         let chip = crate::ui::conversation::speed_chip_id(&chat, "voice-speed");
-        // The chip cycles 1x, 1.5x, and 2x, as on the phone, then 2.5x and 3x.
-        for expected in [1.5, 2.0, 2.5, 3.0, 1.0] {
+        // The chip cycles 1x, 1.5x, and 2x, as on the phone, then 2.5x and 3x
+        // with extended speeds.
+        let cycle: &[f32] = if extended {
+            &[1.5, 2.0, 2.5, 3.0, 1.0]
+        } else {
+            &[1.5, 2.0, 1.0]
+        };
+        for &expected in cycle {
             click(&mut app, chip, egui::PointerButton::Primary);
             assert_eq!(app.player.speed(), expected);
             assert_eq!(app.settings.voice_speed, expected);
         }
         // Right-clicking it opens the message menu, which lists every speed.
-        for option in crate::audio::SPEEDS.into_iter().rev() {
+        for &option in crate::audio::speeds(extended).iter().rev() {
             click(&mut app, chip, egui::PointerButton::Secondary);
             let choice = crate::ui::conversation::speed_button_id(&chat, "voice-speed", option);
             click(&mut app, choice, egui::PointerButton::Primary);
