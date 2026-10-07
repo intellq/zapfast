@@ -706,6 +706,9 @@ pub struct App {
     /// Set when a call event arrived, so the surface is drawn now instead of when something else
     /// happens to ask for a repaint.
     call_repaint: bool,
+    /// A notification went out this frame: highlight the taskbar entry of a
+    /// window that is open but not focused.
+    wants_attention: bool,
     /// Whether ZapFast starts at login, when this installation supports it.
     pub start_with_system: Option<bool>,
     /// Whether ZapFast is the desktop's app for WhatsApp links, when this
@@ -1315,6 +1318,7 @@ impl App {
             main_monitor: None,
             call_notified: None,
             call_repaint: false,
+            wants_attention: false,
             start_with_system: None,
             whatsapp_links: None,
             pending_wa_link: None,
@@ -1848,6 +1852,7 @@ impl App {
             std::sync::Arc::clone(&self.notification_opens),
             move || waker.wake(),
         );
+        self.wants_attention = true;
     }
 
     /// Announces a message while the app lock is on: "New message" from
@@ -1857,6 +1862,7 @@ impl App {
     /// plays, still silent for groups when group sounds are off. The click
     /// target stays inside ZapFast: it opens the message once unlocked.
     fn notify_while_locked(&mut self, chat_id: &str, is_group: bool, message: &str) {
+        self.wants_attention = true;
         let (title, body) = crate::notify::locked_lines(self.locale);
         let sound = notification_sound(&self.settings, None, is_group, false);
         let waker = self.waker.clone();
@@ -7146,6 +7152,26 @@ impl App {
         self.hold_media();
         self.follow_receipts();
         self.sync_badge();
+        self.request_attention(ctx);
+    }
+
+    /// Highlights the taskbar entry for a message that notified while the
+    /// window is open behind others, as KDE Plasma's task manager shows for
+    /// chat apps. The desktop clears it once the window is focused. Linux
+    /// only: elsewhere it would bounce the Dock or flash the taskbar. Asks the
+    /// viewport too, since `window_focused` stays false behind the app lock
+    /// even while the lock screen has the focus.
+    fn request_attention(&mut self, ctx: &egui::Context) {
+        if std::mem::take(&mut self.wants_attention)
+            && cfg!(target_os = "linux")
+            && !self.window_hidden
+            && !self.window_focused
+            && ctx.input(|input| input.viewport().focused) != Some(true)
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+                egui::UserAttentionType::Informational,
+            ));
+        }
     }
 
     /// Collects a finished password check, and locks once ZapFast has gone
@@ -14510,6 +14536,78 @@ mod app_lock_tests {
         assert_eq!(app.open_chat, None, "not while locked");
         try_password(&mut app, &ctx, PASSWORD);
         assert_eq!(app.open_chat.as_deref(), Some(CHAT), "opened once unlocked");
+    }
+
+    fn attention_requested(ctx: &egui::Context) -> bool {
+        ctx.viewport(|viewport| {
+            viewport
+                .commands
+                .iter()
+                .any(|command| matches!(command, egui::ViewportCommand::RequestUserAttention(_)))
+        })
+    }
+
+    /// A notification highlights the taskbar entry of an open, unfocused
+    /// window, once; a hidden window has no entry to highlight.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_notification_highlights_an_unfocused_window_in_the_taskbar() {
+        let ctx = egui::Context::default();
+        let mut app = unlocked_app();
+        let message = incoming(&mut app);
+        app.window_hidden = false;
+        app.window_focused = false;
+        app.maybe_notify(CHAT, &message);
+        app.request_attention(&ctx);
+        assert!(attention_requested(&ctx));
+
+        let ctx = egui::Context::default();
+        app.request_attention(&ctx);
+        assert!(!attention_requested(&ctx), "only once per notification");
+
+        app.window_hidden = true;
+        app.maybe_notify(CHAT, &message);
+        app.request_attention(&ctx);
+        assert!(!attention_requested(&ctx));
+    }
+
+    /// Behind the app lock `window_focused` stays false, but a lock screen
+    /// that has the focus is no window to point at.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_focused_lock_screen_is_not_highlighted() {
+        let ctx = egui::Context::default();
+        let mut input = egui::RawInput::default();
+        input.viewports.insert(
+            egui::ViewportId::ROOT,
+            egui::ViewportInfo {
+                focused: Some(true),
+                ..Default::default()
+            },
+        );
+        ctx.run_ui(input, |_| {}).textures_delta.clear();
+        let mut app = unlocked_app();
+        let message = incoming(&mut app);
+        app.window_hidden = false;
+        app.lock_app();
+        assert!(!app.window_focused);
+        app.maybe_notify(CHAT, &message);
+        app.request_attention(&ctx);
+        assert!(!attention_requested(&ctx));
+    }
+
+    #[test]
+    fn reading_the_chat_asks_for_no_attention() {
+        let ctx = egui::Context::default();
+        let mut app = unlocked_app();
+        let message = incoming(&mut app);
+        app.window_hidden = false;
+        app.window_focused = true;
+        app.page = Page::Chats;
+        app.open_chat = Some(CHAT.into());
+        app.maybe_notify(CHAT, &message);
+        app.request_attention(&ctx);
+        assert!(!attention_requested(&ctx));
     }
 
     #[test]
