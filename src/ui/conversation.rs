@@ -33,6 +33,8 @@ const NOT_SENT: &str = crate::i18n::n_("Not sent");
 const NOT_SENT_HINT: &str = crate::i18n::n_(
     "This message could not be sent, and ZapFast will not retry it. Send it again yourself.",
 );
+const NOT_SENT_RESEND_HINT: &str =
+    crate::i18n::n_("This message could not be sent. Click to send it again.");
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let Some(chat) = app.current_chat().cloned() else {
@@ -3843,10 +3845,18 @@ fn bubble_frame(
                 }
                 None => content(ui, view, message, cap, reserve, actions),
             };
-            if over_picture && let Some(picture) = slot {
-                footer_over_picture(ui, &palette, message, picture);
+            // While selecting, a click picks the message instead.
+            let resend = resendable(view, message) && view.selection.is_empty();
+            let resend_clicked = if over_picture && let Some(picture) = slot {
+                footer_over_picture(ui, &palette, message, picture, resend)
             } else {
-                footer(ui, &palette, message, slot);
+                footer(ui, &palette, message, slot, resend)
+            };
+            if resend_clicked {
+                actions.push(Action::RetrySend {
+                    chat: view.chat.id.clone(),
+                    message: message.id.clone(),
+                });
             }
             if matches!(message.content, Content::Poll { .. }) {
                 super::polls::results_button(
@@ -4453,14 +4463,21 @@ const OVER_PICTURE_INSET: Vec2 = vec2(10.0, 6.0);
 
 /// Paints the time and ticks over the bottom corner of a picture without a
 /// caption, in white on a soft dark scrim so they read on any picture.
-fn footer_over_picture(ui: &mut egui::Ui, palette: &Palette, message: &Message, picture: Rect) {
+/// Like `footer`, over the bottom of a picture.
+fn footer_over_picture(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    message: &Message,
+    picture: Rect,
+    resend: bool,
+) -> bool {
     let font = theme::regular(11.0);
     let time =
         ui.painter()
             .layout_no_wrap(crate::util::clock(message.timestamp), font, Color32::WHITE);
     let failed = not_sent(message).then(|| {
         ui.painter()
-            .layout_no_wrap(NOT_SENT.to_owned(), theme::medium(11.0), Color32::WHITE)
+            .layout_no_wrap(tr(NOT_SENT).to_owned(), theme::medium(11.0), Color32::WHITE)
     });
     let tick_width = if message.from_me { 19.0 } else { 0.0 };
     let width =
@@ -4477,6 +4494,7 @@ fn footer_over_picture(ui: &mut egui::Ui, palette: &Palette, message: &Message, 
         ui.painter()
             .rect_filled(scrim, scrim.height() / 2.0, Color32::from_black_alpha(110));
     }
+    let mut clicked = false;
     let mut x = row.right();
     if message.from_me {
         let ticks = Rect::from_center_size(pos2(x - 7.5, row.center().y), Vec2::splat(15.0));
@@ -4497,19 +4515,12 @@ fn footer_over_picture(ui: &mut egui::Ui, palette: &Palette, message: &Message, 
         );
         ui.painter().galley(label.min, failed, Color32::WHITE);
         let status = Rect::from_min_max(label.min, pos2(row.right(), label.max.y));
-        let response = ui.interact(
-            status,
-            ui.id().with(("not-sent", &message.id)),
-            Sense::hover(),
-        );
-        response.widget_info(|| {
-            egui::WidgetInfo::labeled(egui::WidgetType::Label, true, NOT_SENT_HINT)
-        });
-        response.on_hover_text(NOT_SENT_HINT);
+        clicked = not_sent_status(ui, message, status, resend);
     }
     ui.ctx().data_mut(|data| {
         data.insert_temp(footer_id(&message.chat, &message.id), row);
     });
+    clicked
 }
 
 /// Where a message's time and ticks were drawn, for layout tests.
@@ -4522,7 +4533,15 @@ fn not_sent(message: &Message) -> bool {
 }
 
 /// Paints the time and ticks at the bubble's right edge without widening it.
-fn footer(ui: &mut egui::Ui, palette: &Palette, message: &Message, slot: Option<Rect>) {
+/// Returns whether the "not sent" status was clicked to send the message
+/// again, which `resend` allows.
+fn footer(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    message: &Message,
+    slot: Option<Rect>,
+    resend: bool,
+) -> bool {
     let font = theme::regular(11.0);
     let time = ui.painter().layout_no_wrap(
         crate::util::clock(message.timestamp),
@@ -4586,18 +4605,32 @@ fn footer(ui: &mut egui::Ui, palette: &Palette, message: &Message, slot: Option<
             failed.size(),
         );
         ui.painter().galley(label.min, failed, palette.text);
-        // Explain on hover and to screen readers; hovering takes no clicks
-        // from the bubble.
         let status = Rect::from_min_max(label.min, pos2(rect.right(), label.max.y));
-        let response = ui.interact(
-            status,
-            ui.id().with(("not-sent", &message.id)),
-            Sense::hover(),
-        );
+        return not_sent_status(ui, message, status, resend);
+    }
+    false
+}
+
+/// The "not sent" word and red icon: explained on hover and to screen
+/// readers, and a click sends the message again when `resend` allows it.
+/// Otherwise hovering takes no clicks from the bubble.
+fn not_sent_status(ui: &mut egui::Ui, message: &Message, status: Rect, resend: bool) -> bool {
+    let id = ui.id().with(("not-sent", &message.id));
+    if resend {
+        let response = ui
+            .interact(status, id, Sense::click())
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tr(NOT_SENT_RESEND_HINT))
+        });
+        response.on_hover_text(tr(NOT_SENT_RESEND_HINT)).clicked()
+    } else {
+        let response = ui.interact(status, id, Sense::hover());
         response.widget_info(|| {
             egui::WidgetInfo::labeled(egui::WidgetType::Label, true, tr(NOT_SENT_HINT))
         });
         response.on_hover_text(tr(NOT_SENT_HINT));
+        false
     }
 }
 
@@ -4795,10 +4828,10 @@ fn context_menu(ui: &mut egui::Ui, view: &View<'_>, message: &Message, actions: 
         },
     );
     widgets::menu_separator(ui, &palette);
-    if media_unsent(view, message)
+    if resendable(view, message)
         && widgets::menu_item(ui, &palette, Some(Icon::Refresh), tr("Send again"))
     {
-        actions.push(Action::RetryMedia {
+        actions.push(Action::RetrySend {
             chat: chat.clone(),
             message: message.id.clone(),
         });
@@ -6876,6 +6909,19 @@ fn media_sending(view: &View<'_>, message: &Message) -> bool {
 }
 
 /// Whether an own attachment failed to go out and can be sent again.
+/// An own message of any kind that failed to go out and is not being sent
+/// again already. A poll is sent only once its voting key is saved, so a
+/// failed one never reaches the chat.
+fn resendable(view: &View<'_>, message: &Message) -> bool {
+    message.from_me
+        && message.status == Delivery::Failed
+        && !matches!(
+            message.content,
+            Content::Revoked { .. } | Content::Poll { .. }
+        )
+        && !media_sending(view, message)
+}
+
 fn media_unsent(view: &View<'_>, message: &Message) -> bool {
     message.from_me
         && message.status == Delivery::Failed
@@ -6984,7 +7030,7 @@ fn sending_overlay(
         );
         theme::paint_icon(ui, Icon::Refresh, disc, 22.0, Color32::WHITE);
         if response.clicked() {
-            actions.push(Action::RetryMedia {
+            actions.push(Action::RetrySend {
                 chat: view.chat.id.clone(),
                 message: message.id.clone(),
             });
@@ -8004,7 +8050,7 @@ fn voice_player(
                     )
                     .clicked()
                     {
-                        actions.push(Action::RetryMedia {
+                        actions.push(Action::RetrySend {
                             chat: view.chat.id.clone(),
                             message: message.id.clone(),
                         });

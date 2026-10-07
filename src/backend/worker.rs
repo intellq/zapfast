@@ -4663,7 +4663,7 @@ impl Worker {
             Command::VotePoll { chat, .. }
             | Command::React { chat, .. }
             | Command::EditText { chat, .. }
-            | Command::RetryMedia { chat, .. }
+            | Command::RetrySend { chat, .. }
             | Command::SendStickerPack { chat, .. }
             | Command::MakeSticker {
                 chat: Some(chat), ..
@@ -5588,7 +5588,7 @@ impl Worker {
                 quoting,
             } => self.send_voice(chat, samples, quoting),
             Command::CancelMedia { chat, message } => self.cancel_media(chat, message),
-            Command::RetryMedia { chat, message } => self.retry_media(chat, message),
+            Command::RetrySend { chat, message } => self.retry_send(chat, message),
             Command::Staged { row } => {
                 let (chat, id) = (row.chat.clone(), row.id.clone());
                 self.media_sending.insert((chat.clone(), id.clone()));
@@ -7979,7 +7979,7 @@ impl Worker {
 
     /// Sends again an own attachment or voice message that failed: the
     /// stored message when it was already uploaded, or else its saved file.
-    fn retry_media(&mut self, chat: ChatId, id: String) {
+    fn retry_send(&mut self, chat: ChatId, id: String) {
         let Ok(Some(row)) = self.archive.message(&chat, &id) else {
             return;
         };
@@ -7993,22 +7993,28 @@ impl Worker {
             self.retry_voice(chat, id);
             return;
         }
-        let Some(media) = row.content.media().cloned() else {
-            return;
-        };
         if !row.from_me
             || row.status != Delivery::Failed
-            || !matches!(
-                row.content,
-                Content::Image { .. }
-                    | Content::Video { .. }
-                    | Content::Audio { .. }
-                    | Content::Document { .. }
-            )
+            || matches!(row.content, Content::Revoked { .. } | Content::Poll { .. })
             || self.media_sending.contains(&(chat.clone(), id.clone()))
         {
             return;
         }
+        // Attachments read back from disk can be uploaded again; anything
+        // else goes again as it was archived when first sent.
+        let media = row
+            .content
+            .media()
+            .filter(|_| {
+                matches!(
+                    row.content,
+                    Content::Image { .. }
+                        | Content::Video { .. }
+                        | Content::Audio { .. }
+                        | Content::Document { .. }
+                )
+            })
+            .cloned();
         let (Some(client), Some(jid)) = (self.client.clone(), Self::jid_of(&chat)) else {
             self.emit(Event::Error(tr("Not connected to WhatsApp").to_owned()));
             return;
@@ -8019,10 +8025,18 @@ impl Worker {
             .ok()
             .flatten()
             .and_then(|raw| wa::Message::decode_from_slice(&raw).ok());
-        let saved = media.path.clone().filter(|path| path.is_file());
+        let saved = media
+            .as_ref()
+            .and_then(|media| media.path.clone())
+            .filter(|path| path.is_file());
         if uploaded.is_none() && saved.is_none() {
             self.emit(Event::Error(
-                tr("The file is no longer available to send").to_owned(),
+                if media.is_some() {
+                    tr("The file is no longer available to send")
+                } else {
+                    tr("This message can no longer be sent again")
+                }
+                .to_owned(),
             ));
             return;
         }
@@ -8047,7 +8061,9 @@ impl Worker {
             ));
             return;
         }
-        let Some(path) = saved else { return };
+        let (Some(path), Some(media)) = (saved, media) else {
+            return;
+        };
         // A quote whose original is gone by now goes without it.
         let context = row
             .quoted

@@ -6352,6 +6352,103 @@ mod tests {
         }
     }
 
+    /// An own text that failed to go out, as when the connection dropped,
+    /// can be sent again from its menu; a delivered one cannot.
+    #[test]
+    fn a_failed_text_can_be_sent_again_from_its_menu() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let chat = sample_ids()[0].to_owned();
+        for failed in [true, false] {
+            let mut app = app();
+            app.attach(&ctx);
+            app.backend.record_demo_commands();
+            let mut text = message(&chat, "unsent-text", true, 100, Content::text("hello"));
+            text.status = if failed {
+                crate::model::Delivery::Failed
+            } else {
+                crate::model::Delivery::Delivered
+            };
+            app.conversations.get_mut(&chat).unwrap().messages = vec![text];
+            app.open_message_menu = Some("unsent-text".into());
+            render(&mut app, &ctx);
+            let nodes = accessible_nodes(&mut app, &ctx, Vec::new());
+            let again = nodes
+                .iter()
+                .find(|(label, _, _)| label == "Send again")
+                .map(|(_, _, pos)| *pos);
+            assert_eq!(again.is_some(), failed, "Send again only when it failed");
+            let Some(pos) = again else { continue };
+            let press = |pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            accessible_nodes(
+                &mut app,
+                &ctx,
+                vec![egui::Event::PointerMoved(pos), press(true)],
+            );
+            accessible_nodes(&mut app, &ctx, vec![press(false)]);
+            assert!(
+                app.backend.take_demo_commands().iter().any(|command| matches!(
+                    command,
+                    crate::backend::Command::RetrySend { message, .. } if message == "unsent-text"
+                )),
+                "the text goes again"
+            );
+        }
+    }
+
+    /// A click on a failed message's "not sent" status sends it again, as
+    /// its menu does; while selecting, the click picks the message instead.
+    #[test]
+    fn a_click_on_not_sent_sends_the_message_again() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let chat = sample_ids()[0].to_owned();
+        let hint = "This message could not be sent. Click to send it again.";
+        for selecting in [false, true] {
+            let mut app = app();
+            app.attach(&ctx);
+            app.backend.record_demo_commands();
+            let mut text = message(&chat, "unsent-text", true, 100, Content::text("hello"));
+            text.status = crate::model::Delivery::Failed;
+            app.conversations.get_mut(&chat).unwrap().messages = vec![text];
+            if selecting {
+                app.selection = Some((chat.clone(), vec!["unsent-text".into()]));
+            }
+            render(&mut app, &ctx);
+            let nodes = accessible_nodes(&mut app, &ctx, Vec::new());
+            let status = nodes
+                .iter()
+                .find(|(label, _, _)| label == hint)
+                .map(|(_, _, pos)| *pos);
+            assert_eq!(status.is_some(), !selecting, "clickable only outside selection");
+            let Some(pos) = status else { continue };
+            let press = |pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            accessible_nodes(
+                &mut app,
+                &ctx,
+                vec![egui::Event::PointerMoved(pos), press(true)],
+            );
+            accessible_nodes(&mut app, &ctx, vec![press(false)]);
+            assert!(
+                app.backend.take_demo_commands().iter().any(|command| matches!(
+                    command,
+                    crate::backend::Command::RetrySend { message, .. } if message == "unsent-text"
+                )),
+                "the text goes again"
+            );
+        }
+    }
+
     #[test]
     fn enter_submits_the_locked_chat_code_and_keeps_wrong_codes_locked() {
         for code in ["wrong-code", "demo-code"] {

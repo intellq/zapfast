@@ -4979,3 +4979,11 @@ msgstr ""
 #: src/app.rs
 msgid "Messages from {name}"
 msgstr ""
+
+#: src/backend/worker.rs
+msgid "This message can no longer be sent again"
+msgstr ""
+
+#: src/ui/conversation.rs
+msgid "This message could not be sent. Click to send it again."
+msgstr ""

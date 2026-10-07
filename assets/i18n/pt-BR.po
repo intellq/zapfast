@@ -5148,3 +5148,11 @@ msgstr "Anexos deixados de fora por não ter sido possível baixá-los: {count}"
 #: src/app.rs
 msgid "Messages from {name}"
 msgstr "Mensagens de {name}"
+
+#: src/backend/worker.rs
+msgid "This message can no longer be sent again"
+msgstr "Esta mensagem não pode mais ser reenviada"
+
+#: src/ui/conversation.rs
+msgid "This message could not be sent. Click to send it again."
+msgstr "Não foi possível enviar esta mensagem. Clique para enviar de novo."

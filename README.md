@@ -582,6 +582,12 @@ Depois da 0.19.2 (ainda sem release):
   aplicativo.
 - **Configurações › Conta:** "Adicionar conta" e o botão de desconectar ficam
   empilhados na borda direita do card.
+- **Enviar de novo** qualquer mensagem própria que ficou como "Não enviada"
+  (texto, figurinha, GIF, encaminhada, além dos anexos e áudios, que já
+  tinham): pelo menu do botão direito ou com um clique no "Não enviada" e no
+  ícone vermelho. O reenvio usa o mesmo identificador, então não duplica se a
+  primeira tentativa tiver chegado. Sobre fotos e vídeos, o "Não enviada"
+  aparece em português.
 
 Na 0.19.2:
 

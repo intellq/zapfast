@@ -5801,8 +5801,8 @@ impl App {
             Action::CancelMedia { chat, message } => {
                 self.backend.send(Command::CancelMedia { chat, message });
             }
-            Action::RetryMedia { chat, message } => {
-                self.backend.send(Command::RetryMedia { chat, message });
+            Action::RetrySend { chat, message } => {
+                self.backend.send(Command::RetrySend { chat, message });
             }
             Action::SetMuted(chat, until) => {
                 if let Some(known) = self.chat_mut(&chat) {
