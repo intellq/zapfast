@@ -331,6 +331,9 @@ fn deliver(
         .hint(notify_rust::Hint::DesktopEntry(badge::desktop_file()))
         .summary(title)
         .body(body)
+        // The freedesktop category for a received instant message, which
+        // notification servers can sort, filter, or style by.
+        .hint(notify_rust::Hint::Category("im.received".into()))
         .icon("zapfast")
         .action("default", tr("Open"));
     notification.hint(sound_hint(system_sound));
