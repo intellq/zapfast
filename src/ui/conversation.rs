@@ -70,14 +70,16 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     );
     // The chat list, or its rail of avatars, stands at the header's level
     // beside the conversation: it casts the same shadow across it, from
-    // under the header down.
-    widgets::paint_shadow_beside(
-        ui,
-        &app.palette,
-        header.left(),
-        header.bottom(),
-        ui.max_rect().bottom(),
-    );
+    // under the header down. A narrow window has no list beside it.
+    if !super::narrow(ui.ctx()) {
+        widgets::paint_shadow_beside(
+            ui,
+            &app.palette,
+            header.left(),
+            header.bottom(),
+            ui.max_rect().bottom(),
+        );
+    }
 }
 
 fn empty(app: &mut App, ui: &mut egui::Ui) {
@@ -138,15 +140,22 @@ fn header(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> Rect {
             if theme::macos_chrome(ui.ctx()) {
                 super::titlebar_drag(ui, ui.max_rect());
             }
-            ui.horizontal(|ui| {
+            let narrow = super::narrow(ui.ctx());
+            let row = ui.horizontal(|ui| {
                 // Give both rows a fixed height so their contents align.
                 ui.set_min_height(HEADER_ROW);
+                // With no chat list beside it, the header clears the traffic
+                // lights itself.
+                if narrow && theme::macos_chrome(ui.ctx()) {
+                    ui.add_space(theme::traffic_light_inset(ui.ctx()));
+                }
                 let picture = app.avatar(&chat.id);
                 let (subtitle, color) = subtitle(app, chat);
                 // The call buttons reflect the backend's own state: this chat's call is the one
                 // the worker owns, and nothing about it is inferred here.
                 let call_here = app.call.as_ref().is_some_and(|call| call.chat == chat.id);
-                let right_controls = 108.0;
+                // Call, More and Search, and Back in a narrow window.
+                let right_controls = if narrow { 144.0 } else { 108.0 };
                 // Treat the avatar, name, and subtitle as one info button.
                 let block = ui
                     .scope(|ui| {
@@ -423,11 +432,41 @@ fn header(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> Rect {
                             Action::OpenChatSearch
                         });
                     }
+                    // A narrow window shows the list or the chat, not both;
+                    // this is the way back to the list.
+                    if narrow {
+                        let back = theme::icon_button(
+                            ui,
+                            Icon::ArrowLeft,
+                            18.0,
+                            palette.secondary,
+                            palette.text,
+                            tr("Back to chats"),
+                        )
+                        .tab_stop(Stop::Back);
+                        ui.ctx()
+                            .data_mut(|data| data.insert_temp(back_button_id(), back.rect));
+                        if back.clicked() {
+                            app.actions.push(Action::CloseChat);
+                        }
+                    }
                 });
             });
+            ui.ctx()
+                .data_mut(|data| data.insert_temp(header_row_id(), row.response.rect));
         })
         .response
         .rect
+}
+
+/// Where a narrow window's Back was laid out, for interaction tests.
+pub(crate) fn back_button_id() -> egui::Id {
+    egui::Id::new("conversation-back")
+}
+
+/// Where the conversation header's row was laid out, for layout tests.
+pub(crate) fn header_row_id() -> egui::Id {
+    egui::Id::new("conversation-header-row")
 }
 
 /// Chat-header subtitle.
