@@ -5445,10 +5445,9 @@ impl Worker {
                 to_phone,
             } => {
                 // WhatsApp saves contacts by number; a privacy id goes by the number behind it.
-                let (Some(client), Some(jid)) = (
-                    self.client.clone(),
-                    Self::jid_of(&self.canonical_str(&id)),
-                ) else {
+                let (Some(client), Some(jid)) =
+                    (self.client.clone(), Self::jid_of(&self.canonical_str(&id)))
+                else {
                     self.emit(Event::Error(tr("Not connected to WhatsApp").to_owned()));
                     return;
                 };
@@ -10708,7 +10707,10 @@ mod tests {
             folder.path().join("photo (3).jpg")
         );
         std::fs::write(folder.path().join("notes"), b"3").unwrap();
-        assert_eq!(free_path(folder.path(), "notes"), folder.path().join("notes (2)"));
+        assert_eq!(
+            free_path(folder.path(), "notes"),
+            folder.path().join("notes (2)")
+        );
     }
 
     #[test]

@@ -1678,6 +1678,8 @@ pub enum Action {
         without_captions: bool,
     },
     ToggleForwardTarget(ChatId),
+    /// Starts selecting messages in the open chat with none picked yet.
+    StartSelection,
     /// Starts selecting messages in the open chat, beginning with this one.
     SelectMessage(String),
     /// Adds a message to the selection or removes it.

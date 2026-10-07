@@ -77,11 +77,7 @@ pub const STANDARD_SPEEDS: [f32; 3] = [1.0, 1.5, 2.0];
 
 /// The speeds offered: all of them with `extended`, WhatsApp's otherwise.
 pub fn speeds(extended: bool) -> &'static [f32] {
-    if extended {
-        &SPEEDS
-    } else {
-        &STANDARD_SPEEDS
-    }
+    if extended { &SPEEDS } else { &STANDARD_SPEEDS }
 }
 
 /// The speed after `speed` when the chip is clicked: the next faster cycled

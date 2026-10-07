@@ -5164,3 +5164,11 @@ msgstr "Estender velocidade máxima dos áudios"
 #: src/ui/settings.rs
 msgid "On, voice messages and audio can play at up to 3.0x, with 1.25x, 1.75x and 2.5x as well. Off, only WhatsApp's speeds: 1.0x, 1.5x and 2.0x."
 msgstr "Marcada, os áudios podem ser reproduzidos em até 3.0x, com 1.25x, 1.75x e 2.5x também. Desmarcada, ficam só as velocidades do WhatsApp: 1.0x, 1.5x e 2.0x."
+
+#: src/ui/conversation.rs
+msgid "Select messages"
+msgstr "Selecionar mensagens"
+
+#: src/ui/conversation.rs
+msgid "Select message from {sender}, {time}: {summary}"
+msgstr "Selecionar mensagem de {sender} ({time}): {summary}"

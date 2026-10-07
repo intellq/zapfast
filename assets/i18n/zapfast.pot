@@ -4995,3 +4995,11 @@ msgstr ""
 #: src/ui/settings.rs
 msgid "On, voice messages and audio can play at up to 3.0x, with 1.25x, 1.75x and 2.5x as well. Off, only WhatsApp's speeds: 1.0x, 1.5x and 2.0x."
 msgstr ""
+
+#: src/ui/conversation.rs
+msgid "Select messages"
+msgstr ""
+
+#: src/ui/conversation.rs
+msgid "Select message from {sender}, {time}: {summary}"
+msgstr ""

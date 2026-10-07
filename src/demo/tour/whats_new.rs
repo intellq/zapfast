@@ -251,6 +251,9 @@ pub(super) fn script() -> Vec<Cue> {
             "Shift + click · Select the ones between",
         ),
     );
+    // The poll between them cannot be forwarded: a click leaves it out.
+    add(68.6, Move(BubbleCorner("group-poll")));
+    add(68.9, Click(left));
     add(69.2, Move(Stop(Control::ForwardSelection)));
     add(69.6, Click(left));
     add(71.8, esc("Esc · Close"));

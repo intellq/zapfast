@@ -1124,7 +1124,10 @@ mod tests {
             ThemeChoice::System.palette(true),
             crate::theme::Palette::whatsapp_dark()
         );
-        assert_eq!(ThemeChoice::System.palette(false), crate::theme::Palette::light());
+        assert_eq!(
+            ThemeChoice::System.palette(false),
+            crate::theme::Palette::light()
+        );
         assert_eq!(
             serde_json::from_str::<ThemeChoice>("\"dark\"").unwrap(),
             ThemeChoice::Dark

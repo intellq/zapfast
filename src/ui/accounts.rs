@@ -124,9 +124,10 @@ fn menu(app: &mut App, button: &egui::Response) {
                         }
                         ui.close();
                     }
-                    Some(RowClick::Sound) => app
-                        .actions
-                        .push(Action::SetAccountSilenced(entry.id.clone(), !entry.silenced)),
+                    Some(RowClick::Sound) => app.actions.push(Action::SetAccountSilenced(
+                        entry.id.clone(),
+                        !entry.silenced,
+                    )),
                     _ => {}
                 }
             }
@@ -219,8 +220,10 @@ fn account_row(app: &App, ui: &mut egui::Ui, entry: &Entry) -> Option<RowClick> 
                 ROW_AVATAR / 2.0,
                 egui::Color32::from_black_alpha(150),
             );
-            icon.image(egui::Color32::WHITE, 18.0)
-                .paint_at(ui, Rect::from_center_size(avatar.center(), Vec2::splat(18.0)));
+            icon.image(egui::Color32::WHITE, 18.0).paint_at(
+                ui,
+                Rect::from_center_size(avatar.center(), Vec2::splat(18.0)),
+            );
         } else if entry.silenced {
             // A silenced account keeps saying so in a corner of its picture.
             let at = avatar.right_bottom() - vec2(3.0, 3.0);

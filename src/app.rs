@@ -332,6 +332,21 @@ pub struct Presence {
     pub last_seen: Option<i64>,
 }
 
+/// Whether a message can join a selection. Unlike upstream, polls and
+/// interactive messages stay selectable, so they can be deleted, copied
+/// and saved; forwarding is disabled when the selection holds one.
+pub(crate) fn can_select(content: &Content) -> bool {
+    !matches!(
+        content,
+        Content::Revoked { .. } | Content::PhoneOnly { .. } | Content::Unsupported { .. }
+    )
+}
+
+/// Whether a message can be forwarded, matching `Worker::forward_job`.
+pub(crate) fn can_forward(content: &Content) -> bool {
+    can_select(content) && !matches!(content, Content::Poll { .. } | Content::Interactive { .. })
+}
+
 /// The "unread messages" divider of the open chat. It stays until another
 /// chat opens, like on the phone.
 #[derive(Clone, Debug, PartialEq)]
@@ -3572,6 +3587,28 @@ impl App {
             }
             Event::AccountRemoved => {}
         }
+        self.prune_selection();
+    }
+
+    fn prune_selection(&mut self) {
+        let Some((chat, ids)) = self.selection.clone() else {
+            return;
+        };
+        let conversation = self.conversations.get(chat.as_str());
+        let selectable = |id: &str| {
+            conversation
+                .and_then(|conversation| conversation.message(id))
+                .is_some_and(|message| can_select(&message.content))
+        };
+        let ids: Vec<String> = ids.into_iter().filter(|id| selectable(id)).collect();
+        let anchor_gone = self
+            .selection_anchor
+            .as_deref()
+            .is_some_and(|id| !selectable(id));
+        if anchor_gone {
+            self.selection_anchor = ids.last().cloned();
+        }
+        self.selection = Some((chat, ids));
     }
 
     fn handle_link(&mut self, status: LinkStatus, live: bool) {
@@ -5588,8 +5625,26 @@ impl App {
                     self.forward_targets.push(chat);
                 }
             }
+            Action::StartSelection => {
+                // Choosing it again keeps what is already ticked.
+                if let Some(chat) = self.open_chat.clone()
+                    && self
+                        .selection
+                        .as_ref()
+                        .is_none_or(|(selected, _)| *selected != chat)
+                {
+                    self.selection = Some((chat, Vec::new()));
+                    self.selection_anchor = None;
+                }
+            }
             Action::SelectMessage(id) => {
-                if let Some(chat) = self.open_chat.clone() {
+                if let Some(chat) = self.open_chat.clone()
+                    && self
+                        .conversations
+                        .get(&chat)
+                        .and_then(|conversation| conversation.message(&id))
+                        .is_some_and(|message| can_select(&message.content))
+                {
                     self.selection = Some((chat, vec![id.clone()]));
                     self.selection_anchor = Some(id);
                 }
@@ -5612,14 +5667,7 @@ impl App {
                 if let (Some(from), Some(to)) = (position(&anchor), position(&id)) {
                     let (from, to) = (from.min(to), from.max(to));
                     for message in &conversation.messages[from..=to] {
-                        // Deleted and placeholder messages cannot be forwarded.
-                        if !matches!(
-                            message.content,
-                            Content::Revoked { .. }
-                                | Content::PhoneOnly { .. }
-                                | Content::Unsupported { .. }
-                        ) && !ids.contains(&message.id)
-                        {
+                        if can_select(&message.content) && !ids.contains(&message.id) {
                             ids.push(message.id.clone());
                         }
                     }
@@ -5629,9 +5677,17 @@ impl App {
                 self.selection_anchor = Some(id);
             }
             Action::ToggleSelected(id) => {
-                self.selection_anchor = Some(id.clone());
                 let mut next = self.selection.clone();
                 if let Some((chat, ids)) = next.as_mut() {
+                    let selectable = self
+                        .conversations
+                        .get(chat.as_str())
+                        .and_then(|conversation| conversation.message(&id))
+                        .is_some_and(|message| can_select(&message.content));
+                    if !selectable {
+                        return;
+                    }
+                    self.selection_anchor = Some(id.clone());
                     if let Some(index) = ids.iter().position(|selected| *selected == id) {
                         ids.remove(index);
                     } else {
@@ -5649,13 +5705,6 @@ impl App {
                     }
                 }
                 self.selection = next;
-                if self
-                    .selection
-                    .as_ref()
-                    .is_some_and(|(_, ids)| ids.is_empty())
-                {
-                    self.selection = None;
-                }
             }
             Action::CancelSelection => self.selection = None,
             Action::Edit(id) => {
@@ -5693,6 +5742,7 @@ impl App {
                 {
                     message.content = Content::REVOKED;
                 }
+                self.prune_selection();
                 self.backend.send(Command::Revoke { chat, id });
             }
             Action::DeleteForMe {
@@ -10294,10 +10344,154 @@ mod tests {
             Some(vec!["second".into(), "third".into(), "fifth".into()])
         );
         app.apply(Action::CancelSelection, &ctx);
-        // Unselecting the last message leaves selection mode.
+        // Unselecting the last message keeps selecting, as WhatsApp Web
+        // does, and the chat menu opens a selection with nothing in it.
         app.apply(Action::SelectMessage("second".into()), &ctx);
         app.apply(Action::ToggleSelected("second".into()), &ctx);
-        assert!(app.selection.is_none());
+        assert_eq!(app.selection, Some((chat.into(), Vec::new())));
+        app.apply(Action::CancelSelection, &ctx);
+        app.apply(Action::StartSelection, &ctx);
+        assert_eq!(app.selection, Some((chat.into(), Vec::new())));
+        app.apply(Action::ToggleSelected("fifth".into()), &ctx);
+        assert_eq!(app.selection, Some((chat.into(), vec!["fifth".into()])));
+        // Choosing it again keeps what is ticked, and a deleted message
+        // cannot be ticked.
+        app.apply(Action::StartSelection, &ctx);
+        app.apply(Action::ToggleSelected("gone".into()), &ctx);
+        assert_eq!(app.selection, Some((chat.into(), vec!["fifth".into()])));
+    }
+
+    #[test]
+    fn selection_drops_messages_that_become_ineligible() {
+        let mut app = app();
+        let (backend, events) = Backend::detached();
+        app.backend = backend;
+        let ctx = egui::Context::default();
+        let chat = "1@s.whatsapp.net";
+        app.open_chat = Some(chat.into());
+        app.conversations.entry(chat.into()).or_default().merge(
+            vec![message(chat, "first", 1), message(chat, "second", 2)],
+            false,
+        );
+        app.apply(Action::SelectMessage("first".into()), &ctx);
+        app.apply(Action::SelectRange("second".into()), &ctx);
+        let mut revoked = message(chat, "first", 1);
+        revoked.content = Content::REVOKED;
+        events
+            .send(Event::MessageUpdated(Box::new(revoked)))
+            .unwrap();
+        app.handle_events();
+        assert_eq!(app.selection, Some((chat.into(), vec!["second".into()])));
+        assert_eq!(app.selection_anchor.as_deref(), Some("second"));
+        app.apply(Action::SelectRange("first".into()), &ctx);
+        assert_eq!(app.selection, Some((chat.into(), vec!["second".into()])));
+
+        app.apply(
+            Action::DeleteForEveryone {
+                chat: chat.into(),
+                id: "second".into(),
+            },
+            &ctx,
+        );
+        assert_eq!(app.selection, Some((chat.into(), Vec::new())));
+
+        // Delete for me keeps the row until the deletion is accepted, then
+        // drops it from the selection along with the message.
+        app.conversations
+            .get_mut(chat)
+            .unwrap()
+            .merge(vec![message(chat, "kept", 3)], false);
+        app.apply(Action::SelectMessage("kept".into()), &ctx);
+        events
+            .send(Event::MessageDeleted {
+                chat: chat.to_owned(),
+                id: "kept".into(),
+            })
+            .unwrap();
+        app.handle_events();
+        assert_eq!(app.selection, Some((chat.into(), Vec::new())));
+        assert!(app.conversations[chat].message("kept").is_none());
+    }
+
+    #[test]
+    fn selection_rejects_messages_that_cannot_be_forwarded() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        let chat = "1@s.whatsapp.net";
+        app.open_chat = Some(chat.into());
+        let blocked = [
+            Content::REVOKED,
+            Content::PhoneOnly {
+                view_once: true,
+                live_location: false,
+                once: None,
+            },
+            Content::Unsupported {
+                what: "Test".into(),
+            },
+        ];
+        // Polls and interactive messages can be selected to delete, copy
+        // or save them, though not forwarded.
+        let allowed = [
+            Content::Poll {
+                question: "Lunch?".into(),
+                options: vec!["Yes".into(), "No".into()],
+                state: Default::default(),
+            },
+            Content::Interactive {
+                text: "Choose an option".into(),
+                card: None,
+            },
+        ];
+        let mut messages = vec![message(chat, "first", 1)];
+        for (index, content) in blocked.into_iter().enumerate() {
+            let mut row = message(chat, &format!("blocked-{index}"), index as i64 + 2);
+            row.content = content;
+            messages.push(row);
+        }
+        for (index, content) in allowed.into_iter().enumerate() {
+            let mut row = message(chat, &format!("allowed-{index}"), index as i64 + 5);
+            row.content = content;
+            messages.push(row);
+        }
+        messages.push(message(chat, "last", 10));
+        app.conversations
+            .entry(chat.into())
+            .or_default()
+            .merge(messages, false);
+        for id in (0..3)
+            .map(|index| format!("blocked-{index}"))
+            .chain(std::iter::once("missing".into()))
+        {
+            app.apply(Action::SelectMessage(id.clone()), &ctx);
+            assert!(app.selection.is_none(), "{id} cannot start a selection");
+            assert!(app.selection_anchor.is_none());
+            app.apply(Action::SelectMessage("first".into()), &ctx);
+            app.apply(Action::SelectMessage(id.clone()), &ctx);
+            app.apply(Action::ToggleSelected(id.clone()), &ctx);
+            assert_eq!(
+                app.selection,
+                Some((chat.into(), vec!["first".into()])),
+                "{id} cannot replace or join a selection"
+            );
+            assert_eq!(app.selection_anchor.as_deref(), Some("first"));
+            app.apply(Action::CancelSelection, &ctx);
+            app.selection_anchor = None;
+        }
+        app.apply(Action::SelectMessage("first".into()), &ctx);
+        app.apply(Action::SelectRange("last".into()), &ctx);
+        assert_eq!(
+            app.selection,
+            Some((
+                chat.into(),
+                vec![
+                    "first".into(),
+                    "allowed-0".into(),
+                    "allowed-1".into(),
+                    "last".into()
+                ]
+            ))
+        );
     }
 
     #[test]
@@ -11447,7 +11641,12 @@ mod tests {
             Ok(Command::Download { message, .. }) if message == "two"
         ));
         assert!(commands.try_recv().is_err());
-        app.handle_media(chat, "two", None, Ok(PathBuf::from("/fixture/media/two.jpg")));
+        app.handle_media(
+            chat,
+            "two",
+            None,
+            Ok(PathBuf::from("/fixture/media/two.jpg")),
+        );
         let Ok(Command::SaveBatch { files, text }) = commands.try_recv() else {
             panic!("the three pictures should be saved together");
         };
@@ -11456,7 +11655,10 @@ mod tests {
         // Only the messages without attachments, oldest first.
         let lines: Vec<_> = words.lines().collect();
         assert_eq!(lines.len(), 2, "{words}");
-        assert!(lines[0].ends_with(": earliest") && lines[1].ends_with(": words"), "{words}");
+        assert!(
+            lines[0].ends_with(": earliest") && lines[1].ends_with(": words"),
+            "{words}"
+        );
         let names: Vec<_> = files.iter().map(|(_, name)| name.as_str()).collect();
         assert_eq!(names, ["one.jpg", "three.jpg", "two.jpg"]);
         assert!(app.batch_save.is_none());
