@@ -161,6 +161,9 @@ fastframe-update = { path = "vendor/fastframe-update", features = ["reqwest"] }
 # link). See vendor/wacore-appstate/VENDORED.md.
 [patch."https://github.com/oxidezap/whatsapp-rust"]
 wacore-appstate = { path = "vendor/wacore-appstate" }
+# Copy of whatsapp-rust that can stop asking a sender to resend a message that
+# would not decrypt, for the anonymous mode. See vendor/whatsapp-rust/VENDORED.md.
+whatsapp-rust = { path = "vendor/whatsapp-rust" }
 
 [patch.crates-io]
 # crmne/egui apps-0.36, shared with Spotifast, RekordFlash and TonePush: egui

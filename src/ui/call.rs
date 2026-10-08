@@ -67,6 +67,8 @@ pub struct CallView {
     pub devices: DeviceList,
     /// Whether the window should stay above other windows.
     pub on_top: bool,
+    /// Whether a ringing call offers Decline and Accept: not on an account in anonymous mode.
+    pub answerable: bool,
 }
 
 /// What the call window asks the app to do.
@@ -157,6 +159,8 @@ fn card(app: &mut App, ctx: &egui::Context, call: &CallUpdate) {
     let peer = app.call_name(&call.chat);
     let picture = app.call_avatar(&call.chat);
     let ringing = call.phase == CallPhase::Incoming;
+    // Anonymous, the card only says who is calling.
+    let answerable = ringing && app.call_answerable();
     egui::Area::new(egui::Id::new(CARD))
         .order(egui::Order::Foreground)
         .anchor(egui::Align2::LEFT_BOTTOM, vec2(16.0, -16.0))
@@ -182,7 +186,7 @@ fn card(app: &mut App, ctx: &egui::Context, call: &CallUpdate) {
                     ui.horizontal(|ui| {
                         widgets::avatar(ui, &palette, &peer, &call.chat, 44.0, picture.as_deref());
                         ui.add_space(10.0);
-                        let buttons = if ringing {
+                        let buttons = if answerable {
                             2.0 * CARD_CONTROL + 18.0
                         } else {
                             0.0
@@ -194,7 +198,13 @@ fn card(app: &mut App, ctx: &egui::Context, call: &CallUpdate) {
                             |ui| {
                                 ui.set_width(text);
                                 theme::text(ui, &peer, theme::semibold(15.0), palette.text);
-                                let (line, color) = if ringing {
+                                let (line, color) = if ringing && !answerable {
+                                    (
+                                        gettext(locale, "Anonymous mode: the call is only logged")
+                                            .into_owned(),
+                                        palette.secondary,
+                                    )
+                                } else if ringing {
                                     (
                                         gettext(locale, "Incoming voice call").into_owned(),
                                         palette.secondary,
@@ -205,7 +215,7 @@ fn card(app: &mut App, ctx: &egui::Context, call: &CallUpdate) {
                                 theme::text(ui, line, theme::medium(12.5), color);
                             },
                         );
-                        if ringing {
+                        if answerable {
                             ui.add_space(8.0);
                             let decline = gettext(locale, "Decline").into_owned();
                             let response = control(
@@ -825,7 +835,19 @@ fn controls(
     } = view;
     let locale = *locale;
     if call.phase == CallPhase::Incoming {
-        ringing_controls(ui, palette, locale, requests);
+        if view.answerable {
+            ringing_controls(ui, palette, locale, requests);
+        } else {
+            // Anonymous, the window only says who is calling.
+            ui.vertical_centered(|ui| {
+                theme::text(
+                    ui,
+                    gettext(locale, "Anonymous mode: the call is only logged"),
+                    theme::regular(13.0),
+                    palette.secondary,
+                );
+            });
+        }
         return;
     }
     let connected = call.phase.is_connected();

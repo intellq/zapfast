@@ -801,6 +801,25 @@ impl Archive {
         rows.collect()
     }
 
+    /// [`Self::unread_incoming`] without the messages received at or before `after`, in seconds.
+    pub fn unread_incoming_after(
+        &self,
+        chat: &str,
+        limit: u32,
+        after: i64,
+    ) -> Result<Vec<(String, String)>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, sender FROM messages WHERE chat = ?1 AND from_me = 0
+             AND timestamp >= COALESCE((SELECT read_through FROM chats WHERE id = ?1), -1)
+             AND timestamp > ?3
+             ORDER BY timestamp DESC, COALESCE(history_order, 9223372036854775807) DESC, rowid DESC LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![chat, i64::from(limit), after], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?;
+        rows.collect()
+    }
+
     /// Records an attachment's local path.
     pub fn set_media_path(&self, chat: &str, id: &str, path: &Path) -> Result<Option<Message>> {
         self.put_media_path(chat, id, Some(path))

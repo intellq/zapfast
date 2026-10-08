@@ -497,6 +497,9 @@ impl Worker {
     /// Favorites saved before sync existed, or while offline, count too, so
     /// they reach the phone once after linking.
     pub(super) fn push_favorites(&mut self) {
+        if self.anonymous {
+            return;
+        }
         let Some(client) = self.client.clone() else {
             return;
         };

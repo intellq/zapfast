@@ -24,6 +24,14 @@ struct Cli {
     /// available and ZapFast keeps running in the background.
     #[arg(long)]
     start_hidden: bool,
+    /// Start an account in anonymous mode: ZapFast only reads it and sends
+    /// nothing. The account is the one `--account` names, or the first.
+    #[arg(long)]
+    anonymous: bool,
+    /// With `--anonymous`, the account by its place in the account list,
+    /// counting from 1.
+    #[arg(long, value_name = "N", requires = "anonymous")]
+    account: Option<usize>,
 
     /// Start with offline sample chats.
     #[cfg(feature = "demo")]
@@ -187,6 +195,9 @@ fn run() -> eframe::Result<()> {
         // A hidden start must not surface a copy that is already running.
         let verb = match &link {
             Some(link) => format!("{}{link}", single_instance::OPEN),
+            None if cli.anonymous => {
+                format!("{}{}", single_instance::ANONYMOUS, cli.account.unwrap_or(1))
+            }
             None if cli.start_hidden => "ping".to_owned(),
             None => "show".to_owned(),
         };
@@ -194,6 +205,10 @@ fn run() -> eframe::Result<()> {
             single_instance::Outcome::Only(guard) => Some(guard),
             single_instance::Outcome::Surfaced if link.is_some() => {
                 eprintln!("ZapFast is already running; asked it to open the link");
+                return Ok(());
+            }
+            single_instance::Outcome::Surfaced if cli.anonymous => {
+                eprintln!("ZapFast is already running; asked it to turn on anonymous mode");
                 return Ok(());
             }
             single_instance::Outcome::Surfaced if cli.start_hidden => {
@@ -264,8 +279,16 @@ fn run() -> eframe::Result<()> {
     let mut app = if demo {
         app::App::headless(dirs, settings).0
     } else {
-        app::App::new(&waker, dirs, settings, app::AppOptions { tray: true })
-            .map_err(|error| eframe::Error::AppCreation(error.into()))?
+        app::App::new(
+            &waker,
+            dirs,
+            settings,
+            app::AppOptions {
+                tray: true,
+                anonymous_account: cli.anonymous.then(|| cli.account.unwrap_or(1)),
+            },
+        )
+        .map_err(|error| eframe::Error::AppCreation(error.into()))?
     };
     if !demo {
         // After App::new, which sets the interface language the rule is named in.

@@ -73,6 +73,7 @@ mod tests {
             dirs.as_account(),
             super::Waker::default(),
             crate::model::ATTACHMENT_DOWNLOAD_LIMIT,
+            (false, None),
         );
         assert!(!dirs.session_db().exists());
         assert!(!dirs.archive_db().exists());
@@ -491,6 +492,12 @@ pub enum Command {
     /// Where new downloads go; `None` is the cache.
     SetDownloadFolder(Option<std::path::PathBuf>),
     SetKeepDeletedMessages(bool),
+    /// Anonymous mode for this account, and when it was last turned off (see
+    /// `AccountSettings::anonymous_until`).
+    SetAnonymous {
+        on: bool,
+        until: Option<i64>,
+    },
     /// Whether archived chats stay archived when a new message arrives or is
     /// sent; when not, a new message unarchives the chat here.
     SetKeepChatsArchived(bool),
@@ -1174,7 +1181,14 @@ pub struct Backend {
 }
 
 impl Backend {
-    pub fn spawn(dirs: AccountDirs, waker: Waker, attachment_limit: u64) -> Self {
+    /// Starts an account's backend. `anonymous` is the account's anonymous mode as it starts,
+    /// handed over before the connection so nothing goes out ahead of it.
+    pub fn spawn(
+        dirs: AccountDirs,
+        waker: Waker,
+        attachment_limit: u64,
+        anonymous: (bool, Option<i64>),
+    ) -> Self {
         let (command_tx, command_rx) = mpsc::unbounded_channel();
         let (event_tx, event_rx) = std::sync::mpsc::channel();
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -1197,6 +1211,7 @@ impl Backend {
                             command_rx,
                             waker,
                             attachment_limit,
+                            anonymous,
                         )
                         .await;
                     }

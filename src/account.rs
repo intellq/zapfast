@@ -71,6 +71,8 @@ pub struct Account {
     pub interactive_sending: HashSet<(ChatId, String)>,
     pub group_saving: HashSet<ChatId>,
     pub(crate) reported_online: Option<bool>,
+    /// The anonymous mode the backend last heard of: from its settings at spawn, then each change.
+    pub(crate) reported_anonymous: bool,
     /// Chats this account may pin; WhatsApp Plus raises it once known.
     pub pin_limit: usize,
     /// Every contact the account has blocked, by chat id; `None` until the
@@ -92,6 +94,7 @@ impl Account {
         backend: Backend,
     ) -> Self {
         let open_chat = settings.last_chat.clone();
+        let reported_anonymous = settings.anonymous;
         Self {
             id,
             dirs,
@@ -146,6 +149,7 @@ impl Account {
             interactive_sending: HashSet::new(),
             group_saving: HashSet::new(),
             reported_online: None,
+            reported_anonymous,
             pin_limit: crate::backend::PINNED_CHATS,
             blocklist: None,
             blocking: HashSet::new(),
@@ -154,12 +158,14 @@ impl Account {
         }
     }
 
-    /// Opens a live account from disk, migrating older global fields onto account 1.
+    /// Opens a live account from disk, migrating older global fields onto account 1. `anonymous`
+    /// turns its anonymous mode on before anything connects (`--anonymous`).
     pub fn spawn(
         app_dirs: &AppDirs,
         id: AccountId,
         legacy: &crate::settings::Settings,
         waker: &Waker,
+        anonymous: bool,
     ) -> std::io::Result<Self> {
         let dirs = app_dirs.account(&id);
         dirs.ensure()?;
@@ -174,7 +180,16 @@ impl Account {
             AccountSettings::default()
         };
         resolve_wallpaper_path(&dirs, &mut settings);
-        let backend = Backend::spawn(dirs.clone(), waker.clone(), legacy.attachment_limit_bytes());
+        if anonymous && !settings.anonymous {
+            settings.anonymous = true;
+            settings.save(&path)?;
+        }
+        let backend = Backend::spawn(
+            dirs.clone(),
+            waker.clone(),
+            legacy.attachment_limit_bytes(),
+            (settings.anonymous, settings.anonymous_until),
+        );
         Ok(Self::new(id, dirs, settings, backend))
     }
 

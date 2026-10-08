@@ -5003,3 +5003,21 @@ msgstr ""
 #: src/ui/conversation.rs
 msgid "Select message from {sender}, {time}: {summary}"
 msgstr ""
+
+msgid "Anonymous mode is on: nothing is sent"
+msgstr ""
+
+msgid "Anonymous mode is on: nothing can be sent from this account."
+msgstr ""
+
+msgid "there is no such account"
+msgstr ""
+
+msgid "Anonymous mode: the call is only logged"
+msgstr ""
+
+msgid "Anonymous mode"
+msgstr ""
+
+msgid "This account is only read: nothing is sent, not even read receipts, typing or online status, and calls cannot be answered. Messages read in this mode never get a read receipt."
+msgstr ""

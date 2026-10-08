@@ -895,6 +895,70 @@ impl fastframe_shell::Resident for App {
     }
 }
 
+/// Whether anonymous mode refuses an action: whatever would write, send, call or change something
+/// WhatsApp keeps for the account, and what only leads there (the composer, the pickers, the
+/// attachment and recording buttons). Reading, playing, downloading and saving here go on.
+fn anonymous_refuses(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::StartCall { .. }
+            | Action::AnswerCall
+            | Action::DeclineCall
+            | Action::SendText { .. }
+            | Action::ReplyInteractive { .. }
+            | Action::CreatePoll { .. }
+            | Action::VotePoll { .. }
+            | Action::Composing { .. }
+            | Action::MarkUnread { .. }
+            | Action::StartRecording
+            | Action::SendRecording
+            | Action::RetrySend { .. }
+            | Action::Reply { .. }
+            | Action::Forward { .. }
+            | Action::Edit { .. }
+            | Action::DeleteForEveryone { .. }
+            | Action::DeleteForMe { .. }
+            | Action::Attach
+            | Action::SendFiles { .. }
+            | Action::PasteImage { .. }
+            | Action::TogglePicker { .. }
+            | Action::OpenReactionPicker { .. }
+            | Action::SendSticker { .. }
+            | Action::SaveSticker { .. }
+            | Action::ForgetSticker { .. }
+            | Action::RemoveRecentSticker { .. }
+            | Action::ShareStickerPack { .. }
+            | Action::MakeSticker { .. }
+            | Action::SaveContact { .. }
+            | Action::NewContact { .. }
+            | Action::SendGif { .. }
+            | Action::React { .. }
+            | Action::SetArchived { .. }
+            | Action::SetBlocked { .. }
+            | Action::LeaveGroup { .. }
+            | Action::DeleteChat { .. }
+            | Action::ClearChat { .. }
+            | Action::SetPinned { .. }
+            | Action::SetFavorite { .. }
+            | Action::SetChatLabels { .. }
+            | Action::CreateLabel { .. }
+            | Action::UpdateLabel { .. }
+            | Action::DeleteLabel { .. }
+            | Action::MuteAllChannels { .. }
+            | Action::JoinGroup
+            | Action::FocusComposer
+            | Action::SetProfile { .. }
+            | Action::PickProfilePicture
+            | Action::SetGroupName { .. }
+            | Action::PickGroupPicture { .. }
+            | Action::RemoveGroupPicture { .. }
+            | Action::SetAccountPrivacy { .. }
+            | Action::SetMuted { .. }
+            | Action::SetLocked { .. }
+            | Action::SendPending { .. }
+    )
+}
+
 const TRAY_SHOW: &str = "show";
 const TRAY_LOCK: &str = "lock";
 const TRAY_QUIT: &str = "quit";
@@ -961,11 +1025,17 @@ fn tray_config(lockable: bool) -> fastframe_tray::Config {
 pub struct AppOptions {
     /// Registers the system-tray item.
     pub tray: bool,
+    /// The account, counted from 1 in the account list, that starts in anonymous mode
+    /// (`--anonymous --account N`).
+    pub anonymous_account: Option<usize>,
 }
 
 impl Default for AppOptions {
     fn default() -> Self {
-        Self { tray: true }
+        Self {
+            tray: true,
+            anonymous_account: None,
+        }
     }
 }
 
@@ -995,15 +1065,40 @@ impl App {
         if roster.order.is_empty() {
             roster = AccountRoster::default();
         }
+        let ids: Vec<AccountId> = roster
+            .order
+            .iter()
+            .filter_map(|id| AccountId::parse(id))
+            .collect();
+        // An account that does not exist stops the start: going on would leave the reader
+        // believing nothing is sent from an account that does send.
+        if let Some(number) = options.anonymous_account
+            && (number == 0 || number > ids.len().max(1))
+        {
+            return Err(std::io::Error::other(format!(
+                "--account {number}: there is no such account ({} linked)",
+                ids.len().max(1)
+            )));
+        }
+        let anonymous = |index: usize| options.anonymous_account == Some(index + 1);
         let mut accounts = Vec::new();
-        for id in &roster.order {
-            let Some(id) = AccountId::parse(id) else {
-                continue;
-            };
-            accounts.push(Account::spawn(&dirs, id, &settings, waker)?);
+        for (index, id) in ids.into_iter().enumerate() {
+            accounts.push(Account::spawn(
+                &dirs,
+                id,
+                &settings,
+                waker,
+                anonymous(index),
+            )?);
         }
         if accounts.is_empty() {
-            accounts.push(Account::spawn(&dirs, AccountId::first(), &settings, waker)?);
+            accounts.push(Account::spawn(
+                &dirs,
+                AccountId::first(),
+                &settings,
+                waker,
+                anonymous(0),
+            )?);
             roster = AccountRoster::default();
         }
         let active = roster
@@ -1544,7 +1639,7 @@ impl App {
                 }
             }
         } else {
-            match Account::spawn(&self.dirs, id, &self.settings, &self.waker) {
+            match Account::spawn(&self.dirs, id, &self.settings, &self.waker, false) {
                 Ok(account) => account,
                 Err(error) => {
                     self.toast_error(format!("{}: {error}", tr("Could not add an account")));
@@ -1723,6 +1818,21 @@ impl App {
                 }
                 ControlCommand::ReloadThemes => self.actions.push(Action::ReloadThemes),
                 ControlCommand::Ping => {}
+                ControlCommand::Anonymous(number) => {
+                    match number
+                        .checked_sub(1)
+                        .and_then(|index| self.accounts.get_mut(index))
+                    {
+                        Some(account) => {
+                            account.settings.anonymous = true;
+                            account.mark_settings_dirty();
+                        }
+                        None => self.toast_error(format!(
+                            "--account {number}: {}",
+                            crate::i18n::tr("there is no such account")
+                        )),
+                    }
+                }
             }
         }
         if matches!(self.link, LinkStatus::Connected)
@@ -2430,6 +2540,7 @@ impl App {
                 locale: self.locale,
                 devices: self.call_devices.clone(),
                 on_top: self.settings.call_window_on_top,
+                answerable: self.call_answerable(),
                 call,
             })
         } else {
@@ -4781,7 +4892,10 @@ impl App {
             .map(|current| current.phase);
         // A silenced account takes the call without a sound or a raised window.
         let silenced = self.account().settings.silenced;
+        // Anonymous, a call cannot be answered here, so it does not ring either: the card and the
+        // call window only say who is calling.
         let ring = !silenced
+            && !self.anonymous()
             && self
                 .chat(&update.chat)
                 .is_some_and(|chat| call_notification_eligible(chat, crate::util::now()));
@@ -5113,6 +5227,17 @@ impl App {
     }
 
     fn apply(&mut self, action: Action, ctx: &egui::Context) {
+        if self.anonymous() && anonymous_refuses(&action) {
+            if !matches!(
+                action,
+                Action::Composing { .. } | Action::FocusComposer | Action::TogglePicker(..)
+            ) {
+                self.toast_error(
+                    crate::i18n::tr("Anonymous mode is on: nothing is sent").to_owned(),
+                );
+            }
+            return;
+        }
         if self.app_lock.is_locked() && !allowed_while_locked(&action) {
             // A clicked notification opens its message once unlocked; the
             // rest would show or change what the lock hides.
@@ -7129,12 +7254,49 @@ impl App {
         let looking = self.window_focused && !self.window_hidden;
         let active = self.active;
         for (index, account) in self.accounts.iter_mut().enumerate() {
-            let online = looking && index == active;
+            let online = looking && index == active && !account.settings.anonymous;
             if account.reported_online != Some(online) {
                 account.reported_online = Some(online);
                 account.backend.send(Command::SetOnline(online));
             }
         }
+    }
+
+    /// Tells each backend when its account's anonymous mode changed, from the settings or from
+    /// `--anonymous` sent to this copy. Leaving the mode records when, so what arrived before
+    /// never gets a read receipt.
+    fn sync_anonymous(&mut self) {
+        for account in &mut self.accounts {
+            let on = account.settings.anonymous;
+            if account.reported_anonymous == on {
+                continue;
+            }
+            account.reported_anonymous = on;
+            if !on {
+                account.settings.anonymous_until = Some(crate::util::now());
+                account.mark_settings_dirty();
+            }
+            account.backend.send(Command::SetAnonymous {
+                on,
+                until: account.settings.anonymous_until,
+            });
+        }
+    }
+
+    /// Whether the call can be answered or declined here: not from an account in anonymous mode.
+    pub fn call_answerable(&self) -> bool {
+        let account = self.call_account.as_ref().map_or(self.account(), |id| {
+            self.accounts
+                .iter()
+                .find(|account| account.id == *id)
+                .unwrap_or(self.account())
+        });
+        !account.settings.anonymous
+    }
+
+    /// Whether the account on screen is in anonymous mode.
+    pub fn anonymous(&self) -> bool {
+        self.account().settings.anonymous
     }
 
     /// Processes app state shared by windowed and headless modes.
@@ -7150,6 +7312,7 @@ impl App {
         if self.app_lock.is_locked() {
             self.window_focused = false;
         }
+        self.sync_anonymous();
         self.report_presence();
         self.handle_tray();
         #[cfg(target_os = "macos")]
@@ -7743,6 +7906,19 @@ impl App {
     /// over a chat in the list for a moment open it, so a drop on the history
     /// sends to the chat that was picked on the way.
     fn take_drops_and_pastes(&mut self, ctx: &egui::Context) {
+        // Anonymous, nothing dropped or pasted is taken in to be sent.
+        if self.anonymous() {
+            self.dropping = false;
+            self.drag_pos = None;
+            self.drag_over_chat = None;
+            self.drag_dwell = None;
+            if ctx.input(|input| !input.raw.dropped_files.is_empty()) {
+                self.toast_error(
+                    crate::i18n::tr("Anonymous mode is on: nothing is sent").to_owned(),
+                );
+            }
+            return;
+        }
         let (dropped, hovering, pos, now) = ctx.input(|input| {
             let dropped: Vec<PathBuf> = input
                 .raw
@@ -13963,6 +14139,57 @@ mod tests {
         let view = app.call_window.lock().unwrap().view.clone().unwrap();
         assert_eq!(view.peer, "Locked chat");
         assert!(view.picture.is_none());
+    }
+
+    #[test]
+    fn anonymous_mode_refuses_sending_and_stays_offline() {
+        let mut app = app();
+        let (backend, mut commands) = Backend::recording();
+        app.backend = backend;
+        let ctx = egui::Context::default();
+        app.window_hidden = false;
+        app.window_focused = true;
+        app.account_mut().settings.anonymous = true;
+        app.background_frame(&ctx);
+        let sent: Vec<Command> = std::iter::from_fn(|| commands.try_recv().ok()).collect();
+        assert!(
+            sent.iter().any(|command| matches!(
+                command,
+                Command::SetAnonymous {
+                    on: true,
+                    until: None
+                }
+            )),
+            "{sent:?}"
+        );
+        assert!(
+            sent.iter()
+                .all(|command| !matches!(command, Command::SetOnline(true))),
+            "never online: {sent:?}"
+        );
+        app.apply(Action::StartRecording, &ctx);
+        assert_eq!(
+            error_toasts(&app),
+            ["Anonymous mode is on: nothing is sent"]
+        );
+        app.account_mut().settings.anonymous = false;
+        app.background_frame(&ctx);
+        let until = app.account().settings.anonymous_until;
+        assert!(until.is_some(), "leaving the mode records when");
+        assert!(
+            std::iter::from_fn(|| commands.try_recv().ok()).any(|command| matches!(
+                command,
+                Command::SetAnonymous { on: false, until: sent } if sent == until
+            ))
+        );
+    }
+
+    #[test]
+    fn an_anonymous_call_rings_without_answers() {
+        let mut app = app();
+        app.account_mut().settings.anonymous = true;
+        app.handle_call_update(incoming_call(3, crate::calls::CallPhase::Incoming));
+        assert!(!app.call_answerable());
     }
 
     #[test]

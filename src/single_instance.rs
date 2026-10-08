@@ -25,6 +25,8 @@ const OK: &str = "ok";
 /// fastframe-instance takes requests of up to 16 KiB, room for a link with a
 /// message for the composer.
 pub const OPEN: &str = "open ";
+/// Prefix of the verb that turns anonymous mode on for an account, counted from 1.
+pub const ANONYMOUS: &str = "anonymous ";
 
 /// Fixed port of copies that predate the lock. They never take it.
 const LEGACY_PORT: u16 = 47_119;
@@ -55,6 +57,8 @@ pub enum ControlCommand {
     ReloadThemes,
     /// Confirms an instance is running and changes nothing.
     Ping,
+    /// Turns anonymous mode on for an account, by its place in the account list from 1.
+    Anonymous(usize),
 }
 
 type Queue = Arc<Mutex<Vec<ControlCommand>>>;
@@ -133,6 +137,10 @@ fn parse(verb: &str) -> Option<ControlCommand> {
         "show" => Some(ControlCommand::Show),
         "reload-themes" => Some(ControlCommand::ReloadThemes),
         "ping" => Some(ControlCommand::Ping),
+        verb if verb.starts_with(ANONYMOUS) => verb[ANONYMOUS.len()..]
+            .parse()
+            .ok()
+            .map(ControlCommand::Anonymous),
         verb => verb
             .strip_prefix(OPEN)
             .filter(|link| crate::wa_link::parse(link).is_some())
@@ -254,6 +262,8 @@ mod tests {
     fn only_our_own_verbs_are_understood() {
         assert_eq!(parse("show"), Some(ControlCommand::Show));
         assert_eq!(parse("ping"), Some(ControlCommand::Ping));
+        assert_eq!(parse("anonymous 2"), Some(ControlCommand::Anonymous(2)));
+        assert_eq!(parse("anonymous x"), None);
         assert_eq!(parse("reload-themes"), Some(ControlCommand::ReloadThemes));
         assert_eq!(parse("GET / HTTP/1.1"), None);
         assert_eq!(parse("frobnicate"), None);

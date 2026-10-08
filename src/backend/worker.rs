@@ -498,6 +498,7 @@ pub async fn run(
     mut inbox: mpsc::UnboundedReceiver<Command>,
     waker: Waker,
     attachment_limit: u64,
+    anonymous: (bool, Option<i64>),
 ) {
     let archive = loop {
         let path = dirs.archive_db();
@@ -578,6 +579,8 @@ pub async fn run(
     let mut worker = Worker {
         attachment_limit,
         keep_deleted: false,
+        anonymous: anonymous.0,
+        anonymous_until: anonymous.1,
         privacy_ready: privacy_confirmed,
         privacy_confirmed,
         privacy_snapshot,
@@ -837,6 +840,10 @@ enum WithheldPage {
 struct Worker {
     attachment_limit: u64,
     keep_deleted: bool,
+    /// Anonymous mode: nothing goes out for this account (see `anonymous_refuses`).
+    anonymous: bool,
+    /// When anonymous mode was last turned off: older messages never get a read receipt.
+    anonymous_until: Option<i64>,
     /// Private content may reach the UI.
     privacy_ready: bool,
     /// Phone lock state is known to be mirrored in the archive.
@@ -1743,7 +1750,11 @@ impl Worker {
         match bot {
             Ok(bot) => {
                 let handle = bot.spawn();
-                self.client = Some(handle.client());
+                let client = handle.client();
+                // Before the first message arrives: one that would not decrypt asks its sender for
+                // nothing in anonymous mode.
+                client.set_anonymous(self.anonymous);
+                self.client = Some(client);
                 self.handle = Some(handle);
                 self.set_status(LinkStatus::Connecting);
             }
@@ -1770,6 +1781,9 @@ impl Worker {
     }
 
     fn set_online(&mut self, online: bool) {
+        // Anonymous, the account is never online: delivery receipts then go out inactive, which
+        // the sender's phone does not show as ticks.
+        let online = online && !self.anonymous;
         if self.online_wanted != online {
             self.online_wanted = online;
             self.online_changed = Instant::now();
@@ -4654,6 +4668,10 @@ impl Worker {
     // --- commands --------------------------------------------------------
 
     async fn handle_command(&mut self, command: Command) {
+        if self.anonymous && anonymous_refuses(&command) {
+            self.refuse_anonymously(&command);
+            return;
+        }
         let destinations: Vec<&ChatId> = match &command {
             Command::SendText { chat, .. }
             | Command::ReplyInteractive { chat, .. }
@@ -5077,6 +5095,18 @@ impl Worker {
                 self.download_folder = folder;
             }
             Command::SetKeepDeletedMessages(keep) => self.keep_deleted = keep,
+            Command::SetAnonymous { on, until } => {
+                self.anonymous = on;
+                self.anonymous_until = until;
+                if let Some(client) = &self.client {
+                    client.set_anonymous(on);
+                }
+                // Gone at once, without the usual linger.
+                if on {
+                    self.online_wanted = false;
+                    self.announce_presence(false);
+                }
+            }
             Command::SetKeepChatsArchived(keep) => self.keep_chats_archived = keep,
             Command::SetChatSound { chat, sound } => {
                 let _ = self.archive.set_notification_sound(&chat, sound.as_ref());
@@ -6946,12 +6976,20 @@ impl Worker {
         let Ok(Some(row)) = self.archive.chat(&chat) else {
             return;
         };
+        // Anonymous, the chat is read here and nowhere else: no receipt, and the phone is not told.
+        if self.anonymous {
+            let _ = self.archive.mark_read(&chat);
+            self.emit_chat(&chat);
+            return;
+        }
         // Collect before advancing the archive's read position. Receipts go
         // out even with ours turned off: then only our devices get them.
-        let ids = self
-            .archive
-            .unread_incoming(&chat, row.unread)
-            .unwrap_or_default();
+        // Messages from before anonymous mode was last turned off never get one.
+        let ids = match self.anonymous_until {
+            Some(until) => self.archive.unread_incoming_after(&chat, row.unread, until),
+            None => self.archive.unread_incoming(&chat, row.unread),
+        }
+        .unwrap_or_default();
         let _ = self.archive.mark_read(&chat);
         self.emit_chat(&chat);
         // A chat marked unread with nothing pending still tells the phone it
@@ -6964,7 +7002,38 @@ impl Worker {
         self.send_read_receipts(chat, ids, receipts);
     }
 
+    /// Answers a command anonymous mode refused: quietly for what happens on its own (typing, a
+    /// voice message played), with the reason for what was asked for.
+    fn refuse_anonymously(&self, command: &Command) {
+        log::info!("anonymous mode: refused to send");
+        let error = tr("Anonymous mode is on: nothing is sent").to_owned();
+        match command {
+            Command::Composing { .. } | Command::MarkPlayed { .. } => {}
+            Command::CreatePoll { chat, .. } => self.emit(Event::PollCreated {
+                chat: chat.clone(),
+                error: Some(error),
+            }),
+            Command::VotePoll { chat, message, .. } => self.emit(Event::PollVoted {
+                chat: chat.clone(),
+                message: message.clone(),
+                error: Some(error),
+            }),
+            Command::ReplyInteractive { chat, message, .. } => {
+                self.emit(Event::InteractiveReplyState {
+                    chat: chat.clone(),
+                    message: message.clone(),
+                    pending: false,
+                });
+                self.emit(Event::Error(error));
+            }
+            _ => self.emit(Event::Error(error)),
+        }
+    }
+
     fn pump_read_sync(&mut self) {
+        if self.anonymous {
+            return;
+        }
         if !matches!(self.status, LinkStatus::Connected) || !self.read_sync.ready(Instant::now()) {
             return;
         }
@@ -10729,6 +10798,63 @@ fn free_path(folder: &Path, name: &str) -> PathBuf {
         .unwrap_or(first)
 }
 
+/// Whether anonymous mode refuses a command: everything that would reach WhatsApp on this
+/// account's behalf, whether a contact would see it (messages, reactions, typing, calls, played
+/// voice messages) or only the account's own devices would (archiving, pinning, labels, favorite
+/// stickers, contacts). Reading, downloading and what stays on this computer go on.
+fn anonymous_refuses(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::CreatePoll { .. }
+            | Command::VotePoll { .. }
+            | Command::SendText { .. }
+            | Command::ReplyInteractive { .. }
+            | Command::Forward { .. }
+            | Command::Composing { .. }
+            | Command::MarkUnread { .. }
+            | Command::EditText { .. }
+            | Command::Revoke { .. }
+            | Command::DeleteForMe { .. }
+            | Command::SendFiles { .. }
+            | Command::SendImage { .. }
+            | Command::SetMuted { .. }
+            | Command::SetLocked { .. }
+            | Command::CreateLabel { .. }
+            | Command::UpdateLabel { .. }
+            | Command::DeleteLabel { .. }
+            | Command::SetChatLabels { .. }
+            | Command::SendVoice { .. }
+            | Command::RetrySend { .. }
+            | Command::StartCall { .. }
+            | Command::AnswerCall
+            | Command::DeclineCall
+            | Command::MarkPlayed { .. }
+            | Command::SendSticker { .. }
+            | Command::SaveSticker { .. }
+            | Command::RemoveRecentSticker { .. }
+            | Command::ForgetSticker { .. }
+            | Command::SendStickerPack { .. }
+            | Command::MakeSticker { chat: Some(_), .. }
+            | Command::SetProfile { .. }
+            | Command::SetProfilePicture { .. }
+            | Command::SetGroupName { .. }
+            | Command::SetGroupPicture { .. }
+            | Command::SaveContact { .. }
+            | Command::NewContact { .. }
+            | Command::SendGif { .. }
+            | Command::React { .. }
+            | Command::SetArchived { .. }
+            | Command::LeaveGroup { .. }
+            | Command::DeleteChat { .. }
+            | Command::ClearChat { .. }
+            | Command::SetPinned { .. }
+            | Command::SetFavorite { .. }
+            | Command::SetAccountPrivacy { .. }
+            | Command::SetBlocked { .. }
+            | Command::JoinInvite { .. }
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -12041,6 +12167,38 @@ mod tests {
             "{emitted:?}"
         );
         assert_eq!(emitted.len(), 3, "{emitted:?}");
+    }
+
+    #[tokio::test]
+    async fn anonymous_mode_refuses_what_would_reach_whatsapp() {
+        let (mut worker, events, _, _) = receipt_tests::worker();
+        let chat = "12025550100@s.whatsapp.net";
+        worker.archive.ensure_chat(chat, "Fixture").unwrap();
+        worker.anonymous = true;
+        worker
+            .handle_command(Command::SendText {
+                chat: chat.into(),
+                text: "Fixture".into(),
+                quoting: None,
+                mentions: Vec::new(),
+                preview: None,
+            })
+            .await;
+        worker
+            .handle_command(Command::Composing {
+                chat: chat.into(),
+                composing: true,
+            })
+            .await;
+        worker
+            .handle_command(Command::StartCall { chat: chat.into() })
+            .await;
+        let emitted: Vec<Event> = events.try_iter().collect();
+        let refused = "Anonymous mode is on: nothing is sent";
+        assert!(
+            matches!(&emitted[..], [Event::Error(a), Event::Error(b)] if a == refused && b == refused),
+            "typing is refused quietly: {emitted:?}"
+        );
     }
 
     #[test]
@@ -13551,6 +13709,8 @@ mod receipt_tests {
         let worker = Worker {
             attachment_limit: ATTACHMENT_DOWNLOAD_LIMIT,
             keep_deleted: false,
+            anonymous: false,
+            anonymous_until: None,
             privacy_ready: true,
             privacy_confirmed: true,
             privacy_snapshot: false,
@@ -15383,6 +15543,34 @@ mod receipt_tests {
             1,
             "paging old history preserves a new unread message"
         );
+    }
+
+    #[test]
+    fn reading_in_anonymous_mode_stays_on_this_computer() {
+        let (mut worker, _events, _inbox, _wa) = worker();
+        worker.anonymous = true;
+        worker.store_message(incoming("a", 100), None, None);
+        worker.mark_read(PEER.into(), true);
+        assert_eq!(unread(&worker), 0, "read here");
+        assert!(
+            worker.archive.pending_reads().unwrap().is_empty(),
+            "the phone is not told"
+        );
+    }
+
+    #[test]
+    fn messages_from_before_anonymous_mode_ended_get_no_read_receipt() {
+        let (mut worker, _events, _inbox, _wa) = worker();
+        worker.store_message(incoming("during", 100), None, None);
+        worker.store_message(incoming("after", 200), None, None);
+        let ids: Vec<String> = worker
+            .archive
+            .unread_incoming_after(PEER, 10, 150)
+            .unwrap()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(ids, ["after"]);
     }
 
     #[tokio::test]

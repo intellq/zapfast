@@ -5172,3 +5172,21 @@ msgstr "Selecionar mensagens"
 #: src/ui/conversation.rs
 msgid "Select message from {sender}, {time}: {summary}"
 msgstr "Selecionar mensagem de {sender} ({time}): {summary}"
+
+msgid "Anonymous mode is on: nothing is sent"
+msgstr "Modo anônimo ativo: nada é enviado"
+
+msgid "Anonymous mode is on: nothing can be sent from this account."
+msgstr "Modo anônimo ativo: nenhum envio é possível nesta conta."
+
+msgid "there is no such account"
+msgstr "essa conta não existe"
+
+msgid "Anonymous mode: the call is only logged"
+msgstr "Modo anônimo: a chamada só fica no registro"
+
+msgid "Anonymous mode"
+msgstr "Modo anônimo"
+
+msgid "This account is only read: nothing is sent, not even read receipts, typing or online status, and calls cannot be answered. Messages read in this mode never get a read receipt."
+msgstr "Esta conta só é lida: nada é enviado, nem confirmação de leitura, \"digitando\" ou status online, e não é possível atender chamadas. Mensagens lidas neste modo nunca recebem confirmação de leitura."

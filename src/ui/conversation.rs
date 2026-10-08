@@ -974,6 +974,11 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                 selection_bar(app, ui, &chat.id, &selected);
                 return;
             }
+            // Anonymous, there is no composer at all, so nothing can be typed even by accident.
+            if app.anonymous() {
+                anonymous_strip(app, ui);
+                return;
+            }
             if !chat.can_send() {
                 if chat.kind == crate::model::ChatKind::Broadcast {
                     // A channel we left says so; the rest are only read-only.
@@ -3172,6 +3177,22 @@ fn blocked_strip(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                 app.actions.push(Action::SetBlocked(chat.id.clone(), false));
             }
         });
+        ui.add_space(8.0);
+    });
+}
+
+/// What stands where the composer would while the account is in anonymous mode, as for a blocked
+/// contact: nothing can be sent until the mode is turned off in the settings.
+fn anonymous_strip(app: &App, ui: &mut egui::Ui) {
+    let palette = app.palette;
+    ui.vertical_centered(|ui| {
+        ui.add_space(8.0);
+        theme::text(
+            ui,
+            tr("Anonymous mode is on: nothing can be sent from this account."),
+            theme::regular(13.5),
+            palette.secondary,
+        );
         ui.add_space(8.0);
     });
 }

@@ -927,6 +927,12 @@ pub struct AccountSettings {
     /// Silenced from the account switcher: no notification, sound or ringing, and no unread dot,
     /// whatever `notifications` says.
     pub silenced: bool,
+    /// Anonymous mode: ZapFast only reads this account. Nothing is sent, not even read receipts,
+    /// typing, presence or a request to resend a message that would not decrypt.
+    pub anonymous: bool,
+    /// When anonymous mode was last turned off, in seconds: messages received before then never
+    /// get a read receipt, so leaving the mode does not reveal what was read in it.
+    pub anonymous_until: Option<i64>,
 }
 
 impl Default for AccountSettings {
@@ -939,6 +945,8 @@ impl Default for AccountSettings {
             save_contacts_to_phone: true,
             wallpaper_image: None,
             silenced: false,
+            anonymous: false,
+            anonymous_until: None,
         }
     }
 }
@@ -953,6 +961,8 @@ impl AccountSettings {
             save_contacts_to_phone: settings.save_contacts_to_phone,
             wallpaper_image: settings.wallpaper_image.clone(),
             silenced: false,
+            anonymous: false,
+            anonymous_until: None,
         }
     }
 

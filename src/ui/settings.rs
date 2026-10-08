@@ -970,6 +970,14 @@ fn sections(app: &App) -> Vec<Section> {
             "",
             |settings| &mut settings.keep_deleted_messages,
         );
+        privacy.account_toggle(
+            translated(locale, "Anonymous mode"),
+            translated(
+                locale,
+                "This account is only read: nothing is sent, not even read receipts, typing or online status, and calls cannot be answered. Messages read in this mode never get a read receipt.",
+            ),
+            |settings| &mut settings.anonymous,
+        );
     }
 
     let mut system = Section::new(translated(locale, "System"));
