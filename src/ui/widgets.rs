@@ -260,6 +260,10 @@ pub fn paint_avatar(
         ui.painter().circle_filled(rect.center(), size / 2.0, fill);
         if crate::model::ChatKind::from_id(id) == crate::model::ChatKind::Group {
             theme::paint_icon(ui, Icon::Users, rect, size * 0.5, Color32::WHITE);
+        } else if !name.chars().any(char::is_alphabetic) {
+            // A bare phone number has no initials worth showing: "+55 (94) 8808-2733" would read
+            // "52". A person stands in for it instead.
+            theme::paint_icon(ui, Icon::User, rect, size * 0.5, Color32::WHITE);
         } else {
             ui.painter().text(
                 rect.center(),
