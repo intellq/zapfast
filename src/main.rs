@@ -318,6 +318,29 @@ fn run() -> eframe::Result<()> {
         .start_hidden(start_hidden)
         .idle(fastframe_tray::idle)
         .run(|lease| {
+            // A call that rings while the main window is in the tray opens only the call window.
+            if demo_persistence.is_none() && lease.peek(|app: &app::App| app.call_window_alone()) {
+                let viewport = lease.peek(zapfast::ui::call::standalone_viewport);
+                // eframe restores the size it stored for its first window whether or not it saves
+                // one, and the main window's lives under the app's name: a store of its own keeps
+                // the call window at its size.
+                let store = lease.peek(|app: &app::App| app.dirs.state.join("call-window.ron"));
+                return eframe::run_native(
+                    "ZapFast",
+                    eframe::NativeOptions {
+                        viewport,
+                        persistence_path: Some(store),
+                        persist_window: false,
+                        ..Default::default()
+                    },
+                    Box::new(move |cc| {
+                        let app = lease.take(&cc.egui_ctx);
+                        zapfast::theme::set_font(&cc.egui_ctx, &app.settings.font);
+                        zapfast::theme::install(&cc.egui_ctx);
+                        Ok(Box::new(CallShell { app }))
+                    }),
+                );
+            }
             let receipt = update_receipt.take();
             // The latest geometry lives in the app waiting in the shell, so
             // a reopened window (tray, notification, Wayland reopen) uses
@@ -738,6 +761,44 @@ impl eframe::App for Shell {
     }
 
     /// Saves essential state before the window closes.
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.app.save_state();
+    }
+}
+
+/// The call window alone, for a call that rings while the main window is in the tray. The app
+/// keeps running as it does in the tray; the window closes once the call is no longer shown in it,
+/// and makes way for the main window when that is asked for.
+struct CallShell {
+    app: fastframe_shell::Held<app::App>,
+}
+
+impl eframe::App for CallShell {
+    fn persist_egui_memory(&self) -> bool {
+        false
+    }
+
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let app = &mut *self.app;
+        app.background_frame(ctx);
+        if app.quit_requested {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        } else if app.wants_show {
+            app.reopen_window();
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        } else if !app.call_in_window() {
+            app.hide_intent = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        } else {
+            // Events reach the app between frames: look again soon, as the tray would.
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        }
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        zapfast::ui::call::standalone(ui, &self.app);
+    }
+
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.app.save_state();
     }

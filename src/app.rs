@@ -696,8 +696,9 @@ pub struct App {
     call_windowed: Option<u64>,
     /// What the call window, a viewport of its own, shows and asks for.
     pub(crate) call_window: crate::ui::call::SharedCallWindow,
-    /// Set when a call starts ringing, so the next frame brings the window up to show its card.
-    call_raise: bool,
+    /// The ringing call that moves to the call window whenever the main window is not in front:
+    /// set when it starts ringing, cleared when that window is closed while it rings.
+    call_alert: Option<u64>,
     /// The screen the main window is on, in points, which the call window opens in the corner of.
     pub main_monitor: Option<egui::Rect>,
     /// The generation of an incoming call the desktop was told about, so its notification can be
@@ -871,7 +872,9 @@ impl fastframe_shell::Resident for App {
         self.background_frame(ctx);
         if self.quit_requested {
             fastframe_shell::Headless::Quit
-        } else if self.wants_show {
+        } else if self.wants_show
+            || (self.call_window_alone() && crate::ui::call::standalone_ready(self))
+        {
             fastframe_shell::Headless::Show
         } else {
             fastframe_shell::Headless::Wait
@@ -1317,7 +1320,7 @@ impl App {
             call_devices: crate::calls::DeviceList::default(),
             call_windowed: None,
             call_window: Default::default(),
-            call_raise: false,
+            call_alert: None,
             main_monitor: None,
             call_notified: None,
             call_repaint: false,
@@ -2378,9 +2381,20 @@ impl App {
     /// is past ringing, and the farewell of one that got there.
     pub fn call_in_window(&self) -> bool {
         self.call.as_ref().is_some_and(|call| {
-            call.phase != crate::calls::CallPhase::Incoming
-                && (call.phase.is_live() || self.call_windowed == Some(call.generation))
+            self.call_windowed == Some(call.generation)
+                || (call.phase != crate::calls::CallPhase::Incoming && call.phase.is_live())
         })
+    }
+
+    /// Whether the call window opens on its own, in place of the main window: a call shown in its
+    /// window while the main window is in the tray and nobody asked for it.
+    pub fn call_window_alone(&self) -> bool {
+        self.window_hidden && !self.wants_show && !self.quit_requested && self.call_in_window()
+    }
+
+    /// Closes the standalone call window to open the main window in its place.
+    pub fn reopen_window(&mut self) {
+        self.reopen = true;
     }
 
     /// Whether a call needs the main window to stay: the ringing card lives in it, and the call
@@ -2448,6 +2462,12 @@ impl App {
                 CallRequest::Dismiss => {
                     self.call = None;
                     self.call_surface_until = None;
+                }
+                CallRequest::Answer => self.actions.push(Action::AnswerCall),
+                CallRequest::Decline => self.actions.push(Action::DeclineCall),
+                CallRequest::Hide => {
+                    self.call_windowed = None;
+                    self.call_alert = None;
                 }
             }
         }
@@ -4782,7 +4802,7 @@ impl App {
             && !silenced
             && let Some(call) = self.call.clone()
         {
-            self.call_raise = true;
+            self.call_alert = Some(call.generation);
             self.notify_incoming_call(&call);
         }
     }
@@ -4851,16 +4871,18 @@ impl App {
             self.call_surface_until = None;
             self.call = None;
         }
-        // A call that starts ringing brings the window up, from the tray or from behind other
-        // windows, because its answers are on the card in the window's corner.
-        if std::mem::take(&mut self.call_raise)
-            && self
-                .call
-                .as_ref()
-                .is_some_and(|call| call.phase == crate::calls::CallPhase::Incoming)
-            && (self.window_hidden || !self.window_focused)
+        // A call that rings while the main window is in the tray, minimized, or behind other
+        // windows rings in the call window in the corner of the screen, with Decline and Accept,
+        // and leaves the main window where it is. In front, the card in its corner is enough; once
+        // the main window leaves the front, the card makes way for the call window for good, so the
+        // call is never offered in two places.
+        if (self.window_hidden || !self.window_focused)
+            && let Some(call) = self.call.as_ref().filter(|call| {
+                call.phase == crate::calls::CallPhase::Incoming
+                    && self.call_alert == Some(call.generation)
+            })
         {
-            self.actions.push(Action::ShowWindow);
+            self.call_windowed = Some(call.generation);
         }
         if let Some(call) = &self.call {
             // The duration changes every second; asking here keeps a muted, idle call's timer
@@ -13944,13 +13966,95 @@ mod tests {
     }
 
     #[test]
-    fn a_ringing_call_brings_the_window_back_from_the_tray() {
+    fn a_call_ringing_in_the_tray_opens_only_the_call_window() {
         let mut app = app();
         let ctx = egui::Context::default();
         app.window_hidden = true;
         app.handle_call_update(incoming_call(3, crate::calls::CallPhase::Incoming));
         app.background_frame(&ctx);
-        assert!(app.wants_show, "the card needs the window");
+        assert!(!app.wants_show, "the main window stays in the tray");
+        assert!(app.call_window_alone(), "the call window opens on its own");
+    }
+
+    #[test]
+    fn a_call_ringing_behind_other_windows_opens_the_call_window() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.window_hidden = false;
+        app.window_focused = false;
+        app.handle_call_update(incoming_call(3, crate::calls::CallPhase::Incoming));
+        app.background_frame(&ctx);
+        assert!(!app.reopen && !app.wants_show, "the main window stays put");
+        assert!(app.call_in_window(), "the call rings in its window");
+        assert!(!app.call_window_alone(), "the main window holds it");
+    }
+
+    #[test]
+    fn a_call_ringing_in_front_keeps_the_card() {
+        let mut app = app();
+        app.window_hidden = false;
+        app.window_focused = true;
+        app.handle_call_update(incoming_call(3, crate::calls::CallPhase::Incoming));
+        app.tick(&egui::Context::default());
+        assert!(!app.call_in_window(), "the card in the corner is enough");
+    }
+
+    #[test]
+    fn a_card_left_behind_makes_way_for_the_call_window_for_good() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.window_hidden = false;
+        app.window_focused = true;
+        app.handle_call_update(incoming_call(3, crate::calls::CallPhase::Incoming));
+        app.tick(&ctx);
+        assert!(!app.call_in_window(), "the card rings first");
+        app.window_focused = false;
+        app.tick(&ctx);
+        assert!(
+            app.call_in_window(),
+            "minimized, the call window takes over"
+        );
+        app.window_focused = true;
+        app.tick(&ctx);
+        assert!(
+            app.call_in_window(),
+            "restored, the card does not come back"
+        );
+    }
+
+    #[test]
+    fn the_ringing_call_window_answers_declines_and_closes_back_to_the_card() {
+        use crate::ui::call::CallRequest;
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.window_hidden = false;
+        app.window_focused = false;
+        app.handle_call_update(incoming_call(3, crate::calls::CallPhase::Incoming));
+        app.background_frame(&ctx);
+        let push = |app: &mut App, request| {
+            app.call_window
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .requests
+                .push(request);
+        };
+        push(&mut app, CallRequest::Answer);
+        push(&mut app, CallRequest::Decline);
+        app.sync_call_window(&ctx);
+        assert!(
+            matches!(
+                app.actions.as_slice(),
+                [Action::AnswerCall, Action::DeclineCall]
+            ),
+            "the window's buttons are the card's"
+        );
+        app.actions.clear();
+        push(&mut app, CallRequest::Hide);
+        app.background_frame(&ctx);
+        assert!(app.call.is_some(), "the call keeps ringing");
+        assert!(!app.call_in_window(), "and goes back to the card");
+        app.tick(&ctx);
+        assert!(!app.call_in_window(), "and stays there");
     }
 
     #[test]

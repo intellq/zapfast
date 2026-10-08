@@ -80,6 +80,13 @@ pub enum CallRequest {
     OnTop(bool),
     /// The window was closed: the app forgets the call it showed.
     Dismiss,
+    /// Pick up the call that is ringing.
+    Answer,
+    /// Turn down the call that is ringing.
+    Decline,
+    /// The window of a call that is still ringing was closed: the call keeps ringing, and goes back
+    /// to the card in the main window.
+    Hide,
 }
 
 /// The state the app and the call window share.
@@ -238,14 +245,25 @@ fn card(app: &mut App, ctx: &egui::Context, call: &CallUpdate) {
 fn open_window(app: &App, ctx: &egui::Context) {
     let shared = Arc::clone(&app.call_window);
     let waker = app.waker();
-    let title = app
-        .call
-        .as_ref()
-        .map(|call| app.call_name(&call.chat))
-        .unwrap_or_default();
-    if !placement_ready(app, ctx, &title) {
+    let title = window_title(app);
+    if !placement_ready(app, Some(ctx), &title) {
         return;
     }
+    ctx.show_viewport_deferred(window_id(), viewport(app, title), move |ui, _class| {
+        window(ui, &shared, &waker);
+    });
+}
+
+/// The call window's title: the call's own name.
+fn window_title(app: &App) -> String {
+    app.call
+        .as_ref()
+        .map(|call| app.call_name(&call.chat))
+        .unwrap_or_default()
+}
+
+/// How the call window opens: its size, its icon, and the top-right corner of the screen.
+fn viewport(app: &App, title: String) -> egui::ViewportBuilder {
     let size = [WINDOW_WIDTH, base_height()];
     // Its size is set from what it shows, through the minimum and the maximum: a window made
     // unresizable on Wayland keeps the size it opened with, which would leave no room for the device
@@ -260,7 +278,7 @@ fn open_window(app: &App, ctx: &egui::Context) {
         .with_icon(window_icon());
     // The top-right corner of the screen the main window is on. Wayland ignores a position, and
     // KDE's is set by the KWin script instead.
-    let builder = match app.main_monitor {
+    match app.main_monitor {
         Some(monitor) if crate::keep_above::method() == crate::keep_above::Method::WindowLevel => {
             builder.with_position(pos2(
                 monitor.right() - WINDOW_WIDTH - crate::keep_above::EDGE,
@@ -268,16 +286,30 @@ fn open_window(app: &App, ctx: &egui::Context) {
             ))
         }
         _ => builder,
-    };
-    ctx.show_viewport_deferred(window_id(), builder, move |ui, _class| {
-        window(ui, &shared, &waker);
-    });
+    }
+}
+
+/// The call window as a window of its own, for a call that rings while the main window is in the
+/// tray: there is no main window to hold it, so it opens in the main window's place.
+pub fn standalone_viewport(app: &App) -> egui::ViewportBuilder {
+    viewport(app, window_title(app))
+}
+
+/// Whether the standalone call window may open yet; see [`placement_ready`]. The app runs without
+/// a window then, and asks again on its next tick.
+pub fn standalone_ready(app: &App) -> bool {
+    placement_ready(app, None, &window_title(app))
+}
+
+/// One frame of the standalone call window.
+pub fn standalone(ui: &mut egui::Ui, app: &App) {
+    window(ui, &app.call_window, &app.waker());
 }
 
 /// Whether the call window may open. On KDE Plasma under Wayland a new one waits until KWin is
 /// ready to move it to its corner as it appears, so it opens there instead of in the middle of the
 /// screen and then jumping; after [`PLACE_WAIT`] it opens anyway, and is moved once it is there.
-fn placement_ready(app: &App, ctx: &egui::Context, title: &str) -> bool {
+fn placement_ready(app: &App, ctx: Option<&egui::Context>, title: &str) -> bool {
     if crate::keep_above::method() != crate::keep_above::Method::KWin {
         return true;
     }
@@ -306,7 +338,9 @@ fn placement_ready(app: &App, ctx: &egui::Context, title: &str) -> bool {
     if waited >= PLACE_WAIT {
         return true;
     }
-    ctx.request_repaint_after(PLACE_WAIT - waited);
+    if let Some(ctx) = ctx {
+        ctx.request_repaint_after(PLACE_WAIT - waited);
+    }
     false
 }
 
@@ -350,12 +384,17 @@ fn window(ui: &mut egui::Ui, shared: &SharedCallWindow, waker: &crate::backend::
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
             return;
         };
-        // Closing the window is hanging up: the call has nowhere else to be shown.
+        // Closing the window is hanging up: the call has nowhere else to be shown. A call that is
+        // still ringing only stops being shown here.
         if ctx.input(|input| input.viewport().close_requested()) {
-            if view.call.phase.is_live() {
-                state.requests.push(CallRequest::Hangup);
+            if view.call.phase == CallPhase::Incoming {
+                state.requests.push(CallRequest::Hide);
+            } else {
+                if view.call.phase.is_live() {
+                    state.requests.push(CallRequest::Hangup);
+                }
+                state.requests.push(CallRequest::Dismiss);
             }
-            state.requests.push(CallRequest::Dismiss);
             state.view = None;
             drop(state);
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
@@ -785,6 +824,10 @@ fn controls(
         ..
     } = view;
     let locale = *locale;
+    if call.phase == CallPhase::Incoming {
+        ringing_controls(ui, palette, locale, requests);
+        return;
+    }
     let connected = call.phase.is_connected();
     let live = call.phase.is_live();
     let buttons = 3.0;
@@ -851,6 +894,46 @@ fn controls(
     );
     if response.clicked() {
         requests.push(CallRequest::Hangup);
+    }
+}
+
+/// Decline and Accept, for a call that is still ringing, so the window can answer it without the
+/// main window.
+fn ringing_controls(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    locale: Locale,
+    requests: &mut Vec<CallRequest>,
+) {
+    let spacing = 44.0;
+    let width = 2.0 * CONTROL + spacing;
+    ui.spacing_mut().item_spacing.x = spacing;
+    ui.add_space(((ui.available_width() - width) / 2.0).max(0.0));
+    let tip = gettext(locale, "Decline").into_owned();
+    let response = control(
+        ui,
+        Icon::Phone,
+        CONTROL,
+        palette.danger,
+        Color32::WHITE,
+        &tip,
+        true,
+    );
+    if response.clicked() {
+        requests.push(CallRequest::Decline);
+    }
+    let tip = gettext(locale, "Accept").into_owned();
+    let response = control(
+        ui,
+        Icon::Phone,
+        CONTROL,
+        palette.accent,
+        palette.on_accent,
+        &tip,
+        true,
+    );
+    if response.clicked() {
+        requests.push(CallRequest::Answer);
     }
 }
 
