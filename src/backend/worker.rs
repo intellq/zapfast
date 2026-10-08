@@ -1753,7 +1753,7 @@ impl Worker {
                 let client = handle.client();
                 // Before the first message arrives: one that would not decrypt asks its sender for
                 // nothing in anonymous mode.
-                client.set_anonymous(self.anonymous);
+                client.set_withhold_receipts(self.anonymous);
                 self.client = Some(client);
                 self.handle = Some(handle);
                 self.set_status(LinkStatus::Connecting);
@@ -5099,7 +5099,7 @@ impl Worker {
                 self.anonymous = on;
                 self.anonymous_until = until;
                 if let Some(client) = &self.client {
-                    client.set_anonymous(on);
+                    client.set_withhold_receipts(on);
                 }
                 // Gone at once, without the usual linger.
                 if on {

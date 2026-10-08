@@ -671,7 +671,7 @@ impl Client {
             custom_enc_handlers: std::sync::OnceLock::new(),
             inbound_durability_hook: std::sync::OnceLock::new(),
             retry_admission: std::sync::OnceLock::new(),
-            anonymous: std::sync::atomic::AtomicBool::new(false),
+            withhold_receipts: std::sync::atomic::AtomicBool::new(false),
             history_sync_admission,
             chatstate_handlers: std::sync::RwLock::new(Arc::from([])),
             chatstate_handler_count: AtomicUsize::new(0),

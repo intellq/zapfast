@@ -2182,6 +2182,9 @@ fn bubble_width_limit(available: f32, own: bool, carousel: bool, with_avatar: bo
 /// above the viewport moves the scroll offset with it, so this only shapes the
 /// scrollbar until the reader scrolls near the row.
 fn estimated_height(message: &Message, width: f32, new_day: bool, sender_pictures: bool) -> f32 {
+    if matches!(message.content, Content::Call { .. }) {
+        return CALL_ROW_HEIGHT + if new_day { 36.0 } else { 0.0 };
+    }
     let carousel = matches!(&message.content, Content::Interactive { card: Some(card), .. } if !card.carousel.is_empty());
     let bubble = (bubble_width_limit(
         width,
@@ -2613,6 +2616,10 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                                 egui::UiBuilder::new()
                                     .id(bubble_id(&chat.id, &message.id).with("row-ui")),
                                 |ui| {
+                                    if matches!(message.content, Content::Call { .. }) {
+                                        call_row(ui, &view, message);
+                                        return None;
+                                    }
                                     if selection.is_none() {
                                         return bubble(
                                             ui,
@@ -3211,6 +3218,63 @@ fn centered_note(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) {
 }
 
 /// Typing indicator with stacked avatars and animated dots.
+/// The room a logged call's line takes, with the space around it.
+const CALL_ROW_HEIGHT: f32 = 34.0;
+
+/// A logged call: a centred line like the day chip, outside any bubble and with no menu, since
+/// WhatsApp knows nothing of the row. A missed call is drawn in the danger colour.
+fn call_row(ui: &mut egui::Ui, view: &View<'_>, message: &Message) {
+    let Content::Call { status, .. } = &message.content else {
+        return;
+    };
+    let palette = view.palette;
+    let missed = *status == crate::model::CallStatus::Missed;
+    let color = if missed {
+        palette.danger
+    } else {
+        palette.secondary
+    };
+    let label = format!(
+        "{} · {}",
+        message.content.summary(),
+        crate::util::clock(message.timestamp)
+    );
+    ui.add_space(4.0);
+    ui.vertical_centered(|ui| {
+        let galley = ui
+            .painter()
+            .layout_no_wrap(label, theme::medium(12.0), color);
+        let icon = 14.0;
+        let size = vec2(galley.size().x + icon + 26.0, galley.size().y + 10.0);
+        let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+        if ui.is_rect_visible(rect) {
+            let radius = egui::CornerRadius::from(rect.height() / 2.0);
+            let fill = if palette.dark {
+                palette.panel.lerp_to_gamma(palette.bubble_in, 0.5)
+            } else {
+                palette.panel
+            };
+            ui.painter()
+                .add(palette.bubble_shadow().as_shape(rect, radius));
+            ui.painter().rect_filled(rect, radius, fill);
+            let icon_rect = Rect::from_center_size(
+                egui::pos2(rect.left() + 10.0 + icon / 2.0, rect.center().y),
+                vec2(icon, icon),
+            );
+            theme::paint_icon(ui, Icon::Phone, icon_rect, icon, color);
+            ui.painter().galley(
+                egui::pos2(
+                    icon_rect.right() + 6.0,
+                    rect.center().y - galley.size().y / 2.0,
+                ),
+                galley,
+                color,
+            );
+        }
+    });
+    ui.add_space(4.0);
+}
+
 fn typing_bubble(ui: &mut egui::Ui, view: &View<'_>, typers: &[(String, String)]) {
     let palette = view.palette;
     ui.horizontal(|ui| {
@@ -5902,6 +5966,8 @@ fn content(
             });
             None
         }
+        // Drawn by `call_row`, never inside a bubble.
+        Content::Call { .. } => None,
         Content::Unsupported { what } => {
             mirrored_row(
                 ui,

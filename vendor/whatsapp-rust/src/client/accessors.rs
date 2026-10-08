@@ -308,14 +308,14 @@ impl Client {
         self.retry_admission.set(policy).is_ok()
     }
 
-    /// intellq fork: anonymous mode (off by default). On, a message from someone
+    /// intellq fork: withhold receipts (off by default). On, a message from someone
     /// else is only acknowledged to the server, so it is not redelivered, and
     /// nothing reaches its sender: no delivery receipt (not even `inactive`,
     /// which still shows two ticks) and no resend request for a message that
     /// fails to decrypt, which then stays undecryptable. Receipts to the
     /// account's own devices are unchanged.
-    pub fn set_anonymous(&self, on: bool) {
-        self.anonymous
+    pub fn set_withhold_receipts(&self, on: bool) {
+        self.withhold_receipts
             .store(on, std::sync::atomic::Ordering::Release);
     }
 

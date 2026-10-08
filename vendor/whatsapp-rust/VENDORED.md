@@ -10,10 +10,10 @@ HTTP) apontam para a fonte git do mesmo commit. Sem `benches`, `examples` nem
 `tests`. `README.md` e `agent_docs/call_test_support.md` vieram junto porque o
 código os inclui com `include_str!`.
 
-Mudança de comportamento (modo anônimo do ZapFast):
+Mudança de comportamento (recibos retidos, opcional):
 
-- `Client::set_anonymous(on)` (`src/client/accessors.rs`), guardado em
-  `anonymous` (`src/client.rs`, iniciado em `src/client/lifecycle.rs`).
+- `Client::set_withhold_receipts(on)` (`src/client/accessors.rs`), guardado em
+  `withhold_receipts` (`src/client.rs`, iniciado em `src/client/lifecycle.rs`).
 - Ligado, `ack_received_message` (`src/message/dispatch.rs`) não manda recibo
   de entrega para mensagem de outra pessoa, nem ao vivo nem no lote do
   offline: manda só o ack de transporte (`<ack class="message">`, o mesmo que a

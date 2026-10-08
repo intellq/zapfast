@@ -254,7 +254,7 @@ impl Client {
             // intellq fork: with resend requests off, clear the stanza from the
             // server's queue and leave the message undecryptable.
             if client
-                .anonymous
+                .withhold_receipts
                 .load(std::sync::atomic::Ordering::Acquire)
             {
                 client.send_transport_ack(&info).await;

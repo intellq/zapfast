@@ -11,6 +11,7 @@
 
 use super::*;
 use crate::calls::{self, Call, CallUpdate};
+use crate::model::CallStatus;
 use whatsapp_rust::types::call::IncomingCall;
 use whatsapp_rust::voip::CallEvent;
 
@@ -26,6 +27,11 @@ pub(super) struct CallRuntime {
     watching: bool,
     /// The snapshot the UI was last handed, so the periodic check publishes only real changes.
     last: CallUpdate,
+    /// When the call was placed or started ringing, in Unix seconds: the time its history row
+    /// carries.
+    began: i64,
+    /// The WhatsApp call id, which names the history row so a replayed offer logs once.
+    call_id: String,
 }
 
 /// What a call's background tasks report back to the worker loop.
@@ -42,11 +48,14 @@ impl CallRuntime {
     pub(super) fn new(call: Call) -> Self {
         let (_tx, events) = async_channel::bounded(64);
         let last = call.update();
+        let call_id = call.call_id().to_owned();
         Self {
             call,
             events,
             watching: false,
             last,
+            began: crate::util::now(),
+            call_id,
         }
     }
 
@@ -112,9 +121,96 @@ impl Worker {
         {
             runtime.last = update.clone();
         }
-        self.emit(Event::Call(Box::new(update)));
-        if finished {
-            self.call = None;
+        self.emit(Event::Call(Box::new(update.clone())));
+        if finished && let Some(runtime) = self.call.take() {
+            self.record_call(&runtime.call_id, runtime.began, &update);
+        }
+    }
+
+    /// Writes a finished call into its chat's history, on this computer only.
+    ///
+    /// Only a missed call counts as unread and notifies, as on the phone; the others are a record
+    /// of something the user already saw.
+    pub(super) fn record_call(&mut self, call_id: &str, began: i64, update: &CallUpdate) {
+        let Some(outcome) = update.outcome else {
+            return;
+        };
+        let status = call_status(outcome);
+        let outgoing = update.direction == crate::model::CallDirection::Outgoing;
+        let seconds = update
+            .started
+            .filter(|_| status == CallStatus::Answered || status == CallStatus::ConnectionLost)
+            .map(|started| u32::try_from(started.elapsed().as_secs()).unwrap_or(u32::MAX));
+        self.log_call(call_id, &update.chat, began, outgoing, status, seconds);
+    }
+
+    fn log_call(
+        &mut self,
+        call_id: &str,
+        chat: &str,
+        began: i64,
+        outgoing: bool,
+        status: CallStatus,
+        seconds: Option<u32>,
+    ) {
+        let id = format!("{CALL_ROW_PREFIX}{call_id}");
+        if self.archive.message(chat, &id).ok().flatten().is_some() {
+            return;
+        }
+        if self.predates_removal(chat, began) {
+            return;
+        }
+        self.ensure_chat(chat, None);
+        let row = Message {
+            id: id.clone(),
+            chat: chat.to_owned(),
+            sender: if outgoing { self.me() } else { chat.to_owned() },
+            sender_name: None,
+            from_me: outgoing,
+            timestamp: began,
+            history_order: None,
+            content: Content::Call {
+                outgoing,
+                status,
+                seconds,
+            },
+            status: Delivery::None,
+            delivered_at: None,
+            read_at: None,
+            quoted: None,
+            reactions: Vec::new(),
+            edited: false,
+            mentions: Vec::new(),
+            forwarded: false,
+            thumbnail: None,
+        };
+        if let Err(error) = self.archive.insert_message(&row, None) {
+            log::warn!("could not log a call: {error}");
+            return;
+        }
+        let missed = status == CallStatus::Missed;
+        if missed {
+            let _ = self.archive.bump_unread(chat);
+            if !self.keep_chats_archived
+                && let Err(error) = self
+                    .archive
+                    .unarchive_for_message(chat, began.saturating_mul(1000))
+            {
+                log::warn!("could not unarchive a chat: {error}");
+            }
+        }
+        self.emit(Event::Messages {
+            chat: chat.to_owned(),
+            messages: vec![row.clone()],
+            older: false,
+            complete: false,
+        });
+        self.emit_chat(chat);
+        if missed && !self.syncing {
+            self.emit(Event::Incoming {
+                chat: chat.to_owned(),
+                message: Box::new(row),
+            });
         }
     }
 
@@ -323,12 +419,24 @@ impl Worker {
         if !calls::is_offer(action) {
             return;
         }
-        if self.call_busy() {
-            return;
-        }
         // The offer carries the caller's number beside their privacy id, which the library has
         // learned by now, so a stranger's call lands in the chat named by that number.
         let chat = self.canonical_sync_chat(&incoming.from).await;
+        if self.call_busy() {
+            // Nobody here could pick it up, so it is a missed call, logged once.
+            if callable_chat(&chat) {
+                let call_id = action.call_id().to_owned();
+                self.log_call(
+                    &call_id,
+                    &chat,
+                    crate::util::now(),
+                    false,
+                    CallStatus::Missed,
+                    None,
+                );
+            }
+            return;
+        }
         // A group, broadcast or newsletter offer never reaches the 1:1 call surface. The interface
         // hides the buttons for those chats, but the worker is the boundary: a non-direct offer is
         // refused here rather than rung, so no call is created and no history entry is written.
@@ -360,7 +468,8 @@ impl Worker {
     /// Releases the call on the way out, so quitting leaves no child process or task behind.
     pub(super) async fn shutdown_call(&mut self) {
         if let Some(mut runtime) = self.call.take() {
-            runtime.call.hangup(self.client.as_ref()).await;
+            let update = runtime.call.hangup(self.client.as_ref()).await;
+            self.record_call(&runtime.call_id, runtime.began, &update);
         }
     }
 
@@ -438,6 +547,25 @@ impl Worker {
 /// The interface only draws the phone button on a one-to-one chat, but the worker is the boundary
 /// rather than the interface: a group, a channel or a broadcast list reaching the 1:1 builder would
 /// be refused by the protocol at best and misbehave at worst, so the JID is checked here as well.
+/// Names a call's history row, apart from any WhatsApp message id.
+pub(crate) const CALL_ROW_PREFIX: &str = "zapfast-call-";
+
+/// The stable status a call's history row stores for how it ended.
+fn call_status(outcome: calls::CallOutcome) -> CallStatus {
+    use calls::CallOutcome as Outcome;
+    match outcome {
+        Outcome::Answered => CallStatus::Answered,
+        Outcome::Missed => CallStatus::Missed,
+        Outcome::Declined => CallStatus::Declined,
+        Outcome::Busy => CallStatus::Busy,
+        Outcome::Failed => CallStatus::Failed,
+        Outcome::NoAnswer => CallStatus::NoAnswer,
+        Outcome::ConnectionLost => CallStatus::ConnectionLost,
+        Outcome::AnsweredElsewhere => CallStatus::AnsweredElsewhere,
+        Outcome::DeclinedElsewhere => CallStatus::DeclinedElsewhere,
+    }
+}
+
 fn callable_chat(chat: &str) -> bool {
     matches!(
         crate::model::ChatKind::from_id(chat),
@@ -456,5 +584,106 @@ mod tests {
         assert!(!callable_chat("12345-67890@g.us"));
         assert!(!callable_chat("1234567890@broadcast"));
         assert!(!callable_chat("1234567890@newsletter"));
+    }
+
+    use super::super::receipt_tests::{PEER, worker};
+
+    fn ended(direction: crate::model::CallDirection, outcome: calls::CallOutcome) -> CallUpdate {
+        CallUpdate {
+            generation: 1,
+            chat: PEER.to_owned(),
+            direction,
+            phase: calls::CallPhase::Ended,
+            started: None,
+            muted: false,
+            outcome: Some(outcome),
+            peer_audio: None,
+            lost_devices: Vec::new(),
+            microphone: None,
+            speaker: None,
+        }
+    }
+
+    fn logged(worker: &Worker, call_id: &str) -> Option<Message> {
+        worker
+            .archive
+            .message(PEER, &format!("{CALL_ROW_PREFIX}{call_id}"))
+            .unwrap()
+    }
+
+    #[test]
+    fn a_missed_call_is_logged_once_unread_and_notifies() {
+        let (mut worker, events, _inbox, _wa) = worker();
+        let update = ended(
+            crate::model::CallDirection::Incoming,
+            calls::CallOutcome::Missed,
+        );
+        worker.record_call("abc", 1_000, &update);
+        worker.record_call("abc", 1_000, &update);
+        let row = logged(&worker, "abc").expect("the call is in the history");
+        assert_eq!(
+            row.content,
+            Content::Call {
+                outgoing: false,
+                status: CallStatus::Missed,
+                seconds: None,
+            }
+        );
+        assert_eq!(row.timestamp, 1_000);
+        assert!(!row.from_me);
+        assert_eq!(worker.archive.chat(PEER).unwrap().unwrap().unread, 1);
+        let notified = events
+            .try_iter()
+            .filter(|event| matches!(event, Event::Incoming { .. }))
+            .count();
+        assert_eq!(notified, 1);
+    }
+
+    #[test]
+    fn an_answered_call_keeps_its_length_and_is_not_unread() {
+        let (mut worker, events, _inbox, _wa) = worker();
+        let mut update = ended(
+            crate::model::CallDirection::Outgoing,
+            calls::CallOutcome::Answered,
+        );
+        update.started = Some(Instant::now() - Duration::from_secs(192));
+        worker.record_call("out", 2_000, &update);
+        let row = logged(&worker, "out").expect("the call is in the history");
+        let Content::Call {
+            outgoing: true,
+            status: CallStatus::Answered,
+            seconds: Some(seconds),
+        } = row.content
+        else {
+            panic!("unexpected row {:?}", row.content);
+        };
+        assert!((192..195).contains(&seconds));
+        assert!(row.from_me);
+        assert_eq!(worker.archive.chat(PEER).unwrap().unwrap().unread, 0);
+        assert!(
+            !events
+                .try_iter()
+                .any(|event| matches!(event, Event::Incoming { .. }))
+        );
+    }
+
+    #[test]
+    fn a_logged_call_never_reaches_whatsapp() {
+        let (mut worker, _events, _inbox, _wa) = worker();
+        let update = ended(
+            crate::model::CallDirection::Incoming,
+            calls::CallOutcome::Missed,
+        );
+        worker.record_call("abc", 1_000, &update);
+        assert!(worker.archive.unread_incoming(PEER, 10).unwrap().is_empty());
+        assert!(
+            worker
+                .archive
+                .unread_incoming_after(PEER, 10, 0)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(worker.archive.oldest(PEER).unwrap().is_none());
+        assert!(worker.archive.latest_id_from(PEER, PEER).unwrap().is_none());
     }
 }

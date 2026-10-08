@@ -5019,5 +5019,35 @@ msgstr ""
 msgid "Anonymous mode"
 msgstr ""
 
-msgid "This account is only read: nothing is sent, not even read receipts, typing or online status, and calls cannot be answered. Messages read in this mode never get a read receipt."
+msgid "This account is only read: nothing is sent, not even read receipts, typing or online status, and calls cannot be answered. Messages read in this mode never get a read receipt. Put your phone in airplane mode."
+msgstr ""
+
+msgid "Outgoing voice call"
+msgstr ""
+
+msgid "Missed voice call"
+msgstr ""
+
+msgid "Declined voice call"
+msgstr ""
+
+msgid "Voice call declined"
+msgstr ""
+
+msgid "Voice call, busy"
+msgstr ""
+
+msgid "Voice call failed"
+msgstr ""
+
+msgid "Voice call, no answer"
+msgstr ""
+
+msgid "Voice call, connection lost"
+msgstr ""
+
+msgid "Voice call answered on another device"
+msgstr ""
+
+msgid "Voice call declined on another device"
 msgstr ""

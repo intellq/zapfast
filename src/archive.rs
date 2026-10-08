@@ -788,10 +788,12 @@ impl Archive {
         Ok(())
     }
 
-    /// Returns recent incoming message ids and senders for read receipts.
+    /// Returns recent incoming message ids and senders for read receipts. Logged calls are
+    /// this computer's own rows and never get one.
     pub fn unread_incoming(&self, chat: &str, limit: u32) -> Result<Vec<(String, String)>> {
         let mut statement = self.connection.prepare(
             "SELECT id, sender FROM messages WHERE chat = ?1 AND from_me = 0
+             AND json_extract(content, '$.kind') IS NOT 'call'
              AND timestamp >= COALESCE((SELECT read_through FROM chats WHERE id = ?1), -1)
              ORDER BY timestamp DESC, COALESCE(history_order, 9223372036854775807) DESC, rowid DESC LIMIT ?2",
         )?;
@@ -810,6 +812,7 @@ impl Archive {
     ) -> Result<Vec<(String, String)>> {
         let mut statement = self.connection.prepare(
             "SELECT id, sender FROM messages WHERE chat = ?1 AND from_me = 0
+             AND json_extract(content, '$.kind') IS NOT 'call'
              AND timestamp >= COALESCE((SELECT read_through FROM chats WHERE id = ?1), -1)
              AND timestamp > ?3
              ORDER BY timestamp DESC, COALESCE(history_order, 9223372036854775807) DESC, rowid DESC LIMIT ?2",
@@ -1493,6 +1496,7 @@ impl Archive {
         self.connection
             .query_row(
                 "SELECT id FROM messages WHERE chat = ?1 AND sender = ?2
+                 AND json_extract(content, '$.kind') IS NOT 'call'
                  ORDER BY timestamp DESC, COALESCE(history_order, 9223372036854775807) DESC, rowid DESC LIMIT 1",
                 params![chat, sender],
                 |row| row.get(0),
@@ -1541,7 +1545,10 @@ impl Archive {
         let id: Option<String> = self
             .connection
             .query_row(
-                "SELECT id FROM messages WHERE chat = ?1 ORDER BY timestamp ASC, COALESCE(history_order, 9223372036854775807) ASC, rowid ASC LIMIT 1",
+                // A logged call is this computer's own row: the phone knows no
+                // such id to fetch history before.
+                "SELECT id FROM messages WHERE chat = ?1 AND json_extract(content, '$.kind') IS NOT 'call'
+                 ORDER BY timestamp ASC, COALESCE(history_order, 9223372036854775807) ASC, rowid ASC LIMIT 1",
                 params![chat],
                 |row| row.get(0),
             )

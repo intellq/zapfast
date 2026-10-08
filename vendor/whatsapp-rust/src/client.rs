@@ -1936,10 +1936,10 @@ pub struct Client {
     pub(crate) retry_admission:
         std::sync::OnceLock<Arc<dyn crate::types::retry_admission::RetryAdmission>>,
 
-    /// intellq fork: ZapFast's anonymous mode. Messages from others are only
+    /// intellq fork: receipts withheld. Messages from others are only
     /// acknowledged to the server: no delivery receipt, and no resend request
-    /// for one that fails to decrypt. See [`Client::set_anonymous`].
-    pub(crate) anonymous: std::sync::atomic::AtomicBool,
+    /// for one that fails to decrypt. See [`Client::set_withhold_receipts`].
+    pub(crate) withhold_receipts: std::sync::atomic::AtomicBool,
 
     /// Optional inbound history-sync admission policy, fixed during assembly.
     pub(crate) history_sync_admission:

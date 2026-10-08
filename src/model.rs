@@ -560,6 +560,15 @@ pub enum Content {
     Unsupported {
         what: String,
     },
+    /// A voice call this computer saw, kept only here: WhatsApp never hears
+    /// of the row, so it has no reply, reaction or receipt.
+    Call {
+        outgoing: bool,
+        status: CallStatus,
+        /// Seconds the two sides were connected.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seconds: Option<u32>,
+    },
     /// A message WhatsApp only delivers to the phone, such as view-once
     /// media. Linked devices receive a placeholder that never fills in.
     PhoneOnly {
@@ -572,6 +581,40 @@ pub enum Content {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         once: Option<OnceMedia>,
     },
+}
+
+/// How a logged call turned out, stored under a stable name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CallStatus {
+    Answered,
+    Missed,
+    Declined,
+    Busy,
+    Failed,
+    NoAnswer,
+    ConnectionLost,
+    AnsweredElsewhere,
+    DeclinedElsewhere,
+}
+
+impl CallStatus {
+    /// The line a logged call shows, without its length.
+    pub fn label(self, outgoing: bool) -> &'static str {
+        match (self, outgoing) {
+            (Self::Answered, false) => tr("Incoming voice call"),
+            (Self::Answered, true) => tr("Outgoing voice call"),
+            (Self::Missed, _) => tr("Missed voice call"),
+            (Self::Declined, false) => tr("Declined voice call"),
+            (Self::Declined, true) => tr("Voice call declined"),
+            (Self::Busy, _) => tr("Voice call, busy"),
+            (Self::Failed, _) => tr("Voice call failed"),
+            (Self::NoAnswer, _) => tr("Voice call, no answer"),
+            (Self::ConnectionLost, _) => tr("Voice call, connection lost"),
+            (Self::AnsweredElsewhere, _) => tr("Voice call answered on another device"),
+            (Self::DeclinedElsewhere, _) => tr("Voice call declined on another device"),
+        }
+    }
 }
 
 /// The kind of media a view-once message holds.
@@ -913,6 +956,18 @@ impl Content {
                 view_once: true, ..
             } => tr("View once message").to_owned(),
             Self::PhoneOnly { .. } => tr("Message on your phone").to_owned(),
+            Self::Call {
+                outgoing,
+                status,
+                seconds,
+            } => match seconds {
+                Some(seconds) => format!(
+                    "{} · {}",
+                    status.label(*outgoing),
+                    crate::util::duration(*seconds)
+                ),
+                None => status.label(*outgoing).to_owned(),
+            },
         }
     }
 

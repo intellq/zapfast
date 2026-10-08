@@ -331,10 +331,10 @@ impl Client {
             self.spawn_message_ack(info);
             return;
         }
-        // intellq fork: in anonymous mode a message from someone else is only
+        // intellq fork: with receipts withheld a message from someone else is only
         // acked to the server; any delivery receipt, `inactive` included,
         // shows the sender two ticks. Own-account receipts still go out.
-        if self.anonymous.load(std::sync::atomic::Ordering::Acquire)
+        if self.withhold_receipts.load(std::sync::atomic::Ordering::Acquire)
             && info.category != wacore::types::message::MessageCategory::Peer
             && !info.source.is_self_fanout()
         {

@@ -5188,5 +5188,35 @@ msgstr "Modo anônimo: a chamada só fica no registro"
 msgid "Anonymous mode"
 msgstr "Modo anônimo"
 
-msgid "This account is only read: nothing is sent, not even read receipts, typing or online status, and calls cannot be answered. Messages read in this mode never get a read receipt."
-msgstr "Esta conta só é lida: nada é enviado, nem confirmação de leitura, \"digitando\" ou status online, e não é possível atender chamadas. Mensagens lidas neste modo nunca recebem confirmação de leitura."
+msgid "This account is only read: nothing is sent, not even read receipts, typing or online status, and calls cannot be answered. Messages read in this mode never get a read receipt. Put your phone in airplane mode."
+msgstr "Esta conta só é lida: nada é enviado, nem confirmação de leitura, \"digitando\" ou status online, e não é possível atender chamadas. Mensagens lidas neste modo nunca recebem confirmação de leitura. Coloque seu celular no modo avião."
+
+msgid "Outgoing voice call"
+msgstr "Chamada de voz feita"
+
+msgid "Missed voice call"
+msgstr "Chamada de voz perdida"
+
+msgid "Declined voice call"
+msgstr "Chamada de voz recusada"
+
+msgid "Voice call declined"
+msgstr "Chamada de voz recusada pelo contato"
+
+msgid "Voice call, busy"
+msgstr "Chamada de voz, ocupado"
+
+msgid "Voice call failed"
+msgstr "Chamada de voz não completada"
+
+msgid "Voice call, no answer"
+msgstr "Chamada de voz sem resposta"
+
+msgid "Voice call, connection lost"
+msgstr "Chamada de voz, conexão perdida"
+
+msgid "Voice call answered on another device"
+msgstr "Chamada de voz atendida em outro aparelho"
+
+msgid "Voice call declined on another device"
+msgstr "Chamada de voz recusada em outro aparelho"

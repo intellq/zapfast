@@ -338,7 +338,10 @@ pub struct Presence {
 pub(crate) fn can_select(content: &Content) -> bool {
     !matches!(
         content,
-        Content::Revoked { .. } | Content::PhoneOnly { .. } | Content::Unsupported { .. }
+        Content::Revoked { .. }
+            | Content::PhoneOnly { .. }
+            | Content::Unsupported { .. }
+            | Content::Call { .. }
     )
 }
 
