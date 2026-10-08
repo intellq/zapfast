@@ -1713,7 +1713,7 @@ msgid "Download size limit"
 msgstr ""
 
 #: src/ui/settings.rs:526
-msgid "Maximum size for automatic and manual downloads."
+msgid "Maximum size for automatic downloads. Downloads you start have no limit."
 msgstr ""
 
 #: src/ui/settings.rs:544

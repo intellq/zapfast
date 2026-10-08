@@ -709,6 +709,9 @@ pub struct App {
     /// A notification went out this frame: highlight the taskbar entry of a
     /// window that is open but not focused.
     wants_attention: bool,
+    /// Whether asking for attention would raise the window (Wayland), so a
+    /// notification does not ask.
+    attention_raises_window: bool,
     /// Whether ZapFast starts at login, when this installation supports it.
     pub start_with_system: Option<bool>,
     /// Whether ZapFast is the desktop's app for WhatsApp links, when this
@@ -1319,6 +1322,7 @@ impl App {
             call_notified: None,
             call_repaint: false,
             wants_attention: false,
+            attention_raises_window: std::env::var_os("WAYLAND_DISPLAY").is_some(),
             start_with_system: None,
             whatsapp_links: None,
             pending_wa_link: None,
@@ -5321,7 +5325,8 @@ impl App {
                 chat,
                 message,
             } => {
-                let limit = self.settings.attachment_limit_bytes();
+                // The size limit is for automatic downloads, which the
+                // conversation checks before asking; this one may be by hand.
                 let Some(media) = self
                     .conversations
                     .get_mut(&chat)
@@ -5330,12 +5335,6 @@ impl App {
                 else {
                     return;
                 };
-                if !media.is_within_download_limit(limit) {
-                    media.state = MediaState::Failed(
-                        tr("This attachment exceeds the configured download size limit").into(),
-                    );
-                    return;
-                }
                 if matches!(media.state, MediaState::Downloading) {
                     return;
                 }
@@ -5359,7 +5358,6 @@ impl App {
                 });
             }
             Action::SaveSelection { chat, messages } => {
-                let limit = self.settings.attachment_limit_bytes();
                 let transcript =
                     crate::ui::conversation::selection_transcript(self, &chat, &messages);
                 let text = (!transcript.is_empty()).then(|| {
@@ -5390,10 +5388,7 @@ impl App {
                             path.clone(),
                             crate::ui::conversation::attachment_name(&message.content, path),
                         )),
-                        None if media.is_within_download_limit(limit) => {
-                            batch.waiting.push(message.id.clone());
-                        }
-                        None => batch.failed += 1,
+                        None => batch.waiting.push(message.id.clone()),
                     }
                 }
                 for message in &batch.waiting {
@@ -7161,9 +7156,14 @@ impl App {
     /// only: elsewhere it would bounce the Dock or flash the taskbar. Asks the
     /// viewport too, since `window_focused` stays false behind the app lock
     /// even while the lock screen has the focus.
+    ///
+    /// Not on Wayland: winit asks for attention there with an xdg-activation
+    /// token, and KWin takes it as a request to raise the window, which took
+    /// the focus from a game in fullscreen on another monitor at each message.
     fn request_attention(&mut self, ctx: &egui::Context) {
         if std::mem::take(&mut self.wants_attention)
             && cfg!(target_os = "linux")
+            && !self.attention_raises_window
             && !self.window_hidden
             && !self.window_focused
             && ctx.input(|input| input.viewport().focused) != Some(true)
@@ -12307,7 +12307,9 @@ mod tests {
     }
 
     #[test]
-    fn clicking_an_oversized_attachment_does_not_start_a_download() {
+    /// The size limit is for automatic downloads only: one asked for by
+    /// hand, as a click or "Save as…", goes ahead whatever the size.
+    fn clicking_an_oversized_attachment_still_downloads_it() {
         let mut app = app();
         let (backend, mut commands) = Backend::recording();
         app.backend = backend;
@@ -12338,10 +12340,13 @@ mod tests {
             &egui::Context::default(),
         );
 
-        assert!(commands.try_recv().is_err());
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(Command::Download { message, .. }) if message == "picture"
+        ));
         assert!(matches!(
             app.media_of(chat, "picture").map(|media| &media.state),
-            Some(MediaState::Failed(_))
+            Some(MediaState::Downloading)
         ));
     }
 
@@ -14554,6 +14559,7 @@ mod app_lock_tests {
     fn a_notification_highlights_an_unfocused_window_in_the_taskbar() {
         let ctx = egui::Context::default();
         let mut app = unlocked_app();
+        app.attention_raises_window = false;
         let message = incoming(&mut app);
         app.window_hidden = false;
         app.window_focused = false;
@@ -14566,6 +14572,23 @@ mod app_lock_tests {
         assert!(!attention_requested(&ctx), "only once per notification");
 
         app.window_hidden = true;
+        app.maybe_notify(CHAT, &message);
+        app.request_attention(&ctx);
+        assert!(!attention_requested(&ctx));
+    }
+
+    /// On Wayland asking for attention raises the window, which took the
+    /// focus from a game in fullscreen on another monitor: no notification
+    /// asks there.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_notification_on_wayland_does_not_ask_for_attention() {
+        let ctx = egui::Context::default();
+        let mut app = unlocked_app();
+        app.attention_raises_window = true;
+        let message = incoming(&mut app);
+        app.window_hidden = false;
+        app.window_focused = false;
         app.maybe_notify(CHAT, &message);
         app.request_attention(&ctx);
         assert!(!attention_requested(&ctx));

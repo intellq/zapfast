@@ -1819,8 +1819,8 @@ msgid "Download size limit"
 msgstr "Limite de tamanho dos downloads"
 
 #: src/ui/settings.rs:526
-msgid "Maximum size for automatic and manual downloads."
-msgstr "Tamanho máximo para downloads automáticos e manuais."
+msgid "Maximum size for automatic downloads. Downloads you start have no limit."
+msgstr "Tamanho máximo para downloads automáticos. Os downloads que você pede não têm limite."
 
 #: src/ui/settings.rs:544
 msgid "Pause other media while recording or playing"

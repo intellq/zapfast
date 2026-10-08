@@ -652,7 +652,10 @@ fn sections(app: &App) -> Vec<Section> {
     );
     chats.row(
         translated(locale, "Download size limit"),
-        translated(locale, "Maximum size for automatic and manual downloads."),
+        translated(
+            locale,
+            "Maximum size for automatic downloads. Downloads you start have no limit.",
+        ),
         |ui, app| {
             let mut value = app.settings.attachment_limit_mib.clamp(1, 64);
             if ui

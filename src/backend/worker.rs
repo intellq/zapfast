@@ -140,18 +140,25 @@ fn attachment_is_too_large(size: Option<u64>, limit: u64) -> bool {
     size.is_some_and(|size| size > limit.min(ATTACHMENT_DOWNLOAD_LIMIT))
 }
 
-/// Streams a verified attachment to disk without accepting more than the configured limit.
+/// Whether an attachment of `size` is over the download limit, if there is
+/// one. A download someone asked for has none, whatever its size.
+fn over_download_limit(size: Option<u64>, limit: Option<u64>) -> bool {
+    limit.is_some_and(|limit| attachment_is_too_large(size, limit))
+}
+
+/// Streams a verified attachment to disk without accepting more than the
+/// configured limit, when there is one: a download someone asked for has none.
 async fn download_attachment(
     client: &Client,
     downloadable: &dyn Downloadable,
     dir: &Path,
     path: &Path,
-    limit: u64,
+    limit: Option<u64>,
 ) -> Result<PathBuf, String> {
-    let limit = limit.min(ATTACHMENT_DOWNLOAD_LIMIT);
-    if attachment_is_too_large(downloadable.file_length(), limit) {
+    if over_download_limit(downloadable.file_length(), limit) {
         return Err(tr(ATTACHMENT_LIMIT_ERROR).to_owned());
     }
+    let limit = limit.map_or(u64::MAX, |limit| limit.min(ATTACHMENT_DOWNLOAD_LIMIT));
     tokio::fs::create_dir_all(dir)
         .await
         .map_err(|error| error.to_string())?;
@@ -7198,11 +7205,9 @@ impl Worker {
                 );
                 return;
             };
-        let attachment_limit = self.attachment_limit;
-        if attachment_is_too_large(downloadable.file_length(), attachment_limit) {
-            self.downloaded(chat, id, card, Err(tr(ATTACHMENT_LIMIT_ERROR).to_owned()));
-            return;
-        }
+        // Asked for from the window, where automatic downloads already kept
+        // to the size limit; one asked for by hand has none.
+        let attachment_limit = None;
         // Keep metadata needed for one media re-upload request and retry.
         let media_key = base
             .image_message
@@ -7407,7 +7412,8 @@ impl Worker {
                 let result = with_attachment_deadline(ATTACHMENT_TIMEOUT, async {
                     let path = dir.join(format!("{hash}.webp"));
                     let sticker = PhoneSticker(meta);
-                    download_attachment(&client, &sticker, &dir, &path, attachment_limit).await
+                    download_attachment(&client, &sticker, &dir, &path, Some(attachment_limit))
+                        .await
                 })
                 .await;
                 let _ = commands.send(Command::StickerFetched { hash, result });
@@ -9404,6 +9410,31 @@ fn whatsapp_audio_mime(mime: &str) -> Option<&'static str> {
     }
 }
 
+/// The length, in whole seconds (at least one), of an OGG file holding Opus,
+/// or `None` when it holds something else, such as Vorbis. Opus counts its
+/// granule positions at 48 kHz from the start, pre-skip included.
+fn ogg_opus_seconds(bytes: &[u8]) -> Option<u32> {
+    let head = bytes
+        .windows(8)
+        .take(512)
+        .position(|window| window == b"OpusHead")?;
+    if !bytes.starts_with(b"OggS") {
+        return None;
+    }
+    let pre_skip = bytes
+        .get(head + 10..head + 12)
+        .map_or(0, |skip| u16::from_le_bytes([skip[0], skip[1]]));
+    let last = bytes.windows(4).rposition(|window| window == b"OggS")?;
+    let granule = bytes
+        .get(last + 6..last + 14)
+        .and_then(|granule| <[u8; 8]>::try_from(granule).ok())
+        .map(u64::from_le_bytes)
+        .filter(|granule| *granule != u64::MAX)
+        .unwrap_or(0);
+    let samples = granule.saturating_sub(u64::from(pre_skip));
+    Some(((samples as f64 / 48_000.0).round() as u32).max(1))
+}
+
 /// Uploads a file and builds its message. Images are encoded as JPEG.
 async fn prepare_media(
     client: &Client,
@@ -9509,11 +9540,20 @@ async fn stage_media(
         prepared.thumbnail = thumbnail;
         return Ok(prepared);
     }
-    if let Some(audio_mime) = whatsapp_audio_mime(mime) {
-        let mime_owned = audio_mime.to_owned();
+    // Phones play only Opus in OGG, declared with its codec, and drop an
+    // audio message that says plain "audio/ogg": a Vorbis file goes as a
+    // document.
+    let ogg_opus = (mime == "audio/ogg").then(|| ogg_opus_seconds(&bytes));
+    if let Some(audio_mime) = whatsapp_audio_mime(mime).filter(|_| !matches!(ogg_opus, Some(None)))
+    {
+        let mime_owned = if ogg_opus.is_some() {
+            VOICE_MIME.to_owned()
+        } else {
+            audio_mime.to_owned()
+        };
         let content = Content::Audio {
             media: media(Some(&mime_owned), Some(size), None, None),
-            seconds: None,
+            seconds: ogg_opus.flatten(),
             voice_note: false,
             waveform: Vec::new(),
         };
@@ -9581,12 +9621,13 @@ async fn upload_media(
             }
             message
         }
-        Content::Audio { .. } => {
+        Content::Audio { seconds, .. } => {
             let upload = upload_counted(client, bytes, MediaType::Audio, progress).await?;
             audio_message(
                 upload,
                 AudioOptions {
                     mimetype: mime,
+                    duration_seconds: *seconds,
                     ptt: Some(false),
                     ..Default::default()
                 },
@@ -10733,6 +10774,50 @@ mod tests {
         }
     }
 
+    /// An OGG file: a first page with `codec`'s header, then a last page
+    /// at `granule`.
+    fn ogg(codec: &[u8], granule: u64) -> Vec<u8> {
+        let page = |granule: u64, body: &[u8]| {
+            let mut page = b"OggS\0\x02".to_vec();
+            page.extend_from_slice(&granule.to_le_bytes());
+            page.extend_from_slice(&[0; 13]);
+            page.extend_from_slice(body);
+            page
+        };
+        let mut bytes = page(0, codec);
+        bytes.extend(page(granule, &[0; 40]));
+        bytes
+    }
+
+    #[tokio::test]
+    async fn an_ogg_attachment_goes_as_opus_with_its_length_or_as_a_document() {
+        // OpusHead, version 1, one channel, then a pre-skip of 312 samples.
+        let opus_head = b"OpusHead\x01\x01\x38\x01\x80\xbb\0\0\0\0\0";
+        let opus = ogg(opus_head, 15 * 48_000 + 312);
+        assert_eq!(ogg_opus_seconds(&opus), Some(15));
+        assert_eq!(ogg_opus_seconds(&ogg(opus_head, 0)), Some(1));
+        let vorbis = ogg(b"\x01vorbis\0\0\0\0\x01", 44_100 * 3);
+        assert_eq!(ogg_opus_seconds(&vorbis), None);
+
+        let staged = stage_media(opus, "audio/ogg", Some("note.ogg"), false)
+            .await
+            .unwrap();
+        assert_eq!(staged.mime, VOICE_MIME);
+        assert!(matches!(
+            staged.content,
+            Content::Audio {
+                seconds: Some(15),
+                voice_note: false,
+                ..
+            }
+        ));
+        let staged = stage_media(vorbis, "audio/ogg", Some("song.ogg"), false)
+            .await
+            .unwrap();
+        assert!(matches!(staged.content, Content::Document { .. }));
+        assert_eq!(staged.file_name.as_deref(), Some("song.ogg"));
+    }
+
     #[tokio::test]
     async fn stalled_attachments_finish_with_a_retryable_error() {
         let result = with_attachment_deadline(
@@ -11011,6 +11096,18 @@ mod tests {
             .seek(SeekFrom::Start(0))
             .expect("rewinds after clearing");
         writer.write_all(b"xyz").expect("can retry after clearing");
+    }
+
+    #[test]
+    fn a_download_asked_for_by_hand_has_no_size_limit() {
+        let large = Some(97 * 1024 * 1024);
+        assert!(!over_download_limit(large, None));
+        assert!(!over_download_limit(Some(u64::MAX), None));
+        assert!(over_download_limit(large, Some(ATTACHMENT_DOWNLOAD_LIMIT)));
+        assert!(!over_download_limit(
+            Some(1024),
+            Some(ATTACHMENT_DOWNLOAD_LIMIT)
+        ));
     }
 
     #[test]

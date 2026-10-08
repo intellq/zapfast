@@ -551,6 +551,24 @@ Da sincronização com o upstream 0.18.2:
   fim ao enviar, para mostrá-la. `Shift+Insert` cola, como `Ctrl+V`, no
   compositor.
 
+Depois da 0.19.3 (ainda sem release):
+
+- **Arquivo `.ogg` enviado como áudio chega aos celulares:** um OGG com Opus
+  (como um áudio salvo do próprio WhatsApp) sai como `audio/ogg; codecs=opus`
+  e com a duração, como os celulares enviam; antes ia como `audio/ogg` sem
+  duração, o servidor aceitava e os aparelhos descartavam a mensagem. Um OGG
+  com outro codec (Vorbis) vai como documento. Os outros áudios anexados
+  também passam a levar a duração quando ela é conhecida.
+- **Download manual sem limite de tamanho:** o **Limite de tamanho dos
+  downloads** (**Configurações › Conversas**) vale só para os downloads
+  automáticos. Baixar pelo ícone, clicar no anexo, **Salvar como…** e salvar
+  uma seleção funcionam com qualquer tamanho.
+- **A janela não toma mais o foco ao chegar mensagem no Wayland:** o pedido
+  de atenção na barra de tarefas a cada notificação (trazido do upstream na
+  0.19.3) fazia o KWin trazer a janela para a frente, tirando o foco até de um
+  jogo em tela cheia em outro monitor. No Wayland ele não é mais feito; no X11
+  o ícone continua piscando.
+
 Na 0.19.3:
 
 - **Verificação ortográfica em português do Brasil** no campo de mensagem:

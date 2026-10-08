@@ -725,7 +725,8 @@ impl Worker {
             let mut result = Err("no download references".to_owned());
             for download in &candidates {
                 result =
-                    download_attachment(&client, download, &dir, &path, attachment_limit).await;
+                    download_attachment(&client, download, &dir, &path, Some(attachment_limit))
+                        .await;
                 if result.is_ok() {
                     break;
                 }
