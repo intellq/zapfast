@@ -4494,6 +4494,36 @@ fn quote_block(
 }
 
 /// Keeps row contents left-to-right inside right-aligned own bubbles.
+/// The phone icon of a message that opens only on the phone, in a round
+/// badge a shade off the bubble.
+fn phone_badge(ui: &mut egui::Ui, palette: Palette) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::hover());
+    ui.painter().circle(
+        rect.center(),
+        13.5,
+        palette.text.gamma_multiply(0.06),
+        Stroke::new(1.0, palette.dim.gamma_multiply(0.6)),
+    );
+    theme::paint_icon(ui, Icon::Smartphone, rect, 14.0, palette.dim);
+}
+
+/// A short note under a media card's icon, from `top` down, centred and
+/// wrapped inside the card so a small one, as a sticker's, does not cut it.
+fn paint_card_note(ui: &egui::Ui, card: Rect, top: f32, text: &str, color: Color32) {
+    let mut job = egui::text::LayoutJob::simple(
+        text.to_owned(),
+        theme::regular(11.5),
+        color,
+        (card.width() - 16.0).max(40.0),
+    );
+    // Centred lines are laid out around x = 0.
+    job.halign = Align::Center;
+    let galley = ui.painter().layout_job(job);
+    ui.painter()
+        .with_clip_rect(card.intersect(ui.clip_rect()))
+        .galley(pos2(card.center().x, top), galley, color);
+}
+
 fn mirrored_row(
     ui: &mut egui::Ui,
     own: bool,
@@ -5838,19 +5868,16 @@ fn content(
                 None => tr("This message can only be seen on your phone."),
             };
             // The audio box's width, so the notice wraps inside it instead of
-            // running out to the cap and being cut.
+            // running out to the cap and being cut. Icon first and text from
+            // the left on both sides, as the phone draws it.
             ui.scope(|ui| {
                 ui.set_width(width);
-                mirrored_row(
-                    ui,
-                    own,
-                    |ui| {
-                        theme::icon(ui, Icon::Smartphone, 14.0, palette.dim);
-                    },
-                    |ui| {
+                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                    phone_badge(ui, palette);
+                    ui.with_layout(Layout::top_down(Align::Min), |ui| {
                         theme::paragraph(ui, text, theme::regular(13.5), palette.secondary);
-                    },
-                );
+                    });
+                });
             });
             None
         }
@@ -6171,11 +6198,11 @@ fn carousel_picture(
                     .paint_at(ui, rect);
             } else if media.path.is_some() {
                 theme::paint_icon(ui, Icon::CircleAlert, rect, 24.0, view.palette.danger);
-                ui.painter().text(
-                    rect.center() + vec2(0.0, 24.0),
-                    Align2::CENTER_CENTER,
+                paint_card_note(
+                    ui,
+                    rect,
+                    rect.center().y + 17.0,
                     tr("Could not display this picture. Click to open it."),
-                    theme::regular(11.5),
                     view.palette.secondary,
                 );
             }
@@ -6188,11 +6215,11 @@ fn carousel_picture(
                 MediaState::Downloading => theme::paint_spinner(ui, disc, 20.0, Color32::WHITE),
                 MediaState::Failed(_) => {
                     theme::paint_icon(ui, Icon::CircleAlert, disc, 20.0, Color32::WHITE);
-                    ui.painter().text(
-                        rect.center() + vec2(0.0, 34.0),
-                        Align2::CENTER_CENTER,
+                    paint_card_note(
+                        ui,
+                        rect,
+                        rect.center().y + 27.0,
                         tr("Download failed. Click to retry."),
-                        theme::regular(11.5),
                         Color32::WHITE,
                     );
                 }
@@ -6996,11 +7023,11 @@ fn picture(
                 ui.painter()
                     .circle_filled(disc.center(), 22.0, Color32::from_black_alpha(120));
                 theme::paint_icon(ui, Icon::CircleAlert, disc, 22.0, palette.danger);
-                ui.painter().text(
-                    rect.center() + vec2(0.0, 34.0),
-                    Align2::CENTER_CENTER,
+                paint_card_note(
+                    ui,
+                    rect,
+                    rect.center().y + 27.0,
                     tr("Download failed. Click to retry."),
-                    theme::regular(11.5),
                     Color32::WHITE,
                 );
             }
