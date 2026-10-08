@@ -551,7 +551,7 @@ Da sincronização com o upstream 0.18.2:
   fim ao enviar, para mostrá-la. `Shift+Insert` cola, como `Ctrl+V`, no
   compositor.
 
-Depois da 0.19.3 (ainda sem release):
+Na 0.19.4:
 
 - **Arquivo `.ogg` enviado como áudio chega aos celulares:** um OGG com Opus
   (como um áudio salvo do próprio WhatsApp) sai como `audio/ogg; codecs=opus`
@@ -580,6 +580,13 @@ Depois da 0.19.3 (ainda sem release):
 - **Layout:** os avisos de falha de download nos cards (figurinha, foto)
   quebram linha dentro do card; a mensagem de visualização única enviada mostra
   o ícone do celular à esquerda, num círculo, com o texto alinhado à esquerda.
+- **Registro de ligações na conversa:** cada ligação vira uma linha
+  centralizada no histórico, com o resultado, a duração quando houve conversa e
+  o horário ("Chamada de voz feita · 3:12 · 17:04"): recebida, feita, perdida,
+  recusada, ocupado, sem resposta, não completada, conexão perdida, atendida ou
+  recusada em outro aparelho. A perdida aparece em vermelho, conta como não lida
+  e notifica; as outras só ficam no histórico. O registro fica só neste
+  computador e vale para as ligações que o ZapFast viu aberto.
 
 Na 0.19.3:
 
