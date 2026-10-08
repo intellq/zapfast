@@ -568,6 +568,18 @@ Depois da 0.19.3 (ainda sem release):
   0.19.3) fazia o KWin trazer a janela para a frente, tirando o foco até de um
   jogo em tela cheia em outro monitor. No Wayland ele não é mais feito; no X11
   o ícone continua piscando.
+- **Chamada recebida avisa no popup da ligação, sem trazer a janela:** com o
+  ZapFast em primeiro plano, a chamada continua no card do canto inferior
+  esquerdo. Em segundo plano, minimizado ou só na bandeja, ela toca no popup do
+  canto superior direito da tela, com **Recusar** e **Atender**, e a janela
+  principal fica onde está (na bandeja, o popup abre sozinho). Se o card estava
+  na tela e a janela sai do primeiro plano, ele vira o popup e não volta.
+  Fechar o popup enquanto toca não recusa: a chamada volta ao card.
+- **Avatar de quem só tem número:** sem foto, um nome sem letras (como
+  `+55 (94) 8808-2733`) mostra um ícone de pessoa em vez de iniciais como "52".
+- **Layout:** os avisos de falha de download nos cards (figurinha, foto)
+  quebram linha dentro do card; a mensagem de visualização única enviada mostra
+  o ícone do celular à esquerda, num círculo, com o texto alinhado à esquerda.
 
 Na 0.19.3:
 
