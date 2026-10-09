@@ -5701,6 +5701,7 @@ fn content(
                 &message.id,
                 &title,
                 address.clone(),
+                None,
                 (*latitude, *longitude),
                 actions,
             );
@@ -5713,11 +5714,18 @@ fn content(
             speed_mps,
             sequence,
             updated,
+            newer_on_phone,
             ..
         } => {
             let over = message
                 .content
                 .live_location_over(message.timestamp, view.now);
+            if !over {
+                let until_expiry =
+                    (message.timestamp + crate::model::LIVE_LOCATION_LIMIT - view.now).max(1);
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_secs(until_expiry as u64));
+            }
             let title = if over {
                 crate::i18n::gettext(view.locale, "Live location ended")
             } else {
@@ -5742,6 +5750,13 @@ fn content(
                 }
                 meta.join(" · ")
             });
+            // The phone holds the positions that follow this one: WhatsApp
+            // keeps live locations off linked devices, so say where the rest
+            // of the share is instead of letting the pin look live.
+            let note = (!over && *newer_on_phone).then(|| {
+                crate::i18n::gettext(view.locale, "Open WhatsApp on your phone to follow it.")
+                    .into_owned()
+            });
             // Each position gets its own preview, as a later one replaces the first.
             let key = format!("{}-{sequence}-{updated}", message.id);
             location_card(
@@ -5751,6 +5766,7 @@ fn content(
                 &key,
                 &title,
                 detail,
+                note,
                 (*latitude, *longitude),
                 actions,
             );
@@ -6926,6 +6942,7 @@ fn location_card(
     preview_key: &str,
     title: &str,
     detail: Option<String>,
+    note: Option<String>,
     (latitude, longitude): (f64, f64),
     actions: &mut Vec<Action>,
 ) {
@@ -6959,6 +6976,9 @@ fn location_card(
         });
         if let Some(detail) = detail {
             widgets::rich_text(ui, &detail, theme::regular(12.5), palette.secondary);
+        }
+        if let Some(note) = note {
+            widgets::rich_text(ui, &note, theme::regular(12.5), palette.secondary);
         }
         if theme::link(
             ui,

@@ -83,7 +83,9 @@ caption. Press Escape or click a file's close button to remove it. Incoming
 non-sticker attachments up to 64 MiB download when they enter view if automatic
 downloads are on, or on click. Visible stickers download automatically up to the
 same limit. If an attachment has expired, ZapFast asks your phone to
-upload it again.
+upload it again. A live-location share shows the position this linked device received;
+WhatsApp sends later positions only to the phone. ZapFast marks when newer
+positions are available there, but cannot follow the moving location here.
 
 ## Interactive messages
 

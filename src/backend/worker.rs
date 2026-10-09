@@ -3444,7 +3444,7 @@ impl Worker {
             && info.media_type == Some(EncMediaType::LiveLocation)
         {
             *live_location = true;
-            if self.continues_masked_live_location(&chat, &sender, &info.id, info) {
+            if self.absorb_masked_live_location(&chat, &sender, &info.id, info) {
                 return;
             }
         }
@@ -3552,14 +3552,21 @@ impl Worker {
 
     /// Whether a masked live location only continues the share `sender`
     /// last posted in this chat. Linked devices cannot follow the position,
-    /// so a share keeps the one bubble it started with.
-    fn continues_masked_live_location(
-        &self,
+    /// so a share keeps the one bubble it started with: the card it already
+    /// shows keeps its last position and says the newer ones are on the
+    /// phone, and a share this device was never able to read keeps its
+    /// single placeholder.
+    fn absorb_masked_live_location(
+        &mut self,
         chat: &str,
         sender: &str,
         id: &str,
         info: &MessageInfo,
     ) -> bool {
+        let now = info.timestamp.timestamp();
+        if self.mark_share_on_the_phone(chat, sender, now) {
+            return true;
+        }
         let Ok(Some(latest)) = self.archive.latest_id_from(chat, sender) else {
             return false;
         };
@@ -3579,6 +3586,41 @@ impl Worker {
                     }
                 ) && info.timestamp.timestamp() - message.timestamp <= LIVE_LOCATION_LIMIT
             })
+    }
+
+    /// Whether the sender's share in this chat is a card, marking it as the
+    /// one that cannot follow the phone's newer positions, and whether the
+    /// position that arrived belongs to it. That card is the share's whole
+    /// row, so it owns the fact instead of the chat growing a second bubble.
+    fn mark_share_on_the_phone(&mut self, chat: &str, sender: &str, now: i64) -> bool {
+        let since = now - LIVE_LOCATION_LIMIT;
+        let Ok(Some(latest)) = self.archive.unique_live_location(chat, sender, since) else {
+            return false;
+        };
+        let Ok(Some(mut share)) = self.archive.message(chat, &latest) else {
+            return false;
+        };
+        // The share's newest position may be newer than this event: a masked
+        // event that arrives out of order says nothing about positions the
+        // card already shows, so it must not claim the phone holds them.
+        if live_location_time(&share) > now {
+            return false;
+        }
+        if share.content.live_location_over(share.timestamp, now) {
+            return false;
+        }
+        let Content::LiveLocation { newer_on_phone, .. } = &mut share.content else {
+            return false;
+        };
+        if *newer_on_phone {
+            return true;
+        }
+        *newer_on_phone = true;
+        if let Err(error) = self.archive.insert_message(&share, None) {
+            log::warn!("could not store a live location position notice: {error}");
+        }
+        self.emit_message(chat, &latest);
+        true
     }
 
     /// The stored live location that a position from `sender` updates: the
@@ -3804,7 +3846,7 @@ impl Worker {
             self.canonical(&info.source.sender)
         };
         let live_location = info.media_type == Some(EncMediaType::LiveLocation);
-        if live_location && self.continues_masked_live_location(&chat, &sender, &info.id, info) {
+        if live_location && self.absorb_masked_live_location(&chat, &sender, &info.id, info) {
             return;
         }
         let row = Message {
@@ -3902,6 +3944,7 @@ impl Worker {
         // that has no downloaded path.
         if let Some(existing) = &existing {
             message.content.keep_local_paths(&existing.content);
+            keep_live_location_notice(&mut message.content, existing);
         }
         if let Err(error) = self.archive.insert_message(&message, raw.as_deref()) {
             log::warn!("could not store a message: {error}");
@@ -4414,20 +4457,26 @@ impl Worker {
                 // archive already holds; keep the files it already downloaded.
                 let mut keep_raw = false;
                 let mut existed = false;
+                let mut live_location_changed = false;
                 if let Ok(Some(existing)) = self.archive.message(&id, &row.id) {
                     existed = true;
                     row.content.keep_local_paths(&existing.content);
+                    keep_live_location_notice(&mut row.content, &existing);
                     // A repeated original must not undo a later edit or revoke.
                     if (existing.edited && !row.edited)
                         || matches!(existing.content, Content::Revoked { .. })
                     {
-                        row.content = existing.content;
+                        row.content = existing.content.clone();
                         row.edited = existing.edited;
                         row.quoted = existing.quoted;
                         row.mentions = existing.mentions;
-                        row.thumbnail = existing.thumbnail;
+                        row.thumbnail = existing.thumbnail.clone();
                         keep_raw = true;
                     }
+                    live_location_changed = matches!(
+                        (&existing.content, &row.content),
+                        (Content::LiveLocation { .. }, Content::LiveLocation { .. })
+                    ) && existing.content != row.content;
                 }
                 if let Err(error) = self
                     .archive
@@ -4435,10 +4484,15 @@ impl Worker {
                 {
                     failed += 1;
                     log::warn!("could not store a history message: {error}");
-                } else if existed {
-                    repeated += 1;
                 } else {
-                    added += 1;
+                    if live_location_changed {
+                        self.emit_message(&id, &row.id);
+                    }
+                    if existed {
+                        repeated += 1;
+                    } else {
+                        added += 1;
+                    }
                 }
                 if group {
                     self.file_history_receipts(&id, &row.id, &message.receipts);
@@ -9018,6 +9072,7 @@ fn live_location_of(base: &wa::Message) -> Option<(Content, Option<String>)> {
                 sequence: 0,
                 ended: false,
                 updated: 0,
+                newer_on_phone: false,
             },
             None,
         ));
@@ -9035,7 +9090,33 @@ fn live_location_content(live: &wa::message::LiveLocationMessage, ended: bool) -
         sequence: live.sequence_number.unwrap_or(0),
         ended,
         updated: 0,
+        newer_on_phone: false,
     }
+}
+
+/// Carries a stored live location's notice about the positions the phone
+/// keeps to itself into a replayed classification of the same message. A
+/// replay brings no newer readable position, so the notice stands; only an
+/// advancing position or a share the phone reports as finished takes it back.
+fn keep_live_location_notice(incoming: &mut Content, existing: &Message) {
+    if !matches!(incoming, Content::LiveLocation { .. }) {
+        return;
+    }
+    let stored = matches!(
+        existing.content,
+        Content::LiveLocation {
+            newer_on_phone: true,
+            ..
+        }
+    );
+    // `live_location_newer` needs the share, so decide before borrowing the
+    // incoming content's own fields.
+    let advances = live_location_newer(existing, incoming);
+    let ended = matches!(incoming, Content::LiveLocation { ended: true, .. });
+    let Content::LiveLocation { newer_on_phone, .. } = incoming else {
+        return;
+    };
+    *newer_on_phone = stored && !advances && !ended;
 }
 
 /// The last position of a share that history reports as finished.
@@ -11832,6 +11913,188 @@ mod tests {
             &live_location_info("again", now, source()),
         );
         assert_eq!(worker.archive.messages(PEER, None, 10).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn a_masked_position_marks_the_share_it_cannot_move() {
+        const PEER: &str = super::receipt_tests::PEER;
+        let (mut worker, _events, _inbox, _wa) = super::receipt_tests::worker();
+        let start = crate::util::now() - 600;
+        let source = || MessageSource {
+            chat: PEER.parse().unwrap(),
+            sender: PEER.parse().unwrap(),
+            ..Default::default()
+        };
+        let ingest = |worker: &mut Worker, position: (Arc<wa::Message>, MessageInfo)| {
+            worker.ingest(&position.0, &position.1);
+        };
+        // Whether the share's card says the phone holds the newer positions.
+        let marked = |worker: &Worker| {
+            let share = worker.archive.message(PEER, "start").unwrap().unwrap();
+            match share.content {
+                Content::LiveLocation { newer_on_phone, .. } => newer_on_phone,
+                other => panic!("unexpected {other:?}"),
+            }
+        };
+        // Ada shares where she is, and this device reads the position.
+        ingest(&mut worker, live_position("start", start, 1, 51.0, None));
+        assert!(!marked(&worker));
+        // She moves, and the phone keeps the positions to itself.
+        worker.ingest(
+            &masked_live_location(),
+            &live_location_info("masked", start + 60, source()),
+        );
+        assert_eq!(worker.archive.messages(PEER, None, 10).unwrap().len(), 1);
+        assert!(
+            marked(&worker),
+            "the card says where the newer positions are"
+        );
+        // A position this device can read takes the notice back.
+        ingest(
+            &mut worker,
+            live_position("p2", start + 120, 2, 51.1, Some("start")),
+        );
+        let rows = worker.archive.messages(PEER, None, 10).unwrap();
+        assert_eq!(rows.len(), 1, "the share keeps its one row");
+        assert!(!marked(&worker));
+    }
+
+    /// A history replay of the position a share started with reclassifies
+    /// the row the archive already holds, and that fresh classification
+    /// carries no newer readable position. It must not take back the notice
+    /// that the phone keeps the newer ones; a share the phone reports as
+    /// finished does.
+    #[test]
+    fn a_history_replay_keeps_the_live_location_notice() {
+        const PEER: &str = super::receipt_tests::PEER;
+        let (mut worker, _events, _inbox, _wa) = super::receipt_tests::worker();
+        let start = 1_700_000_000;
+        let source = || MessageSource {
+            chat: PEER.parse().unwrap(),
+            sender: PEER.parse().unwrap(),
+            ..Default::default()
+        };
+        let (message, info) = live_position("start", start, 1, 51.0, None);
+        worker.ingest(&message, &info);
+        // The phone keeps the positions that follow to itself.
+        worker.ingest(
+            &masked_live_location(),
+            &live_location_info("masked", start + 60, source()),
+        );
+        let marked = |worker: &Worker| {
+            let share = worker.archive.message(PEER, "start").unwrap().unwrap();
+            match share.content {
+                Content::LiveLocation { newer_on_phone, .. } => newer_on_phone,
+                other => panic!("unexpected {other:?}"),
+            }
+        };
+        assert!(
+            marked(&worker),
+            "the card says where the newer positions are"
+        );
+        let replay = |worker: &mut Worker, finished: bool| {
+            worker.apply_history(
+                ParsedHistory {
+                    chats: vec![parse_conversation(wa::Conversation {
+                        id: PEER.into(),
+                        messages: vec![wa::HistorySyncMsg {
+                            message: MessageField::some(wa::WebMessageInfo {
+                                key: MessageField::some(wa::MessageKey {
+                                    id: Some("start".into()),
+                                    from_me: Some(false),
+                                    remote_jid: Some(PEER.into()),
+                                    ..Default::default()
+                                }),
+                                message: MessageField::some(wa::Message {
+                                    live_location_message: MessageField::some(
+                                        wa::message::LiveLocationMessage {
+                                            degrees_latitude: Some(51.0),
+                                            degrees_longitude: Some(-0.12),
+                                            sequence_number: Some(1),
+                                            time_offset: finished.then_some(600),
+                                            ..Default::default()
+                                        },
+                                    ),
+                                    ..Default::default()
+                                }),
+                                message_timestamp: Some(start as u64),
+                                final_live_location: if finished {
+                                    MessageField::some(wa::message::LiveLocationMessage {
+                                        degrees_latitude: Some(51.0),
+                                        degrees_longitude: Some(-0.12),
+                                        sequence_number: Some(1),
+                                        time_offset: Some(600),
+                                        ..Default::default()
+                                    })
+                                } else {
+                                    MessageField::default()
+                                },
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    })],
+                    push_names: Vec::new(),
+                    lids: Vec::new(),
+                    stickers: Vec::new(),
+                },
+                true,
+            );
+        };
+        // The same unfinished position, replayed.
+        replay(&mut worker, false);
+        assert!(
+            marked(&worker),
+            "a replay with no newer readable position keeps the notice"
+        );
+        // The same position, this time as the share's last one.
+        replay(&mut worker, true);
+        assert!(
+            !marked(&worker),
+            "a share the phone reports as finished takes the notice back"
+        );
+    }
+
+    /// A masked event that arrives out of order, older than the position the
+    /// card already shows, says nothing about the positions the phone keeps.
+    #[test]
+    fn an_out_of_order_masked_event_does_not_mark_the_card() {
+        const PEER: &str = super::receipt_tests::PEER;
+        let (mut worker, _events, _inbox, _wa) = super::receipt_tests::worker();
+        let start = crate::util::now() - 600;
+        let source = || MessageSource {
+            chat: PEER.parse().unwrap(),
+            sender: PEER.parse().unwrap(),
+            ..Default::default()
+        };
+        let ingest = |worker: &mut Worker, position: (Arc<wa::Message>, MessageInfo)| {
+            worker.ingest(&position.0, &position.1);
+        };
+        // Ada shares where she is, and this device reads both positions.
+        ingest(&mut worker, live_position("start", start, 1, 51.0, None));
+        ingest(
+            &mut worker,
+            live_position("p2", start + 300, 2, 51.1, Some("start")),
+        );
+        // A masked event from before that position arrives late.
+        worker.ingest(
+            &masked_live_location(),
+            &live_location_info("masked", start + 60, source()),
+        );
+        let share = worker.archive.message(PEER, "start").unwrap().unwrap();
+        assert!(
+            matches!(
+                share.content,
+                Content::LiveLocation {
+                    newer_on_phone: false,
+                    updated,
+                    ..
+                } if updated == start + 300
+            ),
+            "the card keeps the newer readable position: {:?}",
+            share.content
+        );
     }
 
     #[test]
