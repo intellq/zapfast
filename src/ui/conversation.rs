@@ -4609,8 +4609,7 @@ fn quote_block(
 /// Keeps row contents left-to-right inside right-aligned own bubbles.
 /// The phone icon of a message that opens only on the phone, in a round
 /// badge a shade off the bubble.
-fn phone_badge(ui: &mut egui::Ui, palette: Palette) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::hover());
+fn phone_badge(ui: &egui::Ui, palette: Palette, rect: Rect) {
     ui.painter().circle(
         rect.center(),
         13.5,
@@ -6052,16 +6051,32 @@ fn content(
             };
             // The audio box's width, so the notice wraps inside it instead of
             // running out to the cap and being cut. Icon first and text from
-            // the left on both sides, as the phone draws it.
-            ui.scope(|ui| {
-                ui.set_width(width);
-                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                    phone_badge(ui, palette);
-                    ui.with_layout(Layout::top_down(Align::Min), |ui| {
-                        theme::paragraph(ui, text, theme::regular(13.5), palette.secondary);
-                    });
-                });
-            });
+            // the left on both sides, as the phone draws it. Measured first:
+            // a centred row would otherwise take all the height left below,
+            // and the last message in a chat would stretch to the bottom.
+            let badge = 28.0;
+            let gap = ui.spacing().item_spacing.x;
+            let galley = ui.painter().layout(
+                text.to_owned(),
+                theme::regular(13.5),
+                palette.secondary,
+                (width - badge - gap).max(1.0),
+            );
+            let height = galley.size().y.max(badge);
+            let (rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
+            let badge_rect = Rect::from_min_size(
+                pos2(rect.left(), rect.center().y - badge / 2.0),
+                Vec2::splat(badge),
+            );
+            phone_badge(ui, palette, badge_rect);
+            ui.painter().galley(
+                pos2(
+                    badge_rect.right() + gap,
+                    rect.center().y - galley.size().y / 2.0,
+                ),
+                galley,
+                palette.secondary,
+            );
             None
         }
         // Drawn by `call_row`, never inside a bubble.
