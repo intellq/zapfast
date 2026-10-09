@@ -2,6 +2,7 @@
 
 pub mod accounts;
 pub mod call;
+pub mod calls;
 pub mod chats;
 pub mod conversation;
 pub mod dialogs;

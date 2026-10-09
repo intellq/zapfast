@@ -39,6 +39,7 @@ use whatsapp_rust::{MediaRetryResult, MediaReuploadRequest};
 
 mod blocking;
 mod bot_replies;
+mod call_log;
 mod calls;
 mod channel_pictures;
 mod contact_names;
@@ -1063,6 +1064,8 @@ struct ParsedHistory {
     lids: Vec<(String, String)>,
     /// Recent phone stickers included with history sync.
     stickers: Vec<wa::StickerMetadata>,
+    /// The phone's call log, sent with the history at link time.
+    calls: Vec<wa::CallLogRecord>,
 }
 
 struct ParsedChat {
@@ -1505,6 +1508,7 @@ impl Worker {
         }
         self.emit(Event::Contacts(self.contacts.values().cloned().collect()));
         self.emit_chats();
+        self.emit_call_log();
     }
 
     /// Re-derives archived rows from raw protobufs after parser changes. Also
@@ -1605,6 +1609,7 @@ impl Worker {
                 continue;
             }
             content.keep_local_paths(&existing.content);
+            content.set_call_direction(existing.from_me);
             let mentions = self.mentions_of(&mentioned_of(base));
             let thumbnail = thumbnail_of(base);
             if self
@@ -2597,6 +2602,7 @@ impl Worker {
             E::IncomingCall(call) => self.call_signaling(call).await,
             E::MissedCall(call) => self.call_resolved(&call.call_id),
             E::CallEndedElsewhere(call) => self.call_resolved(&call.call_id),
+            E::CallLogSync(sync) => self.call_log_synced(sync),
             E::PairingQrCode(qr) => {
                 self.qr = Some(qr.code.clone());
                 let status = self.unlinked();
@@ -3523,6 +3529,19 @@ impl Worker {
             self.file_motion_clip(&chat, &parent, &sender, &clip);
             return;
         }
+        if let Some(log) = base.call_log_messsage.as_option() {
+            let entry = call_log::call_log_message_entry(
+                log,
+                &info.id,
+                &chat,
+                info.timestamp.timestamp(),
+                from_me,
+            );
+            if self.log_call(entry) {
+                self.emit_call_log();
+            }
+            return;
+        }
         let Some(mut content) = classify(message) else {
             return;
         };
@@ -4313,6 +4332,7 @@ impl Worker {
                 log::warn!("could not store a sticker");
             }
         }
+        self.file_history_calls(&parsed.calls);
         for chat in &parsed.chats {
             if let (Some(lid), Some(pn)) = (&chat.lid_jid, &chat.pn_jid)
                 && let (Some(lid), Some(pn)) = (Self::jid_of(lid), Self::jid_of(pn))
@@ -5108,6 +5128,7 @@ impl Worker {
                 mentions,
             } => self.edit_text(chat, id, text, mentions),
             Command::Revoke { chat, id } => self.revoke(chat, id),
+            Command::RemoveCall { chat, id } => self.remove_call(&chat, &id),
             Command::DeleteForMe { chat, id, on_phone } => {
                 // A deleted message exists only here: nothing to delete on the phone.
                 let revoked = matches!(
@@ -9534,7 +9555,19 @@ fn classify_base(base: &wa::Message) -> Option<Content> {
     {
         return unsupported("payment");
     }
-    if base.call_log_messsage.is_set() || base.scheduled_call_creation_message.is_set() {
+    if let Some(log) = base.call_log_messsage.as_option() {
+        // The direction comes from the envelope; `Content::set_call_direction`
+        // turns it once the caller knows.
+        let entry = call_log::call_log_message_entry(log, "", "", 0, false);
+        return Some(Content::Call {
+            outgoing: false,
+            status: entry.status,
+            seconds: entry.seconds,
+            video: entry.video,
+            group: entry.group,
+        });
+    }
+    if base.scheduled_call_creation_message.is_set() {
         return unsupported("call");
     }
     if base.lottie_sticker_message.is_set() {
@@ -10711,6 +10744,7 @@ fn parse_history(compressed: &[u8]) -> Result<ParsedHistory, String> {
         push_names,
         lids,
         stickers: remainder.recent_stickers,
+        calls: remainder.call_log_records,
     })
 }
 
@@ -10875,6 +10909,7 @@ fn parse_conversation(conversation: wa::Conversation) -> ParsedChat {
             diagnostics.unclassified += 1;
             continue;
         };
+        content.set_call_direction(from_me);
         // Normalizing an edit must not remove an outer view-once restriction.
         if original.is_view_once()
             && let Some(kind) = crate::model::OnceMedia::of(&content)
@@ -12273,6 +12308,7 @@ mod tests {
                     push_names: Vec::new(),
                     lids: Vec::new(),
                     stickers: Vec::new(),
+                    calls: Vec::new(),
                 },
                 true,
             );
@@ -14787,6 +14823,7 @@ mod receipt_tests {
                 push_names: Vec::new(),
                 lids: Vec::new(),
                 stickers: Vec::new(),
+                calls: Vec::new(),
             },
             true,
         );
@@ -14812,6 +14849,7 @@ mod receipt_tests {
                 push_names: Vec::new(),
                 lids: Vec::new(),
                 stickers: Vec::new(),
+                calls: Vec::new(),
             },
             false,
         );
@@ -15582,6 +15620,7 @@ mod receipt_tests {
                 push_names: Vec::new(),
                 lids: Vec::new(),
                 stickers: Vec::new(),
+                calls: Vec::new(),
             },
             true,
         );
@@ -15644,6 +15683,7 @@ mod receipt_tests {
                 push_names: Vec::new(),
                 lids: Vec::new(),
                 stickers: Vec::new(),
+                calls: Vec::new(),
             },
             true,
         );
@@ -15737,6 +15777,7 @@ mod receipt_tests {
                 push_names: Vec::new(),
                 lids: Vec::new(),
                 stickers: Vec::new(),
+                calls: Vec::new(),
             },
             false,
         );
@@ -15802,6 +15843,7 @@ mod receipt_tests {
             push_names: Vec::new(),
             lids: Vec::new(),
             stickers: Vec::new(),
+            calls: Vec::new(),
         }
     }
 
@@ -16874,6 +16916,7 @@ mod chat_removal_tests {
             push_names: Vec::new(),
             lids: Vec::new(),
             stickers: Vec::new(),
+            calls: Vec::new(),
         }
     }
 

@@ -4343,9 +4343,6 @@ msgstr ""
 msgid "Speaker"
 msgstr ""
 
-#: src/ui/call.rs:647 src/app.rs:3350
-msgid "Incoming voice call"
-msgstr ""
 
 #: src/ui/call.rs:657
 msgid "Accept"
@@ -5022,35 +5019,15 @@ msgstr ""
 msgid "This account is only read: nothing is sent, not even read receipts, typing or online status, and calls cannot be answered. Messages read in this mode never get a read receipt. Put your phone in airplane mode."
 msgstr ""
 
-msgid "Outgoing voice call"
-msgstr ""
 
-msgid "Missed voice call"
-msgstr ""
 
-msgid "Declined voice call"
-msgstr ""
 
-msgid "Voice call declined"
-msgstr ""
 
-msgid "Voice call, busy"
-msgstr ""
 
-msgid "Voice call failed"
-msgstr ""
 
-msgid "Voice call, no answer"
-msgstr ""
 
-msgid "Voice call, connection lost"
-msgstr ""
 
-msgid "Voice call answered on another device"
-msgstr ""
 
-msgid "Voice call declined on another device"
-msgstr ""
 
 msgid "Play motion photo"
 msgstr ""
@@ -5059,4 +5036,152 @@ msgid "The clip has not arrived"
 msgstr ""
 
 msgid "Archive or unarchive the open chat"
+msgstr ""
+
+msgid "voice call"
+msgstr ""
+
+msgid "video call"
+msgstr ""
+
+msgid "group voice call"
+msgstr ""
+
+msgid "group video call"
+msgstr ""
+
+msgid "Incoming {call}"
+msgstr ""
+
+msgid "Outgoing {call}"
+msgstr ""
+
+msgid "Missed {call}"
+msgstr ""
+
+msgid "Declined {call}"
+msgstr ""
+
+msgid "{call} declined"
+msgstr ""
+
+msgid "{call}, busy"
+msgstr ""
+
+msgid "{call} failed"
+msgstr ""
+
+msgid "{call}, no answer"
+msgstr ""
+
+msgid "{call}, connection lost"
+msgstr ""
+
+msgid "{call} answered on another device"
+msgstr ""
+
+msgid "{call} declined on another device"
+msgstr ""
+
+msgid "{call} in progress"
+msgstr ""
+
+msgid "{call} silenced (Do Not Disturb)"
+msgstr ""
+
+msgid "{call} silenced (unknown caller)"
+msgstr ""
+
+
+msgid "Call back"
+msgstr ""
+
+msgid "Delete from call log"
+msgstr ""
+
+msgid "No missed calls"
+msgstr ""
+
+msgid "Choose All to see every call."
+msgstr ""
+
+msgid "No calls yet"
+msgstr ""
+
+msgid "Calls made or received here or on your phone appear here."
+msgstr ""
+
+msgid "Could not remove the call"
+msgstr ""
+
+msgid "{} participant"
+msgid_plural "{} participants"
+msgstr[0] ""
+msgstr[1] ""
+
+msgid "Calls ({} missed)"
+msgid_plural "Calls ({} missed)"
+msgstr[0] ""
+msgstr[1] ""
+
+msgid "Calls"
+msgstr ""
+
+msgid "Missed calls"
+msgstr ""
+
+msgctxt "call"
+msgid "Incoming"
+msgstr ""
+
+msgctxt "call"
+msgid "Outgoing"
+msgstr ""
+
+msgctxt "call"
+msgid "Missed"
+msgstr ""
+
+msgctxt "call"
+msgid "Declined"
+msgstr ""
+
+msgctxt "call"
+msgid "Declined by the contact"
+msgstr ""
+
+msgctxt "call"
+msgid "Busy"
+msgstr ""
+
+msgctxt "call"
+msgid "Failed"
+msgstr ""
+
+msgctxt "call"
+msgid "No answer"
+msgstr ""
+
+msgctxt "call"
+msgid "Connection lost"
+msgstr ""
+
+msgctxt "call"
+msgid "Answered on another device"
+msgstr ""
+
+msgctxt "call"
+msgid "Declined on another device"
+msgstr ""
+
+msgctxt "call"
+msgid "In progress"
+msgstr ""
+
+msgctxt "call"
+msgid "Silenced (Do Not Disturb)"
+msgstr ""
+
+msgctxt "call"
+msgid "Silenced (unknown caller)"
 msgstr ""

@@ -65,6 +65,10 @@ pub struct Account {
     pub new_contact_pending: bool,
     pub pair_phone: String,
     pub show_archived: bool,
+    /// The call log is shown in place of the chat list.
+    pub show_calls: bool,
+    /// The newest call rows of every chat, from the worker.
+    pub call_log: Vec<crate::archive::LoggedCall>,
     pub chat_filter: ChatFilter,
     pub labels: Vec<Label>,
     pub account_privacy: crate::privacy::Snapshot,
@@ -143,6 +147,8 @@ impl Account {
             new_contact_pending: false,
             pair_phone: String::new(),
             show_archived: false,
+            show_calls: false,
+            call_log: Vec::new(),
             chat_filter: ChatFilter::All,
             labels: Vec::new(),
             account_privacy: crate::privacy::Snapshot::default(),

@@ -19,6 +19,8 @@ pub enum Stop {
     ChatSearchDay,
     Back,
     Profile,
+    /// The call log button in the header, left of the archive's.
+    Calls,
     /// The archive button in the header, left of the sidebar's.
     Archived,
     Sidebar,

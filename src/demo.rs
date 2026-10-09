@@ -1603,6 +1603,77 @@ fn photos_sample(app: &mut App) {
     app.scroll_to_bottom = true;
 }
 
+/// Calls of every kind in the first chats and in the call log: missed,
+/// answered with a length, placed without an answer, a video call, a group
+/// call, and one silenced on the phone.
+fn calls_sample(app: &mut App) {
+    use crate::model::CallStatus;
+    let now = crate::util::now();
+    let call = |outgoing, status, seconds, video, group| Content::Call {
+        outgoing,
+        status,
+        seconds,
+        video,
+        group,
+    };
+    let rows = [
+        (
+            SAMPLES[0].id,
+            "call-missed",
+            false,
+            600,
+            call(false, CallStatus::Missed, None, false, None),
+        ),
+        (
+            SAMPLES[2].id,
+            "call-video",
+            false,
+            5400,
+            call(false, CallStatus::Answered, Some(754), true, None),
+        ),
+        (
+            SAMPLES[0].id,
+            "call-placed",
+            true,
+            86_400,
+            call(true, CallStatus::NoAnswer, None, false, None),
+        ),
+        (
+            SAMPLES[1].id,
+            "call-group",
+            false,
+            90_000,
+            call(false, CallStatus::Answered, Some(1325), false, Some(4)),
+        ),
+        (
+            SAMPLES[3].id,
+            "call-silenced",
+            false,
+            180_000,
+            call(false, CallStatus::SilencedUnknown, None, false, None),
+        ),
+        (
+            SAMPLES[0].id,
+            "call-answered",
+            true,
+            260_000,
+            call(true, CallStatus::Answered, Some(252), false, None),
+        ),
+    ];
+    for (chat, id, outgoing, ago, content) in rows {
+        let row = message(chat, id, outgoing, now - ago, content.clone());
+        let messages = &mut app.conversations.entry(chat.into()).or_default().messages;
+        messages.push(row);
+        messages.sort_by_key(|message| message.timestamp);
+        app.call_log.push(crate::archive::LoggedCall {
+            chat: chat.into(),
+            id: id.into(),
+            timestamp: now - ago,
+            content,
+        });
+    }
+}
+
 /// A motion photo with its clip downloaded. `playing` plays it in the bubble.
 fn motion_sample(app: &mut App, playing: bool) {
     let id = SAMPLES[0].id;
@@ -1813,6 +1884,18 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
                     "Sounds good, see you at\nthe station".into(),
                 );
                 app.composer = "Still typing this one".into();
+            }
+            "calls" => {
+                calls_sample(app);
+                app.show_calls = true;
+            }
+            "calls-missed" => calls_sample(app),
+            "calls-chat" => {
+                calls_sample(app);
+                app.actions.push(crate::model::Action::OpenMessage {
+                    chat: SAMPLES[0].id.into(),
+                    message: "call-placed".into(),
+                });
             }
             "motion" => motion_sample(app, false),
             "motion-playing" => motion_sample(app, true),
@@ -4760,6 +4843,9 @@ mod tests {
             "message-info-unknown",
             "message-info-partial",
             "message-info-direct",
+            "calls",
+            "calls-missed",
+            "calls-chat",
             "motion",
             "motion-playing",
             "motion-preview",

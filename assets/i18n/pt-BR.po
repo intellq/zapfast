@@ -4568,9 +4568,6 @@ msgstr "Microfone"
 msgid "Speaker"
 msgstr "Alto-falante"
 
-#: src/ui/call.rs:647 src/app.rs:3350
-msgid "Incoming voice call"
-msgstr "Chamada de voz recebida"
 
 #: src/ui/call.rs:657
 msgid "Accept"
@@ -5191,35 +5188,15 @@ msgstr "Modo anônimo"
 msgid "This account is only read: nothing is sent, not even read receipts, typing or online status, and calls cannot be answered. Messages read in this mode never get a read receipt. Put your phone in airplane mode."
 msgstr "Esta conta só é lida: nada é enviado, nem confirmação de leitura, \"digitando\" ou status online, e não é possível atender chamadas. Mensagens lidas neste modo nunca recebem confirmação de leitura. Coloque seu celular no modo avião."
 
-msgid "Outgoing voice call"
-msgstr "Chamada de voz feita"
 
-msgid "Missed voice call"
-msgstr "Chamada de voz perdida"
 
-msgid "Declined voice call"
-msgstr "Chamada de voz recusada"
 
-msgid "Voice call declined"
-msgstr "Chamada de voz recusada pelo contato"
 
-msgid "Voice call, busy"
-msgstr "Chamada de voz, ocupado"
 
-msgid "Voice call failed"
-msgstr "Chamada de voz não completada"
 
-msgid "Voice call, no answer"
-msgstr "Chamada de voz sem resposta"
 
-msgid "Voice call, connection lost"
-msgstr "Chamada de voz, conexão perdida"
 
-msgid "Voice call answered on another device"
-msgstr "Chamada de voz atendida em outro aparelho"
 
-msgid "Voice call declined on another device"
-msgstr "Chamada de voz recusada em outro aparelho"
 
 msgid "Play motion photo"
 msgstr "Reproduzir foto em movimento"
@@ -5229,3 +5206,151 @@ msgstr "O vídeo da foto ainda não chegou"
 
 msgid "Archive or unarchive the open chat"
 msgstr "Arquivar ou desarquivar a conversa aberta"
+
+msgid "voice call"
+msgstr "chamada de voz"
+
+msgid "video call"
+msgstr "chamada de vídeo"
+
+msgid "group voice call"
+msgstr "chamada de voz em grupo"
+
+msgid "group video call"
+msgstr "chamada de vídeo em grupo"
+
+msgid "Incoming {call}"
+msgstr "{call} recebida"
+
+msgid "Outgoing {call}"
+msgstr "{call} feita"
+
+msgid "Missed {call}"
+msgstr "{call} perdida"
+
+msgid "Declined {call}"
+msgstr "{call} recusada"
+
+msgid "{call} declined"
+msgstr "{call} recusada pelo contato"
+
+msgid "{call}, busy"
+msgstr "{call}, ocupado"
+
+msgid "{call} failed"
+msgstr "{call} não completada"
+
+msgid "{call}, no answer"
+msgstr "{call} sem resposta"
+
+msgid "{call}, connection lost"
+msgstr "{call}, conexão perdida"
+
+msgid "{call} answered on another device"
+msgstr "{call} atendida em outro aparelho"
+
+msgid "{call} declined on another device"
+msgstr "{call} recusada em outro aparelho"
+
+msgid "{call} in progress"
+msgstr "{call} em andamento"
+
+msgid "{call} silenced (Do Not Disturb)"
+msgstr "{call} silenciada (não perturbe)"
+
+msgid "{call} silenced (unknown caller)"
+msgstr "{call} silenciada (número desconhecido)"
+
+
+msgid "Call back"
+msgstr "Ligar de volta"
+
+msgid "Delete from call log"
+msgstr "Apagar do registro"
+
+msgid "No missed calls"
+msgstr "Nenhuma ligação perdida"
+
+msgid "Choose All to see every call."
+msgstr "Escolha Todas para ver todas as ligações."
+
+msgid "No calls yet"
+msgstr "Nenhuma ligação ainda"
+
+msgid "Calls made or received here or on your phone appear here."
+msgstr "As ligações feitas ou recebidas aqui ou no celular aparecem aqui."
+
+msgid "Could not remove the call"
+msgstr "Não foi possível apagar a ligação"
+
+msgid "{} participant"
+msgid_plural "{} participants"
+msgstr[0] "{} participante"
+msgstr[1] "{} participantes"
+
+msgid "Calls ({} missed)"
+msgid_plural "Calls ({} missed)"
+msgstr[0] "Ligações ({} perdida)"
+msgstr[1] "Ligações ({} perdidas)"
+
+msgid "Calls"
+msgstr "Ligações"
+
+msgid "Missed calls"
+msgstr "Perdidas"
+
+msgctxt "call"
+msgid "Incoming"
+msgstr "Recebida"
+
+msgctxt "call"
+msgid "Outgoing"
+msgstr "Feita"
+
+msgctxt "call"
+msgid "Missed"
+msgstr "Perdida"
+
+msgctxt "call"
+msgid "Declined"
+msgstr "Recusada"
+
+msgctxt "call"
+msgid "Declined by the contact"
+msgstr "Recusada pelo contato"
+
+msgctxt "call"
+msgid "Busy"
+msgstr "Ocupado"
+
+msgctxt "call"
+msgid "Failed"
+msgstr "Não completada"
+
+msgctxt "call"
+msgid "No answer"
+msgstr "Sem resposta"
+
+msgctxt "call"
+msgid "Connection lost"
+msgstr "Conexão perdida"
+
+msgctxt "call"
+msgid "Answered on another device"
+msgstr "Atendida em outro aparelho"
+
+msgctxt "call"
+msgid "Declined on another device"
+msgstr "Recusada em outro aparelho"
+
+msgctxt "call"
+msgid "In progress"
+msgstr "Em andamento"
+
+msgctxt "call"
+msgid "Silenced (Do Not Disturb)"
+msgstr "Silenciada (não perturbe)"
+
+msgctxt "call"
+msgid "Silenced (unknown caller)"
+msgstr "Silenciada (número desconhecido)"

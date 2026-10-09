@@ -43,8 +43,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let side_bar = side_bar(app, ui.ctx());
     let response = panel.show(ui, |ui| {
         if !side_bar {
-            header(app, ui);
-            list(app, ui);
+            body(app, ui);
             return;
         }
         let full = ui.max_rect();
@@ -61,10 +60,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             egui::UiBuilder::new()
                 .max_rect(rest)
                 .layout(Layout::top_down(Align::Min)),
-            |ui| {
-                header(app, ui);
-                list(app, ui);
-            },
+            |ui| body(app, ui),
         );
     });
     let width = response.response.rect.width() - extra;
@@ -83,10 +79,17 @@ pub fn full_show(app: &mut App, ui: &mut egui::Ui) {
     let palette = app.palette;
     egui::CentralPanel::default()
         .frame(Frame::new().fill(palette.panel).inner_margin(Margin::ZERO))
-        .show(ui, |ui| {
-            header(app, ui);
-            list(app, ui);
-        });
+        .show(ui, |ui| body(app, ui));
+}
+
+/// The header and the chat list, or the call log in their place.
+fn body(app: &mut App, ui: &mut egui::Ui) {
+    if app.show_calls && !app.locked_folder {
+        super::calls::show(app, ui);
+        return;
+    }
+    header(app, ui);
+    list(app, ui);
 }
 
 /// Walks matching chats while the global search field keeps keyboard focus.
@@ -207,6 +210,11 @@ fn header(app: &mut App, ui: &mut egui::Ui) {
                     }
                     if !side_bar {
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            // Five buttons beside the title need tighter gaps
+                            // to leave it room at the list's usual width.
+                            if app.archived_count() > 0 && !app.call_log.is_empty() {
+                                ui.spacing_mut().item_spacing.x = 2.0;
+                            }
                             settings_button(app, ui);
                             new_chat_button(app, ui);
                             // A narrow window shows the list or a chat, never
@@ -215,6 +223,7 @@ fn header(app: &mut App, ui: &mut egui::Ui) {
                                 hide_list_button(app, ui);
                             }
                             archived_button(app, ui);
+                            super::calls::button(app, ui);
                         });
                     }
                 });
@@ -263,6 +272,8 @@ fn side_bar_column(app: &mut App, ui: &mut egui::Ui) {
     profile_button(app, ui);
     ui.add_space(10.0);
     let gap = 6.0;
+    super::calls::button(app, ui);
+    ui.add_space(gap);
     archived_button(app, ui);
     ui.add_space(gap);
     hide_list_button(app, ui);
@@ -451,6 +462,7 @@ fn macos_header(app: &mut App, ui: &mut egui::Ui) {
                         app.actions.push(Action::ToggleSidebar);
                     }
                     archived_button(app, ui);
+                    super::calls::button(app, ui);
                 });
             });
             ui.add_space(6.0);

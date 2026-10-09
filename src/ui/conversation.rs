@@ -2630,8 +2630,7 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                                     .id(bubble_id(&chat.id, &message.id).with("row-ui")),
                                 |ui| {
                                     if matches!(message.content, Content::Call { .. }) {
-                                        call_row(ui, &view, message);
-                                        return None;
+                                        return Some(call_row(ui, &view, message, &mut actions));
                                     }
                                     if selection.is_none() {
                                         return bubble(
@@ -3234,14 +3233,17 @@ fn centered_note(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) {
 /// The room a logged call's line takes, with the space around it.
 const CALL_ROW_HEIGHT: f32 = 34.0;
 
-/// A logged call: a centred line like the day chip, outside any bubble and with no menu, since
-/// WhatsApp knows nothing of the row. A missed call is drawn in the danger colour.
-fn call_row(ui: &mut egui::Ui, view: &View<'_>, message: &Message) {
-    let Content::Call { status, .. } = &message.content else {
-        return;
-    };
+/// A logged call: a centred line like the day chip, outside any bubble. Its menu calls back and
+/// deletes the row here; WhatsApp knows nothing of it. A missed call is drawn in the danger
+/// colour.
+fn call_row(
+    ui: &mut egui::Ui,
+    view: &View<'_>,
+    message: &Message,
+    actions: &mut Vec<Action>,
+) -> egui::Response {
     let palette = view.palette;
-    let missed = *status == crate::model::CallStatus::Missed;
+    let missed = matches!(&message.content, Content::Call { status, .. } if status.missed());
     let color = if missed {
         palette.danger
     } else {
@@ -3253,39 +3255,52 @@ fn call_row(ui: &mut egui::Ui, view: &View<'_>, message: &Message) {
         crate::util::clock(message.timestamp)
     );
     ui.add_space(4.0);
-    ui.vertical_centered(|ui| {
-        let galley = ui
-            .painter()
-            .layout_no_wrap(label, theme::medium(12.0), color);
-        let icon = 14.0;
-        let size = vec2(galley.size().x + icon + 26.0, galley.size().y + 10.0);
-        let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
-        if ui.is_rect_visible(rect) {
-            let radius = egui::CornerRadius::from(rect.height() / 2.0);
-            let fill = if palette.dark {
-                palette.panel.lerp_to_gamma(palette.bubble_in, 0.5)
-            } else {
-                palette.panel
-            };
-            ui.painter()
-                .add(palette.bubble_shadow().as_shape(rect, radius));
-            ui.painter().rect_filled(rect, radius, fill);
-            let icon_rect = Rect::from_center_size(
-                egui::pos2(rect.left() + 10.0 + icon / 2.0, rect.center().y),
-                vec2(icon, icon),
-            );
-            theme::paint_icon(ui, Icon::Phone, icon_rect, icon, color);
-            ui.painter().galley(
-                egui::pos2(
-                    icon_rect.right() + 6.0,
-                    rect.center().y - galley.size().y / 2.0,
-                ),
-                galley,
-                color,
-            );
-        }
-    });
+    let response = ui
+        .vertical_centered(|ui| {
+            let galley = ui
+                .painter()
+                .layout_no_wrap(label, theme::medium(12.0), color);
+            let icon = 14.0;
+            let size = vec2(galley.size().x + icon + 26.0, galley.size().y + 10.0);
+            let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+            if ui.is_rect_visible(rect) {
+                let radius = egui::CornerRadius::from(rect.height() / 2.0);
+                let fill = if palette.dark {
+                    palette.panel.lerp_to_gamma(palette.bubble_in, 0.5)
+                } else {
+                    palette.panel
+                };
+                ui.painter()
+                    .add(palette.bubble_shadow().as_shape(rect, radius));
+                ui.painter().rect_filled(rect, radius, fill);
+                let icon_rect = Rect::from_center_size(
+                    egui::pos2(rect.left() + 10.0 + icon / 2.0, rect.center().y),
+                    vec2(icon, icon),
+                );
+                theme::paint_icon(
+                    ui,
+                    super::calls::icon(&message.content),
+                    icon_rect,
+                    icon,
+                    color,
+                );
+                ui.painter().galley(
+                    egui::pos2(
+                        icon_rect.right() + 6.0,
+                        rect.center().y - galley.size().y / 2.0,
+                    ),
+                    galley,
+                    color,
+                );
+            }
+            response
+        })
+        .inner;
     ui.add_space(4.0);
+    response.context_menu(|ui| {
+        super::calls::row_menu(ui, &palette, view.chat, message, actions);
+    });
+    response
 }
 
 fn typing_bubble(ui: &mut egui::Ui, view: &View<'_>, typers: &[(String, String)]) {

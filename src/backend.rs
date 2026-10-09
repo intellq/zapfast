@@ -302,6 +302,11 @@ pub enum Command {
         id: String,
         on_phone: bool,
     },
+    /// Deletes a call row on this computer only; it never reached WhatsApp.
+    RemoveCall {
+        chat: ChatId,
+        id: String,
+    },
     /// Finishes a synchronized message deletion on the worker thread.
     DeleteForMeSynced {
         chat: ChatId,
@@ -969,6 +974,8 @@ pub enum Event {
         chat: ChatId,
         id: String,
     },
+    /// The newest call rows across every chat, newest first.
+    CallLog(Vec<crate::archive::LoggedCall>),
     /// A chat was deleted here or on a linked device.
     ChatRemoved {
         chat: ChatId,

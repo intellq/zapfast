@@ -141,77 +141,18 @@ impl Worker {
             .started
             .filter(|_| status == CallStatus::Answered || status == CallStatus::ConnectionLost)
             .map(|started| u32::try_from(started.elapsed().as_secs()).unwrap_or(u32::MAX));
-        self.log_call(call_id, &update.chat, began, outgoing, status, seconds);
-    }
-
-    fn log_call(
-        &mut self,
-        call_id: &str,
-        chat: &str,
-        began: i64,
-        outgoing: bool,
-        status: CallStatus,
-        seconds: Option<u32>,
-    ) {
-        let id = format!("{CALL_ROW_PREFIX}{call_id}");
-        if self.archive.message(chat, &id).ok().flatten().is_some() {
-            return;
-        }
-        if self.predates_removal(chat, began) {
-            return;
-        }
-        self.ensure_chat(chat, None);
-        let row = Message {
-            id: id.clone(),
-            chat: chat.to_owned(),
-            sender: if outgoing { self.me() } else { chat.to_owned() },
-            sender_name: None,
-            from_me: outgoing,
-            timestamp: began,
-            history_order: None,
-            content: Content::Call {
-                outgoing,
-                status,
-                seconds,
-            },
-            status: Delivery::None,
-            delivered_at: None,
-            read_at: None,
-            quoted: None,
-            reactions: Vec::new(),
-            edited: false,
-            mentions: Vec::new(),
-            forwarded: false,
-            thumbnail: None,
-        };
-        if let Err(error) = self.archive.insert_message(&row, None) {
-            log::warn!("could not log a call: {error}");
-            return;
-        }
-        let missed = status == CallStatus::Missed;
-        if missed {
-            let _ = self.archive.bump_unread(chat);
-            if !self.keep_chats_archived
-                && let Err(error) = self
-                    .archive
-                    .unarchive_for_message(chat, began.saturating_mul(1000))
-            {
-                log::warn!("could not unarchive a chat: {error}");
-            }
-        }
-        self.emit(Event::Messages {
-            chat: chat.to_owned(),
-            messages: vec![row.clone()],
-            older: false,
-            complete: false,
+        self.log_call(super::call_log::CallEntry {
+            id: format!("{CALL_ROW_PREFIX}{call_id}"),
+            chat: update.chat.clone(),
+            began,
+            outgoing,
+            status,
+            seconds,
+            video: false,
+            group: None,
+            quiet: false,
         });
-        self.emit_chat(chat);
-        if missed && !self.syncing {
-            self.emit(Event::Incoming {
-                chat: chat.to_owned(),
-                message: Box::new(row),
-            });
-        }
+        self.emit_call_log();
     }
 
     /// Whether a call is already up, which every entry point refuses to double.
@@ -426,14 +367,18 @@ impl Worker {
             // Nobody here could pick it up, so it is a missed call, logged once.
             if callable_chat(&chat) {
                 let call_id = action.call_id().to_owned();
-                self.log_call(
-                    &call_id,
-                    &chat,
-                    crate::util::now(),
-                    false,
-                    CallStatus::Missed,
-                    None,
-                );
+                self.log_call(super::call_log::CallEntry {
+                    id: format!("{CALL_ROW_PREFIX}{call_id}"),
+                    chat: chat.clone(),
+                    began: crate::util::now(),
+                    outgoing: false,
+                    status: CallStatus::Missed,
+                    seconds: None,
+                    video: false,
+                    group: None,
+                    quiet: false,
+                });
+                self.emit_call_log();
             }
             return;
         }
@@ -627,6 +572,8 @@ mod tests {
                 outgoing: false,
                 status: CallStatus::Missed,
                 seconds: None,
+                video: false,
+                group: None,
             }
         );
         assert_eq!(row.timestamp, 1_000);
@@ -653,6 +600,7 @@ mod tests {
             outgoing: true,
             status: CallStatus::Answered,
             seconds: Some(seconds),
+            ..
         } = row.content
         else {
             panic!("unexpected row {:?}", row.content);

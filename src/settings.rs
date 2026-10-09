@@ -936,6 +936,9 @@ pub struct AccountSettings {
     /// When anonymous mode was last turned off, in seconds: messages received before then never
     /// get a read receipt, so leaving the mode does not reveal what was read in it.
     pub anonymous_until: Option<i64>,
+    /// When the call log was last opened, in seconds: missed calls after it
+    /// are the ones its button counts.
+    pub calls_seen_at: i64,
 }
 
 impl Default for AccountSettings {
@@ -950,6 +953,7 @@ impl Default for AccountSettings {
             silenced: false,
             anonymous: false,
             anonymous_until: None,
+            calls_seen_at: 0,
         }
     }
 }
@@ -966,6 +970,7 @@ impl AccountSettings {
             silenced: false,
             anonymous: false,
             anonymous_until: None,
+            calls_seen_at: 0,
         }
     }
 
