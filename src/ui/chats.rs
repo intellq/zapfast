@@ -284,9 +284,14 @@ fn side_bar_column(app: &mut App, ui: &mut egui::Ui) {
 }
 
 /// Our picture, which opens the account switcher, with the profile and
-/// settings below the accounts.
+/// settings below the accounts. The right button moves the header's buttons
+/// to the side bar and back, as the setting does.
 fn profile_button(app: &mut App, ui: &mut egui::Ui) {
-    super::accounts::avatar_button(app, ui, 34.0).tab_stop(Stop::Profile);
+    let response = super::accounts::avatar_button(app, ui, 34.0).tab_stop(Stop::Profile);
+    if response.secondary_clicked() && !theme::macos_chrome(ui.ctx()) && !super::narrow(ui.ctx()) {
+        app.settings.side_bar = !app.settings.side_bar;
+        app.actions.push(Action::SettingsChanged);
+    }
 }
 
 fn settings_button(app: &mut App, ui: &mut egui::Ui) {

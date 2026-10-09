@@ -502,7 +502,7 @@ fn sections(app: &App) -> Vec<Section> {
         translated(locale, "Side bar"),
         translated(
             locale,
-            "Your profile picture and the archive, hide list, new chat and Settings buttons in a column left of the chats, with the search field at the top.",
+            "Your profile picture and the archive, hide list, new chat and Settings buttons in a column left of the chats, with the search field at the top. Right-clicking your profile picture also switches it.",
         ),
         |settings| &mut settings.side_bar,
     );

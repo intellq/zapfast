@@ -5025,8 +5025,8 @@ msgid "Side bar"
 msgstr "Barra lateral"
 
 #: src/ui/settings.rs
-msgid "Your profile picture and the archive, hide list, new chat and Settings buttons in a column left of the chats, with the search field at the top."
-msgstr "Sua foto de perfil e os botões de arquivadas, ocultar a lista, nova conversa e configurações numa coluna à esquerda das conversas, com o campo de busca no topo."
+msgid "Your profile picture and the archive, hide list, new chat and Settings buttons in a column left of the chats, with the search field at the top. Right-clicking your profile picture also switches it."
+msgstr "Sua foto de perfil e os botões de arquivadas, ocultar a lista, nova conversa e configurações numa coluna à esquerda das conversas, com o campo de busca no topo. O clique direito na sua foto de perfil também liga e desliga."
 
 #: src/ui/dialogs.rs:1
 msgid "Remove this account?"
