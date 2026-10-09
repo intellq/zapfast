@@ -57,6 +57,24 @@ pub fn row_menu(
     }
 }
 
+/// Opens [`row_menu`] on a call row's right click, as wide as its labels
+/// rather than the row.
+pub fn row_context_menu(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    palette: &Palette,
+    chat: &Chat,
+    message: &Message,
+    actions: &mut Vec<Action>,
+) {
+    let width =
+        widgets::menu_width(ui, &[tr("Call back"), tr("Delete from call log")], true).max(190.0);
+    egui::Popup::context_menu(response)
+        .width(width)
+        .frame(widgets::menu_frame(palette))
+        .show(|ui| row_menu(ui, palette, chat, message, actions));
+}
+
 /// The button to the call log, beside the archive's, with the number of
 /// missed calls since the log was last opened.
 /// It is there once a call is logged, as the archive's is once something is
@@ -383,7 +401,91 @@ fn row(app: &mut App, ui: &mut egui::Ui, call: &LoggedCall) {
         forwarded: false,
         thumbnail: None,
     };
-    response.context_menu(|ui| {
-        row_menu(ui, &palette, &chat, &message, &mut app.actions);
-    });
+    row_context_menu(ui, &response, &palette, &chat, &message, &mut app.actions);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{CallStatus, Delivery};
+
+    #[test]
+    fn a_call_rows_menu_stays_compact_in_wide_windows() {
+        let chat = Chat::new("1@s.whatsapp.net".into(), "Ada".into());
+        let message = Message {
+            id: "call".into(),
+            chat: chat.id.clone(),
+            sender: String::new(),
+            sender_name: None,
+            from_me: false,
+            timestamp: 0,
+            history_order: None,
+            content: Content::Call {
+                outgoing: false,
+                status: CallStatus::Missed,
+                seconds: None,
+                video: false,
+                group: None,
+            },
+            status: Delivery::None,
+            delivered_at: None,
+            read_at: None,
+            quoted: None,
+            reactions: Vec::new(),
+            edited: false,
+            mentions: Vec::new(),
+            forwarded: false,
+            thumbnail: None,
+        };
+        let palette = Palette::dark();
+        for width in [360.0, 1180.0, 2000.0] {
+            let ctx = egui::Context::default();
+            let frame = |events| {
+                let mut response = None;
+                let mut actions = Vec::new();
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            vec2(width, 800.0),
+                        )),
+                        events,
+                        ..Default::default()
+                    },
+                    |ui| {
+                        let (_, row) = ui
+                            .allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click());
+                        row_context_menu(ui, &row, &palette, &chat, &message, &mut actions);
+                        response = Some(row);
+                    },
+                );
+                output.textures_delta.clear();
+                response.unwrap()
+            };
+            let response = frame(vec![]);
+            let position = response.rect.left_center() + vec2(20.0, 0.0);
+            for pressed in [true, false] {
+                frame(vec![
+                    egui::Event::PointerMoved(position),
+                    egui::Event::PointerButton {
+                        pos: position,
+                        button: egui::PointerButton::Secondary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ]);
+            }
+            for _ in 0..3 {
+                frame(vec![]);
+            }
+            let popup = response.id.with("popup");
+            assert!(egui::Popup::is_id_open(&ctx, popup));
+            let rect = ctx.read_response(popup).expect("call row menu").rect;
+            assert!(
+                (190.0..=260.0).contains(&rect.width()),
+                "a {width}-point window produced a {}-point menu",
+                rect.width()
+            );
+        }
+    }
 }

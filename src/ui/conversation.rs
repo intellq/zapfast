@@ -3297,9 +3297,7 @@ fn call_row(
         })
         .inner;
     ui.add_space(4.0);
-    response.context_menu(|ui| {
-        super::calls::row_menu(ui, &palette, view.chat, message, actions);
-    });
+    super::calls::row_context_menu(ui, &response, &palette, view.chat, message, actions);
     response
 }
 
