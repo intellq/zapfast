@@ -538,7 +538,10 @@ pub const SHORTCUTS: &[(&str, &str)] = &[
         crate::i18n::n_("Dismiss the current action, return from search, or close the chat"),
     ),
     ("Ctrl+N", crate::i18n::n_("New chat or message yourself")),
-    ("Ctrl+E", crate::i18n::n_("Archive or unarchive the open chat")),
+    (
+        "Ctrl+E",
+        crate::i18n::n_("Archive or unarchive the open chat"),
+    ),
     (
         "Ctrl+V",
         crate::i18n::n_("Paste text, or stage a picture from the clipboard"),

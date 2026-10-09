@@ -316,7 +316,12 @@ impl Buttons<'_> {
             buttons.push(("image-motion", icon, hint, action));
         }
         buttons.extend([
-            ("image-zoom", zoom_icon, zoom_hint.to_owned(), Some(zoom_action)),
+            (
+                "image-zoom",
+                zoom_icon,
+                zoom_hint.to_owned(),
+                Some(zoom_action),
+            ),
             (
                 "image-copy",
                 Icon::Copy,
