@@ -551,6 +551,32 @@ Da sincronização com o upstream 0.18.2:
   fim ao enviar, para mostrá-la. `Shift+Insert` cola, como `Ctrl+V`, no
   compositor.
 
+Depois da 0.19.4 (ainda sem release):
+
+- **Barra de volume no player de vídeo:** ao passar o mouse sobre o botão de
+  som, sobe uma barra vertical que se arrasta ou clica para mudar o volume
+  (mexer nela tira o mudo). O volume escolhido fica salvo para os próximos
+  vídeos e para a próxima vez que o ZapFast abrir.
+
+Da sincronização com o upstream (09/10/2026; só o `6e6030e` ficou de fora):
+
+- **Números de telefone viram links** no texto das mensagens: o clique (ou
+  Enter com o foco no link) abre **Mensagem** e **Copiar número**. Datas entre
+  parênteses não viram link.
+- **Seleção de texto mais fácil:** o arrasto pode começar na margem do balão de
+  uma mensagem de texto, não só em cima de uma letra.
+- **Localização em tempo real** avisa que as posições novas só chegam ao
+  celular.
+- **Fotos em movimento** (Motion Photo / Live Photo) ganham um ▶ no canto: o
+  clipe baixa e toca por cima da foto, mudo e em loop; no preview da foto, o ▶
+  entre os botões do topo toca o clipe na janela inteira, com som. Antes o
+  clipe aparecia como mensagem não suportada.
+- **Clicar na hora ou nos tiques** de uma mensagem enviada abre **Dados da
+  mensagem**; numa mensagem não enviada o clique continua reenviando.
+- **`Ctrl+E`** arquiva a conversa aberta, ou a desarquiva em **Arquivadas**.
+- **Nome do computador no aparelho:** novas conexões aparecem como
+  "ZapFast (nome-da-máquina)" em **Aparelhos conectados** no celular.
+
 Na 0.19.4:
 
 - **Arquivo `.ogg` enviado como áudio chega aos celulares:** um OGG com Opus
