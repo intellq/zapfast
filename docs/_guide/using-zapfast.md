@@ -21,6 +21,9 @@ check when it was sent, delivered, and read. The reaction row has a **+** that
 opens the full emoji picker. Hover over a reaction to see who added it.
 Editing uses the composer. Press Escape to cancel.
 
+**Development builds** also show when your message was delivered and read when
+you click its time or ticks, as on WhatsApp.
+
 Double-click beside a message, or on its edge, to reply to it. A double-click
 on its text still selects the word.
 

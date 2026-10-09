@@ -5480,6 +5480,71 @@ mod tests {
         assert!(ctx.memory(|memory| memory.has_focus(composer)));
     }
 
+    /// Our time or ticks open "Message info"; an incoming time opens nothing.
+    #[test]
+    fn clicking_the_time_or_ticks_opens_message_info() {
+        // A fresh app per click: a dialog just closed still covers the next frame.
+        fn click_footer(from_me: bool, inset: f32) -> (String, String, Option<Dialog>) {
+            let mut app = app();
+            let ctx = egui::Context::default();
+            app.attach(&ctx);
+            let chat = app.open_chat.clone().expect("the demo opens a chat");
+            render(&mut app, &ctx);
+            render(&mut app, &ctx);
+            let viewport = app
+                .selection_view
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .expect("the message viewport is on screen");
+            let (id, footer) = app.conversations[&chat]
+                .messages
+                .iter()
+                .rev()
+                .filter(|message| message.from_me == from_me)
+                .filter(|message| {
+                    !from_me
+                        || matches!(
+                            message.status,
+                            Delivery::Delivered | Delivery::Read | Delivery::Played
+                        )
+                })
+                .find_map(|message| {
+                    let id = crate::ui::conversation::footer_id(&chat, &message.id);
+                    let rect = ctx.data(|data| data.get_temp::<egui::Rect>(id))?;
+                    viewport
+                        .contains_rect(rect)
+                        .then(|| (message.id.clone(), rect))
+                })
+                .expect("a message with its footer on screen");
+            let at = egui::pos2(footer.right() - inset, footer.center().y);
+            frame_with(
+                &mut app,
+                &ctx,
+                vec![
+                    egui::Event::PointerMoved(at),
+                    primary(at, true),
+                    primary(at, false),
+                ],
+            );
+            render(&mut app, &ctx);
+            (chat, id, app.dialog)
+        }
+
+        let (_, _, dialog) = click_footer(false, 7.5);
+        assert!(dialog.is_none(), "an incoming time is not a button");
+
+        for (part, inset) in [("ticks", 7.5), ("time", 25.0)] {
+            let (chat, id, dialog) = click_footer(true, inset);
+            assert!(
+                matches!(
+                    &dialog,
+                    Some(Dialog::MessageInfo { chat: shown, message }) if *shown == chat && *message == id
+                ),
+                "the {part} open that message's info: {dialog:?}"
+            );
+        }
+    }
+
     /// The composer keeps its draft while the preview is open: Enter does not
     /// send it, and Tab and Enter reach the preview's own controls instead.
     #[test]
