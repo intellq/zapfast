@@ -1897,6 +1897,46 @@ mod tests {
     use crate::settings::Settings;
 
     #[test]
+    fn right_clicking_our_picture_moves_the_buttons_to_the_side_bar_and_back() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _events) =
+            App::headless(AppDirs::under(directory.path()), Settings::default());
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        let frame = |app: &mut App, events| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(1200.0, 800.0))),
+                    events,
+                    ..Default::default()
+                },
+                |ui| show(app, ui),
+            );
+            output.textures_delta.clear();
+            app.actions.clear();
+        };
+        let picture = egui::pos2(31.0, 29.0);
+        for expected in [true, false] {
+            frame(&mut app, vec![]);
+            for pressed in [true, false] {
+                frame(
+                    &mut app,
+                    vec![
+                        egui::Event::PointerMoved(picture),
+                        egui::Event::PointerButton {
+                            pos: picture,
+                            button: egui::PointerButton::Secondary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                );
+            }
+            assert_eq!(app.settings.side_bar, expected);
+        }
+    }
+
+    #[test]
     fn chat_context_menu_stays_compact_in_wide_windows() {
         for width in [360.0, 1180.0, 2000.0] {
             let directory = tempfile::tempdir().unwrap();
