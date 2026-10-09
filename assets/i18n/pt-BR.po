@@ -5226,3 +5226,6 @@ msgstr "Reproduzir foto em movimento"
 
 msgid "The clip has not arrived"
 msgstr "O vídeo da foto ainda não chegou"
+
+msgid "Archive or unarchive the open chat"
+msgstr "Arquivar ou desarquivar a conversa aberta"

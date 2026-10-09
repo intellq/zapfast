@@ -5057,3 +5057,6 @@ msgstr ""
 
 msgid "The clip has not arrived"
 msgstr ""
+
+msgid "Archive or unarchive the open chat"
+msgstr ""

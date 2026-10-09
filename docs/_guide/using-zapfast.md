@@ -235,8 +235,9 @@ filter applies only to this list: search and the archive still show everything,
 and it resets when ZapFast restarts.
 
 Right-click a chat to pin, archive, or mute it for eight hours, one week, or
-indefinitely. These changes also apply on your phone. Click the chat header to
-see its picture, number, and group members.
+indefinitely. These changes also apply on your phone. `Ctrl+E` (Command+E on
+macOS) archives the open chat, or unarchives it from **Archived**, as in
+WhatsApp. Click the chat header to see its picture, number, and group members.
 
 ## Labels
 

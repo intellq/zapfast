@@ -20,6 +20,7 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
     // field, as ↑ keeps its normal meaning outside an empty composer.
     let home_end_allowed = !editing_text || (composer_focused && app.composer.is_empty());
     let find = find_action(app);
+    let archive = archive_action(app);
     let mut actions = Vec::new();
     ctx.input_mut(|input| {
         let mut key = |modifiers: Modifiers, key: Key, action: Action| {
@@ -66,6 +67,9 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
             && app.recording.is_none()
         {
             key(Modifiers::COMMAND, Key::L, Action::FocusComposer);
+        }
+        if let Some(archive) = archive {
+            key(Modifiers::COMMAND, Key::E, archive);
         }
         key(Modifiers::COMMAND, Key::B, Action::ToggleSidebar);
         key(Modifiers::COMMAND, Key::Comma, Action::ToggleSettings);
@@ -484,6 +488,22 @@ fn find_action(app: &App) -> Action {
     }
 }
 
+/// Ctrl+E archives the open chat, or unarchives an archived one, as in
+/// WhatsApp. Archiving closes the chat, as the chat menus do.
+fn archive_action(app: &App) -> Option<Action> {
+    if app.page != Page::Chats
+        || app.dialog.is_some()
+        || app.show_update
+        || app.picker.is_some()
+        || app.reaction_target.is_some()
+        || app.recording.is_some()
+    {
+        return None;
+    }
+    let chat = app.chat(app.open_chat.as_deref()?)?;
+    Some(Action::SetArchived(chat.id.clone(), !chat.archived))
+}
+
 /// Shortcuts shown in the help dialog.
 pub const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+K / Ctrl+Shift+F", crate::i18n::n_("Search chats")),
@@ -518,6 +538,7 @@ pub const SHORTCUTS: &[(&str, &str)] = &[
         crate::i18n::n_("Dismiss the current action, return from search, or close the chat"),
     ),
     ("Ctrl+N", crate::i18n::n_("New chat or message yourself")),
+    ("Ctrl+E", crate::i18n::n_("Archive or unarchive the open chat")),
     (
         "Ctrl+V",
         crate::i18n::n_("Paste text, or stage a picture from the clipboard"),
@@ -1029,6 +1050,43 @@ mod tests {
         app.show_update = false;
         app.reaction_target = Some(("chat-fixture".into(), "message-fixture".into()));
         assert!(press(&mut app, &ctx, Key::Num1, Modifiers::COMMAND));
+        assert!(app.actions.is_empty());
+    }
+
+    #[test]
+    fn ctrl_e_archives_and_unarchives_the_open_chat() {
+        let (_root, mut app, ids) = app_with_chats(2);
+        app.open_chat = Some(ids[1].clone());
+        let ctx = egui::Context::default();
+        for modifiers in ctrl_shift().map(|modifiers| Modifiers {
+            shift: false,
+            ..modifiers
+        }) {
+            app.chats[1].archived = false;
+            app.actions.clear();
+            assert!(!press(&mut app, &ctx, Key::E, modifiers));
+            assert_eq!(app.actions, [Action::SetArchived(ids[1].clone(), true)]);
+            app.chats[1].archived = true;
+            app.actions.clear();
+            assert!(!press(&mut app, &ctx, Key::E, modifiers));
+            assert_eq!(app.actions, [Action::SetArchived(ids[1].clone(), false)]);
+        }
+    }
+
+    #[test]
+    fn ctrl_e_needs_an_open_chat_and_no_overlay() {
+        let (_root, mut app, ids) = app_with_chats(1);
+        let ctx = egui::Context::default();
+        assert!(press(&mut app, &ctx, Key::E, Modifiers::COMMAND));
+        assert!(app.actions.is_empty(), "no chat is open");
+        app.open_chat = Some(ids[0].clone());
+        app.dialog = Some(Dialog::Shortcuts);
+        assert!(press(&mut app, &ctx, Key::E, Modifiers::COMMAND));
+        app.dialog = None;
+        app.page = Page::Settings;
+        assert!(press(&mut app, &ctx, Key::E, Modifiers::COMMAND));
+        app.page = Page::Chats;
+        assert!(press(&mut app, &ctx, Key::E, Modifiers::NONE));
         assert!(app.actions.is_empty());
     }
 
