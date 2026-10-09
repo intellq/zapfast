@@ -568,6 +568,8 @@ pub struct Settings {
     /// The last choice of the new-contact dialog's "Save to phone" box, which
     /// starts the next one and applies when a contact is renamed.
     pub save_contacts_to_phone: bool,
+    /// Videos' sound level, 0 to 1, from the slider over the sound button.
+    pub video_volume: f32,
     /// Legacy plaintext code, accepted once and rewritten as a verifier.
     #[serde(skip_serializing)]
     pub chat_lock_code: Option<String>,
@@ -657,6 +659,7 @@ impl Default for Settings {
             check_for_updates: true,
             download_updates_automatically: true,
             save_contacts_to_phone: true,
+            video_volume: 1.0,
             voice_speed: 1.0,
             extended_voice_speeds: false,
             pause_other_media: true,

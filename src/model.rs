@@ -1654,6 +1654,8 @@ pub enum Action {
     },
     /// Mutes or unmutes video playback.
     ToggleVideoSound,
+    /// The video sound slider moved to this level, 0 to 1.
+    SetVideoVolume(f32),
     /// Shows a loaded video over the window, nearly as tall as it.
     ExpandVideo(String),
     /// Returns the expanded video to its message.

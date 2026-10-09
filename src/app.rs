@@ -1443,6 +1443,12 @@ impl App {
             badge: None,
             app_lock,
         };
+        app.video
+            .set_volume(if app.settings.video_volume.is_finite() {
+                app.settings.video_volume
+            } else {
+                1.0
+            });
         // A hand-edited speed snaps to a supported one, so a speed control
         // always shows the speed that plays.
         app.settings.voice_speed = app.player.set_speed(crate::audio::allowed_speed(
@@ -5944,6 +5950,11 @@ impl App {
             }
             Action::SeekVideo { message, fraction } => self.video.seek(&message, fraction),
             Action::ToggleVideoSound => self.video.toggle_mute(),
+            Action::SetVideoVolume(volume) => {
+                self.video.set_volume(volume);
+                self.settings.video_volume = self.video.volume();
+                self.mark_settings_dirty();
+            }
             Action::ExpandVideo(message) => {
                 if self.video.message() == Some(message.as_str()) {
                     self.video.set_detail(true);

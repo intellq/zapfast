@@ -215,7 +215,7 @@ impl Sound {
     fn open(
         path: &Path,
         from: Duration,
-        muted: bool,
+        level: f32,
         mut backend: Option<Backend>,
     ) -> Result<Option<Self>, String> {
         // Sound FFmpeg or Media Foundation cannot read may still be AAC the
@@ -241,7 +241,7 @@ impl Sound {
         };
         let sink = rodio::Player::connect_new(device.mixer());
         sink.pause();
-        sink.set_volume(if muted { 0.0 } else { 1.0 });
+        sink.set_volume(level);
         sink.append(source);
         Ok(Some(Self {
             device,
@@ -253,10 +253,10 @@ impl Sound {
 
     /// Queues the sound again from `from`, paused. A fresh player keeps the
     /// seek off the audio thread, which `Player::try_seek` would wait for.
-    fn restart(&mut self, path: &Path, from: Duration, muted: bool) {
+    fn restart(&mut self, path: &Path, from: Duration, level: f32) {
         let sink = rodio::Player::connect_new(self.device.mixer());
         sink.pause();
-        sink.set_volume(if muted { 0.0 } else { 1.0 });
+        sink.set_volume(level);
         if let Ok(source) = source(path, from, self.backend.as_ref()) {
             sink.append(source);
         }
@@ -375,6 +375,8 @@ pub struct Player {
     waker: Waker,
     session: Option<Session>,
     muted: bool,
+    /// The sound level, 0 to 1, that applies while not muted.
+    volume: f32,
     /// Whether videos open the sound device. Tests and demo screenshots
     /// play silently.
     audible: bool,
@@ -395,6 +397,7 @@ impl Player {
             waker,
             session: None,
             muted: false,
+            volume: 1.0,
             audible: true,
             seen: Cell::new(Instant::now()),
             ffmpeg: false,
@@ -417,6 +420,7 @@ impl Player {
         }
         let max_side = self.max_side();
         let waker = self.waker.clone();
+        let level = self.level();
         let Some(session) = self.session.as_mut() else {
             return;
         };
@@ -434,7 +438,7 @@ impl Player {
         session.decoded = false;
         session.frames = spawn_decoder(&session.path, at, waker, session.backend.clone(), max_side);
         if let Some(sound) = &mut session.sound {
-            sound.restart(&session.path, at, self.muted);
+            sound.restart(&session.path, at, level);
         }
     }
 
@@ -483,7 +487,7 @@ impl Player {
     /// Jumps to a fraction from 0 to 1 of the playing video, keeping it
     /// playing or paused.
     pub fn seek(&mut self, message: &str, fraction: f32) {
-        let muted = self.muted;
+        let level = self.level();
         let max_side = self.max_side();
         let Some(session) = self
             .session
@@ -512,7 +516,7 @@ impl Player {
             max_side,
         );
         if let Some(sound) = &mut session.sound {
-            sound.restart(&session.path, to, muted);
+            sound.restart(&session.path, to, level);
         }
     }
 
@@ -522,12 +526,33 @@ impl Player {
 
     pub fn toggle_mute(&mut self) {
         self.muted = !self.muted;
+        self.apply_level();
+    }
+
+    /// The sound level while not muted, 0 to 1.
+    pub fn volume(&self) -> f32 {
+        self.volume
+    }
+
+    /// Sets the sound level. Moving it unmutes, as on a phone.
+    pub fn set_volume(&mut self, volume: f32) {
+        self.volume = volume.clamp(0.0, 1.0);
+        self.muted = false;
+        self.apply_level();
+    }
+
+    /// What the sound plays at: nothing when muted, the volume otherwise.
+    fn level(&self) -> f32 {
+        if self.muted { 0.0 } else { self.volume }
+    }
+
+    fn apply_level(&self) {
         if let Some(sound) = self
             .session
             .as_ref()
             .and_then(|session| session.sound.as_ref())
         {
-            sound.sink.set_volume(if self.muted { 0.0 } else { 1.0 });
+            sound.sink.set_volume(self.level());
         }
     }
 
@@ -584,7 +609,7 @@ impl Player {
         clock.seek(from, now);
         let backend = self.backend();
         let (sound, unsupported_audio) = if self.audible {
-            match Sound::open(path, from, self.muted, backend.clone()) {
+            match Sound::open(path, from, self.level(), backend.clone()) {
                 Ok(sound) => (sound, false),
                 Err(error) => {
                     log::warn!("video audio could not be decoded: {error}");
@@ -642,7 +667,7 @@ impl Player {
     /// Plays the session's video with the built-in decoders from where it
     /// was, after FFmpeg or Media Foundation failed on it.
     fn fall_back(&mut self) {
-        let (waker, audible, muted) = (self.waker.clone(), self.audible, self.muted);
+        let (waker, audible, level) = (self.waker.clone(), self.audible, self.level());
         let max_side = self.max_side();
         let Some(session) = self.session.as_mut() else {
             return;
@@ -658,7 +683,7 @@ impl Player {
         session.decoded = false;
         session.frames = spawn_decoder(&session.path, from, waker, None, max_side);
         let (sound, unsupported_audio) = if audible {
-            match Sound::open(&session.path, from, muted, None) {
+            match Sound::open(&session.path, from, level, None) {
                 Ok(sound) => (sound, false),
                 Err(error) => {
                     log::warn!("video audio could not be decoded: {error}");
@@ -1245,6 +1270,22 @@ fn rgb(y: i32, u: i32, v: i32) -> egui::Color32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_volume_slider_sets_the_level_and_unmutes() {
+        let mut player = Player::new(Waker::default());
+        assert_eq!(player.level(), 1.0);
+        player.toggle_mute();
+        assert_eq!(player.level(), 0.0);
+        player.set_volume(0.4);
+        assert!(!player.muted());
+        assert_eq!(player.level(), 0.4);
+        player.toggle_mute();
+        assert_eq!(player.level(), 0.0);
+        assert_eq!(player.volume(), 0.4);
+        player.set_volume(3.0);
+        assert_eq!(player.volume(), 1.0);
+    }
 
     const SAMPLE: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),

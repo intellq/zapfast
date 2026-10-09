@@ -7587,6 +7587,84 @@ fn video_clicked(
     }
 }
 
+/// The vertical volume slider that rises from the sound button while the pointer is on the button
+/// or on the slider, or while it is being dragged. Returns whether it is showing.
+#[allow(clippy::too_many_arguments)]
+fn volume_slider(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    id: egui::Id,
+    video: Rect,
+    bar: Rect,
+    sound: Rect,
+    sound_response: &egui::Response,
+    level: f32,
+    actions: &mut Vec<Action>,
+) -> bool {
+    const WIDTH: f32 = 26.0;
+    const HEIGHT: f32 = 96.0;
+    // Clear of the expand button in the top corner.
+    let top = (bar.top() - HEIGHT).max(video.top() + 40.0);
+    let panel = Rect::from_min_max(
+        pos2(sound.center().x - WIDTH / 2.0, top),
+        pos2(sound.center().x + WIDTH / 2.0, bar.top()),
+    );
+    if panel.height() < 40.0 {
+        return false;
+    }
+    let dragging = ui.ctx().is_being_dragged(id);
+    let pointer = ui.ctx().pointer_hover_pos();
+    let over = pointer.is_some_and(|pointer| panel.union(sound).contains(pointer));
+    let was_open = ui
+        .ctx()
+        .data(|data| data.get_temp::<bool>(id).unwrap_or(false));
+    let open = dragging || sound_response.hovered() || (was_open && over);
+    ui.ctx().data_mut(|data| data.insert_temp(id, open));
+    if !open {
+        return false;
+    }
+    ui.painter().rect_filled(
+        panel,
+        CornerRadius {
+            nw: 6,
+            ne: 6,
+            sw: 0,
+            se: 0,
+        },
+        Color32::from_black_alpha(150),
+    );
+    let track = Rect::from_center_size(panel.center(), vec2(3.0, panel.height() - 20.0));
+    let response = ui
+        .interact(panel, id, Sense::click_and_drag())
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    let pointed = response
+        .interact_pointer_pos()
+        .map(|pointer| ((track.bottom() - pointer.y) / track.height()).clamp(0.0, 1.0));
+    let shown = match pointed {
+        Some(fraction) if response.dragged() || response.clicked() => fraction,
+        _ => level,
+    };
+    if let Some(fraction) = pointed
+        && (response.dragged() || response.clicked())
+        && (fraction - level).abs() > f32::EPSILON
+    {
+        actions.push(Action::SetVideoVolume(fraction));
+    }
+    ui.painter()
+        .rect_filled(track, 1.5, Color32::from_white_alpha(90));
+    let knob = pos2(track.center().x, track.bottom() - shown * track.height());
+    ui.painter().rect_filled(
+        Rect::from_min_max(pos2(track.left(), knob.y), track.max),
+        1.5,
+        palette.accent,
+    );
+    ui.painter().circle_filled(knob, 5.0, palette.accent);
+    if response.dragged() {
+        ui.ctx().request_repaint();
+    }
+    true
+}
+
 /// Play/pause, the time, a seek bar, and a sound switch along the bottom of
 /// a playing video.
 /// What the controls of a loaded video act on and look like.
@@ -7663,13 +7741,25 @@ pub(crate) fn video_controls(
     } else {
         crate::i18n::gettext(locale, "Mute")
     };
-    if ui
+    let sound_response = ui
         .interact(sound, id.with("sound"), Sense::click())
-        .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text(tooltip.as_ref())
-        .clicked()
-    {
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    if sound_response.clicked() {
         actions.push(Action::ToggleVideoSound);
+    }
+    let slider_open = volume_slider(
+        ui,
+        palette,
+        id.with("volume"),
+        rect,
+        bar,
+        sound,
+        &sound_response,
+        if muted { 0.0 } else { video.volume() },
+        actions,
+    );
+    if !slider_open {
+        sound_response.on_hover_text(tooltip.as_ref());
     }
     let time = format!(
         "{} / {}",
