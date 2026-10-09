@@ -5051,3 +5051,9 @@ msgstr ""
 
 msgid "Voice call declined on another device"
 msgstr ""
+
+msgid "Play motion photo"
+msgstr ""
+
+msgid "The clip has not arrived"
+msgstr ""

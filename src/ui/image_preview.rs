@@ -9,7 +9,7 @@ use crate::i18n::tr;
 use egui::{Color32, Layout, Rect, Sense, Vec2, pos2, vec2};
 
 use crate::app::App;
-use crate::model::Action;
+use crate::model::{Action, Content, MediaState};
 use crate::theme::{self, Icon};
 
 /// Space kept free around the image, as around an expanded video.
@@ -36,6 +36,20 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     };
     let palette = app.palette;
     let screen = ctx.content_rect().shrink(MARGIN);
+    // The motion photo this picture belongs to, when it is one.
+    let motion = app.open_chat.as_ref().and_then(|chat| {
+        let messages = &app.conversations.get(chat)?.messages;
+        messages.iter().find_map(|message| match &message.content {
+            Content::Image {
+                media,
+                motion: Some(motion),
+                ..
+            } if media.path.as_deref() == Some(preview.path()) => {
+                Some((chat.clone(), message.id.clone(), motion.clone()))
+            }
+            _ => None,
+        })
+    });
     let response = egui::Modal::new(egui::Id::new("image-preview"))
         .frame(egui::Frame::NONE)
         .backdrop_color(Color32::from_black_alpha(200))
@@ -130,6 +144,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                             fit: preview.is_fit(),
                             path: preview.path(),
                             locale: app.locale,
+                            motion: motion.as_ref(),
                         };
                         match buttons.show(ui, visible, ui.rect_contains_pointer(visible)) {
                             Some(Action::ImageActualSize) => {
@@ -250,6 +265,8 @@ struct Buttons<'a> {
     fit: bool,
     path: &'a std::path::Path,
     locale: crate::i18n::Locale,
+    /// The motion photo this picture belongs to: chat, message and clip.
+    motion: Option<&'a (crate::model::ChatId, String, crate::model::Motion)>,
 }
 
 impl Buttons<'_> {
@@ -273,31 +290,55 @@ impl Buttons<'_> {
             .and_then(|name| name.to_str())
             .unwrap_or("image.png")
             .to_owned();
-        // Left to right: zoom, copy, save, open.
-        let buttons = [
-            ("image-zoom", zoom_icon, zoom_hint.to_owned(), zoom_action),
+        // Left to right: the motion clip, zoom, copy, save, open.
+        let mut buttons = Vec::with_capacity(5);
+        if let Some((chat, message, motion)) = self.motion {
+            // A failed download says why, and a click tries again. While it
+            // downloads, the button shows a spinner and does nothing.
+            let (icon, hint) = match &motion.state {
+                MediaState::Failed(error) => (Icon::CircleAlert, error.clone()),
+                _ => (
+                    Icon::Play,
+                    crate::i18n::gettext(self.locale, "Play motion photo").into_owned(),
+                ),
+            };
+            let action = match (&motion.state, &motion.path) {
+                (MediaState::Downloading, _) => None,
+                (_, Some(path)) => Some(Action::ExpandMotion {
+                    message: message.clone(),
+                    path: path.clone(),
+                }),
+                (_, None) => Some(Action::DownloadMotion {
+                    chat: chat.clone(),
+                    message: message.clone(),
+                }),
+            };
+            buttons.push(("image-motion", icon, hint, action));
+        }
+        buttons.extend([
+            ("image-zoom", zoom_icon, zoom_hint.to_owned(), Some(zoom_action)),
             (
                 "image-copy",
                 Icon::Copy,
                 copy_hint,
-                Action::CopyImage(self.path.to_owned()),
+                Some(Action::CopyImage(self.path.to_owned())),
             ),
             (
                 "image-save",
                 Icon::Download,
                 crate::i18n::gettext(self.locale, "Save as…").into_owned(),
-                Action::SaveAttachmentAs {
+                Some(Action::SaveAttachmentAs {
                     path: self.path.to_owned(),
                     name,
-                },
+                }),
             ),
             (
                 "image-open",
                 Icon::ExternalLink,
                 crate::i18n::gettext(self.locale, "Open in another app").into_owned(),
-                Action::OpenFile(self.path.to_owned()),
+                Some(Action::OpenFile(self.path.to_owned())),
             ),
-        ];
+        ]);
         let count = buttons.len() as f32;
         let placed: Vec<_> = buttons
             .into_iter()
@@ -335,9 +376,13 @@ impl Buttons<'_> {
                     egui::Stroke::new(1.5, Color32::WHITE),
                 );
             }
-            theme::paint_icon(ui, icon, response.rect, 15.0, Color32::WHITE);
-            if response.on_hover_text(hint).clicked() {
-                clicked = Some(action);
+            if action.is_none() {
+                theme::paint_spinner(ui, response.rect, 15.0, Color32::WHITE);
+            } else {
+                theme::paint_icon(ui, icon, response.rect, 15.0, Color32::WHITE);
+            }
+            if response.on_hover_text(hint).clicked() && action.is_some() {
+                clicked = action;
             }
         }
         clicked

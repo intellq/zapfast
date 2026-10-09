@@ -87,6 +87,12 @@ upload it again. A live-location share shows the position this linked device rec
 WhatsApp sends later positions only to the phone. ZapFast marks when newer
 positions are available there, but cannot follow the moving location here.
 
+A motion photo has a play button in its corner. Click it to download the short
+clip to the local cache and play it over the photo, muted and in a loop; click
+again to return to the photo. In the photo's preview, the play button among
+the buttons at the top plays the clip over the whole window with sound. The
+clip follows the same download limit.
+
 ## Interactive messages
 
 Business templates and button messages show their image above the formatted

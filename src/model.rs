@@ -472,6 +472,9 @@ pub enum Content {
     Image {
         caption: Option<String>,
         media: Media,
+        /// The short clip of a motion photo.
+        #[serde(default)]
+        motion: Option<Motion>,
     },
     Video {
         caption: Option<String>,
@@ -812,9 +815,10 @@ impl Content {
     /// new caption.
     pub fn edited(&self, text: String) -> Self {
         match self {
-            Self::Image { media, .. } => Self::Image {
+            Self::Image { media, motion, .. } => Self::Image {
                 caption: Some(text),
                 media: media.clone(),
+                motion: motion.clone(),
             },
             Self::Video {
                 media,
@@ -1022,6 +1026,15 @@ impl Content {
             new.path = old.path.clone();
         }
         if let (
+            Self::Image { motion: new, .. },
+            Self::Image {
+                motion: Some(old), ..
+            },
+        ) = (&mut *self, old)
+        {
+            *new = Some(old.clone());
+        }
+        if let (
             Self::Interactive {
                 card: Some(new), ..
             },
@@ -1120,6 +1133,17 @@ impl Media {
     pub fn is_within_download_limit(&self, limit: u64) -> bool {
         self.size <= limit.min(ATTACHMENT_DOWNLOAD_LIMIT)
     }
+}
+
+/// A motion photo's clip. Its download keys stay in the archive.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Motion {
+    /// Decrypted downloaded file.
+    #[serde(default)]
+    pub path: Option<PathBuf>,
+    /// Non-persisted download state.
+    #[serde(skip)]
+    pub state: MediaState,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -1614,6 +1638,17 @@ pub enum Action {
         chat: ChatId,
         message: String,
     },
+    /// Downloads a motion photo's clip.
+    DownloadMotion {
+        chat: ChatId,
+        message: String,
+    },
+    /// Plays a motion photo's clip over its photo, downloading it first, or
+    /// goes back to the photo.
+    ToggleMotion {
+        chat: ChatId,
+        message: String,
+    },
     /// Plays or pauses a downloaded voice or audio message.
     PlayVoice {
         message: String,
@@ -1664,6 +1699,12 @@ pub enum Action {
     SetVideoVolume(f32),
     /// Shows a loaded video over the window, nearly as tall as it.
     ExpandVideo(String),
+    /// Closes the image preview and plays a motion photo's downloaded clip
+    /// over the whole window, with sound.
+    ExpandMotion {
+        message: String,
+        path: PathBuf,
+    },
     /// Returns the expanded video to its message.
     CollapseVideo,
     /// Closes the expanded video and stops it, leaving its message as it
@@ -2125,6 +2166,7 @@ mod tests {
         );
         // A caption is searched too, and previewed the same way.
         let photo = super::Content::Image {
+            motion: None,
             caption: Some("a photo of a Zebra".into()),
             media: media(),
         };
@@ -2395,6 +2437,7 @@ mod tests {
         assert_eq!(Content::text("hi\nthere").summary(), "hi");
         assert_eq!(
             Content::Image {
+                motion: None,
                 caption: Some("look".into()),
                 media: media()
             }
@@ -2403,6 +2446,7 @@ mod tests {
         );
         assert_eq!(
             Content::Image {
+                motion: None,
                 caption: None,
                 media: media()
             }
@@ -2426,6 +2470,7 @@ mod tests {
         assert_eq!(Content::text("hi\nthere").full_summary(), "hi\nthere");
         assert_eq!(
             Content::Image {
+                motion: None,
                 caption: Some("look\nat this".into()),
                 media: media()
             }

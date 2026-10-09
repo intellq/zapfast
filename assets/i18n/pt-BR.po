@@ -5220,3 +5220,9 @@ msgstr "Chamada de voz atendida em outro aparelho"
 
 msgid "Voice call declined on another device"
 msgstr "Chamada de voz recusada em outro aparelho"
+
+msgid "Play motion photo"
+msgstr "Reproduzir foto em movimento"
+
+msgid "The clip has not arrived"
+msgstr "O vídeo da foto ainda não chegou"

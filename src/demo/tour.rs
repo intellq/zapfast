@@ -167,6 +167,7 @@ fn show_photos(app: &mut App, caption: &str) {
             && let Content::Image {
                 media,
                 caption: text,
+                ..
             } = &mut row.content
         {
             media.path = Some(photo.clone());
