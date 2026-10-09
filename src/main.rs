@@ -86,7 +86,7 @@ struct Cli {
     #[arg(long, requires = "demo")]
     demo_macos: bool,
 
-    /// Demo view: `chat`, `empty`, `settings`, `login`,
+    /// Demo view: `chat`, `phone-menu`, `empty`, `settings`, `login`,
     /// `pair`, `shortcuts`, `about`, `info`, `mention`, `light`, `whatsapp-dark`,
     /// `side-bar`, or a comma-separated
     /// mix such as `chat,light`.
@@ -331,6 +331,11 @@ fn run() -> eframe::Result<()> {
         let (x, y) = value.split_once(',')?;
         Some(egui::pos2(x.trim().parse().ok()?, y.trim().parse().ok()?))
     });
+    #[cfg(feature = "demo")]
+    let demo_phone_menu = cli
+        .demo_page
+        .as_deref()
+        .is_some_and(|page| page.split(',').any(|part| part.trim() == "phone-menu"));
     let mut update_receipt = launch.receipt;
     // The link, archive, and tray outlive windows. The shell recreates a
     // window when the tray, a notification, or another launch requests one;
@@ -410,6 +415,8 @@ fn run() -> eframe::Result<()> {
                         shot,
                         #[cfg(feature = "demo")]
                         hover: demo_hover,
+                        #[cfg(feature = "demo")]
+                        open_phone_menu: demo_phone_menu,
                         #[cfg(feature = "demo")]
                         tour,
                     }))
@@ -628,6 +635,8 @@ struct Shell {
     tour: Option<zapfast::demo::tour::Tour>,
     #[cfg(feature = "demo")]
     hover: Option<egui::Pos2>,
+    #[cfg(feature = "demo")]
+    open_phone_menu: bool,
 }
 
 /// Pending screenshot request.
@@ -755,6 +764,10 @@ impl eframe::App for Shell {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let app = &mut *self.app;
+        #[cfg(feature = "demo")]
+        if std::mem::take(&mut self.open_phone_menu) {
+            egui::Popup::open_id(ui.ctx(), zapfast::demo::phone_menu_popup_id());
+        }
         app.frame_ui(ui);
         let startups: Vec<_> = app
             .accounts
