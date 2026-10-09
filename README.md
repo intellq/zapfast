@@ -557,6 +557,23 @@ Depois da 0.19.4 (ainda sem release):
   som, sobe uma barra vertical que se arrasta ou clica para mudar o volume
   (mexer nela tira o mudo). O volume escolhido fica salvo para os próximos
   vídeos e para a próxima vez que o ZapFast abrir.
+- **Ligações do celular nas conversas:** as ligações do registro do celular
+  entram nas conversas, inclusive as feitas ou recebidas com o ZapFast
+  fechado: de voz ou vídeo, em grupo (com o número de participantes) e as
+  silenciadas (não perturbe ou número desconhecido). A mesma ligação vista
+  aqui e no celular não se repete, e as antigas entram sem notificar.
+- **Menu das ligações:** o clique direito numa ligação oferece **Ligar de
+  volta** (ligação de voz entre duas pessoas) e **Apagar do registro** (só
+  aqui; a linha não volta).
+- **Tela Ligações:** o botão de telefone ao lado de **Arquivadas** (aparece
+  depois da primeira ligação) abre todas as ligações, com **Todas** e
+  **Perdidas**, quem, sentido, tipo, resultado, duração e hora; o botão
+  verde liga de volta e o clique leva até a ligação na conversa. O botão
+  mostra as perdidas ainda não vistas. Conversas trancadas ficam de fora.
+- **Clique direito na sua foto** (canto superior esquerdo) liga e desliga a
+  **Barra lateral**, como a opção das configurações.
+- **Correção:** numa conversa curta, o aviso de visualização única esticava
+  o balão até a caixa de mensagem.
 
 Da sincronização com o upstream (09/10/2026; só o `6e6030e` ficou de fora):
 
