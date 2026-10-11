@@ -551,7 +551,7 @@ Da sincronização com o upstream 0.18.2:
   fim ao enviar, para mostrá-la. `Shift+Insert` cola, como `Ctrl+V`, no
   compositor.
 
-Depois da 0.19.4 (ainda sem release):
+Na 0.19.5:
 
 - **Barra de volume no player de vídeo:** ao passar o mouse sobre o botão de
   som, sobe uma barra vertical que se arrasta ou clica para mudar o volume
@@ -575,7 +575,9 @@ Depois da 0.19.4 (ainda sem release):
 - **Correção:** numa conversa curta, o aviso de visualização única esticava
   o balão até a caixa de mensagem.
 
-Da sincronização com o upstream (09/10/2026; só o `6e6030e` ficou de fora):
+Da sincronização com o upstream (09 e 10/10/2026; ficaram de fora o `6e6030e`
+e o `3178608`, que corrige um nome de arquivo que o preview deste fork não
+mostra):
 
 - **Números de telefone viram links** no texto das mensagens: o clique (ou
   Enter com o foco no link) abre **Mensagem** e **Copiar número**. Datas entre
@@ -593,6 +595,12 @@ Da sincronização com o upstream (09/10/2026; só o `6e6030e` ficou de fora):
 - **`Ctrl+E`** arquiva a conversa aberta, ou a desarquiva em **Arquivadas**.
 - **Nome do computador no aparelho:** novas conexões aparecem como
   "ZapFast (nome-da-máquina)" em **Aparelhos conectados** no celular.
+- **Botões laterais do mouse** voltam e avançam entre as conversas e páginas
+  abertas, como num navegador. Diálogos, menus, o preview, o vídeo expandido e
+  a pasta trancada não entram no histórico, e com um deles aberto os botões
+  não fazem nada; uma conversa apagada é pulada.
+- **`Ctrl+Shift+A`** passa para o próximo número vinculado, na ordem do
+  seletor de contas (com um número só, não faz nada).
 
 Na 0.19.4:
 
