@@ -5207,6 +5207,9 @@ msgstr "O vídeo da foto ainda não chegou"
 msgid "Archive or unarchive the open chat"
 msgstr "Arquivar ou desarquivar a conversa aberta"
 
+msgid "Switch to the next linked number"
+msgstr "Alternar para o próximo número vinculado"
+
 msgid "voice call"
 msgstr "chamada de voz"
 

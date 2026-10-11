@@ -5038,6 +5038,9 @@ msgstr ""
 msgid "Archive or unarchive the open chat"
 msgstr ""
 
+msgid "Switch to the next linked number"
+msgstr ""
+
 msgid "voice call"
 msgstr ""
 
