@@ -30,6 +30,7 @@ pub mod markup;
 pub mod media_foundation;
 pub mod media_pause;
 pub mod model;
+pub mod nav;
 pub mod notify;
 pub mod opener;
 pub mod paths;

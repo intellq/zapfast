@@ -1644,6 +1644,11 @@ pub enum Action {
     Open(Page),
     /// Opens settings, or closes them when they are already showing.
     ToggleSettings,
+    /// Steps back to the previously visited page, chat, or dialog, as a
+    /// browser's back button does.
+    NavigateBack,
+    /// Steps forward again after a back step.
+    NavigateForward,
     OpenChat(ChatId),
     /// Starts a 1:1 voice call with the chat.
     StartCall(ChatId),

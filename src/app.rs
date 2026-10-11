@@ -18,6 +18,7 @@ use crate::model::{
     Dialog, Gif, GifError, Label, Media, MediaState, Message, Page, PickerTab, Scroll,
     SidebarDisplayMode, StickerPack, StickerShelf, Toast, ToastKind,
 };
+use crate::nav::{History, Location};
 use crate::paths::AppDirs;
 use crate::settings::{AccountRoster, NotificationSound, Settings, ThemeChoice};
 use crate::single_instance::{ControlCommand, Guard};
@@ -599,6 +600,9 @@ pub struct App {
 
     pub page: Page,
     pub dialog: Option<Dialog>,
+    /// Places visited in this window, for the mouse's back and forward
+    /// buttons. Cleared when the account on screen changes.
+    nav_history: History,
     /// Chat filter in the forwarding destination dialog.
     pub forward_search: String,
     pub forward_targets: Vec<ChatId>,
@@ -1370,6 +1374,7 @@ impl App {
             scroll_route: ScrollRoute::default(),
             page: Page::Chats,
             dialog: None,
+            nav_history: History::default(),
             forward_search: String::new(),
             forward_targets: Vec::new(),
             forward_without_captions: false,
@@ -1572,6 +1577,9 @@ impl App {
         self.save_roster();
         self.wallpaper_image.reload();
         self.report_presence();
+        // Chats belong to the account that owns them; another account's chat
+        // cannot be restored into this one.
+        self.nav_history.clear();
     }
 
     /// Drops App-owned pointers into the previous account's chats and media.
@@ -1671,6 +1679,7 @@ impl App {
         self.restore_composer();
         self.save_roster();
         self.report_presence();
+        self.nav_history.clear();
     }
 
     /// Unlinks an account and, once its backend has stopped, deletes its
@@ -1726,6 +1735,7 @@ impl App {
             self.restore_composer();
             self.page = Page::Chats;
             self.wallpaper_image.reload();
+            self.nav_history.clear();
         }
         self.save_roster();
         self.report_presence();
@@ -2161,6 +2171,11 @@ impl App {
         self.leave_chat(id);
         self.chats.retain(|chat| chat.id != id);
         self.conversations.remove(id);
+        // The recorded places belong to the account on screen, and chat ids
+        // repeat across accounts.
+        if !self.events_hidden {
+            self.nav_history.forget(id);
+        }
         self.drafts.remove(id);
         self.draft_mentions.remove(id);
         self.typing.remove(id);
@@ -3908,6 +3923,11 @@ impl App {
                 self.blocklist = None;
                 self.blocking.clear();
                 self.open_chat = None;
+                // Every recorded place named a chat of the account that just
+                // went away, but only when that account is the one on screen.
+                if !self.events_hidden {
+                    self.nav_history.clear();
+                }
                 // Unsent text belongs to the account that was unlinked.
                 self.drafts.clear();
                 self.draft_mentions.clear();
@@ -4633,6 +4653,75 @@ impl App {
         self.backend.send(Command::MarkUnread(chat.to_owned()));
     }
 
+    /// Records where the window now is, for the back and forward buttons. The
+    /// place is built only when it changed, so an idle frame allocates
+    /// nothing.
+    fn record_location(&mut self) {
+        if self
+            .nav_history
+            .is_current(&self.page, self.open_chat.as_deref())
+        {
+            return;
+        }
+        self.nav_history.visit(Location {
+            page: self.page.clone(),
+            chat: self.open_chat.clone(),
+        });
+    }
+
+    /// Steps to the place visited before this one, as the mouse's back button
+    /// does.
+    fn navigate_back(&mut self, ctx: &egui::Context) {
+        // A place the window cannot show is forgotten by `show_location`, and
+        // the step moves on to the one before it, so one press never lands on
+        // a place that shows nothing. Each call takes a place off the stack,
+        // so this ends at the oldest.
+        while let Some(location) = self.nav_history.back() {
+            if self.show_location(location, ctx) {
+                break;
+            }
+        }
+    }
+
+    /// Steps forward again after a back step, as the mouse's forward button
+    /// does.
+    fn navigate_forward(&mut self, ctx: &egui::Context) {
+        while let Some(location) = self.nav_history.forward() {
+            if self.show_location(location, ctx) {
+                break;
+            }
+        }
+    }
+
+    /// Restores a place through the same actions the interface uses, so a
+    /// draft is saved and a locked chat stays shut. Reports whether the window
+    /// could show it; a place naming a chat it cannot open is forgotten.
+    fn show_location(&mut self, location: Location, ctx: &egui::Context) -> bool {
+        let wanted = location.chat.clone();
+        // The chat first: opening one lands on the chat list, and the page
+        // below puts the reader back on the page the place recorded.
+        if self.open_chat != location.chat {
+            // A place whose chat is gone closes the current chat instead.
+            match location.chat {
+                Some(chat) if self.chat(&chat).is_some() => self.apply(Action::OpenChat(chat), ctx),
+                _ => self.apply(Action::CloseChat, ctx),
+            }
+        }
+        if self.page != location.page {
+            self.apply(Action::Open(location.page), ctx);
+        }
+        // A chat that is gone, or locked outside its folder, cannot be opened.
+        // Keeping its place would make every back step land on it again and
+        // replace the forward history.
+        if let Some(chat) = wanted
+            && self.open_chat.as_deref() != Some(chat.as_str())
+        {
+            self.nav_history.forget(&chat);
+            return false;
+        }
+        true
+    }
+
     fn open_chat(&mut self, id: ChatId) {
         // Notifications and stale actions must not open a locked chat from
         // outside the authenticated folder.
@@ -5342,9 +5431,13 @@ impl App {
         while !actions.is_empty() {
             for action in actions.drain(..) {
                 self.apply(action, ctx);
+                self.record_location();
             }
             actions = std::mem::take(&mut self.actions);
         }
+        // A frame with no queued action still fixes the opening place, so the
+        // first navigation has somewhere to return to.
+        self.record_location();
     }
 
     fn apply(&mut self, action: Action, ctx: &egui::Context) {
@@ -5408,6 +5501,8 @@ impl App {
             }
             Action::OpenChat(id) => self.open_chat(id),
             Action::OpenCallChat(id) => self.open_chat(id),
+            Action::NavigateBack => self.navigate_back(ctx),
+            Action::NavigateForward => self.navigate_forward(ctx),
             Action::StartChat { id, name } => {
                 if self.chat(&id).is_none() {
                     self.chats.push(Chat::new(id.clone(), name.clone()));
@@ -8726,11 +8821,334 @@ fn call_notification_eligible(chat: &Chat, now: i64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{ChatKind, Contact, Content, Media, MediaState, ToastKind};
+    use crate::model::{ChatKind, Contact, Content, Dialog, Media, MediaState, ToastKind};
 
     fn app() -> App {
         let root = std::env::temp_dir().join(format!("zapfast-app-{}", std::process::id()));
         App::headless(AppDirs::under(&root), Settings::default()).0
+    }
+
+    #[test]
+    fn back_and_forward_walk_between_chats_and_settings() {
+        let ctx = egui::Context::default();
+        let mut app = app();
+        let chat = "15550008888@s.whatsapp.net";
+        app.chats.push(Chat::new(chat.into(), "Ada".into()));
+        // The first frame fixes the place the window opened on.
+        app.apply_actions(&ctx);
+
+        let open = |app: &mut App, action: Action| {
+            app.actions.push(action);
+            app.apply_actions(&ctx);
+        };
+        open(&mut app, Action::OpenChat(chat.into()));
+        assert_eq!(app.open_chat.as_deref(), Some(chat));
+        open(&mut app, Action::Open(Page::Settings));
+        assert_eq!(app.page, Page::Settings);
+        assert_eq!(app.open_chat.as_deref(), Some(chat));
+
+        app.apply(Action::NavigateBack, &ctx);
+        assert_eq!(app.page, Page::Chats, "back leaves Settings");
+        assert_eq!(app.open_chat.as_deref(), Some(chat));
+        app.apply(Action::NavigateBack, &ctx);
+        assert_eq!(app.open_chat, None, "back leaves the chat");
+
+        app.apply(Action::NavigateForward, &ctx);
+        assert_eq!(app.open_chat.as_deref(), Some(chat), "forward reopens it");
+        app.apply(Action::NavigateForward, &ctx);
+        assert_eq!(app.page, Page::Settings);
+        assert_eq!(app.open_chat.as_deref(), Some(chat));
+    }
+
+    #[test]
+    fn a_dialog_is_not_a_place_in_the_history() {
+        let ctx = egui::Context::default();
+        let mut app = app();
+        let chat = "15550007777@s.whatsapp.net";
+        app.chats.push(Chat::new(chat.into(), "Ada".into()));
+        app.apply_actions(&ctx);
+
+        app.actions.push(Action::OpenChat(chat.into()));
+        app.apply_actions(&ctx);
+        app.actions.push(Action::ShowDialog(Dialog::NewChat));
+        app.apply_actions(&ctx);
+        app.actions.push(Action::CloseDialog);
+        app.apply_actions(&ctx);
+
+        // The dialog never became a place, so one back step reaches the list.
+        app.apply(Action::NavigateBack, &ctx);
+        assert_eq!(app.open_chat, None);
+        assert_eq!(app.page, Page::Chats);
+        assert_eq!(app.dialog, None, "the dialog is not restored");
+    }
+
+    #[test]
+    fn a_deleted_chat_is_not_reopened_from_the_history() {
+        let ctx = egui::Context::default();
+        let mut app = app();
+        let chat = "15550007777@s.whatsapp.net";
+        app.chats.push(Chat::new(chat.into(), "Ada".into()));
+        app.apply_actions(&ctx);
+
+        app.actions.push(Action::OpenChat(chat.into()));
+        app.apply_actions(&ctx);
+        app.actions.push(Action::Open(Page::Settings));
+        app.apply_actions(&ctx);
+
+        // The phone deletes the chat while the window is elsewhere.
+        app.forget_chat(chat);
+        app.apply_actions(&ctx);
+        assert_eq!(app.open_chat, None);
+
+        // The step skips the removed chat instead of reopening it.
+        app.apply(Action::NavigateBack, &ctx);
+        assert_eq!(app.page, Page::Chats);
+        assert_eq!(app.open_chat, None);
+    }
+
+    #[test]
+    fn a_gone_chat_is_never_reopened_from_a_stale_place() {
+        let ctx = egui::Context::default();
+        let mut app = app();
+        let chat = "15550007777@s.whatsapp.net";
+        app.chats.push(Chat::new(chat.into(), "Ada".into()));
+        app.apply_actions(&ctx);
+        app.actions.push(Action::OpenChat(chat.into()));
+        app.apply_actions(&ctx);
+        app.actions.push(Action::Open(Page::Settings));
+        app.apply_actions(&ctx);
+
+        // Defence in depth: even when a path clears chats without pruning the
+        // history, a place naming a gone chat is not opened.
+        app.chats.clear();
+        app.open_chat = None;
+        app.apply(Action::NavigateBack, &ctx);
+        app.apply(Action::NavigateBack, &ctx);
+        assert_eq!(app.open_chat, None);
+        assert_eq!(app.page, Page::Chats);
+    }
+
+    /// Two accounts sharing `chat`: the first on screen, with `chat` opened
+    /// and Settings over it, and the second's event channel.
+    fn two_accounts_on_settings(
+        directory: &std::path::Path,
+        chat: &str,
+    ) -> (App, std::sync::mpsc::Sender<crate::backend::Event>) {
+        let ctx = egui::Context::default();
+        let dirs = AppDirs::under(directory);
+        let mut app = App::headless(dirs.clone(), Settings::default()).0;
+        let (second, events) = Account::detached(
+            &dirs,
+            AccountId::parse("2").unwrap(),
+            crate::settings::AccountSettings::default(),
+        )
+        .unwrap();
+        app.accounts.push(second);
+        app.active = 0;
+        app.chats.push(Chat::new(chat.into(), "Ada".into()));
+        app.accounts[1]
+            .chats
+            .push(Chat::new(chat.into(), "Ada".into()));
+        app.apply_actions(&ctx);
+        app.actions.push(Action::OpenChat(chat.into()));
+        app.apply_actions(&ctx);
+        app.actions.push(Action::Open(Page::Settings));
+        app.apply_actions(&ctx);
+        (app, events)
+    }
+
+    #[test]
+    fn a_hidden_accounts_chat_removal_leaves_the_history_alone() {
+        let directory = tempfile::tempdir().unwrap();
+        let chat = "15550007777@s.whatsapp.net";
+        let (mut app, events) = two_accounts_on_settings(directory.path(), chat);
+        let ctx = egui::Context::default();
+
+        events
+            .send(crate::backend::Event::ChatRemoved { chat: chat.into() })
+            .unwrap();
+        app.handle_events();
+
+        // The chat is gone from the hidden account only, and chat ids repeat
+        // across accounts, so the window's own place still names it.
+        app.apply(Action::NavigateBack, &ctx);
+        assert_eq!(app.page, Page::Chats);
+        assert_eq!(app.open_chat.as_deref(), Some(chat));
+    }
+
+    #[test]
+    fn a_hidden_accounts_logout_leaves_the_history_alone() {
+        let directory = tempfile::tempdir().unwrap();
+        let chat = "15550007777@s.whatsapp.net";
+        let (mut app, events) = two_accounts_on_settings(directory.path(), chat);
+        let ctx = egui::Context::default();
+
+        events
+            .send(crate::backend::Event::Link(LinkStatus::LoggedOut))
+            .unwrap();
+        app.handle_events();
+
+        app.apply(Action::NavigateBack, &ctx);
+        assert_eq!(
+            app.page,
+            Page::Chats,
+            "back still leaves the window's own Settings"
+        );
+        assert_eq!(app.open_chat.as_deref(), Some(chat));
+    }
+
+    #[test]
+    fn a_gone_chat_keeps_the_forward_history() {
+        let ctx = egui::Context::default();
+        let mut app = app();
+        let gone = "15550007771@s.whatsapp.net";
+        let kept = "15550007772@s.whatsapp.net";
+        app.chats.push(Chat::new(gone.into(), "Ada".into()));
+        app.chats.push(Chat::new(kept.into(), "Grace".into()));
+        app.apply_actions(&ctx);
+        app.actions.push(Action::OpenChat(gone.into()));
+        app.apply_actions(&ctx);
+        app.actions.push(Action::OpenChat(kept.into()));
+        app.apply_actions(&ctx);
+        app.actions.push(Action::Open(Page::Settings));
+        app.apply_actions(&ctx);
+
+        // A path that drops a chat without pruning the history, which the
+        // guard in `show_location` exists for.
+        app.chats.retain(|chat| chat.id != gone);
+
+        app.actions.push(Action::NavigateBack);
+        app.apply_actions(&ctx);
+        assert_eq!(app.open_chat.as_deref(), Some(kept));
+        app.actions.push(Action::NavigateBack);
+        app.apply_actions(&ctx);
+        assert_eq!(app.open_chat, None, "the gone chat is not reopened");
+
+        // The step that skipped the gone chat must not drop where a forward
+        // step would go.
+        app.actions.push(Action::NavigateForward);
+        app.apply_actions(&ctx);
+        assert_eq!(app.open_chat.as_deref(), Some(kept));
+    }
+
+    #[test]
+    fn a_locked_chat_outside_its_folder_does_not_strand_the_history() {
+        let ctx = egui::Context::default();
+        let mut app = app();
+        app.settings.set_chat_lock_code(Some("123456"));
+        let locked = "15550007774@s.whatsapp.net";
+        let mut chat = Chat::new(locked.into(), "Ada".into());
+        chat.locked = true;
+        app.chats.push(chat);
+        app.apply_actions(&ctx);
+
+        // The reader opens the locked chat from the locked folder, then opens
+        // Settings over it.
+        app.apply(Action::UnlockLockedFolder("123456".into()), &ctx);
+        assert!(app.locked_folder_open());
+        app.actions.push(Action::OpenChat(locked.into()));
+        app.apply_actions(&ctx);
+        app.actions.push(Action::Open(Page::Settings));
+        app.apply_actions(&ctx);
+        assert_eq!(app.open_chat.as_deref(), Some(locked));
+
+        // Hiding the window closes the folder and drops the code, so the chat
+        // can no longer be opened from the history.
+        app.window_gone();
+        app.apply_actions(&ctx);
+        assert_eq!(app.open_chat, None, "the locked chat is hidden again");
+
+        // Back must step past the place it cannot show in one press, and the
+        // way forward must survive the step.
+        app.actions.push(Action::NavigateBack);
+        app.apply_actions(&ctx);
+        assert_eq!(app.page, Page::Chats, "one press past the locked place");
+        assert_eq!(app.open_chat, None);
+
+        app.actions.push(Action::NavigateForward);
+        app.apply_actions(&ctx);
+        assert_eq!(app.page, Page::Settings, "forward still reaches Settings");
+    }
+
+    #[test]
+    fn a_new_place_drops_the_forward_history() {
+        let ctx = egui::Context::default();
+        let mut app = app();
+        let first = "15550009991@s.whatsapp.net";
+        let second = "15550009992@s.whatsapp.net";
+        app.chats.push(Chat::new(first.into(), "Ada".into()));
+        app.chats.push(Chat::new(second.into(), "Grace".into()));
+        app.apply_actions(&ctx);
+
+        app.actions.push(Action::OpenChat(first.into()));
+        app.apply_actions(&ctx);
+        app.apply(Action::NavigateBack, &ctx);
+        assert_eq!(app.open_chat, None);
+
+        app.actions.push(Action::OpenChat(second.into()));
+        app.apply_actions(&ctx);
+        app.apply(Action::NavigateForward, &ctx);
+        assert_eq!(
+            app.open_chat.as_deref(),
+            Some(second),
+            "forward no longer reaches the chat the back step left"
+        );
+    }
+
+    #[test]
+    fn switching_accounts_forgets_the_history() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _commands) = two_accounts(directory.path());
+        let ctx = egui::Context::default();
+        let chat = "15550003333@s.whatsapp.net";
+        app.chats.push(Chat::new(chat.into(), "Ada".into()));
+        app.apply_actions(&ctx);
+        app.actions.push(Action::OpenChat(chat.into()));
+        app.apply_actions(&ctx);
+        app.apply(Action::SwitchAccount(AccountId::parse("2").unwrap()), &ctx);
+        assert_eq!(app.open_chat, None, "the other account has no chat open");
+        app.apply(Action::NavigateBack, &ctx);
+        assert_eq!(
+            app.open_chat, None,
+            "the first account's chat is not restored"
+        );
+    }
+
+    #[test]
+    fn a_back_side_button_press_steps_back_through_a_frame() {
+        let ctx = egui::Context::default();
+        let mut app = app();
+        app.attach(&ctx);
+        let chat = "15550007777@s.whatsapp.net";
+        app.chats.push(Chat::new(chat.into(), "Ada".into()));
+        app.apply_actions(&ctx);
+        app.actions.push(Action::OpenChat(chat.into()));
+        app.apply_actions(&ctx);
+        assert_eq!(app.open_chat.as_deref(), Some(chat));
+
+        let press = |app: &mut App, button: egui::PointerButton| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    events: vec![egui::Event::PointerButton {
+                        pos: egui::pos2(20.0, 20.0),
+                        button,
+                        pressed: true,
+                        modifiers: egui::Modifiers::NONE,
+                    }],
+                    ..Default::default()
+                },
+                |ui| app.frame_ui(ui),
+            );
+            output.textures_delta.clear();
+        };
+        press(&mut app, egui::PointerButton::Extra1);
+        assert_eq!(app.open_chat, None, "the back button closed the chat");
+        press(&mut app, egui::PointerButton::Extra2);
+        assert_eq!(
+            app.open_chat.as_deref(),
+            Some(chat),
+            "the forward button reopened it"
+        );
     }
 
     #[test]
