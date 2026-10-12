@@ -8356,6 +8356,7 @@ dependencies = [
  "sha2",
  "skrifa",
  "spellbook",
+ "symphonia",
  "tauri-winrt-notification",
  "tempfile",
  "tokio",
