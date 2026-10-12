@@ -5348,11 +5348,21 @@ impl App {
     }
 
     /// Remembers the window's size, position and maximized state in the
-    /// settings; see [`crate::window::Snapshot`].
+    /// settings, in logical pixels, so a window saved while zoomed opens at
+    /// the same size; see [`fastframe_shell::window::Geometry`].
     fn sync_window_state(&mut self, ctx: &egui::Context) {
-        if crate::window::Snapshot::read(ctx).remember(&mut self.settings) {
+        let mut geometry = self.settings.window_geometry();
+        if geometry.remember(ctx) {
+            self.settings.set_window_geometry(geometry);
             self.mark_settings_dirty();
         }
+    }
+
+    /// What must happen in every pass of an open window, including the
+    /// passes eframe runs without `ui` for a minimized or covered one. Call it
+    /// from `eframe::App::logic`, after [`Self::background_frame`].
+    pub fn window_logic(&mut self, ctx: &egui::Context) {
+        self.sync_window_state(ctx);
     }
 
     pub fn load_custom_themes(&mut self) {
@@ -8112,7 +8122,6 @@ impl App {
             .lock()
             .unwrap_or_else(|p| p.into_inner()) = None;
         self.apply_theme(ctx);
-        self.sync_window_state(ctx);
         if ctx.input(|input| input.events.iter().any(is_user_input)) {
             self.app_lock.note_input();
         }
@@ -9656,15 +9665,33 @@ mod tests {
         assert!(app.taskbar_badge_count().is_none());
     }
 
-    /// Window geometry syncing lives in `window::tests`: this frame only
-    /// forwards the snapshot and marks the settings dirty.
+    /// The window's geometry is remembered in the logic pass, which eframe
+    /// runs for a minimized window too, and only a change marks the settings
+    /// for saving.
     #[test]
-    fn sync_window_state_marks_the_settings_dirty_on_change() {
+    fn the_logic_pass_remembers_the_window_geometry() {
         let mut app = app();
         let ctx = egui::Context::default();
-        // A headless context carries no viewport, so nothing is remembered.
-        app.sync_window_state(&ctx);
-        assert!(!app.settings_dirty);
+        let run = |app: &mut App, rect: egui::Rect| {
+            let mut input = egui::RawInput::default();
+            let info = input.viewports.entry(egui::ViewportId::ROOT).or_default();
+            info.inner_rect = Some(rect);
+            info.outer_rect = Some(rect.expand(4.0));
+            info.maximized = Some(false);
+            let mut output = ctx.run_ui(input, |ui| app.window_logic(ui.ctx()));
+            output.textures_delta.clear();
+        };
+        let rect = egui::Rect::from_min_size(egui::pos2(100.0, 50.0), egui::vec2(1280.0, 800.0));
+        run(&mut app, rect);
+        assert!(app.settings_dirty);
+        assert_eq!(
+            (app.settings.window_width, app.settings.window_height),
+            (Some(1280.0), Some(800.0))
+        );
+
+        app.settings_dirty = false;
+        run(&mut app, rect);
+        assert!(!app.settings_dirty, "nothing changed, nothing to save");
     }
 
     #[test]
