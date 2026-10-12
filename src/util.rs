@@ -76,23 +76,23 @@ mod clock_preference {
         gnome().unwrap_or_else(locale)
     }
 
-    /// GNOME keeps its own clock format, independent of the locale.
+    /// GNOME keeps its own clock format, independent of the locale. It is
+    /// read through the desktop portal, which works inside a Flatpak too.
     fn gnome() -> Option<bool> {
-        let desktop = std::env::var("XDG_CURRENT_DESKTOP").ok()?;
-        if !desktop
-            .split(':')
-            .any(|name| name.eq_ignore_ascii_case("GNOME"))
-        {
+        if !fastframe_desktop::is_gnome() {
             return None;
         }
-        let output = std::process::Command::new("gsettings")
-            .args(["get", "org.gnome.desktop.interface", "clock-format"])
-            .stderr(std::process::Stdio::null())
-            .output()
-            .ok()?;
-        match String::from_utf8_lossy(&output.stdout).trim() {
-            "'12h'" => Some(true),
-            "'24h'" => Some(false),
+        clock_format(
+            fastframe_desktop::setting("org.gnome.desktop.interface", "clock-format").as_deref(),
+        )
+    }
+
+    /// Whether GNOME's `clock-format` names a 12-hour clock, or `None` for
+    /// anything but its two values.
+    pub(super) fn clock_format(value: Option<&str>) -> Option<bool> {
+        match value? {
+            "12h" => Some(true),
+            "24h" => Some(false),
             _ => None,
         }
     }
@@ -888,6 +888,19 @@ mod tests {
                 second("2018-11-05T02:00:00Z")
             ))
         );
+    }
+
+    /// GNOME's clock format comes from the portal as the bare value, not
+    /// the quoted text `gsettings` printed.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn gnome_clock_formats_are_recognized() {
+        use super::clock_preference::clock_format;
+        assert_eq!(clock_format(Some("12h")), Some(true));
+        assert_eq!(clock_format(Some("24h")), Some(false));
+        assert_eq!(clock_format(Some("'12h'")), None);
+        assert_eq!(clock_format(Some("")), None);
+        assert_eq!(clock_format(None), None);
     }
 
     #[test]

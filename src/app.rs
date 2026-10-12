@@ -7708,7 +7708,7 @@ impl App {
     /// token, and KWin takes it as a request to raise the window, which took
     /// the focus from a game in fullscreen on another monitor at each message.
     fn request_attention(&mut self, ctx: &egui::Context) {
-        self.request_attention_on(ctx, gnome_desktop());
+        self.request_attention_on(ctx, fastframe_desktop::is_gnome());
     }
 
     /// [`Self::request_attention`] on a desktop that is GNOME or not, which
@@ -8822,22 +8822,6 @@ impl Delivery {
     pub fn in_flight(self) -> bool {
         matches!(self, Delivery::Pending)
     }
-}
-
-/// Whether `desktop`, an `XDG_CURRENT_DESKTOP` value, names GNOME. GNOME
-/// turns a window's request for attention into a "“ZapFast” is ready" notice
-/// of its own on every message, on top of the message's notification,
-/// instead of marking the taskbar (#466).
-fn is_gnome(desktop: Option<&str>) -> bool {
-    desktop.is_some_and(|desktop| {
-        desktop
-            .split(':')
-            .any(|name| name.eq_ignore_ascii_case("GNOME"))
-    })
-}
-
-fn gnome_desktop() -> bool {
-    is_gnome(std::env::var("XDG_CURRENT_DESKTOP").ok().as_deref())
 }
 
 /// Whether an incoming message in this chat warrants a desktop notification.
@@ -15860,17 +15844,6 @@ mod app_lock_tests {
         assert_eq!(app.open_chat, None, "not while locked");
         try_password(&mut app, &ctx, PASSWORD);
         assert_eq!(app.open_chat.as_deref(), Some(CHAT), "opened once unlocked");
-    }
-
-    #[test]
-    fn gnome_is_recognised_in_any_entry_of_the_desktop_list() {
-        for desktop in ["GNOME", "zorin:GNOME", "ubuntu:GNOME", "gnome"] {
-            assert!(is_gnome(Some(desktop)), "{desktop}");
-        }
-        for desktop in ["KDE", "XFCE", "Hyprland", "GNOME-Flashback", ""] {
-            assert!(!is_gnome(Some(desktop)), "{desktop}");
-        }
-        assert!(!is_gnome(None));
     }
 
     fn attention_requested(ctx: &egui::Context) -> bool {

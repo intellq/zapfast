@@ -549,7 +549,7 @@ fn native_options(
         .with_app_id(if demo {
             "zapfast-demo".to_owned()
         } else {
-            std::env::var("FLATPAK_ID").unwrap_or_else(|_| "zapfast".to_owned())
+            fastframe_desktop::desktop_entry("zapfast")
         });
     // The remembered size and position, from the settings, over the default
     // size. Demo runs keep their fixed screenshot size.
