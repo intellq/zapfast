@@ -403,6 +403,7 @@ impl Archive {
             }
         }
         favorites::adopt_local_marks(&connection)?;
+        call_log::settle_deleted_calls(&connection)?;
         Self::prune_receipts(&connection)?;
         transcripts::prune(&connection)?;
         Ok(Self { connection })

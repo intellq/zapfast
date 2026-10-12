@@ -580,6 +580,26 @@ mod tests {
     }
 
     #[test]
+    fn deleting_a_call_puts_its_chat_back_where_its_last_message_was() {
+        let (mut worker, _events, _inbox, _wa) = worker();
+        worker.me_pn = Some(ME.into());
+        let before = crate::util::now() - 90 * 86_400;
+        let mut older = super::super::receipt_tests::own_message("older", before);
+        older.chat = PEER.into();
+        worker.archive.ensure_chat(PEER, "Ada").unwrap();
+        worker.archive.insert_message(&older, None).unwrap();
+        let call = record(CallResult::REJECTED, crate::util::now() - 60);
+        worker.call_log_synced(&synced("late", PEER, false, call));
+        let activity = |worker: &Worker| worker.archive.chat(PEER).unwrap().unwrap().last_activity;
+        assert!(
+            activity(&worker) > before + 86_400,
+            "the call moved the chat up"
+        );
+        worker.remove_call(PEER, &format!("{CALL_ROW_PREFIX}late"));
+        assert_eq!(activity(&worker), before, "and deleting it moves it back");
+    }
+
+    #[test]
     fn history_brings_the_phones_call_log_quietly() {
         let (mut worker, events, _inbox, _wa) = worker();
         worker.me_pn = Some(ME.into());

@@ -25,6 +25,19 @@ pub struct LoggedCall {
     pub content: Content,
 }
 
+/// Puts back the activity of chats whose call was deleted before deleting one
+/// did, which left them at the call's hour and place. Only chats with a
+/// deleted call and a message older than their activity are touched.
+pub fn settle_deleted_calls(connection: &rusqlite::Connection) -> Result<()> {
+    connection.execute(
+        "UPDATE chats SET last_activity = (SELECT MAX(timestamp) FROM messages WHERE chat = chats.id)
+         WHERE id IN (SELECT chat FROM removed_calls)
+           AND last_activity > (SELECT MAX(timestamp) FROM messages WHERE chat = chats.id)",
+        [],
+    )?;
+    Ok(())
+}
+
 impl Archive {
     /// The newest `limit` call rows across every chat.
     pub fn call_log(&self, limit: usize) -> Result<Vec<LoggedCall>> {
@@ -83,7 +96,27 @@ impl Archive {
             "INSERT OR IGNORE INTO removed_calls (chat, id) VALUES (?1, ?2)",
             params![chat, id],
         )?;
-        self.delete_message(chat, id)
+        let began: Option<i64> = self
+            .connection
+            .query_row(
+                "SELECT timestamp FROM messages WHERE chat = ?1 AND id = ?2",
+                params![chat, id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let deleted = self.delete_message(chat, id)?;
+        // The chat moved up for the call and only ever moves up, so without
+        // this it would keep the call's hour and place after it is gone. Back
+        // to its last message, or to the bottom when the call was all it had.
+        if let Some(began) = began {
+            self.connection.execute(
+                "UPDATE chats SET last_activity = COALESCE(
+                     (SELECT MAX(timestamp) FROM messages WHERE chat = ?1), 0)
+                 WHERE id = ?1 AND last_activity = ?2",
+                params![chat, began],
+            )?;
+        }
+        Ok(deleted)
     }
 
     /// Whether the call row `id` of `chat` was deleted here.
@@ -93,5 +126,43 @@ impl Archive {
             params![chat, id],
             |row| row.get(0),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::archive::tests::message;
+
+    #[test]
+    fn a_chat_left_at_a_deleted_calls_hour_goes_back_to_its_last_message() {
+        let archive = Archive::in_memory().unwrap();
+        let (old, fresh) = ("1@s.whatsapp.net", "2@s.whatsapp.net");
+        for chat in [old, fresh] {
+            archive.ensure_chat(chat, "A").unwrap();
+            archive
+                .insert_message(&message(chat, "m1", 100, false), None)
+                .unwrap();
+        }
+        // Left at the hour of a call that is gone, as older copies did.
+        archive
+            .connection
+            .execute("UPDATE chats SET last_activity = 900", [])
+            .unwrap();
+        archive
+            .connection
+            .execute(
+                "INSERT INTO removed_calls (chat, id) VALUES (?1, 'call')",
+                [old],
+            )
+            .unwrap();
+        settle_deleted_calls(&archive.connection).unwrap();
+        let activity = |chat: &str| archive.chat(chat).unwrap().unwrap().last_activity;
+        assert_eq!(activity(old), 100);
+        assert_eq!(
+            activity(fresh),
+            900,
+            "a chat with no deleted call is left alone"
+        );
     }
 }
