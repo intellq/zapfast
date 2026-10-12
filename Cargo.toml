@@ -149,7 +149,8 @@ fastframe-theme = { git = "https://github.com/crmne/fastframe", tag = "v0.5.0" }
 fastframe-log = { git = "https://github.com/crmne/fastframe", tag = "v0.5.0" }
 # The tray item: StatusNotifier on Linux, tray-icon on Windows and macOS.
 fastframe-tray = { git = "https://github.com/crmne/fastframe", tag = "v0.5.0" }
-# Keeps ZapFast running without a window and recovers off-screen windows.
+# Keeps ZapFast running without a window, remembers its geometry, recovers it
+# off screen, and brings it forward on niri.
 fastframe-shell = { git = "https://github.com/crmne/fastframe", tag = "v0.5.0" }
 # Centres the macOS traffic lights on ZapFast's own header.
 fastframe-macos = { git = "https://github.com/crmne/fastframe", tag = "v0.5.0" }

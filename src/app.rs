@@ -739,6 +739,10 @@ pub struct App {
     /// spawn.
     #[cfg(test)]
     test_tray_shown: Option<bool>,
+    /// Stands in for the compositor raising the window, so tests never run
+    /// its command line tool.
+    #[cfg(test)]
+    test_raised: bool,
     /// Whether the app is running without a window.
     pub window_hidden: bool,
     /// Whether window close should keep the process running.
@@ -1440,6 +1444,8 @@ impl App {
             tray: None,
             #[cfg(test)]
             test_tray_shown: None,
+            #[cfg(test)]
+            test_raised: false,
             window_hidden: false,
             hide_intent: false,
             wants_show: false,
@@ -1783,6 +1789,15 @@ impl App {
     /// Whether window close keeps the app in the tray.
     pub fn hides_to_tray(&self) -> bool {
         self.tray_shown() && self.settings.keep_running_in_background
+    }
+
+    /// Asks the compositor to bring the existing window forward, which niri
+    /// can do on Wayland; see [`fastframe_shell::window::raise_on_compositor`].
+    fn raise_on_compositor(&self) -> bool {
+        #[cfg(test)]
+        return self.test_raised;
+        #[cfg(not(test))]
+        fastframe_shell::window::raise_on_compositor()
     }
 
     /// Whether a panel shows the tray item now, so a hidden window can be
@@ -7463,6 +7478,9 @@ impl App {
                 if self.window_hidden {
                     // The headless loop in `main` will create the window.
                     self.wants_show = true;
+                } else if self.wayland && self.raise_on_compositor() {
+                    // The compositor (niri) focused the existing window and
+                    // switched to its workspace, so nothing is reopened.
                 } else if self.wayland {
                     // Wayland drops a programmatic focus or unminimize
                     // request, so a minimized or covered window cannot come
@@ -10542,8 +10560,9 @@ mod tests {
 
     /// A Wayland compositor ignores an app's focus and unminimize requests, so
     /// a notification click or a second launch closes the window and asks the
-    /// shell for a fresh one, which the compositor raises. Elsewhere the
-    /// window is only told to restore and focus.
+    /// shell for a fresh one, which the compositor raises, unless the
+    /// compositor (niri) can raise the existing one. Elsewhere the window is
+    /// only told to restore and focus.
     #[test]
     fn a_wayland_show_reopens_the_window_instead_of_focusing_it() {
         use fastframe_shell::{Closed, Resident};
@@ -10554,6 +10573,14 @@ mod tests {
         app.apply(Action::ShowWindow, &ctx);
         assert!(app.reopen, "Wayland closes the window to make a fresh one");
         assert_eq!(app.closed(), Closed::Reopen);
+
+        // niri brings the existing window forward, on its own workspace.
+        let mut app = self::app();
+        app.wayland = true;
+        app.test_raised = true;
+        app.apply(Action::ShowWindow, &ctx);
+        assert!(!app.reopen, "a raised window is not reopened");
+        assert_ne!(app.closed(), Closed::Reopen);
 
         let mut app = self::app();
         app.wayland = false;
