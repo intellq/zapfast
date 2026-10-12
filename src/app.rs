@@ -5363,6 +5363,22 @@ impl App {
     /// from `eframe::App::logic`, after [`Self::background_frame`].
     pub fn window_logic(&mut self, ctx: &egui::Context) {
         self.sync_window_state(ctx);
+        // Close the window and continue headless when background mode is
+        // enabled. Decided here rather than in `frame_ui`, which eframe skips
+        // for a minimized window: closing one from the taskbar quit instead.
+        if ctx.input(|input| input.viewport().close_requested())
+            && !self.quit_requested
+            && self.hides_to_tray()
+        {
+            if self.call_keeps_window() {
+                // The call window is this window's child and would close with it, so during a
+                // call the window is minimized instead of going to the tray.
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            } else {
+                self.hide_intent = true;
+            }
+        }
     }
 
     pub fn load_custom_themes(&mut self) {
@@ -8153,20 +8169,6 @@ impl App {
         }
         self.window_focused = focused;
         self.report_presence();
-        // Close the window and continue headless when background mode is enabled.
-        if ctx.input(|input| input.viewport().close_requested())
-            && !self.quit_requested
-            && self.hides_to_tray()
-        {
-            if self.call_keeps_window() {
-                // The call window is this window's child and would close with it, so during a
-                // call the window is minimized instead of going to the tray.
-                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
-            } else {
-                self.hide_intent = true;
-            }
-        }
         if locked {
             // Files dropped or pasted on the lock screen go nowhere.
             self.dropping = false;
@@ -10502,6 +10504,40 @@ mod tests {
 
         app.settings.keep_running_in_background = false;
         assert!(!app.hides_to_tray(), "the setting still decides");
+    }
+
+    /// eframe runs only the logic pass for a minimized window, so closing one
+    /// (from the taskbar, say) must still hide it to the tray rather than
+    /// quit, and quit when nothing could bring it back.
+    #[test]
+    fn closing_a_minimized_window_hides_it_to_the_tray() {
+        use fastframe_shell::{Closed, Resident};
+        let ctx = egui::Context::default();
+        let close_minimized = |app: &mut App| {
+            let mut input = egui::RawInput::default();
+            let info = input.viewports.entry(egui::ViewportId::ROOT).or_default();
+            info.minimized = Some(true);
+            info.events.push(egui::ViewportEvent::Close);
+            let mut output = ctx.run_ui(input, |ui| app.window_logic(ui.ctx()));
+            output.textures_delta.clear();
+        };
+
+        let mut app = app();
+        app.test_tray_shown = Some(true);
+        close_minimized(&mut app);
+        assert!(app.hide_intent);
+        assert_eq!(app.closed(), Closed::Hide);
+
+        let mut app = self::app();
+        app.test_tray_shown = Some(false);
+        close_minimized(&mut app);
+        assert_eq!(app.closed(), Closed::Quit, "no tray, no way back");
+
+        let mut app = self::app();
+        app.test_tray_shown = Some(true);
+        app.quit_requested = true;
+        close_minimized(&mut app);
+        assert_eq!(app.closed(), Closed::Quit);
     }
 
     /// A Wayland compositor ignores an app's focus and unminimize requests, so
