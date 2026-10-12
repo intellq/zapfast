@@ -8988,7 +8988,9 @@ fn voice_player(
         transcription_status(ui, view, message, playable, progress, width, actions);
         None
     } else if let Some(transcript) = transcript.filter(|_| !folded) {
-        Some(transcript_block(ui, view, message, transcript, width, actions))
+        Some(transcript_block(
+            ui, view, message, transcript, width, actions,
+        ))
     } else {
         // The time and ticks share the duration's line, as on the phone. A
         // long error leaves them no room, so they keep a line of their own.

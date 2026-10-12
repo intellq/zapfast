@@ -13281,12 +13281,15 @@ mod call_surface_tests {
                 frame.contains_rect(footer),
                 "{id}: the time is inside the bubble ({footer:?} in {frame:?})"
             );
+            // The fork's transcribe button shares that line and makes it a
+            // few points taller.
+            let pill = 12.0;
             assert!(
-                frame.bottom() - footer.bottom() <= 8.0,
+                frame.bottom() - footer.bottom() <= 8.0 + pill / 2.0,
                 "{id}: the bubble closes under the time ({footer:?} in {frame:?})"
             );
             assert!(
-                frame.height() <= 60.0,
+                frame.height() <= 60.0 + pill,
                 "{id}: no line of its own for the time ({footer:?} in {frame:?})"
             );
         }
