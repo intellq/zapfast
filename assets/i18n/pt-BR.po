@@ -5357,3 +5357,9 @@ msgstr "Silenciada (não perturbe)"
 msgctxt "call"
 msgid "Silenced (unknown caller)"
 msgstr "Silenciada (número desconhecido)"
+
+#. Translators: one word, no spaces. The word after @ that mentions everyone.
+#: src/mentions.rs:68
+msgctxt "mention"
+msgid "all"
+msgstr "todos"

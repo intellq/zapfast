@@ -19,7 +19,13 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 "Plural-Forms: nplurals=INTEGER; plural=EXPRESSION;\n"
 
-#: src/model.rs:74
+#. Translators: one word, no spaces. The word after @ that mentions everyone.
+#: src/mentions.rs:70
+msgctxt "mention"
+msgid "all"
+msgstr ""
+
+#: src/model.rs:113
 msgid "All"
 msgstr ""
 

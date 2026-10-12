@@ -29,6 +29,7 @@ pub mod markup;
 #[cfg(windows)]
 pub mod media_foundation;
 pub mod media_pause;
+pub mod mentions;
 pub mod model;
 pub mod nav;
 pub mod notify;

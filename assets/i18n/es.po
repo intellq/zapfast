@@ -5038,3 +5038,9 @@ msgstr ""
 #, fuzzy
 #~ msgid "No calls yet"
 #~ msgstr "Aún no hay favoritos"
+
+#. Translators: one word, no spaces. The word after @ that mentions everyone.
+#: src/mentions.rs:68
+msgctxt "mention"
+msgid "all"
+msgstr "todos"
