@@ -511,6 +511,9 @@ pub enum Command {
     /// Whether archived chats stay archived when a new message arrives or is
     /// sent; when not, a new message unarchives the chat here.
     SetKeepChatsArchived(bool),
+    /// The machine woke up from sleep: a link open across it can still look
+    /// established while nothing arrives, so reconnect it now.
+    Resumed,
     /// Asks where to save a copy of an attachment, then copies it there.
     SaveAttachmentAs {
         source: std::path::PathBuf,

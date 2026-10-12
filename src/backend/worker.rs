@@ -1444,8 +1444,25 @@ impl Worker {
         }
     }
 
-    /// Reconnects a link that the machine slept under, or that has received
-    /// nothing for longer than a working one can. See `link_watch`.
+    /// Reconnects a connected link after the machine woke up, as the system
+    /// reports it (fastframe-power's `Resumed`, on Linux and Windows). See
+    /// `link_watch`.
+    fn resumed(&mut self) {
+        let Some(client) = self
+            .client
+            .clone()
+            .filter(|_| matches!(self.status, LinkStatus::Connected))
+        else {
+            return;
+        };
+        log::info!("link: the machine woke up, reconnecting");
+        self.set_status(LinkStatus::Connecting);
+        tokio::spawn(async move { client.reconnect_immediately().await });
+    }
+
+    /// Reconnects a link that the machine slept under (macOS, where the
+    /// system does not report the wake yet), or that has received nothing
+    /// for longer than a working one can. See `link_watch`.
     fn watch_link(&mut self) {
         let client = self
             .client
@@ -5372,6 +5389,7 @@ impl Worker {
                 }
             }
             Command::SetKeepChatsArchived(keep) => self.keep_chats_archived = keep,
+            Command::Resumed => self.resumed(),
             Command::SetChatSound { chat, sound } => {
                 let _ = self.archive.set_notification_sound(&chat, sound.as_ref());
                 self.emit_chat(&chat);

@@ -735,6 +735,9 @@ pub struct App {
     /// Cross-thread window repaint handle.
     waker: Waker,
     tray: Option<fastframe_tray::Tray>,
+    /// Sleep and wake as the system reports them. Tests and demo runs get a
+    /// fixed one that reads nothing from the machine.
+    power: fastframe_power::Power,
     /// Stands in for whether a panel shows the tray item, which tests cannot
     /// spawn.
     #[cfg(test)]
@@ -1134,13 +1137,15 @@ impl App {
             .name("text-rendering".into())
             .spawn(move || crate::theme::follow_text_rendering(move || text_waker.wake()))
             .ok();
+        let power_waker = waker.clone();
+        app.power = fastframe_power::Power::spawn(move || power_waker.wake());
         if options.tray {
             let waker = waker.clone();
             let lockable = app.settings.app_lock_hash.is_some();
             app.tray = fastframe_tray::Tray::spawn(tray_config(lockable), move || waker.wake());
         }
-        // The clock preference may run a helper on Linux; keep it off the
-        // first frame.
+        // The clock preference may wait on the desktop portal on Linux; keep
+        // it off the first frame.
         std::thread::Builder::new()
             .name("clock-format".into())
             .spawn(|| {
@@ -1442,6 +1447,7 @@ impl App {
             wa_link_text: None,
             waker,
             tray: None,
+            power: fastframe_power::Power::fixed(Default::default()),
             #[cfg(test)]
             test_tray_shown: None,
             #[cfg(test)]
@@ -7676,6 +7682,7 @@ impl App {
         }
         self.sync_anonymous();
         self.report_presence();
+        self.handle_power();
         self.handle_tray();
         #[cfg(target_os = "macos")]
         self.actions.extend(crate::macos::drain(self.window_hidden));
@@ -7695,6 +7702,28 @@ impl App {
         self.follow_receipts();
         self.sync_badge();
         self.request_attention(ctx);
+    }
+
+    /// Answers the system's sleep and wake. Every account reconnects its link
+    /// after a wake (Linux and Windows report it; macOS does not yet, so
+    /// there the worker's link watch notices the sleep on its own). Settings
+    /// waiting for their debounced save are saved before the machine sleeps
+    /// or the session ends.
+    fn handle_power(&mut self) {
+        for event in self.power.events() {
+            match event {
+                fastframe_power::Event::Suspending(ack)
+                | fastframe_power::Event::EndingSession(ack) => {
+                    self.save_state();
+                    ack.done();
+                }
+                fastframe_power::Event::Resumed => {
+                    for account in &self.accounts {
+                        account.backend.send(Command::Resumed);
+                    }
+                }
+            }
+        }
     }
 
     /// Highlights the taskbar entry for a message that notified while the
@@ -9667,6 +9696,26 @@ mod tests {
         assert!(app.badge.is_none());
         #[cfg(target_os = "windows")]
         assert!(app.taskbar_badge_count().is_none());
+    }
+
+    /// Every account reconnects when the system reports a wake, and a sleep
+    /// is answered at once, with the settings saved.
+    #[test]
+    fn a_wake_reconnects_every_account_and_a_sleep_saves_first() {
+        let mut app = app();
+        let (backend, mut commands) = Backend::recording();
+        app.backend = backend;
+        app.power.send(fastframe_power::Event::Resumed);
+        app.handle_power();
+        assert!(matches!(commands.try_recv(), Ok(Command::Resumed)));
+        assert!(commands.try_recv().is_err(), "once per wake");
+
+        app.settings_dirty = true;
+        let ack = fastframe_power::Ack::default();
+        app.power.send(fastframe_power::Event::Suspending(ack));
+        app.handle_power();
+        assert!(!app.settings_dirty, "saved before sleeping");
+        assert!(commands.try_recv().is_err());
     }
 
     /// The window's geometry is remembered in the logic pass, which eframe

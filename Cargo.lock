@@ -2205,6 +2205,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "fastframe-power"
+version = "0.5.0"
+source = "git+https://github.com/crmne/fastframe?tag=v0.5.0#075ba9d4d7b9d2c13ca20d1bdb7cc158dba62c22"
+dependencies = [
+ "log",
+ "objc2 0.6.4",
+ "objc2-foundation 0.3.2",
+ "windows-sys 0.60.2",
+ "zbus",
+]
+
+[[package]]
 name = "fastframe-scroll"
 version = "0.5.0"
 source = "git+https://github.com/crmne/fastframe?tag=v0.5.0#075ba9d4d7b9d2c13ca20d1bdb7cc158dba62c22"
@@ -8381,6 +8393,7 @@ dependencies = [
  "fastframe-instance",
  "fastframe-log",
  "fastframe-macos",
+ "fastframe-power",
  "fastframe-scroll",
  "fastframe-shell",
  "fastframe-text",
