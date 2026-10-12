@@ -813,15 +813,10 @@ impl Settings {
         }
     }
 
-    /// Atomically replaces the settings file through a temporary file.
+    /// Replaces the settings file whole, never leaving it half written.
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
         let contents = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
-        let temp = path.with_extension("json.tmp");
-        std::fs::write(&temp, contents)?;
-        std::fs::rename(&temp, path)
+        fastframe_file::write(path, contents)
     }
 
     /// Brings a file written before [`SETTINGS_VERSION`] up to date. Each
@@ -1001,13 +996,8 @@ impl AccountSettings {
     }
 
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
         let contents = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
-        let temp = path.with_extension("json.tmp");
-        std::fs::write(&temp, contents)?;
-        std::fs::rename(&temp, path)
+        fastframe_file::write(path, contents)
     }
 }
 
@@ -1060,13 +1050,8 @@ impl AccountRoster {
     }
 
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
         let contents = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
-        let temp = path.with_extension("json.tmp");
-        std::fs::write(&temp, contents)?;
-        std::fs::rename(&temp, path)
+        fastframe_file::write(path, contents)
     }
 
     pub fn allocate(&mut self) -> crate::model::AccountId {
