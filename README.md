@@ -551,6 +551,46 @@ Da sincronização com o upstream 0.18.2:
   fim ao enviar, para mostrá-la. `Shift+Insert` cola, como `Ctrl+V`, no
   compositor.
 
+Na 0.19.6 (sincronização com o upstream de 11 e 12/10/2026):
+
+- **Mencionar todos nos grupos:** digite `@todos` (ou `@all`) e escolha
+  **todos** na lista; a mensagem sai como `@all` e notifica cada participante,
+  como no celular. Em grupos com mais de 32 pessoas, só administradores podem.
+  Editar uma mensagem ou legenda que já mencionava todos não notifica de novo,
+  e encaminhar ou responder não repete a notificação.
+- **Contas offline quando ninguém está olhando:** ao conectar ou reconectar,
+  as contas não se anunciam mais "online" sozinhas. Só a conta na tela, com a
+  janela em foco, aparece online; as outras e a janela fechada na bandeja
+  ficam offline, e o celular volta a receber as próprias notificações.
+- **Som dos vídeos do WhatsApp:** o decodificador embutido toca o áudio dos
+  vídeos enviados pelo WhatsApp, que antes ficavam mudos sem o FFmpeg. O
+  FFmpeg (Linux) e o Media Foundation (Windows) continuam tendo a vez quando
+  estão ligados.
+- **Horário do áudio na linha da duração:** a hora e os tiques de uma
+  mensagem de voz ficam ao lado da duração, sem a faixa vazia embaixo.
+- **QR de pareamento abre o WhatsApp pela câmera:** apontada para o QR, a
+  câmera do celular oferece abrir **Aparelhos conectados**; o leitor do
+  WhatsApp continua lendo o código.
+- **Reconexão logo após a suspensão** no Linux e no Windows, em vez de
+  esperar até dois minutos de silêncio.
+- **Janela:** o tamanho e a posição ficam iguais ao reabrir mesmo com zoom na
+  interface; fechar a janela minimizada (pela barra de tarefas) a manda para
+  a bandeja em vez de encerrar o ZapFast; no niri, um clique em notificação
+  traz a janela existente em vez de abrir outra.
+- **Configurações gravadas com segurança:** configurações, contas e papel de
+  parede são gravados no disco antes de substituir o arquivo antigo, para uma
+  queda de energia não deixar o ZapFast com as configurações em branco.
+- **Números estrangeiros agrupados pelo código do país:** "+1 555 123 4567"
+  em vez de "+15 551 234 567". Os números do Brasil não mudam.
+- **GNOME:** uma mensagem não aparece mais duas vezes (a notificação e o
+  aviso "ZapFast está pronto"), e o formato de 12 ou 24 horas vem do sistema
+  também no Flatpak.
+- **Ícone** sem o filtro SVG que bandejas e menus feitos em Qt (como o KDE)
+  não desenhavam.
+- **Leitor de tela:** com o NVDA ou outro leitor ligado, as animações
+  decorativas (como "digitando…") passam a ser desenhadas em passos, e o
+  leitor não trava mais a cada tecla.
+
 Na 0.19.5:
 
 - **Barra de volume no player de vídeo:** ao passar o mouse sobre o botão de
