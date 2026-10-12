@@ -5744,7 +5744,9 @@ fn content(
             seconds,
             waveform,
             ..
-        } => voice_player(ui, view, message, media, *seconds, waveform, width, actions),
+        } => voice_player(
+            ui, view, message, media, *seconds, waveform, width, reserve, actions,
+        ),
         Content::Document {
             media,
             file_name,
@@ -8693,6 +8695,7 @@ fn voice_player(
     seconds: Option<u32>,
     waveform: &[u8],
     width: f32,
+    reserve: f32,
     actions: &mut Vec<Action>,
 ) -> Option<Rect> {
     use crate::audio::State;
@@ -8750,7 +8753,8 @@ fn voice_player(
         });
     };
     // Force left-to-right layout at the player's width inside own bubbles.
-    ui.allocate_ui_with_layout(
+    let mut duration = None;
+    let row = ui.allocate_ui_with_layout(
         vec2(width.max(0.0), button),
         Layout::left_to_right(Align::Center),
         |ui| {
@@ -8892,7 +8896,7 @@ fn voice_player(
                     _ => shown,
                 };
                 if let Some(path) = playable.filter(|_| transcribe_button) {
-                    ui.horizontal(|ui| {
+                    let row = ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 8.0;
                         theme::text(ui, text, theme::regular(11.5), palette.secondary);
                         if transcribe_pill(ui, view, folded).clicked() {
@@ -8903,8 +8907,10 @@ fn voice_player(
                             });
                         }
                     });
+                    duration = Some(row.response.rect);
                 } else {
-                    theme::text(ui, text, theme::regular(11.5), palette.secondary);
+                    duration =
+                        Some(theme::text(ui, text, theme::regular(11.5), palette.secondary).rect);
                 }
             });
             // Speed chip, cycling 1x, 1.5x, and 2x like the phone. The
@@ -8981,10 +8987,20 @@ fn voice_player(
     if let Some(progress) = &progress {
         transcription_status(ui, view, message, playable, progress, width, actions);
         None
+    } else if let Some(transcript) = transcript.filter(|_| !folded) {
+        Some(transcript_block(ui, view, message, transcript, width, actions))
     } else {
-        transcript
-            .filter(|_| !folded)
-            .map(|transcript| transcript_block(ui, view, message, transcript, width, actions))
+        // The time and ticks share the duration's line, as on the phone. A
+        // long error leaves them no room, so they keep a line of their own.
+        let right = row.response.rect.right();
+        duration
+            .filter(|duration| duration.right() + 8.0 + reserve <= right)
+            .map(|duration| {
+                Rect::from_min_max(
+                    pos2(right - reserve, duration.center().y - 7.5),
+                    pos2(right, duration.center().y + 7.5),
+                )
+            })
     }
 }
 
