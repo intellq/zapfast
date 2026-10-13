@@ -1,7 +1,8 @@
 # Releases of the intellq fork: Linux x86_64 (.tar.gz with install.sh) and
-# Windows x86_64 (installer, portable .zip and the OpenGL add-on for virtual
-# machines). The upstream release.yml also builds macOS, arm64, Flatpak and
-# the package-manager recipes; it is disabled in the fork's Actions settings.
+# Windows x86_64 (the Windows Installer package and the OpenGL add-on for
+# virtual machines). The upstream release.yml also builds macOS, arm64,
+# Flatpak and the package-manager recipes; it is disabled in the fork's
+# Actions settings.
 #
 # To release: bump the version in Cargo.toml (upstream patch × 100 + N), write
 # packaging/release-notes/vX.Y.Z.md, commit both to main, push, then push the
@@ -120,34 +121,9 @@ jobs:
           echo 'LIBCLANG_PATH=C:\Program Files\LLVM\bin' >> "$GITHUB_ENV"
       - run: cargo build --locked --release --target x86_64-pc-windows-msvc
 
-      # The updater unpacks <stem>/zapfast.exe from this archive; the marker
-      # lets a portable copy update itself where it was unpacked.
-      - name: Portable package
-        shell: bash
-        run: |
-          name="zapfast-${GITHUB_REF_NAME}-x86_64-pc-windows-msvc"
-          mkdir -p "dist/$name"
-          cp target/x86_64-pc-windows-msvc/release/zapfast.exe "dist/$name/"
-          cp README.md LICENSE THIRD-PARTY-NOTICES.md packaging/zapfast-portable.txt "dist/$name/"
-          cd dist
-          7z a "$name.zip" "$name"
-          rm -r "$name"
-
-      # Inno Setup ships with the runner image. PowerShell, because bash on
-      # Windows rewrites /D... arguments as paths.
-      - name: Installer
-        shell: pwsh
-        run: |
-          $version = $env:GITHUB_REF_NAME.TrimStart("v")
-          $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
-          if (-not $iscc) { $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
-          & $iscc "/DVersion=$version" "/DNumericVersion=$version" "/DArch=x86_64" `
-            "/DBinary=$PWD\target\x86_64-pc-windows-msvc\release\zapfast.exe" `
-            "/DOutputDir=$PWD\dist" packaging\windows\zapfast.iss
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      # The Windows Installer package: the updater installs it when a release
-      # has one, and the setup program otherwise.
+      # The Windows Installer package, the only installer. The updater of a
+      # copy made by the setup program of 0.19.7 or earlier goes through
+      # 0.19.7, which carries both.
       - uses: ruby/setup-ruby@a0102e0972be65f351c307e2d64b9314a57c8073 # v1
         with:
           ruby-version: '4.0'
@@ -191,7 +167,6 @@ jobs:
           name: windows
           path: |
             dist/*.zip
-            dist/*-setup.exe
             dist/*.msi
           if-no-files-found: error
 
