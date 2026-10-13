@@ -43,8 +43,10 @@ sozinho a partir das Releases do fork (não das do upstream).
   se ainda não estiver. `./uninstall.sh` remove (com `--purge`, também a
   sessão, o histórico e as configurações).
 - **Windows:** o instalador `…-x86_64-pc-windows-msvc-setup.exe` (sem
-  administrador; atalho na área de trabalho marcado por padrão) ou o `.zip`
-  portátil, que se atualiza na própria pasta.
+  administrador; atalho na área de trabalho marcado por padrão), o pacote
+  `….msi` (também sem administrador, para quem prefere o Windows Installer ou
+  tem o instalador marcado pelo antivírus) ou o `.zip` portátil, que se
+  atualiza na própria pasta.
 - **Máquina virtual Windows sem aceleração 3D:** extraia
   `zapfast-vX.Y.Z-windows-opengl-vm.zip` dentro da pasta do ZapFast (OpenGL
   por software do Mesa).
@@ -550,6 +552,27 @@ Da sincronização com o upstream 0.18.2:
 - **Responder (citar)** uma mensagem de qualquer ponto do histórico rola até o
   fim ao enviar, para mostrá-la. `Shift+Insert` cola, como `Ctrl+V`, no
   compositor.
+
+Na 0.19.7:
+
+- **Figurinhas animadas sem baixar mostram o primeiro quadro:** com o
+  download automático de figurinhas animadas desligado, a figurinha aparece
+  com o primeiro quadro e um botão de play, que baixa e anima, como nos
+  vídeos. Se a figurinha chegou sem miniatura, ela é baixada uma vez só para
+  tirar o primeiro quadro (reduzido a 256 pontos) e o arquivo é descartado;
+  isso vale também para as do histórico, quando aparecem na tela.
+- **Minhas mensagens com a mesma largura das dos contatos:** as bolhas das
+  mensagens enviadas vão até o mesmo limite das recebidas (a largura da
+  conversa menos a margem), em vez de 72% dela com no máximo 560 pontos.
+- **Ordem das ligações:** apagar uma ligação do registro devolve a conversa ao
+  lugar e ao horário da última mensagem, em vez de deixá-la no topo com o
+  horário da ligação. Conversas que já ficaram assim são acertadas uma vez ao
+  abrir o ZapFast.
+- **Windows Installer (MSI):** a release traz também um pacote MSI, que assume
+  uma instalação feita pelo instalador `-setup.exe` (mesma pasta, conversas e
+  configurações mantidas) e se recusa a instalar ou desinstalar com o ZapFast
+  aberto. As cópias que se atualizam sozinhas passam a instalá-lo quando a
+  release tem um (fastframe 0.5.1).
 
 Na 0.19.6 (sincronização com o upstream de 11 e 12/10/2026):
 
