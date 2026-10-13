@@ -665,6 +665,7 @@ pub async fn run(
         first_names_recovered,
         first_names_recovering: false,
         downloads: HashSet::new(),
+        sticker_posters: HashSet::new(),
         read_sync: ReadSync::default(),
         favorite_chats: Default::default(),
         poll_decrypting: 0,
@@ -1024,6 +1025,9 @@ struct Worker {
     first_names_recovering: bool,
     /// Active attachment downloads by chat, message id, and carousel card.
     downloads: HashSet<(ChatId, String, Option<usize>)>,
+    /// Stickers whose first frame was asked for since the app opened, so a
+    /// failed one is not tried again on every redraw.
+    sticker_posters: HashSet<(ChatId, String)>,
     /// Serial forward in flight. The next send waits for the running one.
     forward_queue: Option<ForwardQueue<ForwardJob>>,
     call: Option<calls::CallRuntime>,
@@ -5229,6 +5233,18 @@ impl Worker {
                 chat,
                 message,
             } => self.download_media(chat, message, card),
+            Command::StickerPoster { chat, message } => self.sticker_poster(chat, message),
+            Command::StickerPosterMade { chat, id, poster } => {
+                // A sticker that gave no frame stays in `sticker_posters`, so
+                // it is not asked for again until the app reopens.
+                if let Some(poster) = poster {
+                    match self.archive.set_missing_thumbnail(&chat, &id, &poster) {
+                        Ok(true) => self.emit_message(&chat, &id),
+                        Ok(false) => {}
+                        Err(error) => log::warn!("could not store a sticker's picture: {error}"),
+                    }
+                }
+            }
             Command::FetchAvatar { id, full } => self.fetch_avatar(id, full),
             Command::EditText {
                 chat,
@@ -7712,6 +7728,55 @@ impl Worker {
         });
     }
 
+    /// Downloads an animated sticker that was not downloaded automatically,
+    /// keeps its first frame as its picture and discards the file. Stickers
+    /// are small, and the frame is what the conversation shows in place of the
+    /// animation.
+    fn sticker_poster(&mut self, chat: ChatId, id: String) {
+        if !self.sticker_posters.insert((chat.clone(), id.clone())) {
+            return;
+        }
+        let sticker = self
+            .archive
+            .raw(&chat, &id)
+            .ok()
+            .flatten()
+            .and_then(|raw| wa::Message::decode_from_slice(&raw).ok())
+            .and_then(|message| {
+                message
+                    .get_base_message()
+                    .sticker_message
+                    .as_option()
+                    .cloned()
+            });
+        let (Some(client), Some(sticker)) = (self.client.clone(), sticker) else {
+            self.sticker_posters.remove(&(chat, id));
+            return;
+        };
+        let dir = self.download_dir();
+        let commands = self.commands.clone();
+        tokio::spawn(async move {
+            let path = media_path(&dir, &chat, &format!("{id}-poster"), "image/webp", None);
+            let downloaded = with_attachment_deadline(
+                ATTACHMENT_TIMEOUT,
+                download_attachment(&client, &sticker, &dir, &path, Some(STICKER_POSTER_LIMIT)),
+            )
+            .await;
+            let poster = match downloaded {
+                Ok(path) => {
+                    let poster = tokio::fs::read(&path)
+                        .await
+                        .ok()
+                        .and_then(|bytes| crate::animation::sticker_poster(&bytes));
+                    let _ = tokio::fs::remove_file(&path).await;
+                    poster
+                }
+                Err(_) => None,
+            };
+            let _ = commands.send(Command::StickerPosterMade { chat, id, poster });
+        });
+    }
+
     /// Keeps a motion photo's clip for its photo, which may not be here yet.
     fn file_motion_clip(&mut self, chat: &str, parent: &str, sender: &str, clip: &[u8]) {
         match self.archive.put_motion_clip(chat, parent, sender, clip) {
@@ -9252,6 +9317,9 @@ fn extension_for(mime: &str, file_name: Option<&str>) -> String {
         _ => mime.split_once('/').map_or("bin", |(_, subtype)| subtype),
     })
 }
+
+/// The largest sticker downloaded only for its first frame.
+const STICKER_POSTER_LIMIT: u64 = 4 * 1024 * 1024;
 
 fn media_path(dir: &Path, chat: &str, id: &str, mime: &str, file_name: Option<&str>) -> PathBuf {
     let extension = extension_for(mime, file_name);
@@ -14880,6 +14948,7 @@ mod receipt_tests {
             first_names_recovered: true,
             first_names_recovering: false,
             downloads: HashSet::new(),
+            sticker_posters: HashSet::new(),
             read_sync: ReadSync::default(),
             favorite_chats: Default::default(),
             poll_decrypting: 0,

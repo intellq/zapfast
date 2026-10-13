@@ -1749,6 +1749,12 @@ pub enum Action {
         chat: ChatId,
         message: String,
     },
+    /// Takes the first frame of an animated sticker that is not downloaded,
+    /// to show in its place.
+    StickerPoster {
+        chat: ChatId,
+        message: String,
+    },
     /// Downloads a motion photo's clip.
     DownloadMotion {
         chat: ChatId,

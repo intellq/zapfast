@@ -7438,17 +7438,29 @@ fn picture(
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .clicked()
         && !matches!(media.state, MediaState::Downloading);
-    let auto = ui.is_rect_visible(rect)
+    let allowed = auto_download_allowed(
+        media,
+        if sticker == Some(true) {
+            crate::settings::AutoDownloadKind::AnimatedSticker
+        } else {
+            crate::settings::AutoDownloadKind::Image
+        },
+        view.download_settings,
+    );
+    let auto = ui.is_rect_visible(rect) && matches!(media.state, MediaState::Idle) && allowed;
+    // An animated sticker that stays on the server and came without its first
+    // frame has the frame taken from a download that is then discarded.
+    if sticker == Some(true)
+        && !allowed
+        && message.thumbnail.is_none()
         && matches!(media.state, MediaState::Idle)
-        && auto_download_allowed(
-            media,
-            if sticker == Some(true) {
-                crate::settings::AutoDownloadKind::AnimatedSticker
-            } else {
-                crate::settings::AutoDownloadKind::Image
-            },
-            view.download_settings,
-        );
+        && ui.is_rect_visible(rect)
+    {
+        actions.push(Action::StickerPoster {
+            chat: view.chat.id.clone(),
+            message: message.id.clone(),
+        });
+    }
     if wants || auto {
         actions.push(Action::Download {
             card: None,

@@ -245,6 +245,12 @@ pub enum Command {
         chat: ChatId,
         message: String,
     },
+    /// Takes the first frame of an animated sticker that is not downloaded and
+    /// keeps it as the sticker's picture, then discards the file.
+    StickerPoster {
+        chat: ChatId,
+        message: String,
+    },
     /// Downloads a motion photo's clip.
     DownloadMotion {
         chat: ChatId,
@@ -698,6 +704,12 @@ pub enum Command {
         chat: ChatId,
         id: String,
         result: Result<PathBuf, String>,
+    },
+    /// Internal result of taking a sticker's first frame.
+    StickerPosterMade {
+        chat: ChatId,
+        id: String,
+        poster: Option<Vec<u8>>,
     },
     /// Internal motion-clip download result.
     MotionDownloaded {

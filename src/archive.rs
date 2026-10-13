@@ -1427,6 +1427,16 @@ impl Archive {
         Ok(())
     }
 
+    /// Keeps `thumbnail` as the picture of a message that came without one.
+    /// Returns whether the message had none and now has.
+    pub fn set_missing_thumbnail(&self, chat: &str, id: &str, thumbnail: &[u8]) -> Result<bool> {
+        Ok(self.connection.execute(
+            "UPDATE messages SET thumbnail = ?3
+             WHERE chat = ?1 AND id = ?2 AND (thumbnail IS NULL OR length(thumbnail) = 0)",
+            params![chat, id, thumbnail],
+        )? > 0)
+    }
+
     pub fn delete_message(&self, chat: &str, id: &str) -> Result<bool> {
         let deleted = self.connection.execute(
             "DELETE FROM messages WHERE chat = ?1 AND id = ?2",
@@ -2251,6 +2261,11 @@ pub(crate) mod tests {
             !chats[0].group_subject_known,
             "legacy group placeholders remain identifiable"
         );
+        assert!(
+            !archive
+                .set_missing_thumbnail("1@s.whatsapp.net", "none", &[9])
+                .expect("no such message"),
+        );
         let mut with_thumbnail = message("1@s.whatsapp.net", "m1", 1, false);
         with_thumbnail.thumbnail = Some(vec![1, 2, 3]);
         archive
@@ -2263,6 +2278,27 @@ pub(crate) mod tests {
                 .expect("exists")
                 .thumbnail,
             Some(vec![1, 2, 3])
+        );
+        assert!(
+            !archive
+                .set_missing_thumbnail("1@s.whatsapp.net", "m1", &[9])
+                .expect("kept"),
+            "a thumbnail that came with the message is not replaced"
+        );
+        let bare = message("1@s.whatsapp.net", "m2", 2, false);
+        archive.insert_message(&bare, None).expect("insert");
+        assert!(
+            archive
+                .set_missing_thumbnail("1@s.whatsapp.net", "m2", &[9])
+                .expect("set")
+        );
+        assert_eq!(
+            archive
+                .message("1@s.whatsapp.net", "m2")
+                .expect("read")
+                .expect("exists")
+                .thumbnail,
+            Some(vec![9])
         );
         assert_eq!(
             archive

@@ -542,6 +542,9 @@ pub struct App {
     /// Document to open, or to save a copy of (`true`), once its download
     /// finishes.
     document_wanted: Option<(ChatId, String, bool)>,
+    /// Stickers whose first frame was asked for, so a conversation redrawing
+    /// does not ask again while it comes.
+    sticker_posters_asked: HashSet<(ChatId, String)>,
     /// Attachments of selected messages being gathered to save together.
     batch_save: Option<BatchSave>,
     /// Chat whose voice messages carry on into the next unheard one when a
@@ -1355,6 +1358,7 @@ impl App {
             video_expanded: None,
             video_wanted: None,
             document_wanted: None,
+            sticker_posters_asked: HashSet::new(),
             batch_save: None,
             voice_chat: None,
             voice_wanted: None,
@@ -5781,6 +5785,14 @@ impl App {
                     .is_some_and(|motion| motion.path.is_none())
                 {
                     self.actions.push(Action::DownloadMotion { chat, message });
+                }
+            }
+            Action::StickerPoster { chat, message } => {
+                if self
+                    .sticker_posters_asked
+                    .insert((chat.clone(), message.clone()))
+                {
+                    self.backend.send(Command::StickerPoster { chat, message });
                 }
             }
             Action::DownloadMotion { chat, message } => {

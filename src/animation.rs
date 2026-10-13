@@ -397,6 +397,34 @@ fn decode_webp(path: &Path, limit: usize) -> Option<Decoded> {
     Some(Decoded { frames: decoded })
 }
 
+/// Longest side of a sticker's first frame kept as its poster, enough for the
+/// sticker's size on a dense screen.
+const STICKER_POSTER_SIDE: u32 = 256;
+
+/// The first frame of the WebP sticker in `bytes`, scaled down and encoded as
+/// a PNG: what a sticker that is not downloaded shows in place of its
+/// animation.
+pub(crate) fn sticker_poster(bytes: &[u8]) -> Option<Vec<u8>> {
+    let decoder = webp_animation::Decoder::new(bytes).ok()?;
+    let (width, height) = decoder.dimensions();
+    let frame = decoder.into_iter().next()?;
+    let mut picture = image::RgbaImage::from_raw(width, height, frame.data().to_vec())?;
+    if width.max(height) > STICKER_POSTER_SIDE {
+        let scale = f64::from(STICKER_POSTER_SIDE) / f64::from(width.max(height));
+        picture = image::imageops::resize(
+            &picture,
+            ((f64::from(width) * scale).round() as u32).max(1),
+            ((f64::from(height) * scale).round() as u32).max(1),
+            image::imageops::FilterType::Triangle,
+        );
+    }
+    let mut png = Vec::new();
+    picture
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .ok()?;
+    Some(png)
+}
+
 fn to_color_image(image: &image::RgbaImage) -> ColorImage {
     let image = if image.width() > MAX_WIDTH {
         let height = (image.height() * MAX_WIDTH / image.width()).max(1);
@@ -1215,6 +1243,26 @@ mod tests {
         };
         assert_eq!(old.frames.len(), 1);
         assert!(!old.complete, "it decodes again when it next plays");
+    }
+
+    /// A sticker that is not downloaded keeps its first frame, scaled down to
+    /// the poster's side, and a file that is no WebP gives none.
+    #[test]
+    fn a_sticker_poster_is_its_first_frame_scaled_down() {
+        let mut encoder = webp_animation::Encoder::new((400, 200)).expect("encoder");
+        for (index, shade) in [10u8, 200].into_iter().enumerate() {
+            let frame = image::RgbaImage::from_pixel(400, 200, image::Rgba([shade, 0, 0, 255]));
+            encoder.add_frame(&frame, index as i32 * 40).expect("frame");
+        }
+        let webp = encoder.finalize(80).expect("finalizes");
+        let png = sticker_poster(&webp).expect("a poster");
+        let poster = image::load_from_memory(&png).expect("a PNG").to_rgba8();
+        assert_eq!(poster.dimensions(), (STICKER_POSTER_SIDE, 128));
+        assert!(
+            poster.get_pixel(10, 10).0[0] < 60,
+            "the first frame, not the last"
+        );
+        assert!(sticker_poster(b"not a picture").is_none());
     }
 
     /// An animated WebP of `count` 8x8 frames that all differ.
