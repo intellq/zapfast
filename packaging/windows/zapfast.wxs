@@ -21,14 +21,14 @@
   xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
   <Package
     Name="ZapFast"
-    Manufacturer="Carmine Paolino"
+    Manufacturer="ZapFast (fork intellq)"
     Version="$(Version)"
     UpgradeCode="{AC7FEAEC-54FA-4A71-95A5-532EE484B6A9}"
     Scope="perUser"
     Compressed="yes"
     Language="1033">
     <!-- Never change the UpgradeCode: it ties every version together. -->
-    <SummaryInformation Description="ZapFast" Manufacturer="Carmine Paolino" />
+    <SummaryInformation Description="ZapFast" Manufacturer="ZapFast (fork intellq)" />
     <MajorUpgrade
       Schedule="afterInstallInitialize"
       AllowSameVersionUpgrades="yes"
@@ -37,9 +37,9 @@
 
     <Icon Id="ZapFastIcon" SourceFile="$(sys.SOURCEFILEDIR)zapfast.ico" />
     <Property Id="ARPPRODUCTICON" Value="ZapFastIcon" />
-    <Property Id="ARPURLINFOABOUT" Value="https://zapfast.rocks" />
-    <Property Id="ARPHELPLINK" Value="https://github.com/crmne/zapfast/issues" />
-    <Property Id="ARPURLUPDATEINFO" Value="https://github.com/crmne/zapfast/releases" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/intellq/zapfast" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/intellq/zapfast/issues" />
+    <Property Id="ARPURLUPDATEINFO" Value="https://github.com/intellq/zapfast/releases" />
     <Property Id="ARPCOMMENTS" Value="© 2026 Carmine Paolino. MIT License. Not affiliated with WhatsApp or Meta." />
     <Property Id="ARPNOMODIFY" Value="1" />
     <Property Id="ARPNOREPAIR" Value="1" />

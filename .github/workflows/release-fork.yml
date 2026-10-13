@@ -146,6 +146,32 @@ jobs:
             "/DOutputDir=$PWD\dist" packaging\windows\zapfast.iss
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      # The Windows Installer package: the updater installs it when a release
+      # has one, and the setup program otherwise.
+      - uses: ruby/setup-ruby@a0102e0972be65f351c307e2d64b9314a57c8073 # v1
+        with:
+          ruby-version: '4.0'
+      - name: Windows Installer package
+        shell: pwsh
+        run: |
+          gem install native-packages --version 0.9.0 --no-document
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          dotnet tool install --global wix --version 5.0.2
+          wix extension add --global WixToolset.Util.wixext/5.0.2
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:Path += ";$env:USERPROFILE\.dotnet\tools"
+          $target = "x86_64-pc-windows-msvc"
+          $payload = "dist\windows-input-$target"
+          New-Item -ItemType Directory -Force $payload | Out-Null
+          Copy-Item "target\$target\release\zapfast.exe", README.md, LICENSE, THIRD-PARTY-NOTICES.md, `
+            packaging\windows\zapfast-installer.txt $payload
+          $version = $env:GITHUB_REF_NAME.TrimStart("v")
+          native-packages build --version $version --target windows-amd64 `
+            --defer-recipes --output "$env:RUNNER_TEMP\windows-packages"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item "$env:RUNNER_TEMP\windows-packages\packages\windows-amd64\msi\*.msi" dist\
+          Remove-Item -Recurse $payload
+
       # Unpacked inside the ZapFast folder, beside zapfast.exe. Its name does
       # not match any package the updater looks for.
       - name: OpenGL add-on for virtual machines
@@ -166,6 +192,7 @@ jobs:
           path: |
             dist/*.zip
             dist/*-setup.exe
+            dist/*.msi
           if-no-files-found: error
 
   publish:
@@ -189,7 +216,7 @@ jobs:
       # checksums.txt and its signature, which the updater checks against
       # assets/update-public-key.hex before installing anything.
       - name: Sign update manifest
-        uses: crmne/native-packages/.github/actions/sign-release@dc0cb1586894ca0239c53fd02d4da8064712671c # v0.7.0
+        uses: crmne/native-packages/.github/actions/sign-release@83bd46c245488c2b8f1b9d74569e16cf6a449e8f # v0.9.0
         with:
           directory: dist
           public-key: assets/update-public-key.hex
