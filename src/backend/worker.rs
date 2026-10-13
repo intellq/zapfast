@@ -9435,6 +9435,8 @@ fn thumbnail_of(base: &wa::Message) -> Option<Vec<u8>> {
         .or(base.ptv_message.as_option())
     {
         video.jpeg_thumbnail.clone()
+    } else if let Some(sticker) = base.sticker_message.as_option() {
+        sticker.png_thumbnail.clone()
     } else if let Some(document) = base.document_message.as_option() {
         document.jpeg_thumbnail.clone()
     } else if let Some(location) = base.location_message.as_option() {
@@ -12076,6 +12078,24 @@ mod tests {
         }
         assert_eq!(thumbnail_of(&image), Some(vec![0xff, 0xd8]));
         assert_eq!(classify(&wa::Message::default()), None);
+    }
+
+    #[test]
+    fn a_sticker_keeps_the_first_frame_that_came_with_it() {
+        let sticker = |png_thumbnail: Option<Vec<u8>>| wa::Message {
+            sticker_message: MessageField::some(wa::message::StickerMessage {
+                is_animated: Some(true),
+                png_thumbnail,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            thumbnail_of(&sticker(Some(vec![0x89, 0x50]))),
+            Some(vec![0x89, 0x50])
+        );
+        assert_eq!(thumbnail_of(&sticker(Some(Vec::new()))), None);
+        assert_eq!(thumbnail_of(&sticker(None)), None);
     }
 
     #[test]

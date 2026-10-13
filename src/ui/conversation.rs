@@ -2185,14 +2185,13 @@ struct View<'a> {
 }
 
 /// How far a message bubble may extend across the transcript.
-fn bubble_width_limit(available: f32, own: bool, carousel: bool, with_avatar: bool) -> f32 {
+fn bubble_width_limit(available: f32, carousel: bool, with_avatar: bool) -> f32 {
     let width = if carousel {
         (available * 0.95).min(920.0)
-    } else if own {
-        (available * 0.72).min(560.0)
     } else {
         // Leave room for the frame's 20-point horizontal padding and an
-        // eight-point gap from the outgoing bubbles' right edge.
+        // eight-point gap from the outgoing bubbles' right edge. Outgoing
+        // bubbles reach as far as incoming ones.
         available - 28.0
     };
     (width
@@ -2213,13 +2212,8 @@ fn estimated_height(message: &Message, width: f32, new_day: bool, sender_picture
         return CALL_ROW_HEIGHT + if new_day { 36.0 } else { 0.0 };
     }
     let carousel = matches!(&message.content, Content::Interactive { card: Some(card), .. } if !card.carousel.is_empty());
-    let bubble = (bubble_width_limit(
-        width,
-        message.from_me,
-        carousel,
-        !message.from_me && sender_pictures,
-    ) - 20.0)
-        .max(40.0);
+    let bubble =
+        (bubble_width_limit(width, carousel, !message.from_me && sender_pictures) - 20.0).max(40.0);
     let text_rows = |text: &str| {
         let per_row = bubble / 7.5;
         (text.chars().count() as f32 / per_row).ceil().max(1.0)
@@ -3584,7 +3578,7 @@ fn bubble(
     };
     let with_avatar = !own && shows_sender_pictures(view.chat);
     let carousel = matches!(&message.content, Content::Interactive { card: Some(card), .. } if !card.carousel.is_empty());
-    let max_width = bubble_width_limit(ui.available_width(), own, carousel, with_avatar);
+    let max_width = bubble_width_limit(ui.available_width(), carousel, with_avatar);
     // Register the empty strip beside the bubble from its previous rect, before
     // the row, so the avatar, the bubble, and the reactions win clicks.
     let id = bubble_id(&view.chat.id, &message.id);
@@ -7377,16 +7371,19 @@ fn picture(
         let thumbnail = message
             .thumbnail
             .as_deref()
-            .filter(|_| sticker.is_none())
             .map(|bytes| thumbnail_uri(ui.ctx(), &message.chat, &message.id, bytes));
         match thumbnail {
+            // A sticker that was not downloaded shows the first frame that
+            // came with it, with a play button to download and animate it.
             Some(uri) => {
                 egui::Image::new(uri)
                     .fit_to_exact_size(size)
-                    .corner_radius(6.0)
+                    .corner_radius(if sticker.is_some() { 0.0 } else { 6.0 })
                     .paint_at(ui, rect);
-                ui.painter()
-                    .rect_filled(rect, 6.0, Color32::from_black_alpha(60));
+                if sticker.is_none() {
+                    ui.painter()
+                        .rect_filled(rect, 6.0, Color32::from_black_alpha(60));
+                }
             }
             None => {
                 ui.painter().rect_filled(rect, 6.0, palette.surface);
@@ -7416,10 +7413,10 @@ fn picture(
                     .circle_filled(disc.center(), 22.0, Color32::from_black_alpha(120));
                 theme::paint_icon(
                     ui,
-                    if sticker.is_some() {
-                        Icon::Sticker
-                    } else {
-                        Icon::Download
+                    match sticker {
+                        Some(true) => Icon::Play,
+                        Some(false) => Icon::Sticker,
+                        None => Icon::Download,
                     },
                     disc,
                     22.0,
@@ -9690,6 +9687,17 @@ fn paint_misspelling(
 
 #[cfg(test)]
 mod tests {
+    /// Outgoing bubbles reach as far as incoming ones, with or without the
+    /// sender's picture beside the incoming one.
+    #[test]
+    fn a_bubble_may_reach_across_the_transcript() {
+        assert_eq!(bubble_width_limit(1000.0, false, false), 972.0);
+        assert_eq!(
+            bubble_width_limit(1000.0, false, true),
+            972.0 - SENDER_AVATAR - 8.0
+        );
+        assert_eq!(bubble_width_limit(1000.0, true, false), 920.0);
+    }
 
     /// A video's poster from the phone is about a hundred pixels wide; it is
     /// enlarged before it is drawn, and a large one is left alone.
