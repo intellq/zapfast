@@ -5649,6 +5649,70 @@ mod tests {
         assert!(ctx.memory(|memory| memory.has_focus(composer)));
     }
 
+    /// The sender's name above a group message opens that sender's panel,
+    /// whether or not the message quotes another.
+    #[test]
+    fn clicking_a_group_senders_name_opens_their_panel() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        let group = SAMPLES[1].id.to_owned();
+        app.actions
+            .push(crate::model::Action::OpenChat(group.clone()));
+        for _ in 0..3 {
+            render(&mut app, &ctx);
+        }
+        assert_eq!(app.open_chat.as_deref(), Some(group.as_str()));
+        let viewport = app
+            .selection_view
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .expect("the message viewport is on screen");
+        let senders: Vec<(String, String)> = app.conversations[&group]
+            .messages
+            .iter()
+            .filter(|message| !message.from_me)
+            .map(|message| (message.id.clone(), message.sender.clone()))
+            .collect();
+        assert!(senders.len() >= 3, "a group with several incoming messages");
+        let mut failed = Vec::new();
+        let mut checked = 0;
+        for (id, sender) in senders {
+            app.dialog = None;
+            app.actions.push(crate::model::Action::ScrollTo(id.clone()));
+            for _ in 0..3 {
+                render(&mut app, &ctx);
+            }
+            let name = crate::ui::conversation::sender_name_id(&group, &id);
+            let Some(rect) = ctx
+                .read_response(name)
+                .map(|response| response.rect)
+                .filter(|rect| viewport.contains_rect(*rect))
+            else {
+                continue;
+            };
+            let at = rect.center();
+            let pointer = |pressed| egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            frame_with(
+                &mut app,
+                &ctx,
+                vec![egui::Event::PointerMoved(at), pointer(true), pointer(false)],
+            );
+            render(&mut app, &ctx);
+            checked += 1;
+            if app.dialog != Some(Dialog::ChatInfo(sender)) {
+                failed.push(id);
+            }
+        }
+        assert!(checked >= 3, "several sender names were clicked: {checked}");
+        assert!(failed.is_empty(), "no panel opened for {failed:?}");
+    }
+
     /// Our time or ticks open "Message info"; an incoming time opens nothing.
     #[test]
     fn clicking_the_time_or_ticks_opens_message_info() {

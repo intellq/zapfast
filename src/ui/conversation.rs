@@ -3890,6 +3890,11 @@ pub fn bubble_id(chat: &str, message: &str) -> egui::Id {
     egui::Id::new(("bubble", chat, message))
 }
 
+/// Where a group message's sender name was drawn, for interaction tests.
+pub fn sender_name_id(chat: &str, message: &str) -> egui::Id {
+    egui::Id::new(("sender-name", chat, message))
+}
+
 /// Where a voice message's speed chip was drawn, for interaction tests.
 pub fn speed_chip_id(chat: &str, message: &str) -> egui::Id {
     egui::Id::new(("speed-chip", chat, message))
@@ -4093,6 +4098,7 @@ fn bubble_frame(
         .show(ui, |ui| {
             ui.set_max_width(max_width);
             ui.spacing_mut().item_spacing.y = 4.0;
+            let mut sender_rect = None;
             if show_sender && view.chat.is_group() {
                 let name = (view.names_or)(&message.sender, message.sender_name.as_deref());
                 let response = widgets::rich_text(
@@ -4104,14 +4110,26 @@ fn bubble_frame(
                 let response = ui
                     .interact(
                         response.rect,
-                        ui.id().with(("sender", &message.id)),
+                        sender_name_id(&view.chat.id, &message.id),
                         Sense::CLICK,
                     )
                     .on_hover_cursor(egui::CursorIcon::PointingHand);
                 if response.clicked() {
                     actions.push(Action::ShowDialog(Dialog::ChatInfo(message.sender.clone())));
                 }
+                sender_rect = Some(response.rect);
             }
+            ui.ctx().data_mut(|data| {
+                let key = bubble_id.with("sender");
+                match sender_rect {
+                    Some(rect) => {
+                        data.insert_temp(key, rect);
+                    }
+                    None => {
+                        data.remove::<Rect>(key);
+                    }
+                }
+            });
             // Reserve the label's line now and paint it once the contents
             // are measured, at their start: an own bubble lays out from the
             // right, and its width is known only then.
@@ -6780,8 +6798,11 @@ fn rich_body(
                 // Quote and preview cards have their own click actions and
                 // were registered before the text. Keep their current-frame
                 // rectangles outside this later, enlarged input target.
-                for kind in ["quote", "preview"] {
-                    let present = if kind == "quote" {
+                // The sender's name above the bubble is a click of its own.
+                for kind in ["sender", "quote", "preview"] {
+                    let present = if kind == "sender" {
+                        true
+                    } else if kind == "quote" {
                         message.quoted.is_some()
                     } else {
                         matches!(
