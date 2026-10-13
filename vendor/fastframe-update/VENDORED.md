@@ -1,8 +1,8 @@
 # fastframe-update (cópia do fork intellq)
 
 Cópia de `crates/fastframe-update` de
-[crmne/fastframe](https://github.com/crmne/fastframe) na tag `v0.1.7`
-(commit `9cb2830`), usada pelo ZapFast do fork no lugar da dependência git.
+[crmne/fastframe](https://github.com/crmne/fastframe) na tag `v0.5.1`
+(commit `491f719`), usada pelo ZapFast do fork no lugar da dependência git.
 
 Mudanças de comportamento:
 
