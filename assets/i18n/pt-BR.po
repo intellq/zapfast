@@ -5433,3 +5433,58 @@ msgstr "90 dias"
 #: src/util.rs:292
 msgid "Disappearing messages"
 msgstr "Mensagens temporárias"
+
+msgid "Media cache cleared"
+msgstr "Cache de mídia limpo"
+
+msgid "{title}, {count} unread messages, mentioned you"
+msgstr "{title}, {count} mensagens não lidas, mencionou você"
+
+msgid "Send location"
+msgstr "Enviar localização"
+
+msgid "Delete {} message for everyone?"
+msgid_plural "Delete {} messages for everyone?"
+msgstr[0] "Apagar {} mensagem para todos?"
+msgstr[1] "Apagar {} mensagens para todos?"
+
+msgid "Delete {} message for me?"
+msgid_plural "Delete {} messages for me?"
+msgstr[0] "Apagar {} mensagem para mim?"
+msgstr[1] "Apagar {} mensagens para mim?"
+
+msgid "Clear the media cache?"
+msgstr "Limpar o cache de mídia?"
+
+msgid "This deletes the photos, videos, stickers and files {account} downloaded to this computer. Messages stay, and attachments download again when you open them, while WhatsApp still has them."
+msgstr "Isso apaga as fotos, vídeos, figurinhas e arquivos que {account} baixou neste computador. As mensagens continuam, e os anexos são baixados de novo quando você os abre, enquanto o WhatsApp ainda os tiver."
+
+msgid "Files in a download folder you chose are kept."
+msgstr "Os arquivos em uma pasta de downloads escolhida por você são mantidos."
+
+msgid "Paste a map link or coordinates"
+msgstr "Cole um link de mapa ou coordenadas"
+
+msgid "Short links only open online. Paste the full map link or the coordinates."
+msgstr "Links curtos só abrem online. Cole o link completo do mapa ou as coordenadas."
+
+msgid "That is not a location."
+msgstr "Isso não é uma localização."
+
+msgid "Storage used"
+msgstr "Armazenamento usado"
+
+msgid "Clear…"
+msgstr "Limpar…"
+
+msgid "Photos, videos, stickers and files {account} downloaded to this computer. Clearing them keeps your messages; attachments download again when you open them."
+msgstr "Fotos, vídeos, figurinhas e arquivos que {account} baixou neste computador. Limpá-los mantém suas mensagens; os anexos são baixados de novo quando você os abre."
+
+msgid "Videos and GIFs"
+msgstr "Vídeos e GIFs"
+
+msgid "Other"
+msgstr "Outros"
+
+msgid "Media cache"
+msgstr "Cache de mídia"

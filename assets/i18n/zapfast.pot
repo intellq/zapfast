@@ -5264,3 +5264,58 @@ msgstr ""
 #: src/util.rs:292
 msgid "Disappearing messages"
 msgstr ""
+
+msgid "Media cache cleared"
+msgstr ""
+
+msgid "{title}, {count} unread messages, mentioned you"
+msgstr ""
+
+msgid "Send location"
+msgstr ""
+
+msgid "Delete {} message for everyone?"
+msgid_plural "Delete {} messages for everyone?"
+msgstr[0] ""
+msgstr[1] ""
+
+msgid "Delete {} message for me?"
+msgid_plural "Delete {} messages for me?"
+msgstr[0] ""
+msgstr[1] ""
+
+msgid "Clear the media cache?"
+msgstr ""
+
+msgid "This deletes the photos, videos, stickers and files {account} downloaded to this computer. Messages stay, and attachments download again when you open them, while WhatsApp still has them."
+msgstr ""
+
+msgid "Files in a download folder you chose are kept."
+msgstr ""
+
+msgid "Paste a map link or coordinates"
+msgstr ""
+
+msgid "Short links only open online. Paste the full map link or the coordinates."
+msgstr ""
+
+msgid "That is not a location."
+msgstr ""
+
+msgid "Storage used"
+msgstr ""
+
+msgid "Clear…"
+msgstr ""
+
+msgid "Photos, videos, stickers and files {account} downloaded to this computer. Clearing them keeps your messages; attachments download again when you open them."
+msgstr ""
+
+msgid "Videos and GIFs"
+msgstr ""
+
+msgid "Other"
+msgstr ""
+
+msgid "Media cache"
+msgstr ""
