@@ -53,6 +53,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     if theme::macos_chrome(ui.ctx()) {
         super::banner(app, ui);
     }
+    pin_banner(app, ui, &chat);
     composer(app, ui, &chat);
     // Attachments waiting to be sent take the history's place, as on the
     // phone, with the composer below for their caption.
@@ -81,6 +82,147 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             ui.max_rect().bottom(),
         );
     }
+}
+
+/// Height of the pinned-message line under the header. It is one line
+/// whatever the number of pins, as on WhatsApp: it shows one pin at a time.
+const PIN_ROW_HEIGHT: f32 = 44.0;
+/// Gap between the banner edge and the pin count bar, and the icon's own box.
+const PIN_ROW_INSET: f32 = 12.0;
+const PIN_ICON: f32 = 16.0;
+/// The bar at the line's left edge: one segment per pin, the shown one lit.
+const PIN_BAR_WIDTH: f32 = 3.0;
+const PIN_BAR_GAP: f32 = 2.0;
+
+/// Which pin the line shows: the one it showed last, or the newest pin when
+/// that one is gone. `rows` is newest first.
+fn shown_pin(rows: &[crate::archive::Pinned], cursor: Option<&str>) -> usize {
+    cursor
+        .and_then(|id| rows.iter().position(|row| row.id == id))
+        .unwrap_or(0)
+}
+
+/// The pin a click leaves on the line: the next older one, back to the
+/// newest after the oldest, so repeated clicks walk every pin.
+fn next_pin(rows: usize, shown: usize) -> usize {
+    if rows == 0 { 0 } else { (shown + 1) % rows }
+}
+
+/// Where each segment of the pin count bar goes, top to bottom, for `count`
+/// pins in a bar `height` tall. The newest pin is the bottom segment, as on
+/// WhatsApp.
+fn pin_bar_segments(top: f32, height: f32, count: usize) -> Vec<(f32, f32)> {
+    let count = count.max(1);
+    let gaps = PIN_BAR_GAP * (count - 1) as f32;
+    let segment = ((height - gaps) / count as f32).max(1.0);
+    (0..count)
+        .map(|index| {
+            let start = top + (segment + PIN_BAR_GAP) * index as f32;
+            (start, start + segment)
+        })
+        .collect()
+}
+
+/// The chat's pinned messages under its header, one line like WhatsApp's: it
+/// shows one pin, the newest first, with the message's own words cut off with
+/// an ellipsis when they do not fit. Clicking it opens that message and moves
+/// the line on to the next pin, so repeated clicks walk the chat's pins. A bar
+/// at its left has a segment per pin and lights the one shown.
+fn pin_banner(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
+    let now = crate::util::now();
+    if let Some(wait) = app.chat_pins.get(&chat.id).and_then(|rows| {
+        rows.iter()
+            .filter(|row| row.expires_at > now)
+            .map(|row| row.expires_at)
+            .min()
+    }) {
+        let left = wait.saturating_sub(now).clamp(0, 86_400) as u64;
+        ui.ctx()
+            .request_repaint_after(Duration::from_secs(left.saturating_add(1)));
+    }
+    let rows = live_pins(
+        app.chat_pins.get(&chat.id).map_or(&[][..], Vec::as_slice),
+        now,
+    );
+    if rows.is_empty() {
+        return;
+    }
+    // Which pin is shown is the view's own state, kept per chat.
+    let cursor_id = pin_cursor_id(&chat.id);
+    let cursor = ui.ctx().data(|data| data.get_temp::<String>(cursor_id));
+    let shown = shown_pin(&rows, cursor.as_deref());
+    let row = &rows[shown];
+    let palette = app.palette;
+    let (bar, response) =
+        ui.allocate_exact_size(vec2(ui.available_width(), PIN_ROW_HEIGHT), Sense::click());
+    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+    ui.painter().rect_filled(
+        bar,
+        0.0,
+        if response.hovered() {
+            palette.surface_hover
+        } else {
+            palette.panel
+        },
+    );
+    // Newest pin at the bottom, so the bar fills upward as pins are added.
+    let segments = pin_bar_segments(bar.top() + 8.0, bar.height() - 16.0, rows.len());
+    let left = bar.left() + PIN_ROW_INSET;
+    for (index, (top, bottom)) in segments.iter().enumerate() {
+        let pin = rows.len() - 1 - index;
+        let colour = if pin == shown {
+            palette.accent
+        } else {
+            palette.dim
+        };
+        ui.painter().rect_filled(
+            Rect::from_x_y_ranges(left..=left + PIN_BAR_WIDTH, *top..=*bottom),
+            PIN_BAR_WIDTH / 2.0,
+            colour,
+        );
+    }
+    let icon_left = left + PIN_BAR_WIDTH + 10.0;
+    let icon = Rect::from_center_size(
+        pos2(icon_left + PIN_ICON / 2.0, bar.center().y),
+        Vec2::splat(PIN_ICON),
+    );
+    theme::paint_icon(ui, Icon::Pin, icon, 14.0, palette.accent);
+    let text_left = icon_left + PIN_ICON + 8.0;
+    let text_width = (bar.right() - PIN_ROW_INSET - text_left).max(1.0);
+    let label = widgets::line(
+        ui,
+        &crate::markup::plain(&app.resolve_mention_tokens(&row.text), &[]),
+        theme::regular(13.0),
+        palette.text,
+        text_width,
+        1,
+    );
+    label.paint(
+        ui,
+        pos2(text_left, bar.center().y - label.size().y / 2.0),
+        palette.text,
+    );
+    theme::reveal_focus(&response);
+    let described = crate::i18n::gettext(app.locale, "Pinned message {index} of {count}: {text}")
+        .replace("{index}", &(shown + 1).to_string())
+        .replace("{count}", &rows.len().to_string())
+        .replace("{text}", &row.text);
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), &described)
+    });
+    if response.clicked() {
+        app.actions.push(Action::OpenMessage {
+            chat: chat.id.clone(),
+            message: row.id.clone(),
+        });
+        let next = rows[next_pin(rows.len(), shown)].id.clone();
+        ui.ctx().data_mut(|data| data.insert_temp(cursor_id, next));
+    }
+}
+
+/// Where the pin line keeps the id of the pin it shows, per chat.
+fn pin_cursor_id(chat: &str) -> egui::Id {
+    egui::Id::new(("pin-cursor", chat))
 }
 
 fn empty(app: &mut App, ui: &mut egui::Ui) {
@@ -2166,6 +2308,10 @@ struct View<'a> {
     open_menu: Option<&'a str>,
     /// Ids of the starred messages of this chat, for the mark in the footer.
     starred: Option<&'a HashSet<String>>,
+    /// Ids of this chat's pinned messages, for the menu and the bubble mark.
+    pins: Option<&'a HashSet<String>>,
+    /// Active pins of this chat, for the notices in the transcript.
+    pin_notices: &'a [crate::archive::Pinned],
     reaction: Option<&'a str>,
     /// The reaction picker was opened from the message's context menu.
     reaction_menu: bool,
@@ -2222,9 +2368,16 @@ fn bubble_width_limit(available: f32, carousel: bool, with_avatar: bool) -> f32 
 /// near the viewport are always measured, and a change in the height of a row
 /// above the viewport moves the scroll offset with it, so this only shapes the
 /// scrollbar until the reader scrolls near the row.
-fn estimated_height(message: &Message, width: f32, new_day: bool, sender_pictures: bool) -> f32 {
+fn estimated_height(
+    message: &Message,
+    width: f32,
+    new_day: bool,
+    sender_pictures: bool,
+    notices: usize,
+) -> f32 {
+    let carried = notices as f32 * PIN_NOTICE_HEIGHT;
     if matches!(message.content, Content::Call { .. }) {
-        return CALL_ROW_HEIGHT + if new_day { 36.0 } else { 0.0 };
+        return CALL_ROW_HEIGHT + if new_day { 36.0 } else { 0.0 } + carried;
     }
     let carousel = matches!(&message.content, Content::Interactive { card: Some(card), .. } if !card.carousel.is_empty());
     let bubble =
@@ -2252,9 +2405,72 @@ fn estimated_height(message: &Message, width: f32, new_day: bool, sender_picture
         _ => 40.0,
     };
     // Bubble padding, the sender line, and the row spacing, plus the date
-    // chip above the first message of a day.
-    40.0 + body + if new_day { 36.0 } else { 0.0 }
+    // chip above the first message of a day, and any pin notice this row
+    // carries.
+    40.0 + body + if new_day { 36.0 } else { 0.0 } + notices as f32 * PIN_NOTICE_HEIGHT
 }
+
+/// The pins the transcript places, oldest first. `chat_pins` hands them over
+/// newest first, and a notice belongs above the first message that came after
+/// its pin, so the list goes back into time order before it is placed.
+fn pin_notices_in_time_order(rows: &[crate::archive::Pinned]) -> Vec<crate::archive::Pinned> {
+    let mut sorted = rows.to_vec();
+    sorted.sort_by_key(|row| row.pinned_at);
+    sorted
+}
+
+/// How many notices, from the front of the list, belong above a message that
+/// arrived at `timestamp`.
+fn notices_above(notices: &[crate::archive::Pinned], timestamp: i64) -> usize {
+    notices
+        .iter()
+        .take_while(|notice| notice.pinned_at <= timestamp)
+        .count()
+}
+
+/// The notice a pin leaves in the transcript, where the pin happened, as the
+/// phone shows it.
+fn pin_notice(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    locale: crate::i18n::Locale,
+    names: &dyn Fn(&str, Option<&str>) -> String,
+    row: &crate::archive::Pinned,
+) {
+    let label = pin_notice_label(locale, row, names);
+    ui.vertical_centered(|ui| {
+        widgets::chip(ui, palette, &label);
+    });
+}
+
+/// The words a pin notice shows: who pinned it, or a neutral line when the
+/// archive does not say.
+fn pin_notice_label(
+    locale: crate::i18n::Locale,
+    row: &crate::archive::Pinned,
+    names: &dyn Fn(&str, Option<&str>) -> String,
+) -> String {
+    if row.pinner.by_me {
+        return crate::i18n::gettext(locale, "You pinned a message").to_string();
+    }
+    if row.pinner.sender.is_empty() {
+        return crate::i18n::gettext(locale, "A message was pinned").to_string();
+    }
+    crate::i18n::gettext(locale, "{} pinned a message")
+        .replace("{}", &names(&row.pinner.sender, None))
+}
+
+/// The pins the line under the header shows: one that has run out its seven
+/// days leaves, whether or not a refresh has reached this window yet.
+fn live_pins(rows: &[crate::archive::Pinned], now: i64) -> Vec<crate::archive::Pinned> {
+    rows.iter()
+        .filter(|row| row.expires_at > now)
+        .cloned()
+        .collect()
+}
+
+/// What one pin notice takes in the transcript: the chip and its spacing.
+const PIN_NOTICE_HEIGHT: f32 = 32.0;
 
 /// Incoming messages carry their sender's picture and name in groups only,
 /// as on WhatsApp.
@@ -2329,6 +2545,11 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
         anchor_at_top: app.scroll_anchor_at_top,
         open_menu: app.open_message_menu.as_deref(),
         starred: app.stars.get(&chat.id),
+        pins: app.pins.get(&chat.id),
+        pin_notices: app
+            .chat_pins
+            .get(&chat.id)
+            .map_or(&[][..], |rows| rows.as_slice()),
         reaction: app
             .reaction_target
             .as_ref()
@@ -2556,6 +2777,11 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                     ui.spacing_mut().item_spacing.y = 3.0;
                     top_of_history(ui, &palette, &conversation, chat, &mut actions);
                     let mut previous: Option<&Message> = None;
+                    // The pin notices still to place, in time order. Each one
+                    // sits above the first message that came after it, so the
+                    // row it belongs to carries its height.
+                    let notices = pin_notices_in_time_order(view.pin_notices);
+                    let mut placed = 0;
                     // Rows within a few viewports of the screen are laid out
                     // and their height remembered, so scrolling finds them
                     // measured before they show.
@@ -2566,6 +2792,7 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                             crate::util::day_key(previous.timestamp)
                                 != crate::util::day_key(message.timestamp)
                         });
+                        let here = notices_above(&notices[placed..], message.timestamp);
                         let known = rows.get(&message.id).copied();
                         let height = known.map_or_else(
                             || {
@@ -2574,6 +2801,7 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                                     layout_width,
                                     new_day,
                                     shows_sender_pictures(view.chat),
+                                    here,
                                 )
                             },
                             |row| row.height,
@@ -2594,6 +2822,8 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                         let near = before + height >= viewport.top() - reach
                             && before <= viewport.bottom() + reach;
                         if !lay_out_all && !near {
+                            // The notices this row carries are in its height.
+                            placed += here;
                             // The body rect of a row that just left the
                             // layout marks where it last was, not where it is.
                             if known
@@ -2634,6 +2864,13 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                                 );
                             });
                             ui.add_space(4.0);
+                        }
+                        for _ in 0..here {
+                            let Some(notice) = notices.get(placed) else {
+                                break;
+                            };
+                            pin_notice(ui, &palette, view.locale, view.names_or, notice);
+                            placed += 1;
                         }
                         if let Some((id, count, placed)) = &divider
                             && *id == message.id
@@ -2890,6 +3127,11 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                             },
                         );
                         previous = Some(message);
+                    }
+                    // A pin made after the newest message keeps its notice at
+                    // the end of the transcript.
+                    for notice in &notices[placed..] {
+                        pin_notice(ui, &palette, view.locale, view.names_or, notice);
                     }
                     if !typing.is_empty() {
                         typing_bubble(ui, &view, &typing);
@@ -4255,7 +4497,8 @@ fn bubble_frame(
             // Bubbles without cards use the natural text width.
             let cap = ((max_width - 20.0).min(ui.available_width())).max(0.0);
             let starred = view.starred.is_some_and(|ids| ids.contains(&message.id));
-            let reserve = footer_width(ui, message, starred);
+            let pinned = view.pins.is_some_and(|ids| ids.contains(&message.id));
+            let reserve = footer_width(ui, message, starred, pinned);
             let settled = settled_width(ui, view, message, cap);
             let slot = match settled {
                 Some(width) => {
@@ -4269,9 +4512,9 @@ fn bubble_frame(
             // While selecting, a click picks the message instead.
             let resend = resendable(view, message) && view.selection.is_empty();
             let resend_clicked = if over_picture && let Some(picture) = slot {
-                footer_over_picture(ui, view, message, picture, resend, starred, actions)
+                footer_over_picture(ui, view, message, picture, resend, starred, pinned, actions)
             } else {
-                footer(ui, view, message, slot, resend, starred, actions)
+                footer(ui, view, message, slot, resend, starred, pinned, actions)
             };
             if resend_clicked {
                 actions.push(Action::RetrySend {
@@ -4517,7 +4760,8 @@ fn natural_text_width(ui: &egui::Ui, view: &View<'_>, message: &Message, cap: f3
         .fold(0.0, f32::max);
     let last = laid.galley.rows.last().map_or(0.0, |row| row.row.size.x);
     let starred = view.starred.is_some_and(|ids| ids.contains(&message.id));
-    let reserve = footer_width(ui, message, starred);
+    let pinned = view.pins.is_some_and(|ids| ids.contains(&message.id));
+    let reserve = footer_width(ui, message, starred, pinned);
     Some(if last + 8.0 + reserve <= cap {
         widest.max(last + 8.0 + reserve)
     } else {
@@ -4862,7 +5106,6 @@ const FOOTER_MARK: f32 = 13.0;
 const FOOTER_MARK_GAP: f32 = 8.0;
 /// Room one visible mark keeps next to the clock.
 const FOOTER_MARK_SLOT: f32 = FOOTER_MARK + FOOTER_MARK_GAP;
-
 const FOOTER_STAR: Color32 = Color32::from_rgb(0xEA, 0xB3, 0x08);
 
 /// The clock's own width at the footer's size: the floor a footer starts from,
@@ -4878,8 +5121,8 @@ fn clock_width(ui: &egui::Ui, message: &Message) -> f32 {
         .x
 }
 
-/// Width of the message footer.
-fn footer_width(ui: &egui::Ui, message: &Message, starred: bool) -> f32 {
+/// Width of the message footer, including the room its marks take.
+fn footer_width(ui: &egui::Ui, message: &Message, starred: bool, pinned: bool) -> f32 {
     let font = theme::regular(11.0);
     let time = clock_width(ui, message);
     let edited = if message.edited {
@@ -4901,9 +5144,10 @@ fn footer_width(ui: &egui::Ui, message: &Message, starred: bool) -> f32 {
         0.0
     };
     // Only a message that carries a mark reserves its slot, as WhatsApp does:
-    // a plain footer is the clock and the ticks alone. Starring grows that
-    // bubble's footer by one slot, and a later pin uses the same slot.
-    let marks = if starred { FOOTER_MARK_SLOT } else { 0.0 };
+    // a plain footer is the clock and the ticks alone. Starring or pinning
+    // grows that bubble's footer by one slot each.
+    let marks =
+        if starred { FOOTER_MARK_SLOT } else { 0.0 } + if pinned { FOOTER_MARK_SLOT } else { 0.0 };
     time + edited + not_sent + if message.from_me { 19.0 } else { 0.0 } + marks
 }
 
@@ -4949,6 +5193,7 @@ const OVER_PICTURE_INSET: Vec2 = vec2(10.0, 6.0);
 /// Paints the time and ticks over the bottom corner of a picture without a
 /// caption, in white on a soft dark scrim so they read on any picture.
 /// Like `footer`, over the bottom of a picture.
+#[allow(clippy::too_many_arguments)]
 fn footer_over_picture(
     ui: &mut egui::Ui,
     view: &View<'_>,
@@ -4956,6 +5201,7 @@ fn footer_over_picture(
     picture: Rect,
     resend: bool,
     starred: bool,
+    pinned: bool,
     actions: &mut Vec<Action>,
 ) -> bool {
     let palette = &view.palette;
@@ -4968,7 +5214,8 @@ fn footer_over_picture(
             .layout_no_wrap(tr(NOT_SENT).to_owned(), theme::medium(11.0), Color32::WHITE)
     });
     let tick_width = if message.from_me { 19.0 } else { 0.0 };
-    let marks = if starred { FOOTER_MARK_SLOT } else { 0.0 };
+    let marks =
+        if starred { FOOTER_MARK_SLOT } else { 0.0 } + if pinned { FOOTER_MARK_SLOT } else { 0.0 };
     let width = time.size().x
         + failed.as_ref().map_or(0.0, |galley| galley.size().x + 6.0)
         + tick_width
@@ -5016,6 +5263,19 @@ fn footer_over_picture(
         ui.painter().galley(label.min, failed, Color32::WHITE);
         let status = Rect::from_min_max(label.min, pos2(row.right(), label.max.y));
         clicked = not_sent_status(ui, message, status, resend);
+    }
+    if pinned {
+        x -= FOOTER_MARK_SLOT;
+        theme::paint_icon(
+            ui,
+            Icon::Pin,
+            Rect::from_center_size(
+                pos2(x + FOOTER_MARK / 2.0, row.center().y),
+                Vec2::splat(FOOTER_MARK),
+            ),
+            FOOTER_MARK,
+            Color32::WHITE,
+        );
     }
     if starred {
         x -= FOOTER_MARK_SLOT;
@@ -5088,6 +5348,7 @@ fn not_sent(message: &Message) -> bool {
 /// Paints the time and ticks at the bubble's right edge without widening it.
 /// Returns whether the "not sent" status was clicked to send the message
 /// again, which `resend` allows. Our time and ticks open "Message info".
+#[allow(clippy::too_many_arguments)]
 fn footer(
     ui: &mut egui::Ui,
     view: &View<'_>,
@@ -5095,6 +5356,7 @@ fn footer(
     slot: Option<Rect>,
     resend: bool,
     starred: bool,
+    pinned: bool,
     actions: &mut Vec<Action>,
 ) -> bool {
     let palette = &view.palette;
@@ -5152,6 +5414,20 @@ fn footer(
     );
     status_opens_info(ui, view, message, status, actions);
     let mut clicked = false;
+    if pinned {
+        // Left of the clock, in the room `footer_width` counted for it.
+        x -= FOOTER_MARK_SLOT;
+        theme::paint_icon(
+            ui,
+            Icon::Pin,
+            Rect::from_center_size(
+                pos2(x + FOOTER_MARK / 2.0, rect.center().y),
+                Vec2::splat(FOOTER_MARK),
+            ),
+            FOOTER_MARK,
+            palette.secondary,
+        );
+    }
     if let Some(edited) = edited {
         x -= edited.size().x + 4.0;
         ui.painter().galley(
@@ -5407,6 +5683,8 @@ pub(crate) fn list_menu(
         selection: &[],
         selection_revocable: false,
         selection_forwardable: false,
+        pins: app.pins.get(&message.chat),
+        pin_notices: &[],
     };
     context_menu(ui, &view, message, MenuOrigin::List, actions);
 }
@@ -5554,6 +5832,21 @@ fn context_menu(
             starred: !starred,
         });
         ui.close();
+    }
+    let pinned = view.pins.is_some_and(|ids| ids.contains(&message.id));
+    let pin_label = if pinned {
+        crate::i18n::gettext(view.locale, "Unpin message")
+    } else {
+        crate::i18n::gettext(view.locale, "Pin message")
+    };
+    if !matches!(message.content, Content::Revoked { .. })
+        && widgets::menu_item(ui, &palette, Some(Icon::Pin), &pin_label)
+    {
+        actions.push(Action::SetMessagePinned {
+            chat: chat.clone(),
+            message: message.id.clone(),
+            pinned: !pinned,
+        });
     }
     let forwardable = if group.len() > 1 {
         view.selection_forwardable
@@ -10522,6 +10815,282 @@ mod tests {
         assert!(!reaction_affordance_visible(None, bubble, button));
     }
 
+    /// One pinned row, as the archive hands it over.
+    fn pinned(chat: &str, id: &str) -> crate::archive::Pinned {
+        crate::archive::Pinned {
+            chat: chat.to_owned(),
+            id: id.to_owned(),
+            pinned_at: 1,
+            expires_at: i64::MAX,
+            text: format!("message {id}"),
+            from_me: false,
+            sent_at: 1,
+            pinner: crate::archive::Pinner {
+                by_me: true,
+                sender: String::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn a_pin_notice_names_who_pinned_the_message() {
+        let names = |id: &str, _: Option<&str>| id.split('@').next().unwrap_or(id).to_owned();
+        let mut row = pinned("1@s.whatsapp.net", "m1");
+        assert_eq!(
+            pin_notice_label(crate::i18n::Locale::English, &row, &names),
+            "You pinned a message"
+        );
+
+        row.pinner = crate::archive::Pinner {
+            by_me: false,
+            sender: "bob@s.whatsapp.net".to_owned(),
+        };
+        assert_eq!(
+            pin_notice_label(crate::i18n::Locale::English, &row, &names),
+            "bob pinned a message"
+        );
+
+        // An archive that does not say who pinned it still shows the pin.
+        row.pinner.sender.clear();
+        assert_eq!(
+            pin_notice_label(crate::i18n::Locale::English, &row, &names),
+            "A message was pinned"
+        );
+    }
+
+    #[test]
+    fn an_expired_pin_leaves_the_line_under_the_header() {
+        let mut gone = pinned("1@s.whatsapp.net", "m2");
+        gone.expires_at = 1_000;
+        let mut live = pinned("1@s.whatsapp.net", "m1");
+        live.expires_at = 2_000;
+
+        let rows = live_pins(&[gone, live.clone()], 1_500);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "m1");
+        assert!(
+            live_pins(&[live], 2_000).is_empty(),
+            "the moment it runs out, it leaves"
+        );
+    }
+
+    #[test]
+    fn an_open_pin_asks_for_a_frame_when_it_expires() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _) = App::headless(
+            crate::paths::AppDirs::under(directory.path()),
+            crate::settings::Settings::default(),
+        );
+        let chat = Chat::new("1@s.whatsapp.net".into(), "Ada".into());
+        let mut row = pinned(&chat.id, "m1");
+        row.expires_at = crate::util::now() + 30;
+        app.chat_pins.insert(chat.id.clone(), vec![row]);
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            pin_banner(&mut app, ui, &chat);
+        });
+        output.textures_delta.clear();
+        let delay = output
+            .viewport_output
+            .values()
+            .map(|viewport| viewport.repaint_delay)
+            .min()
+            .unwrap_or(std::time::Duration::MAX);
+        assert!(
+            delay.as_secs() <= 31,
+            "the banner wakes when the pin runs out"
+        );
+    }
+
+    #[test]
+    fn a_pin_notice_sits_above_the_message_that_followed_its_pin() {
+        // `chat_pins` hands the newest pin over first. A pin at 100 and one at
+        // 500 belong above the messages at 200 and 600, one each.
+        let mut newest_first = vec![
+            pinned("1@s.whatsapp.net", "c"),
+            pinned("1@s.whatsapp.net", "a"),
+        ];
+        newest_first[0].pinned_at = 500;
+        newest_first[1].pinned_at = 100;
+
+        let ordered = pin_notices_in_time_order(&newest_first);
+        assert_eq!(
+            ordered.iter().map(|row| row.pinned_at).collect::<Vec<_>>(),
+            [100, 500],
+            "the list goes back into time order before it is placed"
+        );
+        assert_eq!(notices_above(&ordered[..], 200), 1, "one notice above 200");
+        assert_eq!(notices_above(&ordered[1..], 600), 1, "and one above 600");
+
+        // Handed over unsorted, both would pile above the later message, which
+        // is the bug this keeps out.
+        assert_eq!(notices_above(&newest_first[..], 200), 0);
+    }
+
+    #[test]
+    fn the_pin_line_shows_the_newest_pin_and_a_click_walks_the_rest() {
+        let rows = vec![
+            pinned("1@s.whatsapp.net", "newest"),
+            pinned("1@s.whatsapp.net", "middle"),
+            pinned("1@s.whatsapp.net", "oldest"),
+        ];
+        // Nothing shown yet, or the shown pin gone: the newest.
+        assert_eq!(shown_pin(&rows, None), 0);
+        assert_eq!(shown_pin(&rows, Some("unpinned")), 0);
+        assert_eq!(shown_pin(&rows, Some("middle")), 1);
+        // Each click moves on to the next older pin and wraps to the newest.
+        assert_eq!(next_pin(3, 0), 1);
+        assert_eq!(next_pin(3, 1), 2);
+        assert_eq!(next_pin(3, 2), 0);
+        // One pin is its own next pin.
+        assert_eq!(next_pin(1, 0), 0);
+    }
+
+    #[test]
+    fn the_pin_bar_has_a_segment_per_pin_inside_the_line() {
+        for count in 1..=3 {
+            let segments = pin_bar_segments(10.0, 28.0, count);
+            assert_eq!(segments.len(), count);
+            assert!((segments[0].0 - 10.0).abs() < 0.01);
+            assert!((segments[count - 1].1 - 38.0).abs() < 0.01, "{segments:?}");
+            for pair in segments.windows(2) {
+                assert!(pair[1].0 > pair[0].1, "segments do not touch: {segments:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_click_on_the_pin_line_opens_the_pin_and_shows_the_next() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _) = App::headless(
+            crate::paths::AppDirs::under(directory.path()),
+            crate::settings::Settings::default(),
+        );
+        let chat = Chat::new("1@s.whatsapp.net".into(), "Ada".into());
+        app.chat_pins.insert(
+            chat.id.clone(),
+            vec![pinned(&chat.id, "newest"), pinned(&chat.id, "older")],
+        );
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(600.0, 400.0));
+        // Clicks a second apart, so none of them counts as a double click.
+        let clock = std::cell::Cell::new(0.0);
+        let frame = |events: Vec<egui::Event>, app: &mut App, step: f64| {
+            clock.set(clock.get() + step);
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    time: Some(clock.get()),
+                    events,
+                    ..Default::default()
+                },
+                |ui| pin_banner(app, ui, &chat),
+            );
+            output.textures_delta.clear();
+        };
+        let at = pos2(300.0, PIN_ROW_HEIGHT / 2.0);
+        let press = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        // The line has to be laid out once before it can take a click.
+        frame(vec![egui::Event::PointerMoved(at)], &mut app, 1.0);
+        let mut opened = Vec::new();
+        for _ in 0..3 {
+            frame(
+                vec![egui::Event::PointerMoved(at), press(true)],
+                &mut app,
+                1.0,
+            );
+            frame(vec![press(false)], &mut app, 0.05);
+            for action in app.actions.drain(..) {
+                if let Action::OpenMessage { message, .. } = action {
+                    opened.push(message);
+                }
+            }
+        }
+        assert_eq!(opened, ["newest", "older", "newest"]);
+    }
+
+    #[test]
+    fn the_footer_takes_a_slot_only_for_the_marks_on_the_bubble() {
+        let ctx = egui::Context::default();
+        let mut clock = 0.0;
+        let mut plain = 0.0;
+        let mut pinned = 0.0;
+        let mut both = 0.0;
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(400.0, 200.0))),
+                ..Default::default()
+            },
+            |ui| {
+                let message = crate::archive::tests::message("1@s.whatsapp.net", "m1", 0, false);
+                clock = clock_width(ui, &message);
+                plain = footer_width(ui, &message, false, false);
+                pinned = footer_width(ui, &message, false, true);
+                both = footer_width(ui, &message, true, true);
+            },
+        );
+        output.textures_delta.clear();
+        // Measured against the clock the reader's own format produces, not a
+        // number that only holds on a 24-hour one: the same footer is a third
+        // wider where the system shows "12:00 AM".
+        assert!(
+            (plain - clock).abs() < 0.01,
+            "a message without a mark is just the clock, {plain} vs {clock}"
+        );
+        assert!(
+            (pinned - clock - FOOTER_MARK_SLOT).abs() < 0.5,
+            "a pin takes one slot, {pinned} vs {clock}"
+        );
+        assert!(
+            (both - clock - FOOTER_MARK_SLOT * 2.0).abs() < 0.5,
+            "a star and a pin take one slot each, {both} vs {clock}"
+        );
+    }
+
+    #[test]
+    fn the_footer_paints_a_pin_mark_when_the_message_is_pinned() {
+        let ctx = egui::Context::default();
+        with_still_view(|view| {
+            let shapes = |pinned: bool| {
+                let message = crate::archive::tests::message("1@s.whatsapp.net", "m1", 0, false);
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            vec2(400.0, 200.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        footer(
+                            ui,
+                            view,
+                            &message,
+                            None,
+                            false,
+                            false,
+                            pinned,
+                            &mut Vec::new(),
+                        );
+                    },
+                );
+                output.textures_delta.clear();
+                output.shapes.len()
+            };
+            assert_eq!(
+                shapes(true),
+                shapes(false) + 1,
+                "a pinned message paints one extra mark"
+            );
+        });
+    }
+
     #[test]
     fn picture_frames_keep_their_shape_within_the_limit() {
         let landscape = frame_size(&media(Some(1600), Some(1200)), None, 340.0, PICTURE_HEIGHT);
@@ -10555,9 +11124,9 @@ mod tests {
                 let from_them = crate::archive::tests::message("1@s.whatsapp.net", "m1", 0, false);
                 let from_me = crate::archive::tests::message("1@s.whatsapp.net", "m1", 0, true);
                 clock = clock_width(ui, &from_them);
-                incoming = footer_width(ui, &from_them, false);
-                starred = footer_width(ui, &from_them, true);
-                own = footer_width(ui, &from_me, false);
+                incoming = footer_width(ui, &from_them, false, false);
+                starred = footer_width(ui, &from_them, true, false);
+                own = footer_width(ui, &from_me, false, false);
             },
         );
         output.textures_delta.clear();
@@ -10578,10 +11147,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_footer_paints_a_star_mark_when_the_message_is_starred() {
-        let ctx = egui::Context::default();
-        crate::theme::install(&ctx);
+    /// Runs `check` with a still view of one plain chat, as a footer test
+    /// needs one to paint into.
+    fn with_still_view(check: impl FnOnce(&View<'_>)) {
         let directory = tempfile::tempdir().unwrap();
         let (app, _events) = App::headless(
             crate::paths::AppDirs::under(directory.path()),
@@ -10632,22 +11200,95 @@ mod tests {
             selection: &[],
             selection_revocable: false,
             selection_forwardable: false,
+            pins: None,
+            pin_notices: &[],
         };
-        let shapes = |starred: bool| {
-            let message = crate::archive::tests::message("1@s.whatsapp.net", "m1", 0, false);
-            let mut output = ctx.run_ui(
-                egui::RawInput {
-                    screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(400.0, 200.0))),
-                    ..Default::default()
-                },
-                |ui| {
-                    footer(ui, &view, &message, None, false, starred, &mut Vec::new());
-                },
+        check(&view);
+    }
+
+    #[test]
+    fn the_footer_paints_a_star_mark_when_the_message_is_starred() {
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        with_still_view(|view| {
+            let shapes = |starred: bool| {
+                let message = crate::archive::tests::message("1@s.whatsapp.net", "m1", 0, false);
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            vec2(400.0, 200.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        footer(
+                            ui,
+                            view,
+                            &message,
+                            None,
+                            false,
+                            starred,
+                            false,
+                            &mut Vec::new(),
+                        );
+                    },
+                );
+                output.textures_delta.clear();
+                output.shapes.len()
+            };
+            assert_eq!(shapes(true), shapes(false) + 1, "a star paints one mark");
+        });
+    }
+
+    #[test]
+    fn a_picture_without_a_caption_paints_the_marks_it_carries() {
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        with_still_view(|view| {
+            let shapes = |starred: bool, pinned: bool| {
+                let message = crate::archive::tests::message("1@s.whatsapp.net", "m1", 0, false);
+                let picture = Rect::from_min_size(egui::Pos2::ZERO, vec2(240.0, 180.0));
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            vec2(400.0, 200.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        footer_over_picture(
+                            ui,
+                            view,
+                            &message,
+                            picture,
+                            false,
+                            starred,
+                            pinned,
+                            &mut Vec::new(),
+                        );
+                    },
+                );
+                output.textures_delta.clear();
+                output.shapes.len()
+            };
+            assert_eq!(
+                shapes(true, false),
+                shapes(false, false) + 1,
+                "a star on a picture paints one mark"
             );
-            output.textures_delta.clear();
-            output.shapes.len()
-        };
-        assert_eq!(shapes(true), shapes(false) + 1, "a star paints one mark");
+            assert_eq!(
+                shapes(false, true),
+                shapes(false, false) + 1,
+                "a pin on a picture paints one mark"
+            );
+            assert_eq!(
+                shapes(true, true),
+                shapes(false, false) + 2,
+                "both marks on a picture paint both"
+            );
+        });
     }
 
     #[test]
@@ -10681,12 +11322,12 @@ mod tests {
         };
         let mut widths = Vec::new();
         let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
-            widths.push(footer_width(ui, &message, false));
+            widths.push(footer_width(ui, &message, false, false));
             message.status = Delivery::Failed;
-            widths.push(footer_width(ui, &message, false));
+            widths.push(footer_width(ui, &message, false, false));
             // Only our own messages can fail to send.
             message.from_me = false;
-            widths.push(footer_width(ui, &message, false) + 19.0);
+            widths.push(footer_width(ui, &message, false, false) + 19.0);
         });
         output.textures_delta.clear();
         assert!(widths[1] > widths[0] + 30.0, "{widths:?}");

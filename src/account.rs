@@ -92,6 +92,10 @@ pub struct Account {
     /// Ids of the starred messages of each chat, for the mark in the
     /// conversation. Filled when a chat opens and on every confirmed star.
     pub stars: HashMap<ChatId, HashSet<String>>,
+    /// Ids of each chat's pinned messages, for its menu and its bubble mark.
+    pub pins: HashMap<ChatId, HashSet<String>>,
+    /// Active pins of each chat, for the line under its header.
+    pub chat_pins: HashMap<ChatId, Vec<crate::archive::Pinned>>,
     /// A starred row asked to reply: the quote starts once the message it
     /// points at is loaded, because the composer drops a quote whose message
     /// has not arrived yet.
@@ -194,6 +198,8 @@ impl Account {
             starred: Vec::new(),
             show_starred: false,
             stars: HashMap::new(),
+            pins: HashMap::new(),
+            chat_pins: HashMap::new(),
             reply_when_loaded: None,
             account_privacy: crate::privacy::Snapshot::default(),
             interactive_sending: HashSet::new(),

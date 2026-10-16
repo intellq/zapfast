@@ -19,6 +19,8 @@ pub use favorites::Favorite;
 mod labels;
 mod lid_chats;
 pub use labels::{DEFAULT_COLOR, LABEL_LIMIT, NAME_LIMIT};
+mod pins;
+pub use pins::{Pinned, Pinner};
 mod polls;
 mod receipts;
 mod stars;
@@ -395,6 +397,7 @@ impl Archive {
         connection.execute_batch(favorites::SCHEMA)?;
         connection.execute_batch(transcripts::SCHEMA)?;
         connection.execute_batch(stars::SCHEMA)?;
+        connection.execute_batch(pins::SCHEMA)?;
         for (table, column, definition) in MIGRATIONS {
             let exists = connection
                 .prepare(&format!("PRAGMA table_info({table})"))?
@@ -1475,6 +1478,13 @@ impl Archive {
             "DELETE FROM stars WHERE chat = ?1 AND id = ?2",
             params![chat, id],
         )?;
+        // A pin outlives its message in the table only until the message
+        // goes. Left behind, it would hold one of the chat's three slots
+        // while the line under the header had nothing to show for it.
+        self.connection.execute(
+            "DELETE FROM message_pins WHERE chat = ?1 AND id = ?2",
+            params![chat, id],
+        )?;
         Ok(deleted > 0)
     }
 
@@ -1872,6 +1882,10 @@ impl Archive {
                 edited
             ],
         )?;
+        if matches!(content, Content::Revoked { .. }) {
+            // Deleted for everyone: the message is gone, so its pin is too.
+            self.delete_pin(chat, id)?;
+        }
         Ok(changed > 0)
     }
 
@@ -2441,6 +2455,191 @@ pub(crate) mod tests {
         assert!(!row.read_only, "the metadata is applied as it came");
         archive.set_left(id, false).expect("rejoined");
         assert!(!archive.chat(id).expect("row").expect("chat").left);
+    }
+
+    #[test]
+    fn pinning_caps_at_three_active_and_drops_expired() {
+        let archive = Archive::in_memory().unwrap();
+        archive.ensure_chat("1@s.whatsapp.net", "Fixture").unwrap();
+        for id in ["a", "b", "c", "d"] {
+            archive
+                .insert_message(&message("1@s.whatsapp.net", id, 100, false), None)
+                .unwrap();
+        }
+        archive.pin("1@s.whatsapp.net", "a", 10, 1_000).unwrap();
+        archive.pin("1@s.whatsapp.net", "b", 20, 1_000).unwrap();
+        archive.pin("1@s.whatsapp.net", "c", 30, 1_000).unwrap();
+        assert!(archive.pin_full("1@s.whatsapp.net", "d", 50).unwrap());
+        assert!(!archive.pin_full("1@s.whatsapp.net", "a", 50).unwrap());
+        archive.unpin("1@s.whatsapp.net", "b", 35).unwrap();
+        assert!(!archive.pin_full("1@s.whatsapp.net", "d", 50).unwrap());
+        archive.pin("1@s.whatsapp.net", "d", 40, 1_000).unwrap();
+        let ids = archive.pinned_ids("1@s.whatsapp.net", 50).unwrap();
+        assert!(ids.contains("a") && ids.contains("c") && ids.contains("d"));
+        assert!(!ids.contains("b"));
+        archive.pin("1@s.whatsapp.net", "a", 10, 40).unwrap();
+        let ids = archive.pinned_ids("1@s.whatsapp.net", 50).unwrap();
+        assert!(!ids.contains("a"), "expired pins leave the active set");
+    }
+
+    #[test]
+    fn chat_pins_list_newest_first_with_message_body() {
+        let archive = Archive::in_memory().unwrap();
+        archive.ensure_chat("1@s.whatsapp.net", "Fixture").unwrap();
+        archive
+            .insert_message(&message("1@s.whatsapp.net", "old", 10, false), None)
+            .unwrap();
+        archive
+            .insert_message(&message("1@s.whatsapp.net", "new", 20, true), None)
+            .unwrap();
+        archive.pin("1@s.whatsapp.net", "old", 1, 1_000).unwrap();
+        archive.pin("1@s.whatsapp.net", "new", 2, 1_000).unwrap();
+        archive.pin("1@s.whatsapp.net", "ghost", 3, 1_000).unwrap();
+        let rows = archive.chat_pins("1@s.whatsapp.net", 50).unwrap();
+        let ids: Vec<&str> = rows.iter().map(|row| row.id.as_str()).collect();
+        assert_eq!(ids, vec!["new", "old"]);
+        assert_eq!(rows[0].text, "message new");
+        assert!(rows[0].from_me);
+        assert!(rows[0].pinner.by_me, "a pin made here says so");
+        assert!(rows[0].pinner.sender.is_empty());
+    }
+
+    #[test]
+    fn a_pin_made_elsewhere_remembers_who_made_it() {
+        let archive = Archive::in_memory().unwrap();
+        archive.ensure_chat("1@s.whatsapp.net", "Fixture").unwrap();
+        archive
+            .insert_message(&message("1@s.whatsapp.net", "m1", 10, false), None)
+            .unwrap();
+        let bob = Pinner {
+            by_me: false,
+            sender: "bob@s.whatsapp.net".to_owned(),
+        };
+        archive
+            .pin_from("1@s.whatsapp.net", "m1", 500, 9_000, &bob)
+            .unwrap();
+        let rows = archive.chat_pins("1@s.whatsapp.net", 600).unwrap();
+        assert_eq!(rows[0].pinner, bob, "the notice can name who pinned it");
+        // An older pin from anyone loses to the state already stored.
+        assert!(
+            !archive
+                .pin_from("1@s.whatsapp.net", "m1", 400, 9_000, &bob)
+                .unwrap()
+        );
+        let rows = archive.chat_pins("1@s.whatsapp.net", 600).unwrap();
+        assert_eq!(rows.len(), 1, "the newer pin stands");
+        assert_eq!(rows[0].pinned_at, 500);
+        // And an unpin from someone else takes it away.
+        archive
+            .set_pin("1@s.whatsapp.net", "m1", false, 700, 0, &bob)
+            .unwrap();
+        assert!(
+            archive
+                .chat_pins("1@s.whatsapp.net", 800)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_message_deleted_here_or_for_everyone_stops_being_a_pin() {
+        let archive = Archive::in_memory().unwrap();
+        archive.ensure_chat("1@s.whatsapp.net", "Fixture").unwrap();
+        for id in ["a", "b", "c", "d"] {
+            archive
+                .insert_message(&message("1@s.whatsapp.net", id, 100, false), None)
+                .unwrap();
+        }
+        for id in ["a", "b", "c"] {
+            archive.pin("1@s.whatsapp.net", id, 10, 9_000).unwrap();
+        }
+        assert!(archive.pin_full("1@s.whatsapp.net", "d", 50).unwrap());
+
+        // Deleted here: the pin goes with the message, so the slot is free
+        // rather than held for the rest of the pin's seven days.
+        archive.delete_message("1@s.whatsapp.net", "c").unwrap();
+        assert!(!archive.pin_full("1@s.whatsapp.net", "d", 50).unwrap());
+        assert_eq!(
+            archive.chat_pins("1@s.whatsapp.net", 50).unwrap().len(),
+            2,
+            "the line shows the pins left"
+        );
+
+        // Deleted for everyone: the same, for the stub that stays behind.
+        archive
+            .set_content("1@s.whatsapp.net", "b", &Content::REVOKED, false)
+            .unwrap();
+        assert!(!archive.pin_full("1@s.whatsapp.net", "d", 50).unwrap());
+        assert_eq!(archive.chat_pins("1@s.whatsapp.net", 50).unwrap().len(), 1);
+    }
+
+    /// History and reconnects replay old pins. A message revoked for everyone
+    /// must not take one of the chat's three slots again, and a pin dropped
+    /// with a deleted message leaves no slot held.
+    #[test]
+    fn a_replayed_pin_of_a_deleted_message_stays_gone() {
+        let chat = "1@s.whatsapp.net";
+        let archive = Archive::in_memory().unwrap();
+        archive.ensure_chat(chat, "Fixture").unwrap();
+        for id in ["a", "b", "c", "d"] {
+            archive
+                .insert_message(&message(chat, id, 100, false), None)
+                .unwrap();
+        }
+        for id in ["a", "b", "c"] {
+            archive.pin(chat, id, 10, 9_000).unwrap();
+        }
+        archive.delete_message(chat, "c").unwrap();
+        archive
+            .set_content(chat, "b", &Content::REVOKED, false)
+            .unwrap();
+
+        // The same pins arrive again, as a history replay sends them.
+        let by = Pinner {
+            by_me: false,
+            sender: "2@s.whatsapp.net".into(),
+        };
+        assert!(
+            !archive.pin_from(chat, "b", 10, 9_000, &by).unwrap(),
+            "b takes no pin back"
+        );
+        assert_eq!(
+            archive.pinned_ids(chat, 50).unwrap(),
+            std::collections::HashSet::from(["a".to_owned()]),
+            "only the message still here counts"
+        );
+        assert!(!archive.pin_full(chat, "d", 50).unwrap());
+    }
+
+    #[test]
+    fn an_older_pin_does_not_undo_a_newer_unpin() {
+        let archive = Archive::in_memory().unwrap();
+        archive.ensure_chat("1@s.whatsapp.net", "Fixture").unwrap();
+        archive
+            .insert_message(&message("1@s.whatsapp.net", "m1", 100, false), None)
+            .unwrap();
+        assert!(archive.pin("1@s.whatsapp.net", "m1", 500, 9_000).unwrap());
+        assert!(!archive.unpin("1@s.whatsapp.net", "m1", 400).unwrap());
+        assert!(
+            archive
+                .pinned_ids("1@s.whatsapp.net", 600)
+                .unwrap()
+                .contains("m1")
+        );
+        assert!(archive.unpin("1@s.whatsapp.net", "m1", 700).unwrap());
+        assert!(
+            archive
+                .pinned_ids("1@s.whatsapp.net", 800)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(!archive.pin("1@s.whatsapp.net", "m1", 650, 9_000).unwrap());
+        assert!(
+            archive
+                .pinned_ids("1@s.whatsapp.net", 800)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

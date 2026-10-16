@@ -1296,6 +1296,7 @@ fn video_label(gif: bool, note: bool) -> &'static str {
     }
 }
 
+/// `label: caption` with the caption whole, for a row that wraps it.
 fn with_caption(label: &str, caption: &Option<String>) -> String {
     match caption
         .as_deref()
@@ -2227,6 +2228,12 @@ pub enum Action {
     /// Clears a chat's messages here and on the phone, keeping the chat.
     ClearChat(ChatId),
     SetPinned(ChatId, bool),
+    /// Pins or unpins one message for everyone in the chat.
+    SetMessagePinned {
+        chat: ChatId,
+        message: String,
+        pinned: bool,
+    },
     /// Marks a chat as a favorite, or removes the mark, here and on the phone.
     SetFavorite(ChatId, bool),
     ShowDialog(Dialog),

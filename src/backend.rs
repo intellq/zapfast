@@ -238,6 +238,8 @@ pub enum Command {
         chat: ChatId,
         before: Option<PageKey>,
     },
+    /// Asks for one chat's active pins, for the line under its header.
+    LoadPins(ChatId),
     /// Requests messages before the archive's earliest message.
     FetchOlder(ChatId),
     /// Requests phone history immediately before an archived message to repair
@@ -721,6 +723,27 @@ pub enum Command {
         through: i64,
     },
     SetPinned(ChatId, bool),
+    /// Pins or unpins one message for everyone in the chat.
+    SetMessagePinned {
+        chat: ChatId,
+        message: String,
+        pinned: bool,
+    },
+    /// Result of a pin or unpin request.
+    MessagePinned {
+        chat: ChatId,
+        message: String,
+        pinned: bool,
+        /// When the click was made. An older answer cannot overwrite a newer one.
+        at: i64,
+        /// Which attempt this answer belongs to.
+        generation: u64,
+        /// The link the request was sent on: an answer that outlives a
+        /// logout must not write the next account's archive.
+        session: u64,
+        expires_at: i64,
+        result: Result<(), String>,
+    },
     /// Marks a chat as a favorite, or removes the mark, here and on the phone.
     SetFavorite(ChatId, bool),
     /// The phone answered a favorites list sent at `at` holding the queued
@@ -1033,6 +1056,17 @@ pub enum Event {
         truncated: bool,
     },
     ChatUpdated(Box<Chat>),
+    /// Active pins of one chat, for the line under its header.
+    Pins {
+        chat: ChatId,
+        items: Vec<crate::archive::Pinned>,
+    },
+    /// A pin the server accepted, or refused, for one message.
+    PinChanged {
+        chat: ChatId,
+        message: String,
+        pinned: bool,
+    },
     /// Chat messages in ascending order. `older` prepends them; `complete`
     /// means the archive has no earlier rows.
     Messages {

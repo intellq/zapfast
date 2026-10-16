@@ -26,7 +26,7 @@ use whatsapp_rust::pair_code::PairCodeOptions;
 use whatsapp_rust::prelude::{
     Bot, BotHandle, Client, Jid, MessageBuilderExt, MessageExt, MessageField, SendOptions, wa,
 };
-use whatsapp_rust::send::RevokeType;
+use whatsapp_rust::send::{PinDuration, RevokeType};
 use whatsapp_rust::types::events as wa_events;
 use whatsapp_rust::types::message::{EncMediaType, MessageInfo, MessageSource};
 use whatsapp_rust::types::presence::{ChatActivity, PresenceStatus, ReceiptType};
@@ -453,6 +453,8 @@ fn spawn_calling_gate_log(client: Arc<Client>) {
     });
 }
 
+/// Seven days: the pin length WhatsApp offers for a message pinned in a chat.
+const PIN_SECS: i64 = 7 * 24 * 60 * 60;
 /// Reports how many chats this account may pin. The AB props arrive shortly
 /// after connecting and there is no event for them, so this polls briefly.
 fn spawn_pin_limit_check(
@@ -795,6 +797,7 @@ pub async fn run(
         privacy_retry: Instant::now(),
         star_generation: HashMap::new(),
         star_session: 0,
+        pin_generation: HashMap::new(),
         withheld_pages: Vec::new(),
         dirs,
         events,
@@ -1122,6 +1125,9 @@ struct Worker {
     /// linked, and the per-message generations start over there, so the
     /// session has to be checked as well.
     star_session: u64,
+    /// Latest pin or unpin attempt per message. A finished request whose
+    /// generation is older than this is dropped.
+    pin_generation: HashMap<(String, String), u64>,
     /// Transcript pages asked for while private content was withheld. Their
     /// answers never reached the interface, which still waits for them, so
     /// they are read again once content is shown (#180).
@@ -1432,6 +1438,7 @@ struct ParsedChat {
     poll_updates: Vec<HistoryPollUpdate>,
     reactions: Vec<HistoryReaction>,
     clips: Vec<HistoryClip>,
+    pins: Vec<HistoryPin>,
 }
 
 /// A motion photo's clip from history, filed for its photo.
@@ -1469,6 +1476,16 @@ struct HistoryPollUpdate {
     from_me: bool,
     timestamp: i64,
     update: wa::message::PollUpdateMessage,
+}
+
+/// A pin or unpin the phone's history carries for one message.
+struct HistoryPin {
+    target: String,
+    pinned: bool,
+    duration_secs: u32,
+    at: i64,
+    /// Who pinned it, for the notice the chat shows.
+    pinner: crate::archive::Pinner,
 }
 
 /// Standalone reaction from history, applied after the parent row is stored.
@@ -1552,6 +1569,7 @@ impl Worker {
                     | Event::Labels(_)
                     | Event::Typing { .. }
                     | Event::StarredList(_)
+                    | Event::Pins { .. }
             )
         {
             return;
@@ -3703,6 +3721,8 @@ impl Worker {
         // finishes after logout must not write the next account, whose
         // generations start over.
         self.star_generation.clear();
+        self.pin_generation.clear();
+        // Pin answers carry the same session as star answers.
         self.star_session = self.star_session.wrapping_add(1);
         self.me_pn = None;
         self.me_lid = None;
@@ -4160,6 +4180,17 @@ impl Worker {
                 from_me,
                 info.timestamp.timestamp(),
                 update,
+            );
+            return;
+        }
+        if let Some(pin) = base.pin_in_chat_message.as_option() {
+            self.ingest_pin(
+                &chat,
+                pin,
+                base,
+                info.timestamp.timestamp(),
+                &sender,
+                from_me,
             );
             return;
         }
@@ -5296,6 +5327,32 @@ impl Worker {
             for reaction in chat.reactions {
                 self.apply_history_reaction(&id, reaction, &secrets);
             }
+            let had_pins = !chat.pins.is_empty();
+            for pin in chat.pins {
+                let written = if pin.pinned {
+                    let secs = if pin.duration_secs == 0 {
+                        PIN_SECS
+                    } else {
+                        i64::from(pin.duration_secs)
+                    };
+                    self.archive.pin_from(
+                        &id,
+                        &pin.target,
+                        pin.at,
+                        pin.at.saturating_add(secs),
+                        &pin.pinner,
+                    )
+                } else {
+                    self.archive
+                        .set_pin(&id, &pin.target, false, pin.at, 0, &pin.pinner)
+                };
+                if let Err(error) = written {
+                    log::warn!("could not store a history pin: {error}");
+                }
+            }
+            if had_pins {
+                self.emit_pins(&id);
+            }
             for update in chat.poll_updates {
                 let sender = if update.from_me {
                     self.me()
@@ -6028,6 +6085,7 @@ impl Worker {
                 }
             }
             Command::LoadChat { chat, before } => self.load_chat(chat, before),
+            Command::LoadPins(chat) => self.emit_pins(&chat),
             Command::FetchOlder(chat) => {
                 let _ = self.fetch_older(chat, false);
             }
@@ -7258,6 +7316,52 @@ impl Worker {
             Command::BlocklistFetched(result) => self.blocklist_fetched(result),
             Command::SetBlocked { chat, blocked } => self.set_blocked(chat, blocked),
             Command::BlockAnswered { chat, blocked, ok } => self.block_answered(chat, blocked, ok),
+            Command::SetMessagePinned {
+                chat,
+                message,
+                pinned,
+            } => self.set_pin(chat, message, pinned),
+            Command::MessagePinned {
+                chat,
+                message,
+                pinned,
+                at,
+                generation,
+                session,
+                expires_at,
+                result,
+            } => {
+                if self.star_session != session
+                    || self
+                        .pin_generation
+                        .get(&(chat.clone(), message.clone()))
+                        .copied()
+                        != Some(generation)
+                {
+                    return;
+                }
+                if let Err(error) = &result {
+                    self.emit(Event::Error(error.clone()));
+                } else {
+                    let written = if pinned {
+                        self.archive.pin(&chat, &message, at, expires_at)
+                    } else {
+                        self.archive.unpin(&chat, &message, at)
+                    };
+                    match written {
+                        Ok(true) => {
+                            self.emit(Event::PinChanged {
+                                chat: chat.clone(),
+                                message,
+                                pinned,
+                            });
+                            self.emit_pins(&chat);
+                        }
+                        Ok(false) => {}
+                        Err(error) => self.emit(Event::Error(error.to_string())),
+                    }
+                }
+            }
             Command::ChannelMutes(mutes) => {
                 for (chat, muted) in mutes {
                     let Ok(Some(known)) = self.archive.chat(&chat) else {
@@ -8499,6 +8603,9 @@ impl Worker {
                 chat: chat.clone(),
                 ids: ids.into_iter().collect(),
             });
+        }
+        if before.is_none() {
+            self.emit_pins(&chat);
         }
         if before.is_none() && ChatKind::from_id(&chat) == ChatKind::Group {
             // Force group metadata when opening a group.
@@ -10280,6 +10387,145 @@ impl Worker {
                 log::warn!("could not send a reaction");
             }
         });
+    }
+
+    /// Pins or unpins one message for everyone in the chat, for seven days.
+    /// The archive is written only once WhatsApp answers, so a request that
+    /// never reaches the phone leaves nothing behind.
+    fn next_pin_generation(&mut self, chat: &str, id: &str) -> u64 {
+        let slot = self
+            .pin_generation
+            .entry((chat.to_owned(), id.to_owned()))
+            .or_insert(0);
+        *slot = slot.wrapping_add(1);
+        *slot
+    }
+
+    fn set_pin(&mut self, chat: ChatId, id: String, pinned: bool) {
+        let generation = self.next_pin_generation(&chat, &id);
+        let session = self.star_session;
+        let commands = self.commands.clone();
+        let now = crate::util::now();
+        if pinned && self.archive.pin_full(&chat, &id, now).unwrap_or(true) {
+            self.emit(Event::Error(
+                "This chat already has three pinned messages".to_owned(),
+            ));
+            return;
+        }
+        let (Some(client), Some(jid)) = (self.client.clone(), Self::jid_of(&chat)) else {
+            let _ = commands.send(Command::MessagePinned {
+                chat,
+                message: id,
+                pinned,
+                at: now,
+                generation,
+                session,
+                expires_at: now + PIN_SECS,
+                result: Err("Not connected to WhatsApp".to_owned()),
+            });
+            return;
+        };
+        let Ok(Some(target)) = self.archive.message(&chat, &id) else {
+            let _ = commands.send(Command::MessagePinned {
+                chat,
+                message: id,
+                pinned,
+                at: now,
+                generation,
+                session,
+                expires_at: now + PIN_SECS,
+                result: Err("This message is not stored on this computer".to_owned()),
+            });
+            return;
+        };
+        let from_me = target.from_me;
+        let participant = (jid.is_group() && !from_me)
+            .then(|| target.sender.clone())
+            .and_then(|sender| Self::jid_of(&sender));
+        let expires_at = now + PIN_SECS;
+        tokio::spawn(async move {
+            let target = whatsapp_rust::MessageId::new(&id).and_then(|message_id| {
+                whatsapp_rust::MessageRef::new(&jid, message_id, participant.as_ref(), from_me)
+            });
+            let result = match target {
+                Ok(target) if pinned => client
+                    .pin_message(&target, PinDuration::Days7)
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.to_string()),
+                Ok(target) => client
+                    .unpin_message(&target)
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.to_string()),
+                // Only an empty id or a group message without its author fails here.
+                Err(error) => Err(error.to_string()),
+            };
+            let _ = commands.send(Command::MessagePinned {
+                chat,
+                message: id,
+                pinned,
+                at: now,
+                generation,
+                session,
+                expires_at,
+                result,
+            });
+        });
+    }
+
+    /// Stores a pin or an unpin that arrived as a message of its own, from
+    /// this account's other device or from anyone in the chat.
+    fn ingest_pin(
+        &mut self,
+        chat: &str,
+        pin: &wa::message::PinInChatMessage,
+        base: &wa::Message,
+        at: i64,
+        sender: &str,
+        from_me: bool,
+    ) {
+        let duration = base
+            .message_context_info
+            .as_option()
+            .and_then(|context| context.message_add_on_duration_in_secs)
+            .unwrap_or(0);
+        let Some((id, pinned, duration)) = pin_action(pin, duration) else {
+            return;
+        };
+        self.next_pin_generation(chat, &id);
+        let by = crate::archive::Pinner {
+            by_me: from_me,
+            sender: sender.to_owned(),
+        };
+        let written = if pinned {
+            let secs = if duration == 0 {
+                PIN_SECS
+            } else {
+                i64::from(duration)
+            };
+            self.archive
+                .pin_from(chat, &id, at, at.saturating_add(secs), &by)
+        } else {
+            // The notice names whoever made it, so an unpin keeps it too.
+            self.archive.set_pin(chat, &id, false, at, 0, &by)
+        };
+        match written {
+            Ok(true) => self.emit_pins(chat),
+            Ok(false) => {}
+            Err(error) => self.emit(Event::Error(error.to_string())),
+        }
+    }
+
+    /// Hands one chat's active pins to the interface.
+    fn emit_pins(&self, chat: &str) {
+        match self.archive.chat_pins(chat, crate::util::now()) {
+            Ok(items) => self.emit(Event::Pins {
+                chat: chat.to_owned(),
+                items,
+            }),
+            Err(error) => self.emit(Event::Error(error.to_string())),
+        }
     }
 }
 
@@ -12332,6 +12578,7 @@ fn parse_conversation(conversation: wa::Conversation) -> ParsedChat {
     let mut poll_updates = Vec::new();
     let mut reactions = Vec::new();
     let mut clips = Vec::new();
+    let mut pins = Vec::new();
     let mut newest = 0;
     for entry in &conversation.messages {
         let Some(info) = entry.message.as_option() else {
@@ -12456,6 +12703,26 @@ fn parse_conversation(conversation: wa::Conversation) -> ParsedChat {
                     sender,
                     from_me,
                     body: HistoryReactionBody::Encrypted { payload, iv },
+                });
+            }
+            continue;
+        }
+        if let Some(pin) = base.pin_in_chat_message.as_option() {
+            let duration = base
+                .message_context_info
+                .as_option()
+                .and_then(|context| context.message_add_on_duration_in_secs)
+                .unwrap_or(0);
+            if let Some((target, pinned, duration_secs)) = pin_action(pin, duration) {
+                pins.push(HistoryPin {
+                    target,
+                    pinned,
+                    duration_secs,
+                    at: timestamp,
+                    pinner: crate::archive::Pinner {
+                        by_me: from_me,
+                        sender: sender.clone().unwrap_or_default(),
+                    },
                 });
             }
             continue;
@@ -12648,7 +12915,22 @@ fn parse_conversation(conversation: wa::Conversation) -> ParsedChat {
         clips,
         poll_updates,
         reactions,
+        pins,
     }
+}
+
+/// The message a pin names, whether it pins or unpins it, and for how long.
+fn pin_action(pin: &wa::message::PinInChatMessage, duration: u32) -> Option<(String, bool, u32)> {
+    let id = pin
+        .key
+        .as_option()
+        .and_then(|key| key.id.clone())
+        .filter(|id| !id.is_empty())?;
+    let pinned = !matches!(
+        pin.r#type,
+        Some(wa::message::pin_in_chat_message::Type::UnpinForAll)
+    );
+    Some((id, pinned, duration))
 }
 
 /// Displayed emoji for a reaction: `text`, else `groupingKey` when text is empty.
@@ -16969,6 +17251,7 @@ mod receipt_tests {
             privacy_retry: Instant::now(),
             star_generation: HashMap::new(),
             star_session: 0,
+            pin_generation: HashMap::new(),
             withheld_pages: Vec::new(),
             dirs: crate::paths::AppDirs::under(&root).as_account(),
             events,
@@ -17458,6 +17741,70 @@ mod receipt_tests {
             });
             proto3
         }
+    }
+
+    /// A pin for everyone of the message "target".
+    fn target_pin() -> wa::message::PinInChatMessage {
+        let mut pin = wa::message::PinInChatMessage::default();
+        pin.key = MessageField::some({
+            let mut key = wa::MessageKey::default();
+            key.id = Some("target".into());
+            key
+        });
+        pin.r#type = Some(wa::message::pin_in_chat_message::Type::PinForAll);
+        pin
+    }
+
+    #[test]
+    fn pin_action_reads_the_target_and_unpin_type() {
+        let pin = target_pin();
+        assert_eq!(
+            pin_action(&pin, 604_800),
+            Some(("target".into(), true, 604_800))
+        );
+        let mut unpin = pin;
+        unpin.r#type = Some(wa::message::pin_in_chat_message::Type::UnpinForAll);
+        assert_eq!(pin_action(&unpin, 0), Some(("target".into(), false, 0)));
+    }
+
+    #[test]
+    fn history_reads_a_pin_without_showing_it_as_a_message() {
+        let message = {
+            let mut proto = wa::Message::default();
+            proto.pin_in_chat_message = MessageField::some(target_pin());
+            proto.message_context_info = MessageField::some({
+                let mut proto = wa::MessageContextInfo::default();
+                proto.message_add_on_duration_in_secs = Some(604_800);
+                proto
+            });
+            proto
+        };
+        let parsed = parse_conversation({
+            let mut proto = wa::Conversation::default();
+            proto.id = PEER.into();
+            proto.messages = vec![history_entry(
+                PEER,
+                "pin",
+                true,
+                None,
+                message,
+                Vec::new(),
+                None,
+            )];
+            proto
+        });
+        assert!(
+            parsed.messages.is_empty(),
+            "a pin is not a message of its own"
+        );
+        assert_eq!(parsed.pins.len(), 1);
+        assert_eq!(parsed.pins[0].target, "target");
+        assert!(parsed.pins[0].pinned);
+        assert_eq!(parsed.pins[0].duration_secs, 604_800);
+        assert!(
+            parsed.pins[0].pinner.by_me,
+            "the notice says who pinned it, and this one is ours"
+        );
     }
 
     #[test]
@@ -20223,6 +20570,7 @@ mod chat_removal_tests {
                 clips: Vec::new(),
                 poll_updates: Vec::new(),
                 reactions: Vec::new(),
+                pins: Vec::new(),
             }],
             push_names: Vec::new(),
             lids: Vec::new(),
@@ -20472,6 +20820,37 @@ mod chat_removal_tests {
             })
             .await;
         assert!(worker.archive.starred_ids(CHAT).unwrap().is_empty());
+    }
+
+    /// The same for a pin: an answer that outlives a logout belongs to the
+    /// account that left.
+    #[tokio::test]
+    async fn a_pin_answer_from_the_previous_account_does_not_write() {
+        let (mut worker, _events, _, _) = receipt_tests::worker();
+        const CHAT: &str = "1@s.whatsapp.net";
+        worker.archive.ensure_chat(CHAT, "Ada").unwrap();
+        worker
+            .archive
+            .insert_message(
+                &crate::archive::tests::message(CHAT, "m1", 100, false),
+                None,
+            )
+            .unwrap();
+        worker.star_session = 1;
+        worker.pin_generation.insert((CHAT.into(), "m1".into()), 1);
+        worker
+            .handle_command(Command::MessagePinned {
+                chat: CHAT.into(),
+                message: "m1".into(),
+                pinned: true,
+                at: 100,
+                generation: 1,
+                session: 0,
+                expires_at: i64::MAX,
+                result: Ok(()),
+            })
+            .await;
+        assert!(worker.archive.pinned_ids(CHAT, 200).unwrap().is_empty());
     }
 }
 

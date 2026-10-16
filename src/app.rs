@@ -2363,6 +2363,9 @@ impl App {
     fn leave_chat(&mut self, id: &str) {
         self.clear_chat_notifications(id);
         self.search_hits.retain(|message| message.chat != id);
+        // A locked or deleted chat keeps none of its pinned words on screen.
+        self.pins.remove(id);
+        self.chat_pins.remove(id);
         if self.events_hidden {
             if self.open_chat.as_deref() == Some(id) {
                 self.open_chat = None;
@@ -3552,6 +3555,40 @@ impl App {
                 }
             }
             Event::StarredList(list) => self.starred = list,
+            Event::Pins { chat, items } => {
+                // A pin carries the message's own words, so a locked chat
+                // keeps them off the window until its folder is open, the
+                // way its messages do.
+                if self.locked_folder_open() || !self.chat(&chat).is_some_and(|known| known.locked)
+                {
+                    self.pins.insert(
+                        chat.clone(),
+                        items.iter().map(|item| item.id.clone()).collect(),
+                    );
+                    self.chat_pins.insert(chat, items);
+                }
+            }
+            Event::PinChanged {
+                chat,
+                message,
+                pinned,
+            } => {
+                let ids = self.pins.entry(chat.clone()).or_default();
+                if pinned {
+                    ids.insert(message);
+                } else {
+                    ids.remove(&message);
+                }
+                if live {
+                    // One literal per branch, so both reach the catalogs.
+                    let label = if pinned {
+                        crate::i18n::gettext(self.locale, "Pinned for 7 days")
+                    } else {
+                        crate::i18n::gettext(self.locale, "Pin removed")
+                    };
+                    self.toast(label);
+                }
+            }
             Event::Chats(chats) => {
                 for chat in &chats {
                     if chat.unread == 0 {
@@ -3737,6 +3774,13 @@ impl App {
                     // deletion. The star it still holds would keep the row
                     // in the open list with nothing left to unstar.
                     self.forget_star(&message.chat, &message.id);
+                    // Its pin goes with it, from the line and the mark.
+                    if let Some(ids) = self.pins.get_mut(&message.chat) {
+                        ids.remove(&message.id);
+                    }
+                    if let Some(rows) = self.chat_pins.get_mut(&message.chat) {
+                        rows.retain(|row| row.id != message.id);
+                    }
                 } else if in_starred {
                     for entry in &mut self.starred {
                         if entry.message.chat == message.chat && entry.message.id == message.id {
@@ -3905,6 +3949,14 @@ impl App {
                     self.editing = None;
                     self.composer.clear();
                 }
+                // A deleted message leaves the line under the header and
+                // the mark on its bubble behind.
+                if let Some(pins) = self.chat_pins.get_mut(&chat) {
+                    pins.retain(|pin| pin.id != id);
+                }
+                if let Some(ids) = self.pins.get_mut(&chat) {
+                    ids.remove(&id);
+                }
                 // A deleted message leaves the starred list.
                 self.forget_star(&chat, &id);
             }
@@ -3916,6 +3968,9 @@ impl App {
             Event::ChatCleared { chat, through } => {
                 self.handle_chat_cleared(&chat, through, live);
                 self.stars.remove(&chat);
+                // Clearing the chat clears its pins in the archive too.
+                self.pins.remove(&chat);
+                self.chat_pins.remove(&chat);
                 self.reload_lists();
             }
             Event::Media {
@@ -4225,7 +4280,18 @@ impl App {
             Event::Error(message) => {
                 self.sticker_import_pending = false;
                 self.new_contact_pending = false;
-                self.toast_error(message);
+                // The worker sends the English catalog key. `gettext` only
+                // accepts a static key, so unknown errors stay as the worker
+                // wrote them.
+                let shown = match message.as_str() {
+                    "This chat already has three pinned messages" => crate::i18n::gettext(
+                        self.locale,
+                        "This chat already has three pinned messages",
+                    )
+                    .into_owned(),
+                    _ => message,
+                };
+                self.toast_error(shown);
             }
             Event::AccountRemoved => {}
         }
@@ -4323,6 +4389,8 @@ impl App {
                 self.starred.clear();
                 self.show_starred = false;
                 self.stars.clear();
+                self.pins.clear();
+                self.chat_pins.clear();
                 self.account_privacy = crate::privacy::Snapshot::default();
                 self.account_receipts_off = false;
                 self.blocklist = None;
@@ -4940,6 +5008,7 @@ impl App {
                 chat: chat.to_owned(),
                 before: None,
             });
+            self.backend.send(Command::LoadPins(chat.to_owned()));
         }
     }
 
@@ -5269,6 +5338,9 @@ impl App {
         // A chat that history sync named without its messages is not asked
         // about: the phone answers only from a message it can start at.
         self.ensure_loaded(&id);
+        // Read again on every open: a pin that expired while the chat was
+        // closed leaves the line under the header.
+        self.backend.send(Command::LoadPins(id.clone()));
         // The phone may have blocked or unblocked this contact meanwhile, and
         // nothing says so: ask again, unless the server answered a moment ago.
         if self
@@ -5820,6 +5892,21 @@ impl App {
         }
         if !self.typing.is_empty() || self.composing {
             ctx.request_repaint_after(Duration::from_secs(1));
+        }
+        // A pin that has run out its seven days is no longer on the message,
+        // and the worker only speaks when a pin changes. Drop it from the
+        // cache the footer and the message menu read, so an expired pin stops
+        // painting its mark and stops offering Unpin.
+        let stamp = crate::util::now();
+        let account = &mut **self;
+        for (chat, rows) in &account.chat_pins {
+            let Some(ids) = account.pins.get_mut(chat) else {
+                continue;
+            };
+            ids.retain(|id| {
+                rows.iter()
+                    .any(|row| row.id == *id && row.expires_at > stamp)
+            });
         }
     }
 
@@ -7414,6 +7501,33 @@ impl App {
                     };
                 }
                 self.backend.send(Command::SetPinned(chat, pinned));
+            }
+            Action::SetMessagePinned {
+                chat,
+                message,
+                pinned,
+            } => {
+                // WhatsApp keeps three active pins per chat, and the phone
+                // replaces an existing one when a fourth arrives. Refuse the
+                // fourth here, where the count is already known.
+                let now = crate::util::now();
+                let active = self.chat_pins.get(&chat).map_or(0, |rows| {
+                    rows.iter()
+                        .filter(|row| row.expires_at > now && row.id != message)
+                        .count()
+                });
+                if pinned && active >= 3 {
+                    self.toast(crate::i18n::gettext(
+                        self.locale,
+                        "This chat already has three pinned messages",
+                    ));
+                } else {
+                    self.backend.send(Command::SetMessagePinned {
+                        chat,
+                        message,
+                        pinned,
+                    });
+                }
             }
             Action::SetFavorite(chat, favorite) => {
                 if let Some(known) = self.chat_mut(&chat) {
@@ -13185,6 +13299,246 @@ mod tests {
             &egui::Context::default(),
         );
         assert!(app.chat("3@s.whatsapp.net").unwrap().pinned);
+    }
+
+    #[test]
+    fn a_fourth_pinned_message_is_refused_here() {
+        let mut app = app();
+        let (backend, mut commands) = Backend::recording();
+        app.backend = backend;
+        let ctx = egui::Context::default();
+        let chat = "1@s.whatsapp.net".to_owned();
+        app.pins.insert(
+            chat.clone(),
+            ["a".to_owned(), "b".to_owned(), "c".to_owned()]
+                .into_iter()
+                .collect(),
+        );
+        app.chat_pins.insert(
+            chat.clone(),
+            vec![
+                pinned_row(&chat, "a"),
+                pinned_row(&chat, "b"),
+                pinned_row(&chat, "c"),
+            ],
+        );
+        app.apply(
+            Action::SetMessagePinned {
+                chat: chat.clone(),
+                message: "d".into(),
+                pinned: true,
+            },
+            &ctx,
+        );
+        assert!(
+            !matches!(commands.try_recv(), Ok(Command::SetMessagePinned { .. })),
+            "a fourth pin never reaches the phone"
+        );
+        assert!(
+            app.toasts
+                .iter()
+                .any(|toast| toast.message.contains("three pinned messages")),
+            "and the window says why"
+        );
+        app.apply(
+            Action::SetMessagePinned {
+                chat,
+                message: "a".into(),
+                pinned: false,
+            },
+            &ctx,
+        );
+        assert!(
+            matches!(
+                commands.try_recv(),
+                Ok(Command::SetMessagePinned { pinned: false, .. })
+            ),
+            "unpinning always goes through"
+        );
+    }
+
+    /// The banner reads a cache, so a delete, a clear or a lock has to take
+    /// the pinned words off it: the archive join would no longer return them.
+    #[test]
+    fn a_deleted_message_takes_its_pin_off_the_banner() {
+        let mut app = app();
+        let (backend, events) = Backend::detached();
+        app.backend = backend;
+        let chat = "1@s.whatsapp.net";
+        app.chats.push(Chat::new(chat.into(), "Fixture".into()));
+        app.chat_pins
+            .insert(chat.into(), vec![pinned_row(chat, "m1")]);
+        app.pins
+            .insert(chat.into(), ["m1".to_owned()].into_iter().collect());
+
+        events
+            .send(Event::MessageDeleted {
+                chat: chat.into(),
+                id: "m1".into(),
+            })
+            .unwrap();
+        app.handle_events();
+
+        assert!(app.chat_pins.get(chat).is_some_and(Vec::is_empty));
+        assert!(app.pins.get(chat).is_some_and(HashSet::is_empty));
+    }
+
+    #[test]
+    fn clearing_a_chat_drops_its_pins() {
+        let mut app = app();
+        let (backend, events) = Backend::detached();
+        app.backend = backend;
+        let chat = "1@s.whatsapp.net";
+        app.chats.push(Chat::new(chat.into(), "Fixture".into()));
+        app.chat_pins
+            .insert(chat.into(), vec![pinned_row(chat, "m1")]);
+
+        events
+            .send(Event::ChatCleared {
+                chat: chat.into(),
+                through: 100,
+            })
+            .unwrap();
+        app.handle_events();
+
+        assert!(!app.chat_pins.contains_key(chat), "the pins went with it");
+    }
+
+    #[test]
+    fn a_locked_chat_keeps_none_of_its_pins_on_screen() {
+        let mut app = app();
+        let (backend, events) = Backend::detached();
+        app.backend = backend;
+        let chat = "1@s.whatsapp.net";
+        app.chats.push(Chat::new(chat.into(), "Fixture".into()));
+        app.chat_pins
+            .insert(chat.into(), vec![pinned_row(chat, "m1")]);
+        app.pins
+            .insert(chat.into(), ["m1".to_owned()].into_iter().collect());
+
+        let mut locked = Chat::new(chat.into(), "Fixture".into());
+        locked.locked = true;
+        events.send(Event::ChatUpdated(Box::new(locked))).unwrap();
+        app.handle_events();
+
+        assert!(!app.chat_pins.contains_key(chat));
+        assert!(!app.pins.contains_key(chat));
+    }
+
+    #[test]
+    fn an_expired_pin_does_not_count_toward_the_cap() {
+        let mut app = app();
+        let (backend, mut commands) = Backend::recording();
+        app.backend = backend;
+        let chat = "1@s.whatsapp.net".to_owned();
+        let mut rows = vec![
+            pinned_row(&chat, "a"),
+            pinned_row(&chat, "b"),
+            pinned_row(&chat, "c"),
+        ];
+        for row in &mut rows {
+            row.expires_at = 1;
+        }
+        app.pins.insert(
+            chat.clone(),
+            ["a".to_owned(), "b".to_owned(), "c".to_owned()]
+                .into_iter()
+                .collect(),
+        );
+        app.chat_pins.insert(chat.clone(), rows);
+        app.apply(
+            Action::SetMessagePinned {
+                chat,
+                message: "d".into(),
+                pinned: true,
+            },
+            &egui::Context::default(),
+        );
+        assert!(
+            matches!(
+                commands.try_recv(),
+                Ok(Command::SetMessagePinned { pinned: true, .. })
+            ),
+            "expired rows leave a free slot"
+        );
+    }
+
+    #[test]
+    fn a_revoked_message_leaves_the_pin_banner() {
+        let mut app = app();
+        let (backend, events) = Backend::detached();
+        app.backend = backend;
+        let chat = "1@s.whatsapp.net";
+        app.chats.push(Chat::new(chat.into(), "Fixture".into()));
+        app.chat_pins
+            .insert(chat.into(), vec![pinned_row(chat, "m1")]);
+        app.pins
+            .insert(chat.into(), ["m1".to_owned()].into_iter().collect());
+        let mut message = message(chat, "m1", 1);
+        message.content = Content::REVOKED;
+        events
+            .send(Event::MessageUpdated(Box::new(message)))
+            .unwrap();
+        app.handle_events();
+        assert!(app.chat_pins.get(chat).is_some_and(Vec::is_empty));
+        assert!(app.pins.get(chat).is_some_and(HashSet::is_empty));
+    }
+
+    #[test]
+    fn a_worker_pin_refusal_uses_the_reader_language() {
+        let mut app = app();
+        let (backend, events) = Backend::detached();
+        app.backend = backend;
+        app.locale = crate::i18n::Locale::Spanish;
+        events
+            .send(Event::Error(
+                "This chat already has three pinned messages".into(),
+            ))
+            .unwrap();
+        app.handle_events();
+        assert!(
+            app.toasts.iter().any(|toast| toast.message
+                == crate::i18n::gettext(app.locale, "This chat already has three pinned messages")),
+            "the toast is in the reader's language"
+        );
+    }
+
+    /// A pin that expires while the chat is closed leaves the line when it is
+    /// opened again, so the read is asked for on every open.
+    #[test]
+    fn opening_a_chat_reads_its_pins_again() {
+        let mut app = app();
+        let (backend, mut commands) = Backend::recording();
+        app.backend = backend;
+        let chat = "1@s.whatsapp.net";
+        app.chats.push(Chat::new(chat.into(), "Fixture".into()));
+
+        app.open_chat(chat.into());
+
+        let mut asked = false;
+        while let Ok(command) = commands.try_recv() {
+            if matches!(command, Command::LoadPins(id) if id == chat) {
+                asked = true;
+            }
+        }
+        assert!(asked, "the pins are read when the chat opens");
+    }
+
+    /// One pinned row, as the archive hands it over.
+    fn pinned_row(chat: &str, id: &str) -> crate::archive::Pinned {
+        crate::archive::Pinned {
+            chat: chat.to_owned(),
+            id: id.to_owned(),
+            pinned_at: 1,
+            expires_at: i64::MAX,
+            text: format!("message {id}"),
+            from_me: false,
+            sent_at: 1,
+            pinner: crate::archive::Pinner {
+                by_me: true,
+                sender: String::new(),
+            },
+        }
     }
 
     #[test]

@@ -682,6 +682,12 @@ fn starred_list(app: &mut App, ui: &mut egui::Ui) {
         .auto_shrink([false, false])
         .show(ui, |ui| {
             for entry in &app.starred {
+                if app
+                    .chat(&entry.message.chat)
+                    .is_some_and(|chat| chat.locked)
+                {
+                    continue;
+                }
                 starred_row(
                     app,
                     ui,
