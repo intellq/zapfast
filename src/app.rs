@@ -6035,6 +6035,7 @@ impl App {
                     self.composer_mentions.clear();
                     self.emoji_start = None;
                     self.mention_start = None;
+                    self.set_composer_cursor(ctx, 0);
                 }
                 self.reply_to = Some(id);
                 self.focus_composer = true;
@@ -6204,10 +6205,12 @@ impl App {
                     self.editing = Some(id);
                     self.composer_tools_open = false;
                     self.reply_to = None;
+                    let cursor = text.chars().count();
                     self.composer = text;
                     self.composer_mentions.clear();
                     self.emoji_start = None;
                     self.mention_start = None;
+                    self.set_composer_cursor(ctx, cursor);
                     self.focus_composer = true;
                 }
             }
@@ -6217,6 +6220,7 @@ impl App {
                     self.composer_mentions.clear();
                     self.emoji_start = None;
                     self.mention_start = None;
+                    self.set_composer_cursor(ctx, 0);
                 }
             }
             Action::DeleteForEveryone { chat, id } => {
@@ -8271,14 +8275,13 @@ impl App {
 
     fn set_composer_cursor(&self, ctx: &egui::Context, at: usize) {
         let id = egui::Id::new("composer-text");
-        if let Some(mut state) = egui::TextEdit::load_state(ctx, id) {
-            state
-                .cursor
-                .set_char_range(Some(egui::text::CCursorRange::one(
-                    egui::text::CCursor::new(at),
-                )));
-            egui::TextEdit::store_state(ctx, id, state);
-        }
+        let mut state = egui::TextEdit::load_state(ctx, id).unwrap_or_default();
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(at),
+            )));
+        egui::TextEdit::store_state(ctx, id, state);
     }
 
     fn remember_emoji(&mut self, emoji: &str) {

@@ -10693,6 +10693,11 @@ mod tests {
         render(&mut app, &ctx);
         assert_eq!(app.editing.as_deref(), Some(own.as_str()));
         assert!(!app.composer.is_empty());
+        let composer_id = egui::Id::new("composer-text");
+        let cursor = egui::TextEdit::load_state(&ctx, composer_id)
+            .and_then(|state| state.cursor.char_range())
+            .map(|range| range.primary.index.0);
+        assert_eq!(cursor, Some(app.composer.chars().count()));
         frame_with(
             &mut app,
             &ctx,
@@ -10700,6 +10705,10 @@ mod tests {
         );
         assert!(app.editing.is_none());
         assert!(app.composer.is_empty());
+        let cursor = egui::TextEdit::load_state(&ctx, composer_id)
+            .and_then(|state| state.cursor.char_range())
+            .map(|range| range.primary.index.0);
+        assert_eq!(cursor, Some(0));
     }
 
     #[test]
@@ -10730,6 +10739,11 @@ mod tests {
         );
         assert_eq!(app.editing.as_deref(), Some(expected.0.as_str()));
         assert_eq!(app.composer, expected.1);
+        let composer_id = egui::Id::new("composer-text");
+        let cursor = egui::TextEdit::load_state(&ctx, composer_id)
+            .and_then(|state| state.cursor.char_range())
+            .map(|range| range.primary.index.0);
+        assert_eq!(cursor, Some(app.composer.chars().count()));
     }
 
     #[test]
