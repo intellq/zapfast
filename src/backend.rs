@@ -246,6 +246,12 @@ pub enum Command {
         chat: ChatId,
         message: String,
     },
+    /// Whether the background may fetch older history, and the chat the reader
+    /// has open, so it is asked for its older messages first.
+    SetHistoryPrefetch {
+        on: bool,
+        focused: Option<ChatId>,
+    },
     Download {
         card: Option<usize>,
         chat: ChatId,
@@ -289,9 +295,18 @@ pub enum Command {
         chat: ChatId,
         name: String,
     },
+    /// Internal: the id a phone-history request went out under, which the
+    /// phone's answer names. `serial` is the worker's number for the request.
+    OlderSent {
+        chat: ChatId,
+        serial: u64,
+        request: String,
+    },
     /// Internal result for a phone-history request that could not be sent.
+    /// `serial` names the request, so a newer one for the chat is left alone.
     OlderFailed {
         chat: ChatId,
+        serial: u64,
     },
     /// Internal group-metadata failure.
     GroupInfoFailed {
@@ -1096,11 +1111,14 @@ pub enum Event {
     /// Reported history-sync percentage.
     SyncProgress(u32),
     /// Phone-history result. `more` indicates whether another request may help;
-    /// `silent` that the phone was asked and sent nothing back.
+    /// `silent` that the phone was asked and sent nothing back. `background`
+    /// marks a page the reader did not ask for: it must not count against the
+    /// phone's answers nor move the view.
     OlderFetched {
         chat: ChatId,
         more: bool,
         silent: bool,
+        background: bool,
     },
     /// Whether account privacy disables direct-chat read receipts.
     ReceiptsPrivacy {

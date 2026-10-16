@@ -988,6 +988,10 @@ pub struct AccountSettings {
     /// The chip or label the chat list last showed, as
     /// [`crate::model::ListFilter::key`] writes it; `None` shows every chat.
     pub list_filter: Option<String>,
+    /// Whether this account's phone is asked for older history in the
+    /// background. Off by default: it asks the phone for history nobody
+    /// scrolled to, so an account that has never turned it on does not.
+    pub history_prefetch: bool,
 }
 
 impl Default for AccountSettings {
@@ -1005,6 +1009,7 @@ impl Default for AccountSettings {
             anonymous_until: None,
             calls_seen_at: 0,
             list_filter: None,
+            history_prefetch: false,
         }
     }
 }
@@ -1024,6 +1029,7 @@ impl AccountSettings {
             anonymous_until: None,
             calls_seen_at: 0,
             list_filter: None,
+            history_prefetch: false,
         }
     }
 

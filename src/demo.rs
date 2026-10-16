@@ -14525,6 +14525,47 @@ mod call_surface_tests {
         frame_with(&mut app, &ctx, Vec::new());
         assert_eq!(hang_ups(app.backend.take_demo_commands()), 1);
     }
+
+    /// The background history row's title fits on its line in every
+    /// language, instead of ending in an ellipsis. Checked in a window
+    /// narrower than the default (where the longer earlier title was already
+    /// cut short here), so a wider system font still has room.
+    #[test]
+    fn the_older_history_title_fits_in_every_language() {
+        /// Every text drawn, and whether it was cut short with an ellipsis.
+        fn texts(shape: &egui::Shape, out: &mut Vec<(String, bool)>) {
+            match shape {
+                egui::Shape::Text(text) => {
+                    out.push((text.galley.text().to_owned(), text.galley.elided))
+                }
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| texts(shape, out)),
+                _ => {}
+            }
+        }
+        for locale in crate::i18n::Locale::ALL {
+            let mut app = app();
+            let ctx = egui::Context::default();
+            app.attach(&ctx);
+            let title = crate::i18n::gettext(locale, "Fetch older history").into_owned();
+            apply_flags(&mut app, Some("settings"));
+            app.locale = locale;
+            app.settings_search = title.clone();
+            let mut drawn = Vec::new();
+            for clipped in &frames(&mut app, &ctx, egui::vec2(900.0, 780.0)) {
+                texts(&clipped.shape, &mut drawn);
+            }
+            let titles: Vec<bool> = drawn
+                .iter()
+                .filter(|(text, _)| *text == title)
+                .map(|(_, elided)| *elided)
+                .collect();
+            assert!(!titles.is_empty(), "{locale:?}: {title:?} is not drawn");
+            assert!(
+                !titles.contains(&true),
+                "{locale:?}: {title:?} is cut short"
+            );
+        }
+    }
 }
 
 /// The call surface's previews: what they hand it, and the picture they hand it with.

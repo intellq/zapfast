@@ -34,6 +34,9 @@ pub struct Account {
     pub contacts: HashMap<String, Contact>,
     pub conversations: HashMap<ChatId, Conversation>,
     pub open_chat: Option<ChatId>,
+    /// The background-history state last sent to this account's worker: the
+    /// switch and the chat on screen.
+    pub(crate) prefetch_sent: Option<(bool, Option<ChatId>)>,
     pub scroll_chat_into_view: Option<ChatId>,
     pub drafts: HashMap<ChatId, String>,
     /// This account's media cache as last measured, for Settings. `None`
@@ -136,6 +139,7 @@ impl Account {
             contacts: HashMap::new(),
             conversations: HashMap::new(),
             open_chat,
+            prefetch_sent: None,
             scroll_chat_into_view: None,
             drafts: HashMap::new(),
             storage_stats: None,

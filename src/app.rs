@@ -3916,8 +3916,28 @@ impl App {
                 }
             }
             Event::SyncProgress(percent) => self.sync_percent = Some(percent),
-            Event::OlderFetched { chat, more, silent } => {
+            Event::OlderFetched {
+                chat,
+                more,
+                silent,
+                background,
+            } => {
                 let conversation = self.conversations.entry(chat).or_default();
+                if background {
+                    // A background page is not an answer to a request the
+                    // reader made: it must not clear the spinner of a
+                    // request still in flight, and it must not count
+                    // against the phone, or every successful prefetch would
+                    // look like a miss and back off the next scroll.
+                    //
+                    // It does fill the archive with older messages, so a
+                    // chat that had reached its start has not any more:
+                    // without this, scrolling up asks the phone instead of
+                    // reading what the page just filed, and the page stays
+                    // out of sight until the chat is opened again.
+                    conversation.complete = false;
+                    return;
+                }
                 conversation.fetching_phone = false;
                 conversation.phone_silent = silent;
                 conversation.phone_exhausted = !more;
@@ -5765,6 +5785,30 @@ impl App {
 
     pub fn mark_settings_dirty(&mut self) {
         self.settings_dirty = true;
+    }
+
+    /// Tells each account's worker whether it may fetch older history in the
+    /// background, and which chat is on screen so it goes first. Only the
+    /// account on screen has one: a hidden account's remembered chat is not
+    /// being read. Sent only when it changes, so it can run every frame and
+    /// follow every way a chat opens, closes or disappears.
+    fn sync_prefetch(&mut self) {
+        let active = self.active;
+        for (index, account) in self.accounts.iter_mut().enumerate() {
+            let wanted = (
+                account.settings.history_prefetch,
+                (index == active)
+                    .then(|| account.open_chat.clone())
+                    .flatten(),
+            );
+            if account.prefetch_sent.as_ref() != Some(&wanted) {
+                account.backend.send(Command::SetHistoryPrefetch {
+                    on: wanted.0,
+                    focused: wanted.1.clone(),
+                });
+                account.prefetch_sent = Some(wanted);
+            }
+        }
     }
 
     fn save_settings(&mut self) {
@@ -8233,6 +8277,7 @@ impl App {
         self.tick_video(ctx);
         self.sync_call_window(ctx);
         self.apply_actions(ctx);
+        self.sync_prefetch();
         self.hold_media();
         self.follow_receipts();
         self.sync_badge();
@@ -10215,6 +10260,43 @@ mod tests {
         (app, commands)
     }
 
+    /// Background history is each account's own switch. Only the account on
+    /// screen names a chat to ask first, and the worker hears only changes.
+    #[test]
+    fn background_history_follows_each_accounts_switch_and_the_screen() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, mut commands) = two_accounts(directory.path());
+        let mut sent = || -> Vec<(bool, Option<ChatId>)> {
+            std::iter::from_fn(|| commands.try_recv().ok())
+                .filter_map(|command| match command {
+                    Command::SetHistoryPrefetch { on, focused } => Some((on, focused)),
+                    _ => None,
+                })
+                .collect()
+        };
+        app.accounts[1].open_chat = Some("hidden@s.whatsapp.net".into());
+        app.sync_prefetch();
+        assert_eq!(sent(), [(false, None)], "off by default, and hidden");
+        app.sync_prefetch();
+        assert!(sent().is_empty(), "nothing changed, nothing sent");
+
+        app.accounts[1].settings.history_prefetch = true;
+        app.sync_prefetch();
+        assert_eq!(sent(), [(true, None)]);
+
+        app.active = 1;
+        app.sync_prefetch();
+        assert_eq!(
+            sent(),
+            [(true, Some("hidden@s.whatsapp.net".into()))],
+            "on screen, its open chat goes first"
+        );
+        assert!(
+            !app.accounts[0].settings.history_prefetch,
+            "the other account keeps its own switch"
+        );
+    }
+
     #[test]
     fn a_call_on_a_hidden_account_is_answered_by_that_account() {
         let directory = tempfile::tempdir().unwrap();
@@ -10695,6 +10777,63 @@ mod tests {
 
     /// Demo and test runs share the machine with a linked ZapFast, whose real
     /// taskbar badge they must not overwrite.
+    /// A background page is not an answer to a request the reader made.
+    /// Counting it as one would look like the phone missing, and back off the
+    /// next scroll by the miss cooldown.
+    #[test]
+    fn a_background_page_does_not_count_against_the_phone() {
+        let mut app = app();
+        let (backend, events) = Backend::detached();
+        app.backend = backend;
+        let chat = "peer@s.whatsapp.net";
+        {
+            let conversation = app.conversations.entry(chat.into()).or_default();
+            conversation.fetching_phone = true;
+            conversation.phone_misses = 2;
+            conversation.complete = true;
+        }
+
+        events
+            .send(Event::OlderFetched {
+                chat: chat.into(),
+                more: true,
+                silent: false,
+                background: true,
+            })
+            .unwrap();
+        app.handle_events();
+
+        let conversation = app.conversations.get(chat).expect("the chat");
+        assert_eq!(
+            conversation.phone_misses, 2,
+            "a background page is not a miss"
+        );
+        assert!(
+            !conversation.complete,
+            "and it sends the view back to the archive, which holds the older messages the page just filed"
+        );
+        assert!(
+            conversation.fetching_phone,
+            "a background page leaves the reader's request in flight"
+        );
+
+        // A page the reader asked for still counts, and ends the wait.
+        events
+            .send(Event::OlderFetched {
+                chat: chat.into(),
+                more: false,
+                silent: false,
+                background: false,
+            })
+            .unwrap();
+        app.handle_events();
+        let conversation = app.conversations.get(chat).expect("the chat");
+        assert_eq!(conversation.phone_misses, 3);
+        assert!(conversation.phone_exhausted);
+        assert!(!conversation.complete);
+        assert!(!conversation.fetching_phone);
+    }
+
     #[test]
     fn demo_and_test_runs_do_not_publish_a_taskbar_badge() {
         let app = app();
@@ -13559,6 +13698,7 @@ mod tests {
                 chat: chat.into(),
                 more: true,
                 silent: true,
+                background: false,
             })
             .unwrap();
         app.handle_events();

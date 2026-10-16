@@ -670,6 +670,14 @@ fn sections(app: &App) -> Vec<Section> {
             }
         },
     );
+    chats.account_toggle(
+        translated(locale, "Fetch older history"),
+        translated(
+            locale,
+            "Asks your phone in the background for older messages in the open, pinned and ten most recent chats.",
+        ),
+        |settings| &mut settings.history_prefetch,
+    );
     // macOS has no public API to pause other apps' media.
     if crate::media_pause::SUPPORTED {
         chats.toggle(
