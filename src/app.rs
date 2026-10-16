@@ -10191,9 +10191,17 @@ impl App {
                 }
             }
         }
+        // A text paste reads the clipboard too, and finding no file or
+        // picture there is then nothing to report.
+        let text = ctx.input(|input| {
+            input
+                .events
+                .iter()
+                .any(|event| matches!(event, egui::Event::Paste(_)))
+        });
         // Tests inject fixtures and must never read the system clipboard.
         self.take_clipboard_paste(ctx, || {
-            if cfg!(test) {
+            let contents = if cfg!(test) {
                 clipboard_contents(
                     || {
                         ctx.data_mut(|data| {
@@ -10201,6 +10209,7 @@ impl App {
                                 "fixture-clipboard-files",
                             ))
                         })
+                        .ok_or_else(|| "no fixture files".to_owned())
                     },
                     || {
                         ctx.data_mut(|data| {
@@ -10208,11 +10217,20 @@ impl App {
                                 "fixture-clipboard-image",
                             ))
                         })
+                        .ok_or_else(|| "no fixture picture".to_owned())
                     },
                 )
             } else {
                 clipboard_contents(clipboard_files, clipboard_image)
-            }
+            };
+            contents
+                .inspect_err(|why| {
+                    if !text {
+                        // Only the reason: never the paths or the pixels.
+                        log::info!("Ctrl+V found nothing to attach: {why}");
+                    }
+                })
+                .ok()
         });
     }
 
@@ -10672,46 +10690,66 @@ enum ClipboardPaste {
 /// Prefers the clipboard's file list over its picture: Finder, Explorer and
 /// Linux file managers offer the file's icon as an image alongside the path,
 /// so a copied PDF or ZIP would otherwise arrive as its icon (#285).
+///
+/// Says why when there is neither, without naming any file, so a paste that
+/// stages nothing leaves its reason in the log (#404).
 fn clipboard_contents(
-    read_files: impl FnOnce() -> Option<Vec<PathBuf>>,
-    read_image: impl FnOnce() -> Option<(usize, usize, Vec<u8>)>,
-) -> Option<ClipboardPaste> {
-    let files: Vec<PathBuf> = read_files()
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|path| {
-            // text/uri-list lines end in CRLF, and arboard splits only on LF.
-            let path = match path.to_str() {
-                Some(text) if text.ends_with('\r') => PathBuf::from(text.trim_end_matches('\r')),
-                _ => path,
-            };
-            path.exists().then_some(path)
+    read_files: impl FnOnce() -> Result<Vec<PathBuf>, String>,
+    read_image: impl FnOnce() -> Result<(usize, usize, Vec<u8>), String>,
+) -> Result<ClipboardPaste, String> {
+    let listed = read_files();
+    let files: Vec<PathBuf> = listed
+        .as_ref()
+        .map(|paths| {
+            paths
+                .iter()
+                .filter_map(|path| {
+                    // text/uri-list lines end in CRLF, and arboard splits only on LF.
+                    let path = match path.to_str() {
+                        Some(text) if text.ends_with('\r') => {
+                            PathBuf::from(text.trim_end_matches('\r'))
+                        }
+                        _ => path.clone(),
+                    };
+                    path.exists().then_some(path)
+                })
+                .collect()
         })
-        .collect();
+        .unwrap_or_default();
     if !files.is_empty() {
-        return Some(ClipboardPaste::Files(files));
+        return Ok(ClipboardPaste::Files(files));
     }
-    read_image().map(|(width, height, rgba)| ClipboardPaste::Image {
-        width,
-        height,
-        rgba,
-    })
+    let files = match &listed {
+        Ok(paths) => format!("{} copied files, none found on disk", paths.len()),
+        Err(why) => format!("no copied files ({why})"),
+    };
+    match read_image() {
+        Ok((width, height, rgba)) => Ok(ClipboardPaste::Image {
+            width,
+            height,
+            rgba,
+        }),
+        Err(why) => Err(format!("{files}, no picture ({why})")),
+    }
 }
 
 /// Files copied to the clipboard by a file manager.
-fn clipboard_files() -> Option<Vec<PathBuf>> {
-    let mut clipboard = arboard::Clipboard::new().ok()?;
-    clipboard.get().file_list().ok()
+fn clipboard_files() -> Result<Vec<PathBuf>, String> {
+    let mut clipboard = arboard::Clipboard::new().map_err(|error| error.to_string())?;
+    clipboard
+        .get()
+        .file_list()
+        .map_err(|error| error.to_string())
 }
 
 /// Clipboard image as width, height, and straight-alpha RGBA.
-fn clipboard_image() -> Option<(usize, usize, Vec<u8>)> {
-    let mut clipboard = arboard::Clipboard::new().ok()?;
-    let image = clipboard.get_image().ok()?;
+fn clipboard_image() -> Result<(usize, usize, Vec<u8>), String> {
+    let mut clipboard = arboard::Clipboard::new().map_err(|error| error.to_string())?;
+    let image = clipboard.get_image().map_err(|error| error.to_string())?;
     if image.width == 0 || image.height == 0 {
-        return None;
+        return Err("the picture is empty".to_owned());
     }
-    Some((image.width, image.height, image.bytes.into_owned()))
+    Ok((image.width, image.height, image.bytes.into_owned()))
 }
 
 /// Writes decoded straight-alpha RGBA image bytes to the system clipboard.
@@ -12974,12 +13012,15 @@ mod tests {
                 app.take_clipboard_paste(ui.ctx(), || {
                     reads += 1;
                     clipboard_contents(
-                        || files.clone(),
+                        || files.clone().ok_or_else(|| "no fixture files".to_owned()),
                         || {
                             image_reads += 1;
-                            image.then(|| (2, 2, vec![200; 16]))
+                            image
+                                .then(|| (2, 2, vec![200; 16]))
+                                .ok_or_else(|| "no fixture picture".to_owned())
                         },
                     )
+                    .ok()
                 });
                 ui.add(
                     egui::TextEdit::singleline(&mut app.composer)
@@ -13047,7 +13088,7 @@ mod tests {
             },
             |ui| {
                 app.take_clipboard_paste(ui.ctx(), || {
-                    clipboard_contents(|| None, || Some((2, 2, vec![200; 16])))
+                    clipboard_contents(|| Err(String::new()), || Ok((2, 2, vec![200; 16]))).ok()
                 });
                 ui.add(
                     egui::TextEdit::singleline(&mut app.composer)
@@ -13532,8 +13573,76 @@ mod tests {
         std::fs::write(&file, b"PK-fixture").unwrap();
         let mut listed = file.clone().into_os_string();
         listed.push("\r");
-        let contents = clipboard_contents(|| Some(vec![PathBuf::from(listed)]), || None);
-        assert!(matches!(contents, Some(ClipboardPaste::Files(paths)) if paths == [file]));
+        let contents = clipboard_contents(
+            || Ok(vec![PathBuf::from(listed)]),
+            || Err("no fixture picture".to_owned()),
+        );
+        assert!(matches!(contents, Ok(ClipboardPaste::Files(paths)) if paths == [file]));
+    }
+
+    /// A file copied in Explorer and pasted with a quick Ctrl+V right after
+    /// switching back (#404): egui-winit swallows the V press while it looks
+    /// for text that is not there, so only the V release arrives, after Ctrl
+    /// already went up, and a chat row clicked to get here may still hold the
+    /// focus. Explorer offers the file's icon too, and the file must win.
+    #[test]
+    fn a_file_copied_in_explorer_pastes_on_a_quick_tap_after_switching_back() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("fixture report.pdf");
+        std::fs::write(&file, b"%PDF-fixture").unwrap();
+        let (mut app, ctx) = clipboard_app();
+        ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("fixture-chat-row")));
+        let up = egui::Event::ModifiersChanged(egui::Modifiers::NONE);
+        let down = egui::Event::ModifiersChanged(egui::Modifiers::COMMAND);
+        let mut reads = 0;
+        for (time, events) in [
+            (10.0, vec![egui::Event::WindowFocused(true), up.clone()]),
+            (10.5, vec![down]),
+            (10.6, vec![up, bare_v_release()]),
+        ] {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    app.take_clipboard_paste(ui.ctx(), || {
+                        reads += 1;
+                        clipboard_contents(|| Ok(vec![file.clone()]), || Ok((2, 2, vec![200; 16])))
+                            .ok()
+                    });
+                    app.apply_actions(ui.ctx());
+                },
+            );
+            output.textures_delta.clear();
+        }
+        assert_eq!(reads, 1);
+        assert_eq!(app.pending.len(), 1);
+        assert!(matches!(&app.pending[0].item, Pending::File(path) if *path == file));
+    }
+
+    /// A paste that finds nothing says why for the log, naming no file.
+    #[test]
+    fn an_empty_paste_explains_itself_without_naming_files() {
+        let missing = PathBuf::from("/fixture/secret-name.pdf");
+        let why = clipboard_contents(
+            || Ok(vec![missing.clone()]),
+            || Err("no picture here".to_owned()),
+        )
+        .unwrap_err();
+        assert!(why.contains("1 copied files, none found on disk"), "{why}");
+        assert!(why.contains("no picture here"), "{why}");
+        assert!(!why.contains("secret-name"), "{why}");
+        let why = clipboard_contents(
+            || Err("format unavailable".to_owned()),
+            || Err("empty".to_owned()),
+        )
+        .unwrap_err();
+        assert_eq!(
+            why,
+            "no copied files (format unavailable), no picture (empty)"
+        );
     }
 
     #[test]
