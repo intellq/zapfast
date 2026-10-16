@@ -37,6 +37,8 @@ pub(super) enum CallRuntimeEvent {
     Media(CallEvent),
     /// The media task is gone: relay disconnect, send failure, or hangup.
     Ended,
+    /// A call link's join finished: the call is in, or why it is not.
+    LinkJoined(Result<whatsapp_rust::voip::CallHandle, String>),
 }
 
 impl CallRuntime {
@@ -44,6 +46,22 @@ impl CallRuntime {
     /// to watch, and gets one the moment it is placed or answered.
     pub(super) fn new(call: Call, frames: Option<async_channel::Receiver<VideoTick>>) -> Self {
         let (_tx, events) = async_channel::bounded(64);
+        let last = call.update();
+        Self {
+            call,
+            events,
+            frames,
+            watching: false,
+            last,
+        }
+    }
+
+    /// A call link's runtime, whose events are its join's answer until it has a handle to watch.
+    fn joining(
+        call: Call,
+        frames: Option<async_channel::Receiver<VideoTick>>,
+        events: async_channel::Receiver<CallRuntimeEvent>,
+    ) -> Self {
         let last = call.update();
         Self {
             call,
@@ -275,6 +293,73 @@ impl Worker {
         }
     }
 
+    /// Joins a call link the window is already showing as placing under `generation`.
+    ///
+    /// The join itself runs on a task of its own (the call service may hold us in its waiting
+    /// room), and its answer comes back as [`CallRuntimeEvent::LinkJoined`]. A call link belongs
+    /// to no chat, so it is drawn under its roster and filed nowhere.
+    pub(super) async fn join_call_link(
+        &mut self,
+        token: String,
+        video: bool,
+        generation: u64,
+        cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        let mut placing = CallUpdate::placing(generation, String::new(), video);
+        placing.group = Some(calls::GroupCall {
+            link: true,
+            ..calls::GroupCall::default()
+        });
+        if self.call_busy() {
+            self.emit_call(placing.not_placed());
+            return;
+        }
+        let Some(client) = self.client.clone() else {
+            log::warn!("[CALL] cannot join a call link: WhatsApp is not connected");
+            self.emit(Event::Error(
+                "ZapFast is not connected to WhatsApp".to_owned(),
+            ));
+            self.emit_call(placing.not_placed());
+            return;
+        };
+        let devices = self.emit_call_devices().await;
+        let camera = video
+            .then(|| calls::default_camera(&devices, None))
+            .flatten();
+        let (done, answers) = async_channel::bounded(1);
+        let joined =
+            Call::join_link(&client, generation, token, video, camera, &cancel, done).await;
+        match joined {
+            Ok((call, frames)) => {
+                let (tx, events) = async_channel::bounded(1);
+                // The join's answer, as the runtime's first event.
+                tokio::spawn(async move {
+                    if let Ok(answer) = answers.recv().await {
+                        let _ = tx.send(CallRuntimeEvent::LinkJoined(answer)).await;
+                    }
+                });
+                let runtime = CallRuntime::joining(call, frames, events);
+                let update = runtime.call.update();
+                self.call = Some(runtime);
+                if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                    self.hangup_call().await;
+                } else {
+                    self.emit_call(update);
+                }
+            }
+            Err(error) if error.is::<calls::Cancelled>() => {
+                self.emit_call(placing.not_placed());
+            }
+            Err(error) => {
+                log::error!("[CALL] could not join the call link: {error}");
+                self.emit(Event::Error(format!(
+                    "The call link could not be joined: {error}"
+                )));
+                self.emit_call(placing.not_placed());
+            }
+        }
+    }
+
     pub(super) async fn answer_call(&mut self) {
         let Some(client) = self.client.clone() else {
             return;
@@ -437,8 +522,15 @@ impl Worker {
 
     /// One event from the current call's media plane.
     pub(super) fn call_runtime(&mut self, event: CallRuntimeEvent) {
+        let mut refused = None;
         let update = match self.call.as_mut() {
             Some(runtime) => match event {
+                CallRuntimeEvent::LinkJoined(joined) => {
+                    refused = joined.as_ref().err().cloned();
+                    let update = runtime.call.link_joined(joined);
+                    runtime.watch();
+                    update
+                }
                 CallRuntimeEvent::Ended => runtime.call.media_ended(),
                 CallRuntimeEvent::Media(media) => {
                     if matches!(media, CallEvent::RelayAllocated)
@@ -453,6 +545,11 @@ impl Worker {
             },
             None => None,
         };
+        if let Some(error) = refused {
+            self.emit(Event::Error(format!(
+                "The call link could not be joined: {error}"
+            )));
+        }
         if let Some(update) = update {
             self.emit_call(update);
         }

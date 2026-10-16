@@ -6169,6 +6169,12 @@ impl Worker {
                 generation,
                 cancel,
             } => self.start_call(chat, video, generation, cancel).await,
+            Command::JoinCallLink {
+                token,
+                video,
+                generation,
+                cancel,
+            } => self.join_call_link(token, video, generation, cancel).await,
             Command::AnswerCall => self.answer_call().await,
             Command::DeclineCall => self.decline_call().await,
             Command::HangupCall => self.hangup_call().await,

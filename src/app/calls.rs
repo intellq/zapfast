@@ -104,9 +104,14 @@ impl App {
     /// group's subject for a group call), or "Locked chat" while the lock
     /// hides it.
     pub fn call_name(&mut self) -> String {
-        let Some(chat) = self.call.as_ref().map(|call| call.chat.clone()) else {
+        let Some(call) = self.call.as_ref() else {
             return String::new();
         };
+        // A call joined through a link belongs to no chat.
+        if call.group.as_ref().is_some_and(|group| group.link) {
+            return crate::i18n::gettext(self.locale, "Call link").into_owned();
+        }
+        let chat = call.chat.clone();
         if self.call_is_private() {
             return crate::i18n::gettext(self.locale, "Locked chat").into_owned();
         }
@@ -151,7 +156,11 @@ impl App {
     /// The picture the call shows for the other side: none while the chat is
     /// locked, because a photo is the same disclosure the name is.
     pub fn call_avatar(&mut self) -> Option<std::path::PathBuf> {
-        let chat = self.call.as_ref()?.chat.clone();
+        let call = self.call.as_ref()?;
+        if call.chat.is_empty() {
+            return None;
+        }
+        let chat = call.chat.clone();
         if self.call_is_private() {
             return None;
         }
@@ -353,6 +362,34 @@ impl App {
             cancel: Arc::clone(&cancel),
         });
         self.handle_call_update(CallUpdate::placing(generation, chat.to_string(), video));
+        self.call_cancel = Some(cancel);
+        self.call_placed = Some(Instant::now());
+    }
+
+    /// Joins a call link from a message: drawn as connecting in this same
+    /// frame, as a placed call is, while the worker asks to be let in.
+    pub(super) fn join_call_link(&mut self, token: String, video: bool) {
+        if self.call_live() {
+            self.toast_error(crate::i18n::gettext(
+                self.locale,
+                "Hang up the current call first",
+            ));
+            return;
+        }
+        let generation = crate::calls::next_generation();
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.backend.send(Command::JoinCallLink {
+            token,
+            video,
+            generation,
+            cancel: Arc::clone(&cancel),
+        });
+        let mut placing = CallUpdate::placing(generation, String::new(), video);
+        placing.group = Some(crate::calls::GroupCall {
+            link: true,
+            ..crate::calls::GroupCall::default()
+        });
+        self.handle_call_update(placing);
         self.call_cancel = Some(cancel);
         self.call_placed = Some(Instant::now());
     }
@@ -827,6 +864,7 @@ mod tests {
             let mut update = update(1, CallPhase::Active);
             update.video = true;
             update.group = Some(GroupCall {
+                link: false,
                 caller: None,
                 participants: vec![Participant {
                     id: ADA.to_owned(),
@@ -848,6 +886,37 @@ mod tests {
             app.call_member_frames.is_empty(),
             "a stopped camera leaves no frozen picture"
         );
+    }
+
+    /// A call link from a message is joined here rather than opened in the browser, and is
+    /// drawn at once under the link's name, with no chat behind it.
+    #[test]
+    fn a_call_link_is_joined_here() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, mut commands) = app(directory.path());
+        let ctx = egui::Context::default();
+        app.apply(
+            Action::OpenUrl("https://call.whatsapp.com/video/AbCdEf1234567890".to_owned()),
+            &ctx,
+        );
+        let sent = sent(&mut commands);
+        assert!(
+            matches!(
+                sent.as_slice(),
+                [Command::JoinCallLink { token, video: true, .. }] if token == "AbCdEf1234567890"
+            ),
+            "{sent:?}"
+        );
+        let call = app.call.clone().expect("on screen at once");
+        assert_eq!(call.phase, CallPhase::Placing);
+        assert_eq!(app.call_name(), "Call link");
+        assert!(app.call_avatar().is_none());
+        // A second link while that call is up is not joined.
+        app.apply(
+            Action::OpenUrl("https://call.whatsapp.com/voice/AbCdEf1234567890".to_owned()),
+            &ctx,
+        );
+        assert!(self::sent(&mut commands).is_empty());
     }
 
     #[test]

@@ -7296,7 +7296,9 @@ impl App {
                 }
             }
             Action::OpenUrl(url) => {
-                if let Some(link) = crate::wa_link::parse(&url) {
+                if let Some((token, video)) = crate::safety::call_link(&url) {
+                    self.join_call_link(token, video);
+                } else if let Some(link) = crate::wa_link::parse(&url) {
                     self.open_wa_link(link);
                 } else if let Some(url) = crate::safety::external_url(&url) {
                     ctx.open_url(egui::OpenUrl::new_tab(url));

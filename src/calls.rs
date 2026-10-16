@@ -200,6 +200,8 @@ pub struct GroupCall {
     pub caller: Option<String>,
     /// Everyone else on the roster, in the order the call service lists them.
     pub participants: Vec<Participant>,
+    /// Whether we joined through a call link, which belongs to no chat.
+    pub link: bool,
 }
 
 /// One person on a group call's roster.
@@ -1460,6 +1462,8 @@ pub struct Call {
     began: i64,
     /// The roster of a group call; `None` for a one-to-one call.
     group: Option<GroupRoster>,
+    /// The task joining a call link, until it has joined: hanging up stops it.
+    join_task: Option<tokio::task::AbortHandle>,
 }
 
 /// What a group call's own signaling says about who is on it.
@@ -1476,6 +1480,8 @@ struct GroupRoster {
     participants: Vec<GroupCallParticipant>,
     /// The members whose pictures are arriving, by their roster JID.
     video: Vec<Jid>,
+    /// Whether we joined through a call link.
+    link: bool,
 }
 
 impl GroupRoster {
@@ -1560,6 +1566,7 @@ impl GroupRoster {
 
     fn view(&self) -> GroupCall {
         GroupCall {
+            link: self.link,
             caller: self.caller.as_ref().map(Jid::to_non_ad_string),
             participants: self
                 .participants
@@ -1720,6 +1727,7 @@ impl Call {
                 camera,
                 lost_devices: Vec::new(),
                 group: None,
+                join_task: None,
             },
             frames,
         ))
@@ -1760,6 +1768,128 @@ impl Call {
             peer_video_request: None,
             began: crate::util::now(),
             group,
+            join_task: None,
+        }
+    }
+
+    /// Joins a call link: opens the devices as placing a call does, then hands the join to a task
+    /// of its own, since the call service may keep us in its waiting room for as long as it likes
+    /// and the worker must not wait with it. The task's answer arrives on `done`, and
+    /// [`Call::link_joined`] applies it. Until then the call reads as connecting.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn join_link(
+        client: &Arc<Client>,
+        generation: u64,
+        token: String,
+        video: bool,
+        camera: Option<String>,
+        cancel: &AtomicBool,
+        done: async_channel::Sender<std::result::Result<CallHandle, String>>,
+    ) -> Result<(Self, Option<async_channel::Receiver<VideoTick>>)> {
+        if let Some(missing) = missing_audio_device_off_thread(None, None).await {
+            return Err(anyhow!("no {missing} is available; a call needs one"));
+        }
+        let mut pipe = None;
+        if video {
+            match VideoPipeline::start(camera.clone()).await {
+                Ok((pipeline, frames)) => pipe = Some((pipeline, frames)),
+                Err(error) => log::warn!("[CALL] video pipeline could not start: {error}"),
+            }
+        }
+        // A video link's call takes only a video call's media, so one with no video path cannot
+        // join it at all.
+        require_video(video, pipe.is_some())?;
+        if cancel.load(Ordering::Relaxed) {
+            return Err(Cancelled.into());
+        }
+        let (mic, mic_rx) = AudioInput::spawn(None);
+        let (output, output_tx) = AudioOutput::spawn(None);
+        let endpoints = pipe
+            .as_ref()
+            .map(|(pipeline, _)| (pipeline.source(), pipeline.sink()));
+        let client = Arc::clone(client);
+        let task = tokio::spawn(async move {
+            let media = if video {
+                whatsapp_rust::types::group_call::CallLinkMedia::Video
+            } else {
+                whatsapp_rust::types::group_call::CallLinkMedia::Audio
+            };
+            let voip = client.voip();
+            let builder = voip.call_link(&token, media).audio(mic_rx, output_tx);
+            let joined = match endpoints {
+                Some((source, sink)) => builder.video(source, sink).start().await,
+                None => builder.start().await,
+            };
+            let _ = done.send(joined.map_err(|error| error.to_string())).await;
+        });
+        log::info!("[CALL] joining a call link video={video}");
+        let (video_pipe, frames) = match pipe {
+            Some((pipeline, frames)) => (Some(pipeline), Some(frames)),
+            None => (None, None),
+        };
+        Ok((
+            Self {
+                generation,
+                call_id: String::new(),
+                chat: String::new(),
+                direction: CallDirection::Outgoing,
+                video: video_pipe.is_some(),
+                phase: CallPhase::Connecting,
+                started: None,
+                outcome: None,
+                peer_audio: None,
+                incoming: None,
+                handle: None,
+                media_ready: false,
+                mic: Some(mic),
+                speaker: Some(output),
+                camera_wanted: video_pipe
+                    .as_ref()
+                    .is_some_and(VideoPipeline::camera_running),
+                peer_video_request: None,
+                began: crate::util::now(),
+                video_pipe,
+                remote_video: false,
+                microphone: None,
+                speaker_device: None,
+                camera,
+                lost_devices: Vec::new(),
+                group: Some(GroupRoster {
+                    link: true,
+                    ..GroupRoster::default()
+                }),
+                join_task: Some(task.abort_handle()),
+            },
+            frames,
+        ))
+    }
+
+    /// Applies the answer of a call link's join: the call is in and its media coming up, or it
+    /// could not get in.
+    pub fn link_joined(
+        &mut self,
+        joined: std::result::Result<CallHandle, String>,
+    ) -> Option<CallUpdate> {
+        self.join_task = None;
+        if !self.phase.is_live() {
+            return None;
+        }
+        match joined {
+            Ok(handle) => {
+                self.call_id = handle.call_id().to_owned();
+                // The roster the call service admitted us with, until its next update.
+                if let Some(state) = handle.group_state()
+                    && let Some(update) = state.snapshot()
+                    && let Some(roster) = self.group.as_mut()
+                {
+                    roster.apply(update);
+                }
+                self.handle = Some(Arc::new(handle));
+                log::info!("[CALL] joined a call link call_id={}", self.call_id);
+                self.phase = CallPhase::Accepted;
+                self.became_active().or_else(|| Some(self.update()))
+            }
+            Err(error) => self.fail(format!("the call link could not be joined: {error}")),
         }
     }
 
@@ -1792,6 +1922,7 @@ impl Call {
             peer_video_request: None,
             began: crate::util::now(),
             group: None,
+            join_task: None,
         }
     }
 
@@ -2113,6 +2244,11 @@ impl Call {
 
     /// Releases every local resource. Safe to call twice.
     pub fn cleanup(&mut self) {
+        if let Some(task) = self.join_task.take() {
+            // A call link still being joined is let go: the library's own guard ends what it
+            // had begun with the call service.
+            task.abort();
+        }
         if let Some(mut pipe) = self.video_pipe.take() {
             pipe.shutdown();
         }
@@ -3922,6 +4058,7 @@ mod tests {
             peer_video_request: None,
             began: crate::util::now(),
             group: None,
+            join_task: None,
         }
     }
 
@@ -4058,6 +4195,27 @@ mod tests {
             [false, false],
             "someone who left and came back has not sent a picture yet"
         );
+    }
+
+    /// A call link the call service will not let us into fails as a call that never came up,
+    /// and a join that answers after a hang-up changes nothing.
+    #[test]
+    fn a_call_link_that_cannot_be_joined_says_so() {
+        let mut call = dialing();
+        call.call_id = String::new();
+        call.chat = String::new();
+        call.phase = CallPhase::Connecting;
+        call.group = Some(GroupRoster {
+            link: true,
+            ..GroupRoster::default()
+        });
+        assert!(call.update().group.is_some_and(|group| group.link));
+        let update = call
+            .link_joined(Err("call-link ended before admission".to_owned()))
+            .expect("the screen is told");
+        assert_eq!(update.phase, CallPhase::Failed);
+        assert_eq!(update.outcome, Some(CallOutcome::Failed));
+        assert!(call.link_joined(Err("again".to_owned())).is_none());
     }
 
     #[test]

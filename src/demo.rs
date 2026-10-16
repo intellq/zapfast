@@ -2415,6 +2415,19 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
             // A group's video call: three members' cameras on, Tom's off, and
             // ours in the corner.
             "call-group-video" => group_call_sample(app, false, true),
+            // A call link from a message, while the call service lets us in.
+            "call-link" => {
+                call_sample(app, false, false);
+                if let Some(call) = app.call.as_mut() {
+                    call.chat = String::new();
+                    call.phase = CallPhase::Connecting;
+                    call.started = None;
+                    call.group = Some(crate::calls::GroupCall {
+                        link: true,
+                        ..crate::calls::GroupCall::default()
+                    });
+                }
+            }
             "call-strip" => {
                 call_sample(app, false, false);
                 app.call_surface_hidden = true;
@@ -3733,6 +3746,7 @@ pub fn group_call_sample(app: &mut App, incoming: bool, video: bool) {
         call.chat = SAMPLES[1].id.to_owned();
         call.remote_video = false;
         call.group = Some(crate::calls::GroupCall {
+            link: false,
             caller: Some(roster[0].0.to_owned()),
             participants: roster
                 .iter()
@@ -6015,6 +6029,7 @@ mod tests {
             "call-group",
             "call-group-active",
             "call-group-video",
+            "call-link",
             "call-video",
             "call-video,light",
             "call-video-incoming",
