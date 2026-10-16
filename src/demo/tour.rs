@@ -863,9 +863,11 @@ mod tests {
             starred_at: crate::util::now(),
         }];
         frame(&mut app, &mut tour, &ctx, Vec::new());
+        // The header's title shows only where it fits beside its buttons, as
+        // every list title does, so the row is what names where the star is.
         assert!(
-            tour.labels.contains_key("Starred"),
-            "the header names the panel"
+            tour.labels.contains_key(&app.chat_title_of(&chat)),
+            "the row names the chat by its title"
         );
         assert!(
             tour.labels.contains_key(&body),

@@ -193,7 +193,7 @@ fn header(app: &mut App, ui: &mut egui::Ui) {
                                 }
                             }
                         }
-                        theme::text(
+                        header_title(
                             ui,
                             if app.show_starred {
                                 tr("Starred")
@@ -204,6 +204,11 @@ fn header(app: &mut App, ui: &mut egui::Ui) {
                             },
                             theme::bold(20.0),
                             palette.text,
+                            if side_bar {
+                                0.0
+                            } else {
+                                header_buttons_width(app, ui, false)
+                            },
                         );
                     } else {
                         profile_button(app, ui);
@@ -452,7 +457,7 @@ fn macos_header(app: &mut App, ui: &mut egui::Ui) {
                             }
                         }
                     }
-                    theme::text(
+                    header_title(
                         ui,
                         if app.show_starred {
                             tr("Starred")
@@ -463,6 +468,7 @@ fn macos_header(app: &mut App, ui: &mut egui::Ui) {
                         },
                         theme::bold(16.0),
                         palette.text,
+                        header_buttons_width(app, ui, true),
                     );
                 } else {
                     // Our avatar opens the account switcher here as on the
@@ -530,6 +536,62 @@ fn macos_header(app: &mut App, ui: &mut egui::Ui) {
             }
             filter_chips(app, ui);
         });
+}
+
+/// How wide the buttons right of a folder's title are drawn, with the
+/// spacing between them, as `header` and `macos_header` lay them out.
+fn header_buttons_width(app: &App, ui: &egui::Ui, macos: bool) -> f32 {
+    let folder_archive = app.show_archived || app.locked_folder;
+    let calls = !folder_archive && !app.show_calls && !app.call_log.is_empty();
+    let archived = !folder_archive && app.archived_count() > 0;
+    let count = 1 // starred
+        + 1 // new chat
+        + usize::from(!super::narrow(ui.ctx()))
+        + usize::from(!macos)
+        + usize::from(calls)
+        + usize::from(archived);
+    let spacing = if !macos && (app.archived_count() > 0 || !app.call_log.is_empty()) {
+        2.0
+    } else {
+        ui.spacing().item_spacing.x
+    };
+    row_width(count, 18.0 + 12.0, spacing)
+}
+
+/// How wide `count` items `edge` points wide are with `spacing` between them.
+fn row_width(count: usize, edge: f32, spacing: f32) -> f32 {
+    if count == 0 {
+        return 0.0;
+    }
+    count as f32 * edge + (count - 1) as f32 * spacing
+}
+
+/// Draws a folder's title in the chat list header when it fits before the
+/// buttons that follow it on the right, `buttons` points wide, and leaves it
+/// out otherwise: in a narrow list it ran under them. The Back arrow before
+/// it says where you are.
+fn header_title(
+    ui: &mut egui::Ui,
+    text: &str,
+    font: egui::FontId,
+    color: egui::Color32,
+    buttons: f32,
+) {
+    let width = ui
+        .painter()
+        .layout_no_wrap(text.to_owned(), font.clone(), color)
+        .size()
+        .x;
+    let spacing = ui.spacing().item_spacing.x;
+    if title_fits(width, ui.available_width(), buttons, spacing) {
+        theme::text(ui, text, font, color);
+    }
+}
+
+/// Whether a title `width` points wide fits in `available` beside a row of
+/// buttons `buttons` points wide, with `spacing` between the two.
+fn title_fits(width: f32, available: f32, buttons: f32, spacing: f32) -> bool {
+    width + spacing + buttons <= available
 }
 
 /// Stable main-list row id used by interaction tests.
@@ -743,7 +805,10 @@ fn starred_row(
         ui.allocate_exact_size(vec2(width, 26.0 + bubble_height + 10.0), Sense::hover());
     let response = ui.interact(rect, row_id, Sense::click());
     theme::reveal_focus(&response);
-    let label = format!("{}, {words}", app.display_name_or(&message.chat, None));
+    // The chat's own title, as the chat list writes it: a group without a
+    // subject is named after its members, never "Unknown".
+    let name = app.chat_title_of(&message.chat);
+    let label = format!("{name}, {words}");
     response.widget_info(|| {
         egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), &label)
     });
@@ -754,7 +819,6 @@ fn starred_row(
         ui.painter()
             .rect_filled(rect, 6.0, palette.surface_hover.gamma_multiply(0.5));
     }
-    let name = app.display_name_or(&message.chat, None);
     let when = crate::util::moment_stamp(app.locale, marked_at);
     let name_line = widgets::line(
         ui,
@@ -2806,5 +2870,20 @@ mod tests {
         let center = compact_badge_center(avatar);
         assert!(center.x + width / 2.0 <= rail.right(), "{width} too wide");
         assert!(center.y - 10.0 >= rail.top(), "the badge fits its cell");
+    }
+
+    /// A header title shows only when it fits before its buttons, whatever
+    /// the language makes of it.
+    #[test]
+    fn header_titles_make_way_for_their_buttons() {
+        let spacing = 8.0;
+        let two = row_width(2, 30.0, spacing);
+        assert_eq!(two, 68.0);
+        assert!(title_fits(100.0, 176.0, two, spacing));
+        assert!(!title_fits(100.0, 175.0, two, spacing));
+        let three = row_width(3, 30.0, spacing);
+        assert!(!title_fits(100.0, 176.0, three, spacing));
+        assert!(title_fits(100.0, 214.0, three, spacing));
+        assert_eq!(row_width(0, 30.0, spacing), 0.0);
     }
 }

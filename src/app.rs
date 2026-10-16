@@ -2661,6 +2661,16 @@ impl App {
         self.person_name(&chat.id, None)
     }
 
+    /// The title of the chat `id`, as the chat list writes it, for places that
+    /// hold only the id (a starred message). A chat not loaded falls back to
+    /// the person's name.
+    pub fn chat_title_of(&self, id: &str) -> String {
+        match self.chat(id) {
+            Some(chat) => self.chat_title(chat),
+            None => self.display_name(id),
+        }
+    }
+
     /// Our own chat's title, "Name (You)" as on the phone, so searching for
     /// our own name finds it.
     pub fn self_title(&self) -> String {
@@ -20002,6 +20012,32 @@ mod name_tests {
             "Group",
             "no invented members while metadata is missing"
         );
+    }
+
+    /// A starred message names its chat by the chat's title: a group without
+    /// a subject is named after its members, as in the chat list, not
+    /// "Unknown" as a person lookup of a group id would have it.
+    #[test]
+    fn a_chat_is_titled_by_id_as_the_chat_list_titles_it() {
+        let mut app = app();
+        let mut chat = Chat::new("fixture@g.us".into(), String::new());
+        let id = "15550000001@s.whatsapp.net".to_owned();
+        app.contacts.insert(
+            id.clone(),
+            Contact {
+                id: id.clone(),
+                full_name: Some("Ada Lovelace".into()),
+                first_name: Some("Ada".into()),
+                push_name: None,
+            },
+        );
+        chat.participants.push(id);
+        chat.participants.push(app.me.clone().unwrap());
+        app.chats.push(chat.clone());
+        assert_eq!(app.display_name(&chat.id), "Unknown");
+        assert_eq!(app.chat_title_of(&chat.id), app.participant_names(&chat));
+        assert_eq!(app.chat_title_of(&chat.id), "Ada, You");
+        assert_eq!(app.chat_title_of("gone@g.us"), "Unknown");
     }
 
     #[test]
