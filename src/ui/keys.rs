@@ -253,7 +253,7 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
             actions.push(Action::Open(Page::Settings));
         } else if app.page == Page::Settings && !app.settings_search.is_empty() {
             actions.push(Action::SearchSettings(String::new()));
-        } else if app.page == Page::Settings {
+        } else if app.page == Page::Settings || app.page == Page::Calls {
             actions.push(Action::Open(Page::Chats));
         } else if search_focused || !app.search.is_empty() {
             if !app.search.is_empty() {
@@ -759,6 +759,22 @@ mod tests {
         app.actions.clear();
         app.settings_search.clear();
         escape(&mut app, &ctx);
+        assert!(matches!(
+            app.actions.as_slice(),
+            [Action::Open(Page::Chats)]
+        ));
+    }
+
+    #[test]
+    fn escape_leaves_the_calls_page() {
+        let root = tempfile::tempdir().unwrap();
+        let mut app = App::headless(
+            crate::paths::AppDirs::under(root.path()),
+            crate::settings::Settings::default(),
+        )
+        .0;
+        app.page = Page::Calls;
+        escape(&mut app, &egui::Context::default());
         assert!(matches!(
             app.actions.as_slice(),
             [Action::Open(Page::Chats)]

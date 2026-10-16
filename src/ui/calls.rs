@@ -1,490 +1,341 @@
-//! The call log: every chat's call rows in one list, shown in place of the
-//! chat list, and the pieces the call rows in a conversation share with it.
+//! Calls as the history shows them: the entry a call leaves among a chat's
+//! messages, and the Calls page that lists every call of the account,
+//! newest first.
+//!
+//! Both read the same entries, which come from WhatsApp's own records (the
+//! phone's call log and the call-log messages in history) and from the calls
+//! ZapFast took part in. Nothing here starts a call except the call-back
+//! buttons.
 
-use crate::i18n::tr;
-use egui::{Frame, Margin, Rect, Sense, Vec2, pos2, vec2};
+use egui::{Align, CornerRadius, Frame, Layout, Margin, Sense};
 
 use crate::app::App;
-use crate::archive::LoggedCall;
-use crate::model::{Action, Chat, ChatKind, Content, Message};
-use crate::theme::{self, Icon, Palette};
+use crate::i18n::{Locale, gettext};
+use crate::model::{Action, CallStatus, Content, Message, Page};
+use crate::theme::{self, Icon};
+use crate::ui::widgets;
 
-use super::focus::{Stop, TabStop};
-use super::widgets;
+/// The height of one row on the Calls page.
+const ROW: f32 = 62.0;
 
-/// The icon of a call row: a camera for video, people for a group call.
-pub fn icon(content: &Content) -> Icon {
-    match content {
-        Content::Call { video: true, .. } => Icon::Video,
-        Content::Call { group: Some(_), .. } => Icon::Users,
-        _ => Icon::Phone,
-    }
+/// One call, as its entry reads it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Entry {
+    /// Whether this account placed the call.
+    pub from_me: bool,
+    pub video: bool,
+    pub status: CallStatus,
+    /// Seconds the call was up.
+    pub duration: u64,
+    pub group: bool,
 }
 
-/// Whether ZapFast can call back the other side of a logged call: a voice
-/// call between two people, with a contact who can be called from here.
-pub fn can_call_back(content: &Content, chat: &Chat) -> bool {
-    matches!(
-        content,
-        Content::Call {
-            video: false,
-            group: None,
-            ..
+impl Entry {
+    /// The entry of a call message, if it is one.
+    pub fn of(message: &Message) -> Option<Self> {
+        match message.content {
+            Content::Call {
+                video,
+                status,
+                duration,
+                group,
+            } => Some(Self {
+                from_me: message.from_me,
+                video,
+                status,
+                duration,
+                group,
+            }),
+            _ => None,
         }
-    ) && chat.kind == ChatKind::Direct
-        && !chat.blocked
-}
-
-/// The menu of a call row: call back, and delete the row here.
-pub fn row_menu(
-    ui: &mut egui::Ui,
-    palette: &Palette,
-    chat: &Chat,
-    message: &Message,
-    actions: &mut Vec<Action>,
-) {
-    if can_call_back(&message.content, chat)
-        && widgets::menu_item(ui, palette, Some(Icon::Phone), tr("Call back"))
-    {
-        actions.push(Action::StartCall(chat.id.clone()));
     }
-    if widgets::menu_item(ui, palette, Some(Icon::Trash), tr("Delete from call log")) {
-        actions.push(Action::RemoveCall {
-            chat: chat.id.clone(),
-            id: message.id.clone(),
-        });
-    }
-}
 
-/// Opens [`row_menu`] on a call row's right click, as wide as its labels
-/// rather than the row.
-pub fn row_context_menu(
-    ui: &egui::Ui,
-    response: &egui::Response,
-    palette: &Palette,
-    chat: &Chat,
-    message: &Message,
-    actions: &mut Vec<Action>,
-) {
-    let width =
-        widgets::menu_width(ui, &[tr("Call back"), tr("Delete from call log")], true).max(190.0);
-    egui::Popup::context_menu(response)
-        .width(width)
-        .frame(widgets::menu_frame(palette))
-        .show(|ui| row_menu(ui, palette, chat, message, actions));
-}
-
-/// The button to the call log, beside the archive's, with the number of
-/// missed calls since the log was last opened.
-/// It is there once a call is logged, as the archive's is once something is
-/// archived.
-pub fn button(app: &mut App, ui: &mut egui::Ui) {
-    if app.show_archived || app.locked_folder || app.show_calls || app.call_log.is_empty() {
-        return;
+    /// One glyph for the state: the arrow says which way an answered call
+    /// went, the camera what it carried, and a call that never connected has
+    /// the missed or the slashed handset.
+    pub fn icon(&self) -> Icon {
+        match self.status {
+            CallStatus::Missed | CallStatus::NoAnswer => Icon::PhoneMissed,
+            CallStatus::Declined
+            | CallStatus::DeclinedElsewhere
+            | CallStatus::Busy
+            | CallStatus::Failed
+            | CallStatus::ConnectionLost => Icon::PhoneOff,
+            CallStatus::Answered | CallStatus::AnsweredElsewhere => {
+                if self.video {
+                    Icon::Video
+                } else if self.from_me {
+                    Icon::PhoneOutgoing
+                } else {
+                    Icon::PhoneIncoming
+                }
+            }
+        }
     }
-    let palette = app.palette;
-    let missed = app.missed_calls();
-    let hint = if missed > 0 {
-        crate::i18n::ngettext(
-            app.locale,
-            "Calls ({} missed)",
-            "Calls ({} missed)",
-            missed as u32,
-        )
-        .replace("{}", &missed.to_string())
-    } else {
-        tr("Calls").to_owned()
-    };
-    let response = theme::icon_button(
-        ui,
-        Icon::Phone,
-        18.0,
-        palette.secondary,
-        palette.text,
-        &hint,
-    )
-    .tab_stop(Stop::Calls);
-    if missed > 0 {
-        let label = if missed > 9 {
-            "9+".to_owned()
-        } else {
-            missed.to_string()
+
+    /// What the call was: "Missed voice call", "Video call", "Group voice call".
+    pub fn title(&self, locale: Locale) -> String {
+        let missed = self.status == CallStatus::Missed && !self.from_me;
+        let text = match (missed, self.group, self.video) {
+            (true, false, false) => gettext(locale, "Missed voice call"),
+            (true, false, true) => gettext(locale, "Missed video call"),
+            (true, true, false) => gettext(locale, "Missed group voice call"),
+            (true, true, true) => gettext(locale, "Missed group video call"),
+            (false, false, false) => gettext(locale, "Voice call"),
+            (false, false, true) => gettext(locale, "Video call"),
+            (false, true, false) => gettext(locale, "Group voice call"),
+            (false, true, true) => gettext(locale, "Group video call"),
         };
-        let galley = ui
-            .painter()
-            .layout_no_wrap(label, theme::semibold(9.0), palette.on_accent);
-        let width = (galley.size().x + 6.0).max(14.0);
-        let rect = Rect::from_center_size(
-            response.rect.right_top() + vec2(-3.0, 4.0),
-            vec2(width, 14.0),
-        );
-        ui.painter().rect_filled(rect, 7.0, palette.danger);
-        ui.painter().galley(
-            rect.center() - galley.size() / 2.0,
-            galley,
-            palette.on_accent,
-        );
+        text.into_owned()
     }
-    if response.clicked() {
-        app.actions.push(Action::ShowCalls(true));
+
+    /// How it went: its length when it was up, else what became of it. A
+    /// missed call says it in its title.
+    pub fn detail(&self, locale: Locale) -> Option<String> {
+        let text = match self.status {
+            CallStatus::Answered if self.duration > 0 => {
+                return Some(crate::util::call_duration(self.duration));
+            }
+            CallStatus::Answered | CallStatus::Missed => return None,
+            CallStatus::AnsweredElsewhere => gettext(locale, "Answered on another device"),
+            CallStatus::Declined => gettext(locale, "Declined"),
+            CallStatus::DeclinedElsewhere => gettext(locale, "Declined on another device"),
+            CallStatus::Busy => gettext(locale, "Busy"),
+            CallStatus::Failed => gettext(locale, "Could not connect"),
+            CallStatus::NoAnswer => gettext(locale, "No answer"),
+            CallStatus::ConnectionLost => gettext(locale, "Connection lost"),
+        };
+        Some(text.into_owned())
     }
 }
 
-/// Whether the call log screen shows only missed calls.
-fn missed_only_id() -> egui::Id {
-    egui::Id::new("call-log-missed-only")
-}
-
-/// The call log in place of the chat list: its header, the All and Missed
-/// chips, and one row per call, newest first.
+/// The Calls page.
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let palette = app.palette;
-    let missed_only = ui
-        .ctx()
-        .data(|data| data.get_temp::<bool>(missed_only_id()))
-        .unwrap_or(false);
-    let inset = if theme::macos_chrome(ui.ctx()) {
-        (theme::traffic_light_inset(ui.ctx()) - 14.0).max(0.0)
-    } else {
-        0.0
-    };
+    header(app, ui);
+    ui.add_space(2.0);
+    // A locked chat's calls stay out while its folder is closed.
+    let calls: Vec<Message> = app
+        .call_log
+        .iter()
+        .filter(|message| {
+            app.chat(&message.chat)
+                .is_none_or(|chat| !chat.locked || app.locked_folder_open())
+        })
+        .cloned()
+        .collect();
+    if calls.is_empty() {
+        let (title, body) = if app.call_log_loaded {
+            (
+                gettext(app.locale, "No calls yet"),
+                gettext(
+                    app.locale,
+                    "Calls from your phone's call log and the ones you make here appear here.",
+                ),
+            )
+        } else {
+            (
+                gettext(app.locale, "Loading…"),
+                gettext(app.locale, "Reading this account's calls."),
+            )
+        };
+        widgets::empty_state(ui, &palette, Icon::Phone, title.as_ref(), body.as_ref());
+        return;
+    }
+    let mut actions = Vec::new();
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            for message in &calls {
+                row(app, ui, message, &mut actions);
+            }
+            ui.add_space(12.0);
+        });
+    app.actions.extend(actions);
+}
+
+fn header(app: &mut App, ui: &mut egui::Ui) {
+    let palette = app.palette;
     Frame::new()
         .inner_margin(Margin {
             left: 14,
-            right: 10,
+            right: 14,
             top: 12,
             bottom: 8,
         })
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.add_space(inset);
                 if theme::icon_button(
                     ui,
                     Icon::ArrowLeft,
                     18.0,
                     palette.secondary,
                     palette.text,
-                    tr("Back to chats"),
+                    gettext(app.locale, "Back to the chats").as_ref(),
                 )
-                .tab_stop(Stop::Back)
                 .clicked()
                 {
-                    app.actions.push(Action::ShowCalls(false));
+                    app.actions.push(Action::Open(Page::Chats));
                 }
-                theme::text(ui, tr("Calls"), theme::bold(20.0), palette.text);
-            });
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing = vec2(4.0, 6.0);
-                let missed = app.missed_calls();
-                if widgets::filter_chip(ui, &palette, tr("All"), 0, !missed_only)
-                    .tab_stop(Stop::All)
-                    .clicked()
-                {
-                    ui.ctx()
-                        .data_mut(|data| data.insert_temp(missed_only_id(), false));
-                }
-                if widgets::filter_chip(ui, &palette, tr("Missed calls"), missed, missed_only)
-                    .tab_stop(Stop::Unread)
-                    .clicked()
-                {
-                    ui.ctx()
-                        .data_mut(|data| data.insert_temp(missed_only_id(), true));
-                }
+                ui.add_space(2.0);
+                theme::text(
+                    ui,
+                    gettext(app.locale, "Calls"),
+                    theme::bold(20.0),
+                    palette.text,
+                );
             });
         });
-    let calls: Vec<LoggedCall> = app
-        .listed_calls()
-        .into_iter()
-        .filter(|call| !missed_only || missed(call))
-        .cloned()
-        .collect();
-    if calls.is_empty() {
-        let (title, body) = if missed_only {
-            (tr("No missed calls"), tr("Choose All to see every call."))
-        } else {
-            (
-                tr("No calls yet"),
-                tr("Calls made or received here or on your phone appear here."),
-            )
-        };
-        widgets::empty_state(ui, &palette, Icon::Phone, title, body);
+}
+
+/// One call: who, which way, how it went, when, and the way to call back.
+fn row(app: &mut App, ui: &mut egui::Ui, message: &Message, actions: &mut Vec<Action>) {
+    let Some(entry) = Entry::of(message) else {
         return;
-    }
-    egui::ScrollArea::vertical()
-        .id_salt("call-log")
-        .auto_shrink([false, false])
-        .show_rows(ui, theme::ROW_HEIGHT, calls.len(), |ui, range| {
-            ui.spacing_mut().item_spacing.y = 0.0;
-            for call in &calls[range] {
-                row(app, ui, call);
-            }
-        });
-}
-
-/// Whether a logged call rang unanswered here.
-fn missed(call: &LoggedCall) -> bool {
-    matches!(&call.content, Content::Call { outgoing: false, status, .. } if status.missed())
-}
-
-/// One call: who, which way and how it went, when, and a phone button to
-/// call back. A click opens the chat at the call's row; the right button
-/// offers the row's menu.
-fn row(app: &mut App, ui: &mut egui::Ui, call: &LoggedCall) {
+    };
     let palette = app.palette;
-    let Some(chat) = app.chat(&call.chat).cloned() else {
-        return;
-    };
-    let Content::Call { outgoing, .. } = &call.content else {
-        return;
-    };
-    let title = app.chat_title(&chat);
-    let (rect, response) = ui.allocate_exact_size(
-        vec2(ui.available_width(), theme::ROW_HEIGHT),
-        Sense::click(),
-    );
-    theme::reveal_focus(&response);
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &title));
-    let back = can_call_back(&call.content, &chat);
-    let button = Rect::from_center_size(
-        pos2(rect.right() - 30.0, rect.center().y),
-        Vec2::splat(30.0),
-    );
-    let call_back = back.then(|| {
-        ui.interact(
-            button,
-            egui::Id::new(("call-log-back", &call.chat, &call.id)),
+    let locale = app.locale;
+    let name = app.display_name(&message.chat);
+    let picture = app.avatar(&message.chat);
+    // The row's own target goes first, so the call-back buttons inside keep
+    // their clicks.
+    let row = ui
+        .interact(
+            egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), ROW)),
+            ui.id().with(("call-row", &message.chat, &message.id)),
             Sense::click(),
         )
-        .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text(tr("Call back"))
-    });
-    if ui.is_rect_visible(rect) {
-        if response.hovered() {
-            widgets::row_highlight(ui, &palette, rect, palette.surface_hover);
-        }
-        let avatar_rect =
-            Rect::from_center_size(pos2(rect.left() + 38.0, rect.center().y), Vec2::splat(48.0));
-        let picture = app.avatar(&chat.id);
-        widgets::paint_avatar(
-            ui,
-            &palette,
-            avatar_rect,
-            &title,
-            &chat.id,
-            picture.as_deref(),
-        );
-        let left = rect.left() + 76.0;
-        let right = if back {
-            button.left() - 8.0
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    Frame::new()
+        .fill(if row.hovered() {
+            palette.surface_hover
         } else {
-            rect.right() - 14.0
-        };
-        let stamp = crate::util::chat_stamp(app.locale, call.timestamp);
-        let stamp_line = widgets::line(ui, &stamp, theme::regular(12.0), palette.dim, 120.0, 1);
-        let stamp_width = stamp_line.size().x;
-        stamp_line.paint(
-            ui,
-            pos2(right - stamp_width, rect.top() + 16.0),
-            palette.dim,
-        );
-        let name_color = if missed(call) {
-            palette.danger
-        } else {
-            palette.text
-        };
-        widgets::line(
-            ui,
-            &title,
-            theme::medium(14.5),
-            name_color,
-            right - stamp_width - 8.0 - left,
-            1,
-        )
-        .paint(ui, pos2(left, rect.top() + 14.0), name_color);
-        // Which way, the kind of call, then how it went.
-        let detail_color = if missed(call) {
-            palette.danger
-        } else {
-            palette.dim
-        };
-        let arrow = Rect::from_min_size(pos2(left, rect.top() + 39.0), Vec2::splat(14.0));
-        theme::paint_icon(
-            ui,
-            if *outgoing {
-                Icon::ArrowUpRight
-            } else {
-                Icon::ArrowDownLeft
-            },
-            arrow,
-            14.0,
-            detail_color,
-        );
-        let kind = Rect::from_min_size(pos2(arrow.right() + 4.0, arrow.top()), Vec2::splat(14.0));
-        theme::paint_icon(ui, icon(&call.content), kind, 14.0, detail_color);
-        // The icons say which way and what kind; the line says how it went,
-        // with the length under the time.
-        let Content::Call {
-            status,
-            seconds,
-            group,
-            ..
-        } = &call.content
-        else {
-            return;
-        };
-        let mut detail = status.short_label(app.locale, *outgoing);
-        if let Some(people) = group.filter(|people| *people > 0) {
-            detail.push_str(" · ");
-            detail.push_str(
-                &crate::i18n::ngettext(app.locale, "{} participant", "{} participants", people)
-                    .replace("{}", &people.to_string()),
-            );
-        }
-        let length = seconds.map(crate::util::duration);
-        let mut detail_right = right;
-        if let Some(length) = length {
-            let length_line =
-                widgets::line(ui, &length, theme::regular(12.0), palette.dim, 120.0, 1);
-            let width = length_line.size().x;
-            length_line.paint(ui, pos2(right - width, rect.top() + 39.0), palette.dim);
-            detail_right = right - width - 8.0;
-        }
-        widgets::line(
-            ui,
-            &detail,
-            theme::regular(13.0),
-            detail_color,
-            detail_right - kind.right() - 6.0,
-            1,
-        )
-        .paint(
-            ui,
-            pos2(kind.right() + 6.0, rect.top() + 38.0),
-            detail_color,
-        );
-        if let Some(call_back) = &call_back {
-            let fill = if call_back.hovered() {
-                palette.surface_hover
-            } else {
-                egui::Color32::TRANSPARENT
-            };
-            ui.painter().circle_filled(button.center(), 15.0, fill);
-            theme::paint_icon(ui, Icon::Phone, button, 18.0, palette.accent);
-        }
-    }
-    if call_back.is_some_and(|call_back| call_back.clicked()) {
-        app.actions.push(Action::StartCall(chat.id.clone()));
-    } else if response.clicked() {
-        app.actions.push(Action::OpenMessage {
-            chat: chat.id.clone(),
-            message: call.id.clone(),
+            palette.panel
+        })
+        .corner_radius(CornerRadius::same(theme::RADIUS))
+        .inner_margin(Margin::symmetric(12, 8))
+        .show(ui, |ui| {
+            ui.set_min_height(ROW - 16.0);
+            ui.horizontal(|ui| {
+                widgets::avatar(ui, &palette, &name, &message.chat, 40.0, picture.as_deref());
+                ui.add_space(10.0);
+                ui.vertical(|ui| {
+                    ui.add_space(2.0);
+                    theme::text(ui, &name, theme::semibold(14.5), palette.text);
+                    ui.add_space(1.0);
+                    ui.horizontal(|ui| {
+                        theme::icon(
+                            ui,
+                            entry.icon(),
+                            16.0,
+                            if entry.status.is_bad() {
+                                palette.danger
+                            } else {
+                                palette.accent
+                            },
+                        );
+                        ui.add_space(6.0);
+                        let line = match entry.detail(locale) {
+                            Some(detail) => format!("{} · {detail}", entry.title(locale)),
+                            None => entry.title(locale),
+                        };
+                        theme::text(ui, line, theme::medium(12.5), palette.secondary);
+                    });
+                });
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if !entry.group {
+                        let video = gettext(locale, "Video call").into_owned();
+                        if theme::icon_button(
+                            ui,
+                            Icon::Video,
+                            16.0,
+                            palette.secondary,
+                            palette.text,
+                            &video,
+                        )
+                        .clicked()
+                        {
+                            actions.push(Action::StartVideoCall(message.chat.clone()));
+                        }
+                        let voice = gettext(locale, "Voice call").into_owned();
+                        if theme::icon_button(
+                            ui,
+                            Icon::Phone,
+                            16.0,
+                            palette.secondary,
+                            palette.text,
+                            &voice,
+                        )
+                        .clicked()
+                        {
+                            actions.push(Action::StartCall(message.chat.clone()));
+                        }
+                    }
+                    ui.add_space(8.0);
+                    theme::text(
+                        ui,
+                        crate::util::chat_stamp(locale, message.timestamp),
+                        theme::medium(12.0),
+                        palette.secondary,
+                    );
+                });
+            });
+        });
+    let label = gettext(locale, "Open the chat with {name}").replace("{name}", &name);
+    row.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label.as_str()));
+    theme::reveal_focus(&row);
+    if row.clicked() {
+        actions.push(Action::Open(Page::Chats));
+        actions.push(Action::OpenMessage {
+            chat: message.chat.clone(),
+            message: message.id.clone(),
         });
     }
-    let message = Message {
-        id: call.id.clone(),
-        chat: call.chat.clone(),
-        sender: String::new(),
-        sender_name: None,
-        from_me: *outgoing,
-        timestamp: call.timestamp,
-        history_order: None,
-        content: call.content.clone(),
-        status: crate::model::Delivery::None,
-        delivered_at: None,
-        read_at: None,
-        quoted: None,
-        reactions: Vec::new(),
-        edited: false,
-        mentions: Vec::new(),
-        forwarded: false,
-        thumbnail: None,
-    };
-    row_context_menu(ui, &response, &palette, &chat, &message, &mut app.actions);
+    ui.add_space(4.0);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{CallStatus, Delivery};
+
+    fn entry(from_me: bool, video: bool, status: CallStatus) -> Entry {
+        Entry {
+            from_me,
+            video,
+            status,
+            duration: 0,
+            group: false,
+        }
+    }
 
     #[test]
-    fn a_call_rows_menu_stays_compact_in_wide_windows() {
-        let chat = Chat::new("1@s.whatsapp.net".into(), "Ada".into());
-        let message = Message {
-            id: "call".into(),
-            chat: chat.id.clone(),
-            sender: String::new(),
-            sender_name: None,
-            from_me: false,
-            timestamp: 0,
-            history_order: None,
-            content: Content::Call {
-                outgoing: false,
-                status: CallStatus::Missed,
-                seconds: None,
-                video: false,
-                group: None,
-            },
-            status: Delivery::None,
-            delivered_at: None,
-            read_at: None,
-            quoted: None,
-            reactions: Vec::new(),
-            edited: false,
-            mentions: Vec::new(),
-            forwarded: false,
-            thumbnail: None,
-        };
-        let palette = Palette::dark();
-        for width in [360.0, 1180.0, 2000.0] {
-            let ctx = egui::Context::default();
-            let frame = |events| {
-                let mut response = None;
-                let mut actions = Vec::new();
-                let mut output = ctx.run_ui(
-                    egui::RawInput {
-                        screen_rect: Some(Rect::from_min_size(
-                            egui::Pos2::ZERO,
-                            vec2(width, 800.0),
-                        )),
-                        events,
-                        ..Default::default()
-                    },
-                    |ui| {
-                        let (_, row) = ui
-                            .allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click());
-                        row_context_menu(ui, &row, &palette, &chat, &message, &mut actions);
-                        response = Some(row);
-                    },
-                );
-                output.textures_delta.clear();
-                response.unwrap()
-            };
-            let response = frame(vec![]);
-            let position = response.rect.left_center() + vec2(20.0, 0.0);
-            for pressed in [true, false] {
-                frame(vec![
-                    egui::Event::PointerMoved(position),
-                    egui::Event::PointerButton {
-                        pos: position,
-                        button: egui::PointerButton::Secondary,
-                        pressed,
-                        modifiers: egui::Modifiers::NONE,
-                    },
-                ]);
+    fn the_states_a_reader_tells_apart_have_different_glyphs() {
+        let glyphs = [
+            entry(false, false, CallStatus::Answered).icon(),
+            entry(true, false, CallStatus::Answered).icon(),
+            entry(false, false, CallStatus::Missed).icon(),
+            entry(false, false, CallStatus::Declined).icon(),
+            entry(true, true, CallStatus::Answered).icon(),
+        ];
+        for (index, first) in glyphs.iter().enumerate() {
+            for second in &glyphs[index + 1..] {
+                assert_ne!(first, second);
             }
-            for _ in 0..3 {
-                frame(vec![]);
-            }
-            let popup = response.id.with("popup");
-            assert!(egui::Popup::is_id_open(&ctx, popup));
-            let rect = ctx.read_response(popup).expect("call row menu").rect;
-            assert!(
-                (190.0..=260.0).contains(&rect.width()),
-                "a {width}-point window produced a {}-point menu",
-                rect.width()
-            );
         }
+    }
+
+    #[test]
+    fn an_entry_says_what_the_call_was_and_how_it_went() {
+        let locale = Locale::default();
+        let mut answered = entry(true, false, CallStatus::Answered);
+        answered.duration = 221;
+        assert_eq!(answered.title(locale), "Voice call");
+        assert_eq!(answered.detail(locale).as_deref(), Some("3:41"));
+        let missed = entry(false, true, CallStatus::Missed);
+        assert_eq!(missed.title(locale), "Missed video call");
+        assert_eq!(missed.detail(locale), None, "the title already says it");
+        let refused = entry(true, false, CallStatus::NoAnswer);
+        assert_eq!(refused.detail(locale).as_deref(), Some("No answer"));
     }
 }

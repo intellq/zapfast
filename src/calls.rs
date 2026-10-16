@@ -108,32 +108,11 @@ impl CallPhase {
     }
 }
 
-/// How a call turned out, as data rather than as a finished sentence.
-///
-/// The words belong to the call screen, which is the only place that knows the reader's language,
-/// and the call history stores the same value under a stable status. Nothing here is guessed from
-/// the button that was pressed: each one comes from the peer's signaling or from the media plane.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CallOutcome {
-    /// The two sides were connected, so the length in the record is real.
-    Answered,
-    /// An incoming call nobody here picked up.
-    Missed,
-    /// The peer rejected it, or we did.
-    Declined,
-    /// The peer's phone was already on a call.
-    Busy,
-    /// It never came up, and not for any of the reasons above.
-    Failed,
-    /// Outgoing, and nobody answered before the call gave up.
-    NoAnswer,
-    /// The media plane went away under a call that was up.
-    ConnectionLost,
-    /// Another of this account's devices took it.
-    AnsweredElsewhere,
-    /// Another of this account's devices rejected it.
-    DeclinedElsewhere,
-}
+/// How a call turned out: the status a call entry keeps, as data rather than as a finished
+/// sentence. The words belong to the call screen and the history, which know the reader's
+/// language; each value comes from the peer's signaling or from the media plane, never from the
+/// button that was pressed.
+pub use crate::model::CallStatus as CallOutcome;
 
 /// Why the peer's audio is not becoming sound, as the engine names the reason.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1003,6 +982,9 @@ pub struct Call {
     /// The peer's request to turn this voice call into a video call, which turning the camera on
     /// answers.
     peer_video_request: Option<whatsapp_rust::voip::VideoUpgradeToken>,
+    /// When the call was placed or began to ring, Unix seconds: the time its
+    /// entry in the chat carries.
+    began: i64,
 }
 
 impl Call {
@@ -1091,6 +1073,7 @@ impl Call {
                     .as_ref()
                     .is_some_and(VideoPipeline::camera_running),
                 peer_video_request: None,
+                began: crate::util::now(),
                 video_pipe,
                 remote_video: false,
                 microphone,
@@ -1130,6 +1113,7 @@ impl Call {
             lost_devices: Vec::new(),
             camera_wanted: false,
             peer_video_request: None,
+            began: crate::util::now(),
         }
     }
 
@@ -1160,6 +1144,7 @@ impl Call {
             lost_devices: Vec::new(),
             camera_wanted: false,
             peer_video_request: None,
+            began: crate::util::now(),
         }
     }
 
@@ -1209,6 +1194,16 @@ impl Call {
             speaker: self.speaker_device.clone(),
             camera: self.camera.clone(),
         }
+    }
+
+    /// When the call was placed or began to ring, Unix seconds.
+    pub fn began(&self) -> i64 {
+        self.began
+    }
+
+    /// Whether the call carried video at any point.
+    pub fn carried_video(&self) -> bool {
+        self.video
     }
 
     /// The id that tells one call from the next, for a caller that keeps the last snapshot.
@@ -2954,6 +2949,7 @@ mod tests {
             lost_devices: Vec::new(),
             camera_wanted: false,
             peer_video_request: None,
+            began: crate::util::now(),
         }
     }
 

@@ -41,7 +41,6 @@ use whatsapp_rust::{MediaRetryResult, MediaReuploadRequest};
 
 mod blocking;
 mod bot_replies;
-mod call_log;
 mod calls;
 mod channel_pictures;
 mod contact_names;
@@ -1385,8 +1384,6 @@ struct ParsedHistory {
     lids: Vec<(String, String)>,
     /// Recent phone stickers included with history sync.
     stickers: Vec<wa::StickerMetadata>,
-    /// The phone's call log, sent with the history at link time.
-    calls: Vec<wa::CallLogRecord>,
 }
 
 /// A phone-history request waiting for its chunk.
@@ -2168,7 +2165,6 @@ impl Worker {
                 continue;
             }
             content.keep_local_paths(&existing.content);
-            content.set_call_direction(existing.from_me);
             let mentions = self.mentions_of(&recorded_mention_ids(base));
             let thumbnail = thumbnail_of(base);
             if self
@@ -3220,7 +3216,26 @@ impl Worker {
             // that decide the call this worker already owns: the peer's answer is the only thing
             // that moves a call out of dialing, never the fact that dialing started.
             E::IncomingCall(call) => self.call_signaling(call).await,
-            E::MissedCall(call) => self.call_resolved(&call.call_id, None),
+            E::MissedCall(call) => {
+                self.call_resolved(&call.call_id, None);
+                self.missed_call_entry(call);
+            }
+            E::CallLogSync(sync) => self.call_log_entry(
+                &sync.call_id,
+                Some(&sync.call_creator_jid),
+                Some(sync.from_me),
+                &sync.record,
+            ),
+            E::CallLogHistory(history) => {
+                if let Some(call_id) = history.record.call_id.clone() {
+                    self.call_log_entry(
+                        &call_id,
+                        history.call_creator_jid.as_ref(),
+                        history.from_me,
+                        &history.record,
+                    );
+                }
+            }
             E::CallEndedElsewhere(call) => self.call_resolved(
                 &call.call_id,
                 Some(match call.outcome {
@@ -3230,7 +3245,6 @@ impl Worker {
                     _ => crate::calls::CallOutcome::AnsweredElsewhere,
                 }),
             ),
-            E::CallLogSync(sync) => self.call_log_synced(sync),
             E::PairingQrCode(qr) => {
                 // The prefix lets the phone camera open WhatsApp at Linked devices.
                 self.qr = Some(format!("{NATIVE_CAMERA_DEEP_LINK_PREFIX}{}", qr.code));
@@ -4264,19 +4278,6 @@ impl Worker {
             self.file_motion_clip(&chat, &parent, &sender, &clip);
             return;
         }
-        if let Some(log) = base.call_log_messsage.as_option() {
-            let entry = call_log::call_log_message_entry(
-                log,
-                &info.id,
-                &chat,
-                info.timestamp.timestamp(),
-                from_me,
-            );
-            if self.log_call(entry) {
-                self.emit_call_log();
-            }
-            return;
-        }
         let Some(mut content) = classify(message) else {
             return;
         };
@@ -4828,6 +4829,7 @@ impl Worker {
                 Some(&message.content),
             );
         }
+        self.retire_local_call_twins(&message);
         if poll_baseline && let Err(error) = self.archive.mark_poll_history(&chat, &message.id) {
             log::warn!("could not store a live poll baseline: {error}");
         }
@@ -5121,7 +5123,6 @@ impl Worker {
                 log::warn!("could not store a sticker");
             }
         }
-        self.file_history_calls(&parsed.calls);
         for chat in &parsed.chats {
             if let (Some(lid), Some(pn)) = (&chat.lid_jid, &chat.pn_jid)
                 && let (Some(lid), Some(pn)) = (Self::jid_of(lid), Self::jid_of(pn))
@@ -5388,6 +5389,7 @@ impl Worker {
                     if live_location_changed {
                         self.emit_message(&id, &row.id);
                     }
+                    self.retire_local_call_twins(&row);
                     if existed {
                         repeated += 1;
                     } else {
@@ -6081,6 +6083,7 @@ impl Worker {
                     speaker,
                 };
             }
+            Command::LoadCallLog => self.emit_call_log(),
             Command::RefreshPoll { chat, message } => self.refresh_poll(chat, message),
             Command::PollHistoryFailed {
                 chat,
@@ -6335,7 +6338,6 @@ impl Worker {
                 accepted,
             } => self.edit_settled(chat, id, generation, accepted),
             Command::Revoke { chat, id } => self.revoke(chat, id),
-            Command::RemoveCall { chat, id } => self.remove_call(&chat, &id),
             Command::DeleteForMe { chat, id, on_phone } => {
                 // A deleted message exists only here: nothing to delete on the phone.
                 let revoked = matches!(
@@ -11595,16 +11597,7 @@ fn classify_base(base: &wa::Message) -> Option<Content> {
         return unsupported("payment");
     }
     if let Some(log) = base.call_log_messsage.as_option() {
-        // The direction comes from the envelope; `Content::set_call_direction`
-        // turns it once the caller knows.
-        let entry = call_log::call_log_message_entry(log, "", "", 0, false);
-        return Some(Content::Call {
-            outgoing: false,
-            status: entry.status,
-            seconds: entry.seconds,
-            video: entry.video,
-            group: entry.group,
-        });
+        return Some(calls::call_log_content(log));
     }
     if base.scheduled_call_creation_message.is_set() {
         return unsupported("call");
@@ -12791,7 +12784,6 @@ fn parse_history(compressed: &[u8]) -> Result<ParsedHistory, String> {
         push_names,
         lids,
         stickers: remainder.recent_stickers,
-        calls: remainder.call_log_records,
     })
 }
 
@@ -12822,6 +12814,35 @@ fn parse_conversation(conversation: wa::Conversation) -> ParsedChat {
             continue;
         };
         let Some(original) = info.message.as_option() else {
+            // A missed call the phone filed as a bare notice.
+            if let Some(content) = info.message_stub_type.and_then(calls::missed_call_stub) {
+                let from_me = key.from_me.unwrap_or(false);
+                let timestamp = info.message_timestamp.unwrap_or(0) as i64;
+                newest = newest.max(timestamp);
+                messages.push(ParsedMessage {
+                    id,
+                    sender: key.participant.clone().or_else(|| key.remote_jid.clone()),
+                    from_me,
+                    push_name: None,
+                    timestamp,
+                    history_order: entry
+                        .msg_order_id
+                        .and_then(|order| i64::try_from(order).ok()),
+                    edited: false,
+                    content,
+                    status: Delivery::None,
+                    quoted: None,
+                    reactions: Vec::new(),
+                    mentions: Vec::new(),
+                    forwarded: false,
+                    thumbnail: None,
+                    raw: Vec::new(),
+                    poll_secret: None,
+                    poll_votes: Vec::new(),
+                    receipts: Vec::new(),
+                });
+                continue;
+            }
             diagnostics.missing_body += 1;
             diagnostics.ciphertext_stubs += usize::from(
                 info.message_stub_type == Some(wa::web_message_info::StubType::CIPHERTEXT),
@@ -12978,7 +12999,6 @@ fn parse_conversation(conversation: wa::Conversation) -> ParsedChat {
             diagnostics.unclassified += 1;
             continue;
         };
-        content.set_call_direction(from_me);
         // Normalizing an edit must not remove an outer view-once restriction.
         if original.is_view_once()
             && let Some(kind) = crate::model::OnceMedia::of(&content)
@@ -14619,7 +14639,6 @@ mod tests {
                     push_names: Vec::new(),
                     lids: Vec::new(),
                     stickers: Vec::new(),
-                    calls: Vec::new(),
                 },
                 true,
             );
@@ -18270,7 +18289,6 @@ mod receipt_tests {
                 push_names: Vec::new(),
                 lids: Vec::new(),
                 stickers: Vec::new(),
-                calls: Vec::new(),
             },
             true,
         );
@@ -18305,7 +18323,6 @@ mod receipt_tests {
                 push_names: Vec::new(),
                 lids: Vec::new(),
                 stickers: Vec::new(),
-                calls: Vec::new(),
             },
             false,
         );
@@ -19124,7 +19141,6 @@ mod receipt_tests {
                 push_names: Vec::new(),
                 lids: Vec::new(),
                 stickers: Vec::new(),
-                calls: Vec::new(),
             },
             false,
         );
@@ -19567,7 +19583,6 @@ mod receipt_tests {
                 push_names: Vec::new(),
                 lids: Vec::new(),
                 stickers: Vec::new(),
-                calls: Vec::new(),
             },
             true,
         );
@@ -19636,7 +19651,6 @@ mod receipt_tests {
                 push_names: Vec::new(),
                 lids: Vec::new(),
                 stickers: Vec::new(),
-                calls: Vec::new(),
             },
             true,
         );
@@ -19838,7 +19852,6 @@ mod receipt_tests {
                 push_names: Vec::new(),
                 lids: Vec::new(),
                 stickers: Vec::new(),
-                calls: Vec::new(),
             },
             false,
         );
@@ -19905,7 +19918,6 @@ mod receipt_tests {
             push_names: Vec::new(),
             lids: Vec::new(),
             stickers: Vec::new(),
-            calls: Vec::new(),
         }
     }
 
@@ -21194,7 +21206,6 @@ mod chat_removal_tests {
             push_names: Vec::new(),
             lids: Vec::new(),
             stickers: Vec::new(),
-            calls: Vec::new(),
         }
     }
 

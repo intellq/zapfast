@@ -2409,10 +2409,6 @@ fn estimated_height(
     sender_pictures: bool,
     notices: usize,
 ) -> f32 {
-    let carried = notices as f32 * PIN_NOTICE_HEIGHT;
-    if matches!(message.content, Content::Call { .. }) {
-        return CALL_ROW_HEIGHT + if new_day { 36.0 } else { 0.0 } + carried;
-    }
     let carousel = matches!(&message.content, Content::Interactive { card: Some(card), .. } if !card.carousel.is_empty());
     let bubble =
         (bubble_width_limit(width, carousel, !message.from_me && sender_pictures) - 20.0).max(40.0);
@@ -2960,9 +2956,6 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                                 egui::UiBuilder::new()
                                     .id(bubble_id(&chat.id, &message.id).with("row-ui")),
                                 |ui| {
-                                    if matches!(message.content, Content::Call { .. }) {
-                                        return Some(call_row(ui, &view, message, &mut actions));
-                                    }
                                     if selection.is_none() {
                                         return bubble(
                                             ui,
@@ -3580,78 +3573,6 @@ fn centered_note(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) {
     });
 }
 
-/// Typing indicator with stacked avatars and animated dots.
-/// The room a logged call's line takes, with the space around it.
-const CALL_ROW_HEIGHT: f32 = 34.0;
-
-/// A logged call: a centred line like the day chip, outside any bubble. Its menu calls back and
-/// deletes the row here; WhatsApp knows nothing of it. A missed call is drawn in the danger
-/// colour.
-fn call_row(
-    ui: &mut egui::Ui,
-    view: &View<'_>,
-    message: &Message,
-    actions: &mut Vec<Action>,
-) -> egui::Response {
-    let palette = view.palette;
-    let missed = matches!(&message.content, Content::Call { status, .. } if status.missed());
-    let color = if missed {
-        palette.danger
-    } else {
-        palette.secondary
-    };
-    let label = format!(
-        "{} · {}",
-        message.content.summary(),
-        crate::util::clock(message.timestamp)
-    );
-    ui.add_space(4.0);
-    let response = ui
-        .vertical_centered(|ui| {
-            let galley = ui
-                .painter()
-                .layout_no_wrap(label, theme::medium(12.0), color);
-            let icon = 14.0;
-            let size = vec2(galley.size().x + icon + 26.0, galley.size().y + 10.0);
-            let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
-            if ui.is_rect_visible(rect) {
-                let radius = egui::CornerRadius::from(rect.height() / 2.0);
-                let fill = if palette.dark {
-                    palette.panel.lerp_to_gamma(palette.bubble_in, 0.5)
-                } else {
-                    palette.panel
-                };
-                ui.painter()
-                    .add(palette.bubble_shadow().as_shape(rect, radius));
-                ui.painter().rect_filled(rect, radius, fill);
-                let icon_rect = Rect::from_center_size(
-                    egui::pos2(rect.left() + 10.0 + icon / 2.0, rect.center().y),
-                    vec2(icon, icon),
-                );
-                theme::paint_icon(
-                    ui,
-                    super::calls::icon(&message.content),
-                    icon_rect,
-                    icon,
-                    color,
-                );
-                ui.painter().galley(
-                    egui::pos2(
-                        icon_rect.right() + 6.0,
-                        rect.center().y - galley.size().y / 2.0,
-                    ),
-                    galley,
-                    color,
-                );
-            }
-            response
-        })
-        .inner;
-    ui.add_space(4.0);
-    super::calls::row_context_menu(ui, &response, &palette, view.chat, message, actions);
-    response
-}
-
 fn typing_bubble(ui: &mut egui::Ui, view: &View<'_>, typers: &[(String, String)]) {
     let palette = view.palette;
     ui.horizontal(|ui| {
@@ -3797,6 +3718,10 @@ fn reaction_affordance(
     // and catching the pointer, at the edge of the transcript.
     let shown = bubble.rect.intersect(bounds);
     if shown.height() < REACTION_AFFORDANCE_SIZE || shown.width() <= 0.0 {
+        return;
+    }
+    // A call in the chat is a record, as in WhatsApp: no reactions, no replies.
+    if matches!(message.content, Content::Call { .. }) {
         return;
     }
     let rect = reaction_affordance_rect(shown, bounds, message.from_me);
@@ -4269,9 +4194,44 @@ pub fn edge_scroll(pointer: f32, top: f32, bottom: f32) -> f32 {
     }
 }
 
+/// A call's menu: calling back, in a chat that can take a call.
+fn call_menu(ui: &mut egui::Ui, view: &View<'_>, group: bool, actions: &mut Vec<Action>) {
+    let palette = view.palette;
+    let chat = &view.chat.id;
+    if group || view.chat.kind != crate::model::ChatKind::Direct {
+        ui.add_enabled_ui(false, |ui| {
+            widgets::menu_item(
+                ui,
+                &palette,
+                Some(Icon::Phone),
+                &crate::i18n::gettext(view.locale, "Group calls happen on the phone"),
+            );
+        });
+        return;
+    }
+    if widgets::menu_item(
+        ui,
+        &palette,
+        Some(Icon::Phone),
+        &crate::i18n::gettext(view.locale, "Voice call"),
+    ) {
+        actions.push(Action::StartCall(chat.clone()));
+    }
+    if widgets::menu_item(
+        ui,
+        &palette,
+        Some(Icon::Video),
+        &crate::i18n::gettext(view.locale, "Video call"),
+    ) {
+        actions.push(Action::StartVideoCall(chat.clone()));
+    }
+}
+
 /// Starts a reply when the response was double-clicked, as the menu's "Reply".
 fn reply_on_double_click(response: &egui::Response, message: &Message, actions: &mut Vec<Action>) {
-    if response.double_clicked() && !matches!(message.content, Content::Revoked { .. }) {
+    if response.double_clicked()
+        && !matches!(message.content, Content::Revoked { .. } | Content::Call { .. })
+    {
         actions.push(Action::Reply(message.id.clone()));
     }
 }
@@ -5727,6 +5687,10 @@ fn context_menu(
 ) {
     let palette = view.palette;
     let chat = &view.chat.id;
+    if let Content::Call { group, .. } = message.content {
+        call_menu(ui, view, group, actions);
+        return;
+    }
     let mine = own_reaction(message);
     // On one of several selected messages, the menu acts on all of them.
     let group: Vec<String> = if view.selection.len() > 1 && view.selection.contains(&message.id) {
@@ -6677,6 +6641,46 @@ fn content(
             );
             None
         }
+        Content::Call {
+            video,
+            status,
+            duration,
+            group,
+        } => {
+            let entry = super::calls::Entry {
+                from_me: own,
+                video: *video,
+                status: *status,
+                duration: *duration,
+                group: *group,
+            };
+            let tint = if status.is_bad() {
+                palette.danger
+            } else {
+                palette.accent
+            };
+            mirrored_row(
+                ui,
+                own,
+                |ui| {
+                    theme::icon(ui, entry.icon(), 20.0, tint);
+                },
+                |ui| {
+                    ui.vertical(|ui| {
+                        theme::text(
+                            ui,
+                            entry.title(view.locale),
+                            theme::medium(14.0),
+                            palette.text,
+                        );
+                        if let Some(detail) = entry.detail(view.locale) {
+                            theme::text(ui, detail, theme::regular(12.5), palette.secondary);
+                        }
+                    });
+                },
+            );
+            None
+        }
         Content::Revoked { kept } => {
             mirrored_row(
                 ui,
@@ -6783,8 +6787,6 @@ fn content(
             );
             None
         }
-        // Drawn by `call_row`, never inside a bubble.
-        Content::Call { .. } => None,
         Content::Unsupported { what } => {
             mirrored_row(
                 ui,

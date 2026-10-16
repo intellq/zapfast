@@ -3032,46 +3032,6 @@ impl App {
         }
     }
 
-    /// The logged calls the call log lists: every chat's, except locked
-    /// chats', which stay behind their folder.
-    pub fn listed_calls(&self) -> Vec<&crate::archive::LoggedCall> {
-        self.call_log
-            .iter()
-            .filter(|call| self.chat(&call.chat).is_some_and(|chat| !chat.locked))
-            .collect()
-    }
-
-    /// Missed calls since the call log was last opened.
-    pub fn missed_calls(&self) -> usize {
-        let seen = self.account().settings.calls_seen_at;
-        self.listed_calls()
-            .into_iter()
-            .filter(|call| call.timestamp > seen)
-            .filter(|call| {
-                matches!(
-                    &call.content,
-                    Content::Call { outgoing: false, status, .. } if status.missed()
-                )
-            })
-            .count()
-    }
-
-    /// Marks every call so far as seen, which clears the call log's count.
-    fn calls_seen(&mut self) {
-        let newest = self
-            .call_log
-            .iter()
-            .map(|call| call.timestamp)
-            .max()
-            .unwrap_or(0)
-            .max(crate::util::now());
-        let account = self.account_mut();
-        if account.settings.calls_seen_at < newest {
-            account.settings.calls_seen_at = newest;
-            account.mark_settings_dirty();
-        }
-    }
-
     /// Visible chats filtered by search, archive state, and the chat filter,
     /// with pinned chats first.
     /// Locked chats only appear inside the locked folder.
@@ -3451,6 +3411,10 @@ impl App {
             Event::Call(update) => self.handle_call_update(*update),
             Event::CallDevices(devices) => self.call_devices = *devices,
             Event::CallVideo { local, remote } => self.handle_call_video(local, remote),
+            Event::CallLog(entries) => {
+                self.call_log = entries;
+                self.call_log_loaded = true;
+            }
             Event::Labels(labels) => {
                 self.labels = labels;
                 self.prune_labels();
@@ -3591,6 +3555,15 @@ impl App {
                 older,
                 complete,
             } => {
+                // A call filed while the Calls page is open joins its list.
+                if live
+                    && self.page == Page::Calls
+                    && messages
+                        .iter()
+                        .any(|message| matches!(message.content, Content::Call { .. }))
+                {
+                    self.backend.send(Command::LoadCallLog);
+                }
                 let conversation = self.conversations.entry(chat.clone()).or_default();
                 let was_empty = conversation.messages.is_empty();
                 let progress = !messages.is_empty();
@@ -3938,12 +3911,6 @@ impl App {
                     && self.selected_pack().is_none()
                 {
                     self.sticker_shelf = StickerShelf::Recent;
-                }
-            }
-            Event::CallLog(calls) => {
-                self.call_log = calls;
-                if self.show_calls && !self.events_hidden {
-                    self.calls_seen();
                 }
             }
             Event::MessageDeleted { chat, id } => {
@@ -6375,6 +6342,10 @@ impl App {
                     let token = self.storage_token;
                     self.backend.send(Command::LoadStorageStats { token });
                 }
+                // The Calls page reads the account's calls as it opens.
+                if page == Page::Calls {
+                    self.backend.send(Command::LoadCallLog);
+                }
                 // Typed passwords do not wait in a form nobody sees.
                 if page != Page::Settings && !self.app_lock.checking() {
                     self.app_lock.form = None;
@@ -6415,7 +6386,6 @@ impl App {
                     None => self.open_chat(id),
                 }
             }
-            Action::OpenCallChat(id) => self.open_chat(id),
             // Applied by `apply_call_action` before anything else.
             Action::StartCall(_)
             | Action::AnswerCall
@@ -7928,25 +7898,7 @@ impl App {
                     self.actions.push(Action::SetMuted(chat, mute.then_some(0)));
                 }
             }
-            Action::ShowCalls(show) => {
-                if show && self.locked_folder {
-                    self.close_locked_folder();
-                    self.search.clear();
-                    self.search_hits.clear();
-                }
-                if show {
-                    self.show_archived = false;
-                }
-                self.show_calls = show;
-                self.calls_seen();
-            }
-            Action::RemoveCall { chat, id } => {
-                self.backend.send(Command::RemoveCall { chat, id });
-            }
             Action::ShowArchived(show) => {
-                if show {
-                    self.show_calls = false;
-                }
                 if self.locked_folder {
                     self.close_locked_folder();
                     self.search.clear();
@@ -18574,52 +18526,6 @@ mod tests {
             .map(|chat| chat.name.as_str())
             .collect();
         assert_eq!(names, vec!["Ada"]);
-    }
-
-    #[test]
-    fn the_call_log_counts_missed_calls_until_opened_and_hides_locked_chats() {
-        use crate::archive::LoggedCall;
-        use crate::model::CallStatus;
-        let mut app = app();
-        let a = Chat::new("1@s.whatsapp.net".into(), "Ada".into());
-        let mut b = Chat::new("2@s.whatsapp.net".into(), "Bob".into());
-        b.locked = true;
-        app.chats = vec![a, b];
-        let now = crate::util::now();
-        let call = |chat: &str, id: &str, outgoing, status| LoggedCall {
-            chat: chat.into(),
-            id: id.into(),
-            timestamp: now - 60,
-            content: Content::Call {
-                outgoing,
-                status,
-                seconds: None,
-                video: false,
-                group: None,
-            },
-        };
-        app.call_log = vec![
-            call("1@s.whatsapp.net", "missed", false, CallStatus::Missed),
-            call("1@s.whatsapp.net", "dnd", false, CallStatus::SilencedDnd),
-            call("1@s.whatsapp.net", "placed", true, CallStatus::NoAnswer),
-            call("1@s.whatsapp.net", "answered", false, CallStatus::Answered),
-            call("2@s.whatsapp.net", "locked", false, CallStatus::Missed),
-        ];
-
-        // The locked chat's call stays behind its folder, even in the count.
-        assert_eq!(app.listed_calls().len(), 4);
-        assert_eq!(app.missed_calls(), 2);
-
-        // Opening the log leaves the archive and clears the count.
-        app.show_archived = true;
-        app.apply(Action::ShowCalls(true), &egui::Context::default());
-        assert!(app.show_calls);
-        assert!(!app.show_archived);
-        assert_eq!(app.missed_calls(), 0);
-
-        // Opening the archive leaves the log.
-        app.apply(Action::ShowArchived(true), &egui::Context::default());
-        assert!(!app.show_calls);
     }
 
     #[test]

@@ -83,12 +83,8 @@ pub fn full_show(app: &mut App, ui: &mut egui::Ui) {
         .show(ui, |ui| body(app, ui));
 }
 
-/// The header and the chat list, or the call log in their place.
+/// The header and the chat list.
 fn body(app: &mut App, ui: &mut egui::Ui) {
-    if app.show_calls && !app.locked_folder {
-        super::calls::show(app, ui);
-        return;
-    }
     header(app, ui);
     list(app, ui);
 }
@@ -235,7 +231,7 @@ fn header(app: &mut App, ui: &mut egui::Ui) {
                                 hide_list_button(app, ui);
                             }
                             archived_button(app, ui);
-                            super::calls::button(app, ui);
+                            calls_button(app, ui);
                             starred_button(app, ui);
                         });
                     }
@@ -285,7 +281,7 @@ fn side_bar_column(app: &mut App, ui: &mut egui::Ui) {
     profile_button(app, ui);
     ui.add_space(10.0);
     let gap = 6.0;
-    super::calls::button(app, ui);
+    calls_button(app, ui);
     ui.add_space(gap);
     starred_button(app, ui);
     ui.add_space(gap);
@@ -418,6 +414,34 @@ fn archived_button(app: &mut App, ui: &mut egui::Ui) {
     }
 }
 
+/// The button to the Calls page, left of the archive's. Outside the archive
+/// and the locked folder it is always there; while the page is open it is
+/// drawn in the accent color and closes it again.
+fn calls_button(app: &mut App, ui: &mut egui::Ui) {
+    if app.show_archived || app.locked_folder {
+        return;
+    }
+    let palette = app.palette;
+    let open = app.page == Page::Calls;
+    let response = theme::icon_button(
+        ui,
+        Icon::Phone,
+        18.0,
+        if open {
+            palette.accent
+        } else {
+            palette.secondary
+        },
+        palette.text,
+        tr("Calls"),
+    )
+    .tab_stop(Stop::Calls);
+    if response.clicked() {
+        app.actions
+            .push(Action::Open(if open { Page::Chats } else { Page::Calls }));
+    }
+}
+
 /// Where the chat list header's first row was laid out, for layout tests.
 pub(crate) fn header_row_id() -> egui::Id {
     egui::Id::new("chat-list-header-row")
@@ -511,7 +535,7 @@ fn macos_header(app: &mut App, ui: &mut egui::Ui) {
                         app.actions.push(Action::ToggleSidebar);
                     }
                     archived_button(app, ui);
-                    super::calls::button(app, ui);
+                    calls_button(app, ui);
                     starred_button(app, ui);
                 });
             });
@@ -542,7 +566,7 @@ fn macos_header(app: &mut App, ui: &mut egui::Ui) {
 /// spacing between them, as `header` and `macos_header` lay them out.
 fn header_buttons_width(app: &App, ui: &egui::Ui, macos: bool) -> f32 {
     let folder_archive = app.show_archived || app.locked_folder;
-    let calls = !folder_archive && !app.show_calls && !app.call_log.is_empty();
+    let calls = !folder_archive;
     let archived = !folder_archive && app.archived_count() > 0;
     let count = 1 // starred
         + 1 // new chat

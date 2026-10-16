@@ -764,23 +764,6 @@ pub enum Content {
     Unsupported {
         what: String,
     },
-    /// A call this computer saw, or one the phone's call log synced, kept
-    /// only here: WhatsApp never hears of the row, so it has no reply,
-    /// reaction or receipt.
-    Call {
-        outgoing: bool,
-        status: CallStatus,
-        /// Seconds the two sides were connected.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        seconds: Option<u32>,
-        /// A video call. Only the phone's log brings these.
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        video: bool,
-        /// How many people a group call had, the account included; `None`
-        /// for a call between two people.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        group: Option<u32>,
-    },
     /// A message WhatsApp only delivers to the phone, such as view-once
     /// media. Linked devices receive a placeholder that never fills in.
     PhoneOnly {
@@ -793,97 +776,59 @@ pub enum Content {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         once: Option<OnceMedia>,
     },
+    /// A call in this chat, where it falls among the messages, as WhatsApp
+    /// shows it. `from_me` on the message says who placed it. Entries ZapFast
+    /// writes itself carry an id that starts with [`CALL_ENTRY_PREFIX`] and are
+    /// never sent anywhere.
+    Call {
+        video: bool,
+        status: CallStatus,
+        /// Seconds the call was up; zero when it never was.
+        #[serde(default)]
+        duration: u64,
+        /// A group call.
+        #[serde(default)]
+        group: bool,
+    },
 }
 
-/// How a logged call turned out, stored under a stable name.
+/// The id prefix of the call entries ZapFast files from call records: the
+/// calls it handled and the phone's call log. They are local, so no receipt,
+/// reaction or deletion is ever sent for them.
+pub const CALL_ENTRY_PREFIX: &str = "zapfast-call-";
+
+/// How far apart, in seconds, two entries for one call may be: the phone's
+/// call-log message and the call's record are stamped by different clocks.
+pub const CALL_ENTRY_WINDOW: i64 = 120;
+
+/// What became of a call.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CallStatus {
+    /// The two sides talked, so the call's length is real.
     Answered,
-    Missed,
-    Declined,
-    Busy,
-    Failed,
-    NoAnswer,
-    ConnectionLost,
+    /// Another of this account's devices took it.
     AnsweredElsewhere,
+    /// An incoming call nobody picked up.
+    Missed,
+    /// Refused, by either side.
+    Declined,
+    /// Another of this account's devices refused it.
     DeclinedElsewhere,
-    /// Still going when the phone logged it.
-    Ongoing,
-    /// Not rung because the phone was in Do Not Disturb.
-    SilencedDnd,
-    /// Not rung because the phone silences unknown callers.
-    SilencedUnknown,
+    /// The other phone was on another call.
+    Busy,
+    /// It never came up, for no reason above.
+    Failed,
+    /// Outgoing, and nobody answered.
+    NoAnswer,
+    /// The line went while the call was up.
+    ConnectionLost,
 }
 
 impl CallStatus {
-    /// Whether the call rang here unanswered, or would have: these count in
-    /// the missed calls and draw in red.
-    pub fn missed(self) -> bool {
-        matches!(
-            self,
-            Self::Missed | Self::SilencedDnd | Self::SilencedUnknown
-        )
-    }
-
-    /// The line a logged call shows, without its length: `video` and
-    /// `group` name the kind of call.
-    pub fn label(self, outgoing: bool, video: bool, group: bool) -> String {
-        let call = match (video, group) {
-            (false, false) => tr("voice call"),
-            (true, false) => tr("video call"),
-            (false, true) => tr("group voice call"),
-            (true, true) => tr("group video call"),
-        };
-        let template = match (self, outgoing) {
-            (Self::Answered, false) => tr("Incoming {call}"),
-            (Self::Answered, true) => tr("Outgoing {call}"),
-            (Self::Missed, _) => tr("Missed {call}"),
-            (Self::Declined, false) => tr("Declined {call}"),
-            (Self::Declined, true) => tr("{call} declined"),
-            (Self::Busy, _) => tr("{call}, busy"),
-            (Self::Failed, _) => tr("{call} failed"),
-            (Self::NoAnswer, _) => tr("{call}, no answer"),
-            (Self::ConnectionLost, _) => tr("{call}, connection lost"),
-            (Self::AnsweredElsewhere, _) => tr("{call} answered on another device"),
-            (Self::DeclinedElsewhere, _) => tr("{call} declined on another device"),
-            (Self::Ongoing, _) => tr("{call} in progress"),
-            (Self::SilencedDnd, _) => tr("{call} silenced (Do Not Disturb)"),
-            (Self::SilencedUnknown, _) => tr("{call} silenced (unknown caller)"),
-        };
-        capitalize(&template.replace("{call}", call))
-    }
-}
-
-impl CallStatus {
-    /// How the call went, without its kind, for a list whose icon shows it.
-    pub fn short_label(self, locale: crate::i18n::Locale, outgoing: bool) -> String {
-        let source = match (self, outgoing) {
-            (Self::Answered, false) => "Incoming",
-            (Self::Answered, true) => "Outgoing",
-            (Self::Missed, _) => "Missed",
-            (Self::Declined, false) => "Declined",
-            (Self::Declined, true) => "Declined by the contact",
-            (Self::Busy, _) => "Busy",
-            (Self::Failed, _) => "Failed",
-            (Self::NoAnswer, _) => "No answer",
-            (Self::ConnectionLost, _) => "Connection lost",
-            (Self::AnsweredElsewhere, _) => "Answered on another device",
-            (Self::DeclinedElsewhere, _) => "Declined on another device",
-            (Self::Ongoing, _) => "In progress",
-            (Self::SilencedDnd, _) => "Silenced (Do Not Disturb)",
-            (Self::SilencedUnknown, _) => "Silenced (unknown caller)",
-        };
-        crate::i18n::pgettext(locale, "call", source).into_owned()
-    }
-}
-
-/// `text` with its first letter in upper case.
-fn capitalize(text: &str) -> String {
-    let mut chars = text.chars();
-    match chars.next() {
-        Some(first) => first.to_uppercase().chain(chars).collect(),
-        None => String::new(),
+    /// Whether the call is one to notice: missed, refused, or never up.
+    pub fn is_bad(self) -> bool {
+        !matches!(self, Self::Answered | Self::AnsweredElsewhere)
     }
 }
 
@@ -1266,45 +1211,22 @@ impl Content {
             } => tr("View once message").to_owned(),
             Self::PhoneOnly { .. } => tr("Message on your phone").to_owned(),
             Self::Call {
-                outgoing,
-                status,
-                seconds,
                 video,
-                group,
+                status,
+                duration,
+                ..
             } => {
-                let mut line = status.label(*outgoing, *video, group.is_some());
-                if let Some(people) = group.filter(|people| *people > 0) {
-                    line.push_str(" · ");
-                    line.push_str(
-                        &crate::i18n::ngettext(
-                            crate::i18n::current(),
-                            "{} participant",
-                            "{} participants",
-                            people,
-                        )
-                        .replace("{}", &people.to_string()),
-                    );
+                let label = match (status, video) {
+                    (CallStatus::Missed, false) => "Missed voice call",
+                    (CallStatus::Missed, true) => "Missed video call",
+                    (_, false) => "Voice call",
+                    (_, true) => "Video call",
+                };
+                if *status == CallStatus::Answered && *duration > 0 {
+                    format!("{label} ({})", crate::util::call_duration(*duration))
+                } else {
+                    label.to_owned()
                 }
-                if let Some(seconds) = seconds {
-                    line.push_str(" · ");
-                    line.push_str(&crate::util::duration(*seconds));
-                }
-                line
-            }
-        }
-    }
-
-    /// Files a call row read from a message under the direction its
-    /// envelope gives: an unanswered call we placed went unanswered, it was
-    /// not missed.
-    pub fn set_call_direction(&mut self, from_me: bool) {
-        if let Self::Call {
-            outgoing, status, ..
-        } = self
-        {
-            *outgoing = from_me;
-            if from_me && *status == CallStatus::Missed {
-                *status = CallStatus::NoAnswer;
             }
         }
     }
@@ -1629,6 +1551,8 @@ impl Contact {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Page {
     Chats,
+    /// Every call of the account, newest first.
+    Calls,
     Settings,
     Wallpaper,
 }
@@ -2028,8 +1952,6 @@ pub enum Action {
     SetCallMicrophone(Option<String>),
     /// Rebinds the current call's speaker; `None` is the system default.
     SetCallSpeaker(Option<String>),
-    /// Opens the chat a logged call belongs to.
-    OpenCallChat(ChatId),
     /// Switches the current call's camera node.
     SetCallCameraDevice(Option<String>),
     /// Steps away from the full call screen without ending the call.
@@ -2474,13 +2396,6 @@ pub enum Action {
     DeleteLabel(String),
     /// Shows or leaves the archived chats.
     ShowArchived(bool),
-    /// Shows the call log in place of the chat list, or goes back.
-    ShowCalls(bool),
-    /// Deletes a call row on this computer only.
-    RemoveCall {
-        chat: ChatId,
-        id: String,
-    },
     /// Shows or hides the starred messages in the left panel.
     ToggleStarred,
     /// Mutes (`true`) or unmutes every followed channel.

@@ -47,3 +47,4 @@ src/ui/lock.rs
 src/account.rs
 src/ui/accounts.rs
 src/app/calls.rs
+src/ui/calls.rs

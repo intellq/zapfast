@@ -82,10 +82,6 @@ pub struct Account {
     pub(crate) new_contact_dialog_request: Option<u64>,
     pub pair_phone: String,
     pub show_archived: bool,
-    /// The call log is shown in place of the chat list.
-    pub show_calls: bool,
-    /// The newest call rows of every chat, from the worker.
-    pub call_log: Vec<crate::archive::LoggedCall>,
     pub chat_filter: ChatFilter,
     pub labels: Vec<Label>,
     /// Starred messages, newest star first, and whether the left panel lists
@@ -120,6 +116,9 @@ pub struct Account {
     pub media_sending: HashSet<(ChatId, String)>,
     /// Share of each sending attachment uploaded so far, in percent.
     pub media_progress: HashMap<(ChatId, String), u8>,
+    /// The call entries the Calls page lists, newest first, once read.
+    pub call_log: Vec<Message>,
+    pub call_log_loaded: bool,
 }
 
 impl Account {
@@ -197,8 +196,6 @@ impl Account {
             new_contact_dialog_request: None,
             pair_phone: String::new(),
             show_archived: false,
-            show_calls: false,
-            call_log: Vec::new(),
             chat_filter,
             labels: Vec::new(),
             starred: Vec::new(),
@@ -217,6 +214,8 @@ impl Account {
             blocking: HashSet::new(),
             media_sending: HashSet::new(),
             media_progress: HashMap::new(),
+            call_log: Vec::new(),
+            call_log_loaded: false,
         }
     }
 

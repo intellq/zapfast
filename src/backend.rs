@@ -371,11 +371,6 @@ pub enum Command {
         id: String,
         on_phone: bool,
     },
-    /// Deletes a call row on this computer only; it never reached WhatsApp.
-    RemoveCall {
-        chat: ChatId,
-        id: String,
-    },
     /// Finishes a synchronized message deletion on the worker thread.
     DeleteForMeSynced {
         chat: ChatId,
@@ -470,6 +465,8 @@ pub enum Command {
         microphone: Option<String>,
         speaker: Option<String>,
     },
+    /// Reads the account's call entries for the Calls page.
+    LoadCallLog,
     /// Sends a played receipt for a voice message.
     MarkPlayed {
         chat: ChatId,
@@ -1151,8 +1148,6 @@ pub enum Event {
         chat: ChatId,
         id: String,
     },
-    /// The newest call rows across every chat, newest first.
-    CallLog(Vec<crate::archive::LoggedCall>),
     /// A chat was deleted here or on a linked device.
     ChatRemoved {
         chat: ChatId,
@@ -1290,6 +1285,8 @@ pub enum Event {
     Call(Box<crate::calls::CallUpdate>),
     /// The devices the call screen can offer.
     CallDevices(Box<crate::calls::DeviceList>),
+    /// The account's call entries, newest first, for the Calls page.
+    CallLog(Vec<Message>),
     /// One video frame for the call screen: our own preview, the peer's picture, or both.
     CallVideo {
         local: Option<Arc<egui::ColorImage>>,
