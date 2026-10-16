@@ -1,8 +1,8 @@
 //! The navigation rail on the left of the chat list, as WhatsApp's desktop
 //! clients have it: Chats, Calls and Starred at the top; Archived and Locked
 //! chats (while there are any), Settings and our own avatar (the account
-//! switcher) at the bottom. While the chat list is hidden, the chats'
-//! avatars fill the rail between the two, so every chat is still one click
+//! switcher) at the bottom. The chats' avatars fill the rail between the
+//! two, beside the list and while it is hidden, so every chat is one click
 //! away.
 
 use egui::{Frame, Margin, Rect, Sense, Vec2, vec2};
@@ -29,8 +29,7 @@ const AVATAR: f32 = 32.0;
 /// Space above the first destination, as the list header's own margin, and
 /// between the bottom group's plates, the avatar and the window's edge.
 const GAP: f32 = 8.0;
-/// Width of the line between the destinations and the hidden list's
-/// avatars.
+/// Width of the line between the destinations and the chats' avatars.
 const DIVIDER: f32 = 24.0;
 /// How far below the window's top the macOS traffic lights end, centred as
 /// they are in the 60-point title bar, with a little room under them.
@@ -145,9 +144,10 @@ impl Destination {
     }
 }
 
-/// The rail as a fixed panel on the left. `avatars` fills it with the chats
-/// while the list is hidden.
-pub fn show(app: &mut App, ui: &mut egui::Ui, avatars: bool) {
+/// The rail as a fixed panel on the left, with the chats' avatars between
+/// its two groups. `hidden` says the chat list is hidden: the rail then
+/// offers to show it again and stands beside the conversation.
+pub fn show(app: &mut App, ui: &mut egui::Ui, hidden: bool) {
     let palette = app.palette;
     // Its own panel id: sharing the list's would hand that resizable panel
     // this narrow width, and it would save it as the list's width.
@@ -180,27 +180,26 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, avatars: bool) {
         .filter(|destination| destination.offered(app))
         .collect();
         let foot = bottom.len() as f32 * (PLATE + GAP) + GAP + AVATAR + GAP;
-        if avatars {
+        if hidden {
             // A cell of its own under Starred: nothing above it moves when
             // the list comes and goes.
             show_list_button(app, ui, &palette);
-            ui.add_space(GAP / 2.0);
-            let line = Rect::from_center_size(
-                ui.cursor().min + vec2(width / 2.0, 0.0),
-                vec2(DIVIDER, 1.0),
-            );
-            ui.painter().rect_filled(line, 0.0, palette.outline);
-            ui.add_space(GAP / 2.0);
-            let middle = (ui.available_height() - foot).max(0.0);
-            ui.allocate_ui_with_layout(
-                vec2(width, middle),
-                egui::Layout::top_down(egui::Align::Center),
-                |ui| {
-                    ui.spacing_mut().item_spacing.y = row_gap;
-                    super::chats::compact_list(app, ui);
-                },
-            );
         }
+        ui.add_space(GAP / 2.0);
+        let line =
+            Rect::from_center_size(ui.cursor().min + vec2(width / 2.0, 0.0), vec2(DIVIDER, 1.0));
+        ui.painter().rect_filled(line, 0.0, palette.outline);
+        ui.add_space(GAP / 2.0);
+        // The avatars take what the two groups leave, and scroll there.
+        let middle = (ui.available_height() - foot).max(0.0);
+        ui.allocate_ui_with_layout(
+            vec2(width, middle),
+            egui::Layout::top_down(egui::Align::Center),
+            |ui| {
+                ui.spacing_mut().item_spacing.y = row_gap;
+                super::chats::compact_list(app, ui, !hidden);
+            },
+        );
         let rest = (ui.available_height() - foot).max(0.0);
         ui.add_space(rest);
         for destination in bottom {
@@ -216,7 +215,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, avatars: bool) {
     ui.ctx().data_mut(|data| data.insert_temp(rect_id(), rect));
     // No line between the rail and the list, whose shades tell them apart;
     // beside the conversation the rail ends as the list does.
-    if avatars {
+    if hidden {
         widgets::paint_edge_beside(ui, &palette, rect);
     }
 }

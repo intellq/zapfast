@@ -2412,12 +2412,22 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
             // The Calls tab: with no chat open, its start pane; with the
             // chat that was open, that chat beside the history; with a row
             // picked, that row's chat at the call.
-            "calls" | "calls-chat" | "calls-info" | "new-call" => {
+            // The Missed chip picked, and with no missed call to show.
+            "calls" | "calls-chat" | "calls-info" | "new-call" | "calls-missed"
+            | "calls-missed-none" => {
                 app.page = Page::Calls;
                 if part != "calls-chat" {
                     app.open_chat = None;
                 }
                 let mut log = call_entries(crate::util::now());
+                if part.starts_with("calls-missed") {
+                    app.call_filter = crate::model::CallFilter::Missed;
+                }
+                if part == "calls-missed-none" {
+                    log.retain(|message| {
+                        !crate::ui::calls::Entry::of(message).is_some_and(|entry| entry.missed())
+                    });
+                }
                 log.sort_by_key(|message| std::cmp::Reverse(message.timestamp));
                 if part == "calls-info" {
                     // The newest row, Ada's two missed calls, picked: her
@@ -5919,6 +5929,8 @@ mod tests {
             "calls",
             "calls-chat",
             "calls-info",
+            "calls-missed",
+            "calls-missed-none",
             "new-call",
             "call-entries",
             "call",
@@ -16670,17 +16682,27 @@ mod rail_tests {
     /// One frame at `width` by 780 points, with the layout records of the
     /// last one cleared, so a part not drawn leaves none.
     fn frame(app: &mut App, ctx: &egui::Context, width: f32, events: Vec<egui::Event>) {
+        frame_at(app, ctx, egui::vec2(width, 780.0), events);
+    }
+
+    /// One frame at `size`, as [`frame`]; returns the text it painted.
+    fn frame_at(
+        app: &mut App,
+        ctx: &egui::Context,
+        size: egui::Vec2,
+        events: Vec<egui::Event>,
+    ) -> Vec<String> {
         ctx.data_mut(|data| {
             data.remove::<egui::Rect>(rail::rect_id());
             data.remove::<egui::Rect>(crate::ui::chats::header_row_id());
             data.remove::<egui::Rect>(crate::ui::conversation::header_row_id());
+            for chat in &app.chats {
+                data.remove::<egui::Rect>(crate::ui::chats::compact_chat_id(&chat.id));
+            }
         });
         let mut output = ctx.run_ui(
             egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(
-                    egui::Pos2::ZERO,
-                    egui::vec2(width, 780.0),
-                )),
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
                 events,
                 ..Default::default()
             },
@@ -16691,6 +16713,18 @@ mod rail_tests {
             },
         );
         output.textures_delta.clear();
+        fn texts(shape: &egui::Shape, out: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Text(text) => out.push(text.galley.text().to_owned()),
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| texts(shape, out)),
+                _ => {}
+            }
+        }
+        let mut drawn = Vec::new();
+        for clipped in &output.shapes {
+            texts(&clipped.shape, &mut drawn);
+        }
+        drawn
     }
 
     /// The demo on `page`, laid out wide, in the macOS chrome when `macos`.
@@ -16828,9 +16862,10 @@ mod rail_tests {
                 assert!((top[0].center().y - header.center().y).abs() < 3.0);
             }
             assert!(Destination::Chats.lit(&app));
-            // Only the hidden list's avatars are in the rail.
+            // The chats' avatars are in the rail beside the list too.
             let first = app.visible_chats()[0].id.clone();
-            assert!(recorded(&ctx, crate::ui::chats::compact_chat_id(&first)).is_none());
+            let beside = recorded(&ctx, crate::ui::chats::compact_chat_id(&first))
+                .expect("the avatars are in the rail beside the list");
 
             let (app, ctx) = open("rail", macos);
             let rail = rail_rect(&ctx).expect("the rail is drawn with the list hidden");
@@ -16855,7 +16890,217 @@ mod rail_tests {
                 avatar.top() >= starred.bottom() && avatar.bottom() <= settings.top(),
                 "{macos}: between the destinations and Settings: {avatar:?}"
             );
+            // Under Show the chat list, which takes a cell of its own.
+            assert!(avatar.top() >= show.bottom() && avatar.top() > beside.top());
         }
+    }
+
+    /// The rail's avatars beside the shown list: they sit between the
+    /// destinations and the bottom group without overlapping either, in a
+    /// tall and a short window, only the ones on screen are laid out, and a
+    /// click opens the chat with the list still shown.
+    #[test]
+    fn the_rail_shows_the_chats_avatars_beside_the_list() {
+        let viewport_id = crate::ui::chats::list_offset_id().with("compact-viewport");
+        for macos in [false, true] {
+            for size in [egui::vec2(1280.0, 800.0), egui::vec2(1280.0, 440.0)] {
+                let (mut app, ctx) = open("chat", macos);
+                for _ in 0..3 {
+                    frame_at(&mut app, &ctx, size, Vec::new());
+                }
+                let label = format!("{macos} {size:?}");
+                let rail = rail_rect(&ctx).expect("the rail is drawn");
+                assert!(list_header(&ctx).is_some(), "{label}: the list is shown");
+                let starred = destination_rect(&ctx, Destination::Starred);
+                let lowest = [
+                    Destination::Archived,
+                    Destination::Locked,
+                    Destination::Settings,
+                ]
+                .into_iter()
+                .filter_map(|destination| ctx.read_response(rail::destination_id(destination)))
+                .map(|response| response.rect)
+                .chain(stop_rect(&ctx, Stop::Profile))
+                .fold(f32::INFINITY, |top, rect| top.min(rect.top()));
+                let viewport = recorded(&ctx, viewport_id).expect("the avatars' column");
+                assert!(rail.contains_rect(viewport), "{label}: {viewport:?}");
+                assert!(
+                    viewport.top() >= starred.bottom() && viewport.bottom() <= lowest,
+                    "{label}: {viewport:?} between {starred:?} and {lowest}"
+                );
+                let drawn: Vec<(String, egui::Rect)> = app
+                    .visible_chats()
+                    .iter()
+                    .filter_map(|chat| {
+                        recorded(&ctx, crate::ui::chats::compact_chat_id(&chat.id))
+                            .map(|rect| (chat.id.clone(), rect))
+                    })
+                    .collect();
+                assert!(!drawn.is_empty(), "{label}: avatars are drawn");
+                if size.y < 500.0 {
+                    assert!(
+                        drawn.len() < app.visible_chats().len(),
+                        "{label}: only the avatars on screen are laid out"
+                    );
+                }
+                // The column clips its avatars to itself; one laid out past
+                // its end is never seen.
+                assert!(
+                    drawn
+                        .iter()
+                        .all(|(_, rect)| rect.top() < viewport.bottom() + 60.0),
+                    "{label}: avatars past the column: {drawn:?}"
+                );
+                let open_chat = app.open_chat.clone();
+                // The short window may leave room for the open chat's alone.
+                let Some((target, rect)) = drawn
+                    .iter()
+                    .find(|(id, rect)| {
+                        Some(id) != open_chat.as_ref() && viewport.contains(rect.center())
+                    })
+                    .cloned()
+                else {
+                    assert!(size.y < 500.0, "{label}: another chat's avatar is in view");
+                    continue;
+                };
+                frame_at(
+                    &mut app,
+                    &ctx,
+                    size,
+                    vec![egui::Event::PointerMoved(rect.center())],
+                );
+                for pressed in [true, false] {
+                    frame_at(
+                        &mut app,
+                        &ctx,
+                        size,
+                        vec![egui::Event::PointerButton {
+                            pos: rect.center(),
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        }],
+                    );
+                }
+                frame_at(&mut app, &ctx, size, Vec::new());
+                assert_eq!(app.open_chat.as_deref(), Some(target.as_str()), "{label}");
+                assert!(list_header(&ctx).is_some(), "{label}: the list stays shown");
+            }
+        }
+    }
+
+    /// The Calls page's chips, All and Missed, are the chat list's own,
+    /// under its search field and in its Tab order. Missed keeps only calls
+    /// to us nobody took, a group's included; a search looks among them,
+    /// and the choice is kept with the account.
+    #[test]
+    fn the_calls_chips_pick_missed_calls_and_combine_with_search() {
+        use crate::model::CallFilter;
+        use crate::ui::calls;
+        let (mut app, ctx) = open("calls", false);
+        let chip = |ctx: &egui::Context, filter| {
+            recorded(ctx, calls::filter_chip_id(filter)).expect("the chip is drawn")
+        };
+        let (all, missed) = (chip(&ctx, CallFilter::All), chip(&ctx, CallFilter::Missed));
+        let search = stop_rect(&ctx, Stop::Search).expect("the search field");
+        assert!(all.top() >= search.bottom() && all.right() <= missed.left());
+        assert_eq!(all.height(), 28.0, "the chat list's chip");
+        assert_eq!(stop_rect(&ctx, Stop::All), Some(all));
+        assert_eq!(stop_rect(&ctx, Stop::Missed), Some(missed));
+        let rows: Vec<(Message, bool)> = calls::rows(&app.call_log)
+            .into_iter()
+            .map(|row| {
+                let missed = calls::Entry::of(row[0]).unwrap().missed();
+                (row[0].clone(), missed)
+            })
+            .collect();
+        assert!(rows.iter().filter(|(_, missed)| *missed).count() >= 2);
+        assert!(
+            rows.iter().any(|(call, missed)| *missed
+                && matches!(call.content, Content::Call { group: true, .. })),
+            "a missed group call"
+        );
+        let drawn = |ctx: &egui::Context| -> Vec<String> {
+            rows.iter()
+                .filter(|(call, _)| {
+                    ctx.read_response(calls::row_id(&call.chat, &call.id))
+                        .is_some()
+                })
+                .map(|(call, _)| call.id.clone())
+                .collect()
+        };
+        let ids = |keep: &dyn Fn(&Message, bool) -> bool| -> Vec<String> {
+            rows.iter()
+                .filter(|(call, missed)| keep(call, *missed))
+                .map(|(call, _)| call.id.clone())
+                .collect()
+        };
+        assert_eq!(drawn(&ctx), ids(&|_, _| true), "All lists every row");
+
+        click(&mut app, &ctx, 1180.0, missed.center());
+        // A response can come from the pass before the last.
+        frame(&mut app, &ctx, 1180.0, Vec::new());
+        assert_eq!(app.call_filter, CallFilter::Missed);
+        assert_eq!(
+            app.account().settings.call_filter.as_deref(),
+            Some("missed")
+        );
+        assert_eq!(drawn(&ctx), ids(&|_, missed| missed), "only missed calls");
+
+        // A search looks among the missed calls only.
+        let ada = SAMPLES[0].id;
+        app.calls_search = app.display_name(ada);
+        frame(&mut app, &ctx, 1180.0, Vec::new());
+        frame(&mut app, &ctx, 1180.0, Vec::new());
+        assert_eq!(
+            drawn(&ctx),
+            ids(&|call, missed| missed && call.chat == ada),
+            "Ada's missed calls"
+        );
+        let grace = SAMPLES[2].id;
+        app.calls_search = app.display_name(grace);
+        frame(&mut app, &ctx, 1180.0, Vec::new());
+        frame(&mut app, &ctx, 1180.0, Vec::new());
+        let texts = frame_at(&mut app, &ctx, egui::vec2(1180.0, 780.0), Vec::new());
+        assert!(drawn(&ctx).is_empty(), "Grace has no missed call");
+        assert!(texts.iter().any(|text| text == "No matching calls"));
+        // The chips stay while searching: All brings Grace's call back.
+        let missed = chip(&ctx, CallFilter::Missed);
+        click(&mut app, &ctx, 1180.0, missed.center());
+        assert_eq!(app.call_filter, CallFilter::All, "a second click is All");
+        assert_eq!(app.account().settings.call_filter, None);
+        frame(&mut app, &ctx, 1180.0, Vec::new());
+        assert_eq!(drawn(&ctx), ids(&|call, _| call.chat == grace));
+    }
+
+    /// Missed with no missed call says so, and points back to All.
+    #[test]
+    fn missed_with_no_missed_calls_says_so() {
+        use crate::model::CallFilter;
+        use crate::ui::calls;
+        let (mut app, ctx) = open("calls-missed-none", false);
+        assert_eq!(app.call_filter, CallFilter::Missed);
+        assert!(!app.call_log.is_empty(), "other calls remain");
+        let texts = frame_at(&mut app, &ctx, egui::vec2(1180.0, 780.0), Vec::new());
+        assert!(
+            texts.iter().any(|text| text == "No missed calls"),
+            "{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text == "Choose All to see every call."),
+            "{texts:?}"
+        );
+        assert!(
+            app.call_log.iter().all(|call| ctx
+                .read_response(calls::row_id(&call.chat, &call.id))
+                .is_none()),
+            "no rows"
+        );
+        let (app, ctx) = open("calls-missed", false);
+        assert_eq!(app.call_filter, CallFilter::Missed);
+        assert!(recorded(&ctx, calls::filter_chip_id(CallFilter::Missed)).is_some());
     }
 
     /// Archived sits in the rail's bottom group, lit while the archive fills

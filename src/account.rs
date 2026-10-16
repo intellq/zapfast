@@ -83,6 +83,8 @@ pub struct Account {
     pub pair_phone: String,
     pub show_archived: bool,
     pub chat_filter: ChatFilter,
+    /// The chip the Calls page's history shows.
+    pub call_filter: crate::model::CallFilter,
     pub labels: Vec<Label>,
     /// Starred messages, newest star first, and whether the left panel lists
     /// them instead of the chats.
@@ -148,6 +150,7 @@ impl Account {
             Some(crate::model::ListFilter::Chip(chip)) => chip,
             _ => ChatFilter::All,
         };
+        let call_filter = crate::model::CallFilter::parse(settings.call_filter.as_deref());
         Self {
             id,
             dirs,
@@ -206,6 +209,7 @@ impl Account {
             pair_phone: String::new(),
             show_archived: false,
             chat_filter,
+            call_filter,
             labels: Vec::new(),
             starred: Vec::new(),
             show_starred: false,

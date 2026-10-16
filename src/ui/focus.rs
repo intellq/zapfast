@@ -36,7 +36,10 @@ pub enum Stop {
     NewChat,
     Sidebar,
     Search,
+    /// The first chip, All, on the chat list and on the Calls page.
     All,
+    /// The Calls page's Missed chip.
+    Missed,
     Unread,
     Private,
     Favorites,

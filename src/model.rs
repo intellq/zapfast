@@ -215,6 +215,45 @@ impl ChatFilter {
     }
 }
 
+/// Call-history filter chosen from the chips under the Calls page's search
+/// field.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CallFilter {
+    #[default]
+    All,
+    /// Calls to us that nobody took, group calls included.
+    Missed,
+}
+
+impl CallFilter {
+    pub const EVERY: [Self; 2] = [Self::All, Self::Missed];
+
+    pub fn label(self, locale: crate::i18n::Locale) -> std::borrow::Cow<'static, str> {
+        use crate::i18n::gettext;
+        match self {
+            Self::All => gettext(locale, "All"),
+            Self::Missed => gettext(locale, "Missed"),
+        }
+    }
+
+    /// The text settings keep for this filter; `None` for every call.
+    pub fn key(self) -> Option<String> {
+        match self {
+            Self::All => None,
+            Self::Missed => Some("missed".to_owned()),
+        }
+    }
+
+    /// Reads a stored filter. Anything unknown, as a later version may
+    /// write, shows every call.
+    pub fn parse(key: Option<&str>) -> Self {
+        match key {
+            Some("missed") => Self::Missed,
+            _ => Self::All,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Chat {
     pub id: ChatId,
@@ -2819,6 +2858,8 @@ pub enum Action {
     CloseDialog,
     ToggleSidebar,
     SetChatFilter(ChatFilter),
+    /// Picks the chip the Calls page's history shows.
+    SetCallFilter(CallFilter),
     /// Picks the label the chat list shows; `None` shows every chat.
     SelectLabel(Option<String>),
     /// Replaces the labels worn by one chat.
@@ -3519,6 +3560,15 @@ mod tests {
         );
         assert_eq!(ListFilter::parse("something-newer"), None);
         assert_eq!(ListFilter::parse("label:"), None);
+    }
+
+    #[test]
+    fn call_filters_survive_their_stored_form() {
+        for chip in CallFilter::EVERY {
+            assert_eq!(CallFilter::parse(chip.key().as_deref()), chip);
+        }
+        assert_eq!(CallFilter::All.key(), None);
+        assert_eq!(CallFilter::parse(Some("something-newer")), CallFilter::All);
     }
 
     #[test]

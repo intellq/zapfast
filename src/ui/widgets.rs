@@ -1039,6 +1039,32 @@ pub fn fade_left(ui: &Ui, rect: Rect, width: f32, color: Color32) {
     ui.painter().add(egui::Shape::mesh(mesh));
 }
 
+/// Fades the topmost `height` points of `rect` into `color`, for a column
+/// that scrolls on above.
+pub fn fade_top(ui: &Ui, rect: Rect, height: f32, color: Color32) {
+    let fade = Rect::from_min_max(rect.min, pos2(rect.right(), rect.top() + height));
+    vertical_fade(ui, fade, color, Color32::TRANSPARENT);
+}
+
+/// Fades the bottom `height` points of `rect` into `color`; the mirror of
+/// [`fade_top`].
+pub fn fade_bottom(ui: &Ui, rect: Rect, height: f32, color: Color32) {
+    let fade = Rect::from_min_max(pos2(rect.left(), rect.bottom() - height), rect.max);
+    vertical_fade(ui, fade, Color32::TRANSPARENT, color);
+}
+
+/// Fills `rect` with a gradient from `top` to `bottom`.
+fn vertical_fade(ui: &Ui, rect: Rect, top: Color32, bottom: Color32) {
+    let mut mesh = egui::Mesh::default();
+    mesh.colored_vertex(rect.left_top(), top);
+    mesh.colored_vertex(rect.right_top(), top);
+    mesh.colored_vertex(rect.right_bottom(), bottom);
+    mesh.colored_vertex(rect.left_bottom(), bottom);
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(0, 2, 3);
+    ui.painter().add(egui::Shape::mesh(mesh));
+}
+
 /// A horizontal row of chips that scrolls sideways. Its scroll bar takes a
 /// strip of its own under the chips, instead of floating over them.
 pub fn chip_scroll<R>(

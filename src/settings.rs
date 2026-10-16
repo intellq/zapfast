@@ -1002,6 +1002,9 @@ pub struct AccountSettings {
     /// background. Off by default: it asks the phone for history nobody
     /// scrolled to, so an account that has never turned it on does not.
     pub history_prefetch: bool,
+    /// The chip the Calls page last showed, as
+    /// [`crate::model::CallFilter::key`] writes it; `None` shows every call.
+    pub call_filter: Option<String>,
 }
 
 impl Default for AccountSettings {
@@ -1020,6 +1023,7 @@ impl Default for AccountSettings {
             calls_seen_at: 0,
             list_filter: None,
             history_prefetch: false,
+            call_filter: None,
         }
     }
 }
@@ -1040,6 +1044,7 @@ impl AccountSettings {
             calls_seen_at: 0,
             list_filter: None,
             history_prefetch: false,
+            call_filter: None,
         }
     }
 

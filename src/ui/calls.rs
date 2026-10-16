@@ -11,8 +11,9 @@ use egui::{Align, Frame, Layout, Margin, Rect, Sense, Vec2, pos2, vec2};
 
 use crate::app::App;
 use crate::i18n::{Locale, gettext};
-use crate::model::{Action, CallStatus, Content, Message};
+use crate::model::{Action, CallFilter, CallStatus, Content, Message};
 use crate::theme::{self, Icon};
+use crate::ui::focus::{Stop, TabStop};
 use crate::ui::widgets;
 
 /// One call, as its entry reads it.
@@ -204,10 +205,30 @@ fn history(app: &mut App, ui: &mut egui::Ui) {
             });
         return;
     }
+    // The chip picks rows after they fold, so a row reads as it does
+    // under All.
+    let missed_only = app.call_filter == CallFilter::Missed;
+    let shown =
+        |row: &Vec<&Message>| !missed_only || Entry::of(row[0]).is_some_and(|entry| entry.missed());
+    let folded = rows(&calls);
+    if !folded.iter().any(shown) {
+        Frame::new()
+            .inner_margin(Margin::symmetric(24, 0))
+            .show(ui, |ui| {
+                widgets::empty_state(
+                    ui,
+                    &palette,
+                    Icon::PhoneMissed,
+                    gettext(app.locale, "No missed calls").as_ref(),
+                    gettext(app.locale, "Choose All to see every call.").as_ref(),
+                );
+            });
+        return;
+    }
     let needle = crate::util::search_key(app.calls_search.trim());
-    let rows: Vec<Vec<Message>> = rows(&calls)
+    let rows: Vec<Vec<Message>> = folded
         .into_iter()
-        .filter(|row| matches(app, &row[0].chat, &needle))
+        .filter(|row| shown(row) && matches(app, &row[0].chat, &needle))
         .map(|row| row.into_iter().cloned().collect())
         .collect();
     let mut actions = Vec::new();
@@ -233,6 +254,42 @@ fn history(app: &mut App, ui: &mut egui::Ui) {
             ui.add_space(12.0);
         });
     app.actions.extend(actions);
+}
+
+/// Stable id of a call filter chip, for tests.
+pub fn filter_chip_id(filter: CallFilter) -> egui::Id {
+    egui::Id::new(("call-filter", filter as u8))
+}
+
+/// The chips under the Calls page's search field, drawn as the chat list's
+/// are: every call, or the missed ones. They stay while a search is typed,
+/// which looks among the chip's calls. A missed call has no unread state,
+/// so Missed carries no count.
+pub fn filter_chips(app: &mut App, ui: &mut egui::Ui) {
+    let palette = app.palette;
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing = vec2(4.0, 6.0);
+        for filter in CallFilter::EVERY {
+            let selected = app.call_filter == filter;
+            let chip =
+                widgets::filter_chip(ui, &palette, filter.label(app.locale).as_ref(), 0, selected)
+                    .tab_stop(match filter {
+                        CallFilter::All => Stop::All,
+                        CallFilter::Missed => Stop::Missed,
+                    });
+            ui.ctx()
+                .data_mut(|data| data.insert_temp(filter_chip_id(filter), chip.rect));
+            if chip.clicked() {
+                // A second click on Missed returns to every call, as the
+                // chat list's chips do.
+                let next = if selected { CallFilter::All } else { filter };
+                if next != app.call_filter {
+                    app.actions.push(Action::SetCallFilter(next));
+                }
+            }
+        }
+    });
 }
 
 /// Stable id of a history row, for tests.

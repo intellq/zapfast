@@ -254,8 +254,8 @@ fn new_call_header(app: &mut App, ui: &mut egui::Ui, title: f32, buttons: f32) {
 }
 
 /// The search field under the header's first row, and the filter chips
-/// under it on the chat list. The Calls tab searches its own list by name
-/// or number, and has no chips.
+/// under it. The Calls tab searches its own list by name or number, and its
+/// chips pick every call or the missed ones.
 fn search_and_filters(app: &mut App, ui: &mut egui::Ui) {
     let palette = app.palette;
     let width = ui.available_width();
@@ -283,6 +283,7 @@ fn search_and_filters(app: &mut App, ui: &mut egui::Ui) {
             app.new_call_search = text;
         } else {
             app.calls_search = text;
+            super::calls::filter_chips(app, ui);
         }
         return;
     }
@@ -1704,6 +1705,8 @@ fn full_preview_tooltip(
 const COMPACT_CELL: f32 = 52.0;
 /// Avatar size inside a collapsed cell.
 const COMPACT_AVATAR: f32 = 36.0;
+/// Height of the fade over the rail's avatars where they scroll on.
+const COMPACT_FADE: f32 = 16.0;
 
 /// Where one avatar in the collapsed chat list was drawn.
 pub fn compact_chat_id(chat: &str) -> egui::Id {
@@ -1717,11 +1720,21 @@ pub fn compact_width(_ctx: &egui::Context) -> f32 {
     super::rail::WIDTH
 }
 
-/// The rail's avatars while the list is hidden: the chats the full list
-/// would show right now, under the same filter, search, archive, and
-/// locked-folder state.
-pub(super) fn compact_list(app: &mut App, ui: &mut egui::Ui) {
-    let to_top = std::mem::take(&mut app.scroll_chats_to_top);
+/// The rail's avatars: the chats the full list would show right now, under
+/// the same filter, search, archive, and locked-folder state. `beside_list`
+/// says the full list is on screen too; it keeps its own scrolling then,
+/// and the column scrolls on its own.
+pub(super) fn compact_list(app: &mut App, ui: &mut egui::Ui, beside_list: bool) {
+    // The copies a narrow window's slide draws show the real column's
+    // offset, and leave its requests and carried scroll to it.
+    let copy = ui
+        .ctx()
+        .data(|data| data.get_temp::<bool>(slide_copy_id()))
+        .is_some();
+    // The list takes its own request to follow a sent chat to the top.
+    let to_top = !copy
+        && (std::mem::take(&mut app.scroll_rail_to_top)
+            | (!beside_list && std::mem::take(&mut app.scroll_chats_to_top)));
     if !app.locked_folder_open() && app.secret_code_matched() {
         // As in the full list, the secret code reveals only the way in.
         compact_locked_entry(app, ui);
@@ -1734,10 +1747,19 @@ pub(super) fn compact_list(app: &mut App, ui: &mut egui::Ui) {
     if to_top && near_top(ui, "chat-rail", COMPACT_CELL) {
         scroll_area = scroll_area.vertical_scroll_offset(0.0);
     }
-    // Alt+Up/Down reveals the chat it opens here too.
+    if copy
+        && let Some(offset) = ui
+            .ctx()
+            .data(|data| data.get_temp::<f32>(shared_offset_id().with("rail")))
+    {
+        scroll_area = scroll_area.vertical_scroll_offset(offset);
+    }
+    // Alt+Up/Down reveals the chat it opens here too, when the list that
+    // would otherwise show it is hidden.
     let target_row = app
         .scroll_chat_into_view
         .as_ref()
+        .filter(|_| !beside_list && !copy)
         .and_then(|target| chats.iter().position(|chat| chat.id == *target));
     if let Some(target_row) = target_row {
         let id = ui.make_persistent_id(egui::IdSalt::new("chat-rail"));
@@ -1755,7 +1777,16 @@ pub(super) fn compact_list(app: &mut App, ui: &mut egui::Ui) {
         scroll_area = scroll_area.vertical_scroll_offset(offset);
         app.scroll_chat_into_view = None;
     }
-    let carried = app.scroll_route.take(crate::app::ScrollPane::Chats);
+    let pane = if beside_list {
+        crate::app::ScrollPane::Rail
+    } else {
+        crate::app::ScrollPane::Chats
+    };
+    let carried = if copy {
+        0.0
+    } else {
+        app.scroll_route.take(pane)
+    };
     // Only the avatars on screen are laid out, however many chats there are.
     let output = scroll_area.show_rows(ui, COMPACT_CELL, chats.len(), |ui, range| {
         if carried != 0.0 {
@@ -1773,11 +1804,29 @@ pub(super) fn compact_list(app: &mut App, ui: &mut egui::Ui) {
             }
         }
     });
-    app.scroll_route
-        .place(crate::app::ScrollPane::Chats, output.inner_rect);
+    if !copy {
+        ui.ctx().data_mut(|data| {
+            data.insert_temp(shared_offset_id().with("rail"), output.state.offset.y);
+        });
+        app.scroll_route.place(pane, output.inner_rect);
+    }
+    // Avatars cut off at either end fade into the rail, which says the
+    // column scrolls on.
+    let palette = app.palette;
+    {
+        let rect = output.inner_rect;
+        let offset = output.state.offset.y;
+        if offset > 0.5 {
+            widgets::fade_top(ui, rect, COMPACT_FADE, palette.rail());
+        }
+        if output.content_size.y - offset - rect.height() > 0.5 {
+            widgets::fade_bottom(ui, rect, COMPACT_FADE, palette.rail());
+        }
+    }
     #[cfg(test)]
     ui.ctx().data_mut(|data| {
         data.insert_temp(list_offset_id().with("compact"), output.state.offset.y);
+        data.insert_temp(list_offset_id().with("compact-viewport"), output.inner_rect);
         data.insert_temp(list_offset_id().with("compact-id"), output.id);
     });
 }

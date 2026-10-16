@@ -324,10 +324,12 @@ A thin rail runs down the left of the chat list: **Chats**, **Calls**
 top, the one on screen lit; **Archived** and **Locked** (while you have
 archived or locked chats), **Settings**, and your own picture (the account
 switcher) at the bottom. The chat list's header keeps its title, **New
-chat**, and the button beside it (`Ctrl+B`), which hides the list: the chats'
-avatars then fill the rail between its top and bottom buttons. Unread chats
-show their badge, hovering names a chat, clicking opens it, and `Ctrl+B` or
-the button under **Starred** brings the full list back.
+chat**, and the button beside it (`Ctrl+B`), which hides the list. Between
+the rail's top and bottom buttons are the avatars of the chats the list shows,
+with the list on screen or hidden, scrolling on their own when they do not all
+fit. Unread chats show their badge, hovering names a chat, and clicking opens
+it. While the list is hidden, `Ctrl+B` or the button under **Starred** brings
+it back.
 
 ## Notifications and the tray
 
