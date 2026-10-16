@@ -4910,6 +4910,55 @@ mod tests {
         }
     }
 
+    /// A call in the chat is a bubble as wide as its words, on either side:
+    /// in an own bubble the row runs right to left, and its text column once
+    /// took every point the row offered, stretching across the transcript.
+    #[test]
+    fn a_call_bubble_is_as_wide_as_its_words() {
+        let mut app = app();
+        let chat = SAMPLES[0].id;
+        app.open_chat = Some(chat.to_owned());
+        let call = |id: &str, from_me: bool| {
+            message(
+                chat,
+                &format!("{}{id}", crate::model::CALL_ENTRY_PREFIX),
+                from_me,
+                crate::util::now(),
+                Content::Call {
+                    video: false,
+                    status: crate::model::CallStatus::Declined,
+                    duration: 0,
+                    group: false,
+                },
+            )
+        };
+        let conversation = app.conversations.get_mut(chat).unwrap();
+        conversation.messages.push(call("width-in", false));
+        conversation.messages.push(call("width-out", true));
+        app.scroll_to_bottom = true;
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        render(&mut app, &ctx);
+        let width = |id: &str| {
+            let id = crate::ui::conversation::bubble_id(
+                chat,
+                &format!("{}{id}", crate::model::CALL_ENTRY_PREFIX),
+            )
+            .with("rect");
+            ctx.data(|data| data.get_temp::<egui::Rect>(id))
+                .expect("the call bubble was drawn")
+                .width()
+        };
+        let incoming = width("width-in");
+        let own = width("width-out");
+        assert!(own < 240.0, "an own call bubble fits its words: {own}");
+        assert!(
+            (own - incoming).abs() < 24.0,
+            "both sides are alike: {own} and {incoming}"
+        );
+    }
+
     /// A chat shorter than the view sits at its bottom, by the composer, as
     /// on WhatsApp (#378), and stays there when a message arrives.
     #[test]

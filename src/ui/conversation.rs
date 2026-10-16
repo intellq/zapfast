@@ -6860,17 +6860,33 @@ fn content(
                     theme::icon(ui, entry.icon(), 20.0, tint);
                 },
                 |ui| {
-                    ui.vertical(|ui| {
-                        theme::text(
-                            ui,
-                            entry.title(view.locale),
-                            theme::medium(14.0),
-                            palette.text,
-                        );
-                        if let Some(detail) = entry.detail(view.locale) {
-                            theme::text(ui, detail, theme::regular(12.5), palette.secondary);
-                        }
-                    });
+                    // Measured first and laid out at that width: a plain
+                    // `vertical` in an own bubble's right-to-left row takes
+                    // every point the row offers, which stretched a call's
+                    // bubble across the transcript.
+                    let title = entry.title(view.locale);
+                    let detail = entry.detail(view.locale);
+                    let measure = |text: &str, font: egui::FontId| {
+                        ui.painter()
+                            .layout_no_wrap(text.to_owned(), font, palette.text)
+                            .size()
+                            .x
+                    };
+                    let width = detail
+                        .as_deref()
+                        .map(|detail| measure(detail, theme::regular(12.5)))
+                        .unwrap_or(0.0)
+                        .max(measure(&title, theme::medium(14.0)));
+                    ui.allocate_ui_with_layout(
+                        vec2(width, 0.0),
+                        Layout::top_down(Align::Min),
+                        |ui| {
+                            theme::text(ui, title, theme::medium(14.0), palette.text);
+                            if let Some(detail) = detail {
+                                theme::text(ui, detail, theme::regular(12.5), palette.secondary);
+                            }
+                        },
+                    );
                 },
             );
             None
