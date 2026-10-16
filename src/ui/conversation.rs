@@ -966,6 +966,7 @@ fn mention_picker(app: &mut App, ui: &mut egui::Ui, chat: &Chat, field: egui::Id
     }
 }
 
+/// Draws the composer and queues sends with the originating account and selected mentions.
 fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
     let palette = app.palette;
     // The composer floats over the wallpaper; the bar of selected messages is
@@ -1665,6 +1666,8 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                     });
                 } else {
                     app.actions.push(Action::SendPending {
+                        account: app.account().id.clone(),
+                        mentions: app.composer_mentions(),
                         chat: chat.id.clone(),
                         caption: text,
                     });
