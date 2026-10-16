@@ -2424,13 +2424,9 @@ pub enum Action {
     SetCallSpeaker(Option<String>),
     /// Switches the current call's camera node.
     SetCallCameraDevice(Option<String>),
-    /// Steps away from the full call screen without ending the call.
-    LeaveCallSurface,
-    /// Opens the full call screen again.
-    ReturnToCall,
-    /// Takes the call surface full screen, or leaves full screen again. The window moves; the call
-    /// does not.
-    ToggleCallFullscreen,
+    /// Answers a ringing video call with the camera off: a voice answer that
+    /// can still turn the camera on later.
+    AnswerCallWithoutVideo,
     /// Creates and opens a chat for a contact without one.
     StartChat {
         id: ChatId,

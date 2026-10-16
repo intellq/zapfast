@@ -2391,7 +2391,10 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
                         label: "Integrated Camera".into(),
                     }],
                 };
-                app.call_devices_open = true;
+                app.call_window
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .devices_open = true;
                 if let Some(call) = app.call.as_mut() {
                     call.muted = true;
                     call.speaker = Some("desk-speakers".into());
@@ -2434,10 +2437,6 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
                         ..crate::calls::GroupCall::default()
                     });
                 }
-            }
-            "call-strip" => {
-                call_sample(app, false, false);
-                app.call_surface_hidden = true;
             }
             "call-entries" => {
                 // Calls among the open chat's messages, as WhatsApp files them.
@@ -3731,6 +3730,8 @@ pub fn call_sample(app: &mut App, incoming: bool, video: bool) {
         group: None,
     });
     app.call_account = Some(app.account().id.clone());
+    // A call that is up is shown in its own window; one that rings, on the card.
+    app.call_windowed = (!incoming).then_some(1);
     if video && !incoming {
         app.call_remote_frame = Some(std::sync::Arc::new(stock_frame(
             [18, 32, 64],
@@ -6048,7 +6049,6 @@ mod tests {
             "call-failed",
             "call-devices",
             "call-ended",
-            "call-strip",
             "call-group",
             "call-group-active",
             "call-group-video",
@@ -6182,15 +6182,8 @@ mod tests {
             ("info", narrow),
             ("empty", narrow),
             ("chat", egui::vec2(700.0, 600.0)),
-            ("call-active", wide),
-            ("call", wide),
-            ("call-active", narrow),
-            ("call-group", wide),
-            ("call-group-active", wide),
-            ("call-group-active", narrow),
-            ("call-group-video", wide),
-            ("call-group-video", narrow),
-            ("call-group-muted", wide),
+            // The call window is a window of its own, never under the main
+            // window's caption buttons.
             ("calls-link", wide),
             ("settings", wide),
             ("settings", narrow),
@@ -16702,26 +16695,13 @@ mod picture_edge_tests {
     }
 }
 
-/// The call screen as a window: what opens it, what puts it aside without ending the call, and the
-/// one control that does end it.
+/// The call card and the call window: what opens each, and what closing the window does.
 #[cfg(test)]
 mod call_surface_tests {
     use super::tests::{app, frame_with};
     use super::*;
-    use crate::model::Action;
 
-    /// A key press, as egui reports one.
-    fn key(key: egui::Key) -> egui::Event {
-        egui::Event::Key {
-            key,
-            physical_key: None,
-            pressed: true,
-            repeat: false,
-            modifiers: egui::Modifiers::NONE,
-        }
-    }
-
-    /// A running call takes the screen, with the window attached to it.
+    /// A running call, with the main window attached to it.
     fn on_a_call() -> (App, egui::Context) {
         let mut app = app();
         apply_flags(&mut app, Some("call-active"));
@@ -16772,187 +16752,140 @@ mod call_surface_tests {
         labels
     }
 
-    #[test]
-    fn escape_leaves_full_screen_before_it_puts_the_call_aside() {
-        let (mut app, ctx) = on_a_call();
-        app.actions.push(Action::ToggleCallFullscreen);
-        frame_with(&mut app, &ctx, Vec::new());
-        assert!(app.call_fullscreen, "the surface takes the whole screen");
-        assert!(!app.call_surface_hidden);
-
-        frame_with(&mut app, &ctx, vec![key(egui::Key::Escape)]);
-        assert!(!app.call_fullscreen, "escape leaves full screen");
-        assert!(
-            !app.call_surface_hidden,
-            "and the call screen is still the screen"
-        );
-        assert_eq!(
-            app.call.as_ref().map(|call| call.phase),
-            Some(CallPhase::Active),
-            "a window state is not a call state"
-        );
-
-        frame_with(&mut app, &ctx, vec![key(egui::Key::Escape)]);
-        assert!(
-            app.call_surface_hidden,
-            "a second escape is the same move the back button makes"
-        );
-        assert_eq!(
-            app.call.as_ref().map(|call| call.phase),
-            Some(CallPhase::Active),
-            "and the call runs on behind the bar"
-        );
+    /// The call window's state, as the app handed it over.
+    fn view(app: &App) -> Option<crate::ui::call::CallView> {
+        app.call_window.lock().unwrap().view.clone()
     }
 
-    #[test]
-    fn only_the_hang_up_button_ends_a_call() {
-        let (mut app, ctx) = on_a_call();
-        app.backend.record_demo_commands();
-        app.actions.push(Action::ToggleCallFullscreen);
-        frame_with(&mut app, &ctx, Vec::new());
-        // Everything a reader can do to the window short of hanging up.
-        frame_with(&mut app, &ctx, vec![key(egui::Key::Escape)]);
-        frame_with(&mut app, &ctx, vec![key(egui::Key::Escape)]);
-        app.actions.push(Action::ReturnToCall);
-        frame_with(&mut app, &ctx, Vec::new());
-        app.actions.push(Action::ToggleCallFullscreen);
-        frame_with(&mut app, &ctx, Vec::new());
-        frame_with(&mut app, &ctx, vec![key(egui::Key::Escape)]);
-        let hang_ups = |commands: Vec<crate::backend::Command>| {
-            commands
-                .into_iter()
-                .filter(|command| matches!(command, crate::backend::Command::HangupCall))
-                .count()
-        };
-        assert_eq!(
-            hang_ups(app.backend.take_demo_commands()),
-            0,
-            "stepping away, returning, and full screen never hang up"
-        );
-        app.actions.push(Action::HangupCall);
-        frame_with(&mut app, &ctx, Vec::new());
-        assert_eq!(
-            hang_ups(app.backend.take_demo_commands()),
-            1,
-            "the hang-up button is the one that ends the call"
-        );
-    }
+    /// Labels only the upstream full-screen call surface had.
+    const SURFACE: [&str; 5] = [
+        "Full screen",
+        "Exit full screen",
+        "Hide the call screen",
+        "Return to the call",
+        "Back to the call",
+    ];
 
     #[test]
-    fn an_incoming_call_stays_on_screen_until_it_is_answered_or_declined() {
+    fn a_ringing_call_is_a_card_in_the_main_window() {
         let mut app = app();
         apply_flags(&mut app, Some("call"));
         let ctx = egui::Context::default();
         app.attach(&ctx);
-        app.backend.record_demo_commands();
-        // Escape is not an answer and not a refusal, so the ringing call stays where it can be
-        // answered.
-        frame_with(&mut app, &ctx, vec![key(egui::Key::Escape)]);
-        assert!(!app.call_surface_hidden, "the ringing call is still there");
-        assert_eq!(
-            app.call.as_ref().map(|call| call.phase),
-            Some(CallPhase::Incoming)
-        );
-        assert!(
-            !app.backend
-                .take_demo_commands()
-                .iter()
-                .any(|command| matches!(
-                    command,
-                    crate::backend::Command::AnswerCall | crate::backend::Command::DeclineCall
-                )),
-            "escape neither answers nor declines"
-        );
-    }
-
-    #[test]
-    fn the_bar_brings_the_call_screen_back() {
-        let (mut app, ctx) = on_a_call();
+        app.window_focused = true;
         ctx.enable_accesskit();
-        app.actions.push(Action::LeaveCallSurface);
-        let bar = labels(&mut app, &ctx);
-        assert!(
-            bar.contains(&"Return to the call".to_owned()),
-            "the bar offers the way back: {bar:?}"
-        );
-        assert!(
-            !bar.contains(&"Hide the call screen".to_owned()),
-            "and the surface that was put aside is not on screen: {bar:?}"
-        );
-        assert_eq!(
-            app.call.as_ref().map(|call| call.phase),
-            Some(CallPhase::Active),
-            "the bar is only ever a way back to a call that is still up"
-        );
-
-        app.actions.push(Action::ReturnToCall);
-        let screen = labels(&mut app, &ctx);
-        assert!(
-            screen.contains(&"Hide the call screen".to_owned()),
-            "the surface comes back: {screen:?}"
-        );
-        assert!(
-            !screen.contains(&"Return to the call".to_owned()),
-            "and the bar goes with it: {screen:?}"
-        );
-        assert_eq!(
-            app.call.as_ref().map(|call| call.phase),
-            Some(CallPhase::Active),
-            "returning is not a new call"
-        );
-    }
-
-    /// The bar is a way back to a call that is still up, so it goes when the call does.
-    #[test]
-    fn the_bar_leaves_with_the_call_it_belongs_to() {
-        let (mut app, ctx) = on_a_call();
-        ctx.enable_accesskit();
-        app.actions.push(Action::LeaveCallSurface);
-        frame_with(&mut app, &ctx, Vec::new());
-        let bar = labels(&mut app, &ctx);
-        assert!(
-            bar.contains(&"Return to the call".to_owned()),
-            "the call is still up behind the bar: {bar:?}"
-        );
-
-        let call = app.call.as_mut().expect("a call is up");
-        call.phase = CallPhase::Ended;
-        call.outcome = Some(crate::calls::CallOutcome::Answered);
-        let after = labels(&mut app, &ctx);
-        assert!(
-            !after.contains(&"Return to the call".to_owned()),
-            "a call that is over has no way back: {after:?}"
-        );
-    }
-
-    /// A locked chat's farewell, and any call the reader put aside, still ends behind the bar.
-    ///
-    /// `call_surface_hidden` is set for a locked call's terminal snapshot, but the surface only
-    /// looked at the bar while the phase was live, so the four-second farewell painted the whole
-    /// window once more and announced that a hidden chat had a call. A hidden snapshot stays behind
-    /// the bar whatever the phase.
-    #[test]
-    fn a_hidden_farewell_stays_behind_the_bar() {
-        let (mut app, ctx) = on_a_call();
-        ctx.enable_accesskit();
-        app.call_surface_hidden = true;
-        let call = app.call.as_mut().expect("a call is up");
-        call.phase = CallPhase::Ended;
-        call.outcome = Some(crate::calls::CallOutcome::Answered);
         let shown = labels(&mut app, &ctx);
-        for absent in ["Full screen", "Mute", "Hang up"] {
+        assert!(!app.call_in_window(), "in front, the card is enough");
+        assert!(view(&app).is_none(), "and no call window opens");
+        for expected in ["Accept", "Decline"] {
             assert!(
-                !shown.contains(&absent.to_owned()),
-                "a hidden farewell must not paint the call surface: {absent} in {shown:?}"
+                shown.contains(&expected.to_owned()),
+                "{expected} is on the card: {shown:?}"
+            );
+        }
+        frame_with(&mut app, &ctx, Vec::new());
+        assert!(app.call_live(), "the card keeps ringing");
+    }
+
+    #[test]
+    fn a_ringing_video_call_is_answered_with_video_or_voice_only() {
+        let mut app = app();
+        apply_flags(&mut app, Some("call-video-incoming"));
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        app.window_focused = true;
+        ctx.enable_accesskit();
+        let shown = labels(&mut app, &ctx);
+        for expected in ["Decline", "Accept with voice only", "Accept with video"] {
+            assert!(
+                shown.contains(&expected.to_owned()),
+                "{expected} is on the card: {shown:?}"
             );
         }
     }
 
-    /// A call that is over offers no control: the backend has already released the runtime.
-    ///
-    /// The farewell keeps the controls it was drawn with so the outcome reads where the call was,
-    /// but the red Hang up stayed enabled, so a click sent a command nobody was listening for and
-    /// the screen offered an action for a call that had ended.
+    #[test]
+    fn an_answered_call_opens_its_window_and_the_end_closes_it() {
+        let (mut app, ctx) = on_a_call();
+        ctx.enable_accesskit();
+        let shown = labels(&mut app, &ctx);
+        assert!(app.call_in_window());
+        assert!(view(&app).is_some(), "the call window shows the call");
+        for expected in ["Mute", "Start video", "Speaker and devices", "Hang up"] {
+            assert!(
+                shown.contains(&expected.to_owned()),
+                "{expected} is in the call window: {shown:?}"
+            );
+        }
+        for gone in SURFACE {
+            assert!(
+                !shown.contains(&gone.to_owned()),
+                "{gone} belonged to the full-screen surface: {shown:?}"
+            );
+        }
+        // The peer hangs up: the window says so for its farewell, and goes with the call.
+        let call = app.call.as_mut().expect("a call is up");
+        call.phase = CallPhase::Ended;
+        call.outcome = Some(crate::calls::CallOutcome::Answered);
+        frame_with(&mut app, &ctx, Vec::new());
+        assert_eq!(
+            view(&app).map(|view| view.call.phase),
+            Some(CallPhase::Ended)
+        );
+        app.call = None;
+        frame_with(&mut app, &ctx, Vec::new());
+        assert!(view(&app).is_none(), "the call window closes");
+    }
+
+    #[test]
+    fn a_placed_call_opens_its_window_at_once() {
+        let mut app = app();
+        apply_flags(&mut app, Some("call-outgoing"));
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        frame_with(&mut app, &ctx, Vec::new());
+        assert!(app.call_in_window());
+        let view = view(&app).expect("the call window is open");
+        assert_eq!(view.peer, app.call_name());
+    }
+
+    #[test]
+    fn closing_the_call_window_hangs_up() {
+        let (mut app, ctx) = on_a_call();
+        frame_with(&mut app, &ctx, Vec::new());
+        crate::ui::call::close_window(&mut app.call_window.lock().unwrap());
+        frame_with(&mut app, &ctx, Vec::new());
+        assert!(app.call.is_none(), "the call goes with its window");
+        assert!(view(&app).is_none());
+    }
+
+    #[test]
+    fn a_video_call_shows_their_picture_and_ours_in_the_corner() {
+        let mut app = app();
+        apply_flags(&mut app, Some("call-video"));
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        ctx.enable_accesskit();
+        let shown = labels(&mut app, &ctx);
+        let window = app.call_window.lock().unwrap();
+        assert!(window.frames.remote.is_some() && window.frames.local.is_some());
+        assert!(
+            window.textures.remote.is_some(),
+            "the other side's picture is drawn"
+        );
+        assert!(window.textures.local.is_some(), "and our own camera's");
+        drop(window);
+        for expected in ["Turn the camera off", "Hang up"] {
+            assert!(
+                shown.contains(&expected.to_owned()),
+                "{expected} is in the call window: {shown:?}"
+            );
+        }
+        for gone in SURFACE {
+            assert!(!shown.contains(&gone.to_owned()), "{gone}: {shown:?}");
+        }
+    }
+
     #[test]
     fn the_farewell_offers_no_action_for_a_call_that_is_over() {
         let (mut app, ctx) = on_a_call();
@@ -17007,10 +16940,10 @@ mod call_surface_tests {
         running.attach(&ctx);
         ctx.enable_accesskit();
         let shown = labels(&mut running, &ctx);
-        for expected in ["Mute", "Devices", "Hang up"] {
+        for expected in ["Mute", "Speaker and devices", "Hang up"] {
             assert!(
                 shown.contains(&expected.to_owned()),
-                "{expected} is on the call screen: {shown:?}"
+                "{expected} is in the call window: {shown:?}"
             );
         }
         assert!(
@@ -17031,46 +16964,6 @@ mod call_surface_tests {
             "our own tile is ours to name"
         );
         assert_eq!(running.call_caller_name(), None);
-    }
-
-    #[test]
-    fn the_call_screen_labels_every_control_it_offers() {
-        let (mut running, ctx) = on_a_call();
-        ctx.enable_accesskit();
-        let screen = labels(&mut running, &ctx);
-        for expected in [
-            "Hide the call screen",
-            "Full screen",
-            "Mute",
-            "Start video",
-            "Devices",
-            "Hang up",
-        ] {
-            assert!(
-                screen.contains(&expected.to_owned()),
-                "missing accessible label: {expected}"
-            );
-        }
-        // The same controls say what they do when pressed, not just which button they are.
-        running.actions.push(Action::ToggleCallFullscreen);
-        let full = labels(&mut running, &ctx);
-        assert!(
-            full.contains(&"Exit full screen".to_owned()),
-            "the full-screen control says how to leave: {full:?}"
-        );
-
-        let mut ringing = app();
-        apply_flags(&mut ringing, Some("call"));
-        let ctx = egui::Context::default();
-        ctx.enable_accesskit();
-        ringing.attach(&ctx);
-        let incoming = labels(&mut ringing, &ctx);
-        for expected in ["Accept", "Decline"] {
-            assert!(
-                incoming.contains(&expected.to_owned()),
-                "missing accessible label: {expected}"
-            );
-        }
     }
 }
 

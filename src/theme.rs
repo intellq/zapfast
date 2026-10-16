@@ -750,6 +750,7 @@ fastframe_icons::icons! {
         Trash => lucide "trash-2",
         User => lucide "user",
         Users => lucide "users",
+        SwitchCamera => "switch-camera",
         Video => "video",
         VideoOff => "video-off",
         Volume2 => lucide "volume-2",

@@ -5909,3 +5909,18 @@ msgstr ""
 
 msgid "Version {}"
 msgstr ""
+
+msgid "Accept with video"
+msgstr ""
+
+msgid "Accept with voice only"
+msgstr ""
+
+msgid "Expand the call window"
+msgstr ""
+
+msgid "Restore the call window"
+msgstr ""
+
+msgid "Switch camera"
+msgstr ""

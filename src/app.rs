@@ -800,15 +800,19 @@ pub struct App {
     call_surface_until: Option<Instant>,
     /// The microphones and speakers the call screen offers.
     pub call_devices: crate::calls::DeviceList,
-    /// Whether the call screen shows its device pickers.
-    pub call_devices_open: bool,
-    /// Whether the full call screen is put aside so a chat can be read while
-    /// the call runs. The call itself is untouched; a bar offers the way back.
-    pub call_surface_hidden: bool,
-    /// Whether the call surface has taken the whole screen. A window state:
-    /// leaving it never touches the call, and a call that ends puts the
-    /// window back itself.
-    pub call_fullscreen: bool,
+    /// The call that has reached the call window, by generation: a call that
+    /// rang and was never answered stays on the card in the main window until
+    /// it is gone.
+    pub(crate) call_windowed: Option<u64>,
+    /// What the call window, a viewport of its own, shows and asks for.
+    pub(crate) call_window: crate::ui::call::SharedCallWindow,
+    /// The ringing call that moves to the call window whenever the main
+    /// window is not in front: set when it starts ringing, cleared when that
+    /// window is closed while it rings.
+    pub(crate) call_alert: Option<u64>,
+    /// The screen the main window is on, in points, which the call window
+    /// opens in the corner of.
+    pub main_monitor: Option<egui::Rect>,
     /// The incoming call the desktop was told about, so its notification can
     /// be taken back once it is answered or given up.
     call_notified: Option<u64>,
@@ -831,14 +835,9 @@ pub struct App {
     /// The newest camera preview and peer picture of a video call.
     pub call_local_frame: Option<std::sync::Arc<egui::ColorImage>>,
     pub call_remote_frame: Option<std::sync::Arc<egui::ColorImage>>,
-    /// The textures those pictures are drawn through, updated in place rather
-    /// than made afresh for every frame.
-    pub call_local_texture: Option<CallTexture>,
-    pub call_remote_texture: Option<CallTexture>,
-    /// The newest picture of each group member whose video is arriving, by chat id, and the
-    /// texture each is drawn through.
+    /// The newest picture of each group member whose video is arriving, by
+    /// chat id. The call window draws them through textures of its own.
     pub call_member_frames: HashMap<String, std::sync::Arc<egui::ColorImage>>,
-    pub call_member_textures: HashMap<String, CallTexture>,
     /// Whether ZapFast starts at login, when this installation supports it.
     pub start_with_system: Option<bool>,
     /// Whether ZapFast is the desktop's app for WhatsApp links, when this
@@ -1103,7 +1102,9 @@ impl fastframe_shell::Resident for App {
         self.check_tray_wait(Instant::now());
         if self.quit_requested {
             fastframe_shell::Headless::Quit
-        } else if self.wants_show {
+        } else if self.wants_show
+            || (self.call_window_alone() && crate::ui::call::standalone_ready(self))
+        {
             fastframe_shell::Headless::Show
         } else {
             fastframe_shell::Headless::Wait
@@ -1139,6 +1140,7 @@ fn anonymous_refuses(action: &Action) -> bool {
         action,
         Action::StartCall { .. }
             | Action::AnswerCall
+            | Action::AnswerCallWithoutVideo
             | Action::DeclineCall
             | Action::SendText { .. }
             | Action::ReplyInteractive { .. }
@@ -1686,9 +1688,10 @@ impl App {
             call_account: None,
             call_surface_until: None,
             call_devices: crate::calls::DeviceList::default(),
-            call_devices_open: false,
-            call_surface_hidden: false,
-            call_fullscreen: false,
+            call_windowed: None,
+            call_window: Default::default(),
+            call_alert: None,
+            main_monitor: None,
             call_notified: None,
             call_rings: None,
             call_tones: Default::default(),
@@ -1697,10 +1700,7 @@ impl App {
             call_placed: None,
             call_local_frame: None,
             call_remote_frame: None,
-            call_local_texture: None,
-            call_remote_texture: None,
             call_member_frames: HashMap::new(),
-            call_member_textures: HashMap::new(),
             start_with_system: None,
             whatsapp_links: None,
             pending_wa_link: None,
@@ -2074,9 +2074,6 @@ impl App {
         self.window_focused = false;
         self.hide_intent = false;
         self.wants_show = false;
-        // The window is gone with the full screen it was in; a new one starts
-        // at its normal size.
-        self.call_fullscreen = false;
     }
 
     /// What the conversation shows behind its bubbles, for the chat and the
@@ -2282,14 +2279,13 @@ impl App {
                 continue;
             }
             self.switch_account(&target.account);
-            match target.message {
-                Some(message) => self.actions.push(Action::OpenMessage {
+            // A call's notification has no message: it brings the window up,
+            // where the call is waiting on its card or in its own window.
+            if let Some(message) = target.message {
+                self.actions.push(Action::OpenMessage {
                     chat: target.chat,
                     message,
-                }),
-                // A call's notification brings the window up, where the call
-                // is waiting.
-                None => self.actions.push(Action::ReturnToCall),
+                });
             }
             self.actions.push(Action::ShowWindow);
         }
@@ -4771,8 +4767,6 @@ impl App {
         {
             self.hide_locked_chat(&id);
         }
-        // A live call in a locked chat goes back behind the bar.
-        self.hide_private_call();
         self.drop_locked_panel();
     }
 
@@ -6491,7 +6485,15 @@ impl App {
             && !self.quit_requested
             && self.hides_to_tray()
         {
-            self.hide_intent = true;
+            if self.call_keeps_window() {
+                // The call window is this window's child and would close with
+                // it, so during a call the window is minimized instead of
+                // going to the tray.
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            } else {
+                self.hide_intent = true;
+            }
         }
     }
 
@@ -6695,7 +6697,7 @@ impl App {
             self.send_refused(chat, Some(target), unsent, Refusal::QuoteUnavailable);
             return;
         }
-        let Some(action) = self.apply_call_action(action, ctx) else {
+        let Some(action) = self.apply_call_action(action) else {
             return;
         };
         match action {
@@ -6778,9 +6780,7 @@ impl App {
             | Action::SetCallMicrophone(_)
             | Action::SetCallSpeaker(_)
             | Action::SetCallCameraDevice(_)
-            | Action::LeaveCallSurface
-            | Action::ReturnToCall
-            | Action::ToggleCallFullscreen => {}
+            | Action::AnswerCallWithoutVideo => {}
             Action::PickCall { chat, message } => {
                 self.new_call = false;
                 self.picked_call = Some((chat.clone(), message.clone()));
@@ -9136,7 +9136,11 @@ impl App {
                 }
             }
             Action::HideWindow => {
-                if self.tray_shown() {
+                if self.call_keeps_window() {
+                    // A call's card and window go with the main window, so it
+                    // only steps aside.
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                } else if self.tray_shown() {
                     self.hide_intent = true;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
@@ -9377,7 +9381,10 @@ impl App {
         self.tick_audio(ctx);
         self.tick_transcripts();
         self.tick_video(ctx);
+        // The call window's requests are applied with the rest, and it sees what they did.
+        self.sync_call_window(ctx);
         self.apply_actions(ctx);
+        self.sync_call_window(ctx);
         self.sync_prefetch();
         self.hold_media();
         self.follow_receipts();

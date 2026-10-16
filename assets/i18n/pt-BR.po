@@ -6081,3 +6081,18 @@ msgstr "Falhou"
 
 msgid "Version {}"
 msgstr "Versão {}"
+
+msgid "Accept with video"
+msgstr "Aceitar com vídeo"
+
+msgid "Accept with voice only"
+msgstr "Aceitar só com voz"
+
+msgid "Expand the call window"
+msgstr "Ampliar a janela da chamada"
+
+msgid "Restore the call window"
+msgstr "Restaurar a janela da chamada"
+
+msgid "Switch camera"
+msgstr "Trocar de câmera"

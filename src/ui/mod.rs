@@ -67,8 +67,6 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         && !app.chat_search_calendar
         // A name typed in the info panel keeps Tab between its fields.
         && !(app.info_visible() && (app.contact_edit.is_some() || app.group_name_edit.is_some()))
-        // The call screen covers the chats.
-        && (app.call.is_none() || app.call_surface_hidden)
         && !egui::Popup::is_any_open(ctx);
     focus::begin(ctx, main_navigation);
     // The open chat's composer records its rect again below, if there is one.
@@ -98,8 +96,6 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         NarrowView::Detail
     });
     let slide = narrow_slide(ctx, view);
-    // A call the reader stepped away from keeps a strip along the bottom.
-    call::strip(app, ui);
     // Where the open chat or page is drawn, when it is in place.
     let central = match slide {
         Some(progress) => {
