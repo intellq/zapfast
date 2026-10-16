@@ -850,35 +850,15 @@ impl Call {
             self.log_audio_path(marker);
             return;
         };
+        // Every counter the engine keeps, by its own name. A list written out here missed one
+        // (forwarding_envelope_rejected) and would miss each counter a newer engine adds, such as
+        // its counts of the peer's video packets; the whole snapshot carries them all, and it
+        // holds counts and nothing else.
         let stats = handle.media_stats();
         log::info!(
-            "[CALL] media stats call_id={} at={} rtp_received={} unexpected_pt={} srtp_failed={} sframe_failed={} unclassified={} pipe_dropped={} decoded={} delivered={} foreign_decoded={} concealed={} without_decoder={} without_encoder={} mlow_sid={} mlow_dropped={} sink_dropped={} trimmed={} codec_switches={} video_sink_dropped={} peer_keyframes={}",
+            "[CALL] media stats call_id={} at={} {stats:?}",
             self.call_id,
             marker,
-            stats.rtp_received,
-            stats.rtp_payload_type_unexpected,
-            stats.srtp_unprotect_failed,
-            stats.sframe_decrypt_failed,
-            stats.relay_packet_unclassified,
-            stats.inbound_pipe_dropped,
-            stats.audio_frames_decoded,
-            stats.audio_frames_delivered,
-            stats.foreign_frames_decoded,
-            stats.audio_frames_concealed,
-            stats.audio_frames_without_decoder,
-            stats.outbound_frames_without_encoder,
-            // The two that say a peer's packets arrived and were read as frames that carry no
-            // speech: MLOW's silence descriptor, and a frame the profile's own decoder refused. A
-            // call whose `rtp_received` climbs while `decoded` does not is either of these, and
-            // without them a report cannot tell a peer who stopped talking from one whose audio
-            // this side stopped understanding.
-            stats.mlow_inactive_or_sid,
-            stats.mlow_off_point_dropped,
-            stats.audio_sink_dropped,
-            stats.playout_trimmed_samples,
-            stats.codec_switches,
-            stats.video_sink_dropped,
-            stats.peer_keyframe_requests,
         );
         self.log_audio_path(marker);
     }
