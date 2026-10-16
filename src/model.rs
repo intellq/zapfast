@@ -1547,6 +1547,11 @@ pub enum Dialog {
         /// Whether a "for me" deletion is also sent to the phone.
         on_phone: bool,
     },
+    /// Confirms removing an imported sticker pack from disk.
+    ConfirmRemoveStickerPack {
+        name: String,
+        dir: PathBuf,
+    },
     /// Chooses a destination for an archived message.
     Forward {
         chat: ChatId,

@@ -38,6 +38,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                 }
                 Dialog::ConfirmClearChat(_) => 380.0,
                 Dialog::ConfirmDeleteMessage { .. } => 380.0,
+                Dialog::ConfirmRemoveStickerPack { .. } => 380.0,
                 Dialog::StickerPack => 420.0,
                 Dialog::StickerMaker => 400.0,
                 Dialog::Forward { .. } => 420.0,
@@ -81,6 +82,9 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                     for_everyone,
                     on_phone,
                 } => confirm_delete_message(app, ui, &chat, &messages, for_everyone, on_phone),
+                Dialog::ConfirmRemoveStickerPack { name, dir } => {
+                    confirm_remove_sticker_pack(app, ui, &name, dir)
+                }
                 Dialog::Forward { chat, messages } => forward(app, ui, &chat, &messages),
                 Dialog::JoinGroup => join_group(app, ui),
                 Dialog::ConfirmStartOver => confirm_start_over(app, ui),
@@ -1462,34 +1466,75 @@ fn confirm_block(app: &mut App, ui: &mut egui::Ui, id: &str) {
     });
 }
 
-fn confirm_remove(app: &mut App, ui: &mut egui::Ui, id: crate::model::AccountId) {
-    let palette = app.palette;
+fn confirm_remove_sticker_pack(
+    app: &mut App,
+    ui: &mut egui::Ui,
+    name: &str,
+    dir: std::path::PathBuf,
+) {
     let locale = app.locale;
-    title(
-        ui,
+    let body = crate::i18n::gettext(
+        locale,
+        "This deletes \"{name}\" and its stickers from this computer. To use it again, import it again.",
+    )
+    .replace("{name}", name);
+    confirm_destructive(
         app,
-        &crate::i18n::gettext(locale, "Remove this account?"),
-    );
-    theme::paragraph(
         ui,
-        crate::i18n::gettext(
+        &crate::i18n::gettext(locale, "Remove sticker pack?"),
+        &[&body],
+        &crate::i18n::gettext(locale, "Remove"),
+        Action::DeleteStickerPack(dir),
+    );
+}
+
+fn confirm_remove(app: &mut App, ui: &mut egui::Ui, id: crate::model::AccountId) {
+    let locale = app.locale;
+    confirm_destructive(
+        app,
+        ui,
+        &crate::i18n::gettext(locale, "Remove this account?"),
+        &[&crate::i18n::gettext(
             locale,
             "This unlinks the number on this computer and deletes its local chats. Other accounts stay.",
-        )
-        .as_ref(),
-        theme::regular(13.5),
-        palette.text,
+        )],
+        &crate::i18n::gettext(locale, "Remove"),
+        Action::RemoveAccount(id),
     );
+}
+
+/// A confirmation for something that cannot be undone: the question, what it
+/// destroys (the first paragraph in the text colour, any after it as a smaller
+/// note), then Cancel and a red button that queues `action` and closes the
+/// dialog. Callers pass translated text. Enter is deliberately not bound: a
+/// stray keypress must not destroy anything.
+fn confirm_destructive(
+    app: &mut App,
+    ui: &mut egui::Ui,
+    heading: &str,
+    body: &[&str],
+    button: &str,
+    action: Action,
+) {
+    let palette = app.palette;
+    title(ui, app, heading);
+    for (index, paragraph) in body.iter().enumerate() {
+        let (font, colour) = if index == 0 {
+            (theme::regular(13.5), palette.text)
+        } else {
+            (theme::regular(13.0), palette.secondary)
+        };
+        theme::paragraph(ui, *paragraph, font, colour);
+    }
     ui.add_space(10.0);
+    let cancel = crate::i18n::gettext(app.locale, "Cancel");
     ui.horizontal(|ui| {
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if danger_button(ui, app, &crate::i18n::gettext(locale, "Remove")) {
-                app.actions.push(Action::RemoveAccount(id));
+            if danger_button(ui, app, button) {
+                app.actions.push(action);
                 app.actions.push(Action::CloseDialog);
             }
-            if theme::pill_button(ui, &palette, &crate::i18n::gettext(locale, "Cancel"), false)
-                .clicked()
-            {
+            if theme::pill_button(ui, &palette, &cancel, false).clicked() {
                 app.actions.push(Action::CloseDialog);
             }
         });
