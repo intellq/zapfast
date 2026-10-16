@@ -865,6 +865,7 @@ fn record(
 /// Opens the default microphone, with its channel count and sample rate.
 fn open_microphone() -> Result<(rodio::microphone::Microphone, u16, u32), String> {
     let microphone = rodio::microphone::MicrophoneBuilder::new()
+        .with_error_callback(Health::new("voice recording").callback())
         .default_device()
         .map_err(|error| format!("{}: {error}", tr("No microphone available")))?
         .default_config()

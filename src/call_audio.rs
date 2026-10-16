@@ -265,7 +265,7 @@ pub fn unavailable() -> Option<&'static str> {
 /// The pump, the fallback rules and the framing above stay exactly as they are whichever this is,
 /// so what a test covers is the real behaviour rather than a second implementation of it.
 enum Mic {
-    Real(rodio::microphone::Microphone),
+    Real(rodio::microphone::Microphone, crate::audio::Health),
     /// Installed only by a test, and only while its guard lives.
     #[cfg(test)]
     Fake(fake::Microphone),
@@ -274,7 +274,7 @@ enum Mic {
 impl Mic {
     fn channels(&self) -> u16 {
         match self {
-            Mic::Real(microphone) => microphone.channels().get(),
+            Mic::Real(microphone, _) => microphone.channels().get(),
             #[cfg(test)]
             Mic::Fake(microphone) => microphone.channels,
         }
@@ -282,15 +282,24 @@ impl Mic {
 
     fn rate(&self) -> u32 {
         match self {
-            Mic::Real(microphone) => microphone.sample_rate().get(),
+            Mic::Real(microphone, _) => microphone.sample_rate().get(),
             #[cfg(test)]
             Mic::Fake(microphone) => microphone.rate,
         }
     }
 
+    /// Whether the stream keeps failing (#507), so the reader reopens it.
+    fn failed(&self) -> bool {
+        match self {
+            Mic::Real(_, health) => health.failed(),
+            #[cfg(test)]
+            Mic::Fake(_) => false,
+        }
+    }
+
     fn next(&mut self) -> Option<f32> {
         match self {
-            Mic::Real(microphone) => microphone.next(),
+            Mic::Real(microphone, _) => microphone.next(),
             #[cfg(test)]
             Mic::Fake(microphone) => microphone.next(),
         }
@@ -302,7 +311,9 @@ fn open_microphone(device: Option<&str>) -> Result<Mic, String> {
     if let Some(microphone) = fake::open_microphone(device) {
         return Ok(Mic::Fake(microphone));
     }
-    let builder = rodio::microphone::MicrophoneBuilder::new();
+    let health = crate::audio::Health::new("call microphone");
+    let builder =
+        rodio::microphone::MicrophoneBuilder::new().with_error_callback(health.callback());
     let builder = match device {
         Some(name) => {
             let input = rodio::microphone::available_inputs()
@@ -322,7 +333,7 @@ fn open_microphone(device: Option<&str>) -> Result<Mic, String> {
         .default_config()
         .map_err(|error| format!("the microphone has no supported format: {error}"))?
         .open_stream()
-        .map(Mic::Real)
+        .map(|microphone| Mic::Real(microphone, health))
         .map_err(|error| format!("the microphone could not be opened: {error}"))
 }
 
@@ -648,6 +659,14 @@ fn read_microphone(
     let mut block = vec![0.0_f32; converter.block()];
     let mut frames = Vec::new();
     while !stop.load(Ordering::Relaxed) {
+        if microphone.failed() {
+            // The pump opens another once this returns; the wait keeps a device that fails every
+            // stream from being reopened in a loop.
+            log::warn!("[CALL] the microphone stream keeps failing; reopening it");
+            drop(microphone);
+            std::thread::sleep(RETRY);
+            return;
+        }
         for slot in &mut block {
             match microphone.next() {
                 Some(sample) => *slot = sample,
