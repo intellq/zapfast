@@ -300,7 +300,7 @@ fn header(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> Rect {
                 let call_controls = if chat.kind == crate::model::ChatKind::Direct
                     && app.me.as_deref() != Some(chat.id.as_str())
                 {
-                    36.0
+                    if call_here { 36.0 } else { 72.0 }
                 } else {
                     0.0
                 };
@@ -540,6 +540,21 @@ fn header(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> Rect {
                         .clicked()
                         {
                             app.actions.push(call);
+                        }
+                        if !call_here {
+                            let tip = crate::i18n::gettext(app.locale, "Video call");
+                            if theme::icon_button(
+                                ui,
+                                Icon::Video,
+                                18.0,
+                                palette.secondary,
+                                palette.text,
+                                &tip,
+                            )
+                            .clicked()
+                            {
+                                app.actions.push(Action::StartVideoCall(chat.id.clone()));
+                            }
                         }
                     }
                     let searching = app.chat_search_open;

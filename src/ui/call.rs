@@ -9,7 +9,7 @@
 
 use std::time::Instant;
 
-use egui::{Align, Color32, Frame, Layout, Margin, Rect, vec2};
+use egui::{Align, Color32, CornerRadius, Frame, Layout, Margin, Rect, TextureOptions, Vec2, vec2};
 
 use crate::app::App;
 use crate::calls::{CallOutcome, CallPhase, CallUpdate, PeerAudio, SilenceReason};
@@ -26,6 +26,11 @@ const PADDING: f32 = 24.0;
 const CONTROL: f32 = 56.0;
 /// The gap between them.
 const CONTROL_GAP: f32 = 16.0;
+/// How much of the surface the corner preview of our own camera may take.
+const PREVIEW_SHARE: f32 = 0.24;
+/// The plate under words drawn over a video picture: dark in either theme,
+/// because the picture is not themed.
+const VIDEO_SCRIM: Color32 = Color32::from_black_alpha(150);
 
 /// Draws the call surface over the window, when a call wants the screen.
 /// A call the reader stepped away from is drawn by [`strip`] instead.
@@ -47,7 +52,13 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         .fixed_pos(screen.min)
         .show(ctx, |ui| {
             ui.set_min_size(screen.size());
-            ui.painter().rect_filled(screen, 0.0, palette.window);
+            // A peer's picture is letterboxed in black, as any video is.
+            let backdrop = if call.video && call.remote_video && app.call_remote_frame.is_some() {
+                Color32::BLACK
+            } else {
+                palette.window
+            };
+            ui.painter().rect_filled(screen, 0.0, backdrop);
             // Clicks and scrolling stop here rather than reaching the chat
             // drawn underneath.
             ui.interact(
@@ -88,7 +99,8 @@ pub fn strip(app: &mut App, ui: &mut egui::Ui) {
         )
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                theme::icon(ui, Icon::Phone, 15.0, palette.on_accent);
+                let icon = if call.video { Icon::Video } else { Icon::Phone };
+                theme::icon(ui, icon, 15.0, palette.on_accent);
                 theme::text(ui, peer, theme::semibold(13.0), palette.on_accent);
                 theme::text(ui, status, theme::medium(13.0), palette.on_accent);
                 if !call.phase.is_live() {
@@ -140,37 +152,137 @@ fn live(
     area: Rect,
 ) {
     let locale = app.locale;
-    ui.vertical_centered(|ui| {
-        ui.add_space(area.height() * 0.16);
-        let size = (area.height() * 0.26).clamp(96.0, 168.0);
-        widgets::avatar(ui, palette, peer, &call.chat, size, picture);
-        ui.add_space(18.0);
-        theme::text(ui, peer, theme::bold(26.0), palette.text);
-        ui.add_space(6.0);
-        theme::text(
+    let screen = area.expand(PADDING);
+    // The peer's picture fills the window when there is one, and everything
+    // else is drawn over it.
+    let remote = (call.video && call.remote_video)
+        .then(|| app.call_remote_frame.clone())
+        .flatten();
+    if let Some(image) = &remote {
+        let at = fit_inside(screen, image_size(image));
+        let texture = call_texture(
             ui,
-            status(locale, call),
-            theme::medium(15.0),
-            status_color(call, palette),
+            &mut app.call_remote_texture,
+            "zapfast-call-remote",
+            image,
         );
-        notes(ui, locale, call, palette);
-    });
+        egui::Image::new((texture, at.size())).paint_at(ui, at);
+    }
+    // Our own camera sits in the top corner at its own shape.
+    if call.video
+        && call.camera_on
+        && let Some(image) = app.call_local_frame.clone()
+    {
+        let bounds = vec2(area.width(), area.height()) * PREVIEW_SHARE;
+        let size = fit_inside(Rect::from_min_size(area.min, bounds), image_size(&image)).size();
+        let at = Rect::from_min_size(egui::pos2(area.right() - size.x, area.top() + 48.0), size);
+        let texture = call_texture(
+            ui,
+            &mut app.call_local_texture,
+            "zapfast-call-local",
+            &image,
+        );
+        egui::Image::new((texture, size))
+            .corner_radius(CornerRadius::same(12))
+            .paint_at(ui, at);
+        ui.painter().rect_stroke(
+            at,
+            CornerRadius::same(12),
+            egui::Stroke::new(1.0, palette.outline),
+            egui::StrokeKind::Outside,
+        );
+    }
+    if remote.is_none() {
+        ui.vertical_centered(|ui| {
+            ui.add_space(area.height() * 0.16);
+            let size = (area.height() * 0.26).clamp(96.0, 168.0);
+            widgets::avatar(ui, palette, peer, &call.chat, size, picture);
+            ui.add_space(18.0);
+            theme::text(ui, peer, theme::bold(26.0), palette.text);
+            ui.add_space(6.0);
+            theme::text(
+                ui,
+                status(locale, call),
+                theme::medium(15.0),
+                status_color(call, palette),
+            );
+            if call.video_requested {
+                // The camera button below answers it.
+                ui.add_space(4.0);
+                theme::text(
+                    ui,
+                    gettext(
+                        locale,
+                        "Wants to switch to video: turn on your camera to answer",
+                    ),
+                    theme::medium(12.5),
+                    palette.accent,
+                );
+            }
+            if call.video && call.phase == CallPhase::Active && !call.remote_video {
+                ui.add_space(4.0);
+                theme::text(
+                    ui,
+                    gettext(locale, "Their camera is off"),
+                    theme::medium(12.5),
+                    palette.secondary,
+                );
+            }
+            notes(ui, locale, call, palette);
+        });
+    } else {
+        // Over a picture, the name and the length sit on a plate of their own,
+        // as wide as they are.
+        let name =
+            ui.painter()
+                .layout_no_wrap(peer.to_owned(), theme::semibold(15.0), Color32::WHITE);
+        let line =
+            ui.painter()
+                .layout_no_wrap(status(locale, call), theme::medium(13.0), Color32::WHITE);
+        let inner = vec2(
+            name.size().x.max(line.size().x),
+            name.size().y + line.size().y,
+        );
+        let plate = Rect::from_center_size(
+            egui::pos2(area.center().x, area.top() + 4.0 + inner.y / 2.0 + 6.0),
+            inner + vec2(28.0, 12.0),
+        );
+        ui.painter()
+            .rect_filled(plate, CornerRadius::same(14), VIDEO_SCRIM);
+        let top = plate.top() + 6.0;
+        ui.painter().galley(
+            egui::pos2(plate.center().x - name.size().x / 2.0, top),
+            name.clone(),
+            Color32::WHITE,
+        );
+        ui.painter().galley(
+            egui::pos2(plate.center().x - line.size().x / 2.0, top + name.size().y),
+            line,
+            Color32::WHITE,
+        );
+        let below = Rect::from_min_max(
+            egui::pos2(area.left(), plate.bottom() + 6.0),
+            egui::pos2(area.right(), plate.bottom() + 60.0),
+        );
+        ui.scope_builder(egui::UiBuilder::new().max_rect(below), |ui| {
+            ui.vertical_centered(|ui| notes(ui, locale, call, palette));
+        });
+    }
 
-    // Stepping back to the chat and full screen: neither ends the call.
+    // Stepping back to the chat and full screen: neither ends the call. Over
+    // a picture they are white, as the plate's words are.
+    let (corner_tint, corner_hover) = if remote.is_some() {
+        (Color32::from_white_alpha(200), Color32::WHITE)
+    } else {
+        (palette.secondary, palette.text)
+    };
     let corner = Rect::from_min_size(area.min, vec2(area.width(), 40.0));
     ui.scope_builder(egui::UiBuilder::new().max_rect(corner), |ui| {
         ui.horizontal(|ui| {
             if call.phase.is_live() {
                 let back = gettext(locale, "Hide the call screen").into_owned();
-                if theme::icon_button(
-                    ui,
-                    Icon::ArrowLeft,
-                    20.0,
-                    palette.secondary,
-                    palette.text,
-                    &back,
-                )
-                .clicked()
+                if theme::icon_button(ui, Icon::ArrowLeft, 20.0, corner_tint, corner_hover, &back)
+                    .clicked()
                 {
                     app.actions.push(Action::LeaveCallSurface);
                 }
@@ -181,9 +293,7 @@ fn live(
                 } else {
                     (Icon::Maximize, gettext(locale, "Full screen"))
                 };
-                if theme::icon_button(ui, icon, 18.0, palette.secondary, palette.text, &tip)
-                    .clicked()
-                {
+                if theme::icon_button(ui, icon, 18.0, corner_tint, corner_hover, &tip).clicked() {
                     app.actions.push(Action::ToggleCallFullscreen);
                 }
             });
@@ -230,6 +340,7 @@ pub(crate) fn status(locale: Locale, call: &CallUpdate) -> String {
             .outcome
             .map(|outcome| outcome_text(locale, outcome, call.phase))
             .unwrap_or_else(|| gettext(locale, "Call ended").into_owned()),
+        CallPhase::Incoming if call.video => gettext(locale, "Incoming video call").into_owned(),
         CallPhase::Incoming => gettext(locale, "Incoming voice call").into_owned(),
     }
 }
@@ -278,6 +389,7 @@ fn notes(ui: &mut egui::Ui, locale: Locale, call: &CallUpdate, palette: &Palette
                 locale,
                 "Speaker “{name}” is not available; using the system default",
             ),
+            crate::calls::DeviceKind::Camera => gettext(locale, "Camera “{name}” is not available"),
         };
         theme::text(
             ui,
@@ -344,7 +456,7 @@ fn control(
 fn controls(ui: &mut egui::Ui, app: &mut App, call: &CallUpdate, palette: &Palette) {
     let locale = app.locale;
     let live = call.phase.is_live();
-    let buttons = 3.0;
+    let buttons = 4.0;
     {
         ui.spacing_mut().item_spacing.x = CONTROL_GAP;
         let width = buttons * CONTROL + (buttons - 1.0) * CONTROL_GAP;
@@ -370,8 +482,36 @@ fn controls(ui: &mut egui::Ui, app: &mut App, call: &CallUpdate, palette: &Palet
             app.actions.push(Action::SetCallMuted(!call.muted));
         }
 
+        // The camera: starts video on a voice call, and stops or starts
+        // sending our picture on a video call.
+        let (icon, tip, fill, tint) = if !call.video {
+            (
+                Icon::Video,
+                gettext(locale, "Start video"),
+                palette.surface_active,
+                palette.text,
+            )
+        } else if call.camera_on {
+            (
+                Icon::Video,
+                gettext(locale, "Turn the camera off"),
+                palette.surface_active,
+                palette.text,
+            )
+        } else {
+            (
+                Icon::VideoOff,
+                gettext(locale, "Turn the camera on"),
+                palette.text,
+                palette.window,
+            )
+        };
+        if control(ui, icon, fill, tint, &tip, call.phase.is_connected()).clicked() {
+            app.actions.push(Action::SetCallCamera(!call.camera_on));
+        }
+
         let open = app.call_devices_open;
-        let tip = gettext(locale, "Microphone and speaker");
+        let tip = gettext(locale, "Devices");
         let (fill, tint) = if open {
             (palette.text, palette.window)
         } else {
@@ -414,9 +554,16 @@ fn devices(ui: &mut egui::Ui, app: &mut App, call: &CallUpdate, palette: &Palett
         .iter()
         .map(|device| (device.id.clone(), device.label.clone()))
         .collect();
+    let cameras: Vec<(String, String)> = app
+        .call_devices
+        .cameras
+        .iter()
+        .map(|device| (device.id.clone(), device.label.clone()))
+        .collect();
     let mut actions = Vec::new();
     {
-        let width = 2.0 * PICKER + 16.0;
+        let pickers = if call.video { 3.0 } else { 2.0 };
+        let width = pickers * PICKER + (pickers - 1.0) * 16.0;
         ui.add_space(((ui.available_width() - width) / 2.0).max(0.0));
         Picker {
             salt: "call-microphone",
@@ -439,6 +586,19 @@ fn devices(ui: &mut egui::Ui, app: &mut App, call: &CallUpdate, palette: &Palett
             palette,
         }
         .show(ui, &mut actions, Action::SetCallSpeaker);
+        if call.video {
+            ui.add_space(16.0);
+            Picker {
+                salt: "call-camera",
+                icon: Icon::Video,
+                title: &gettext(locale, "Camera"),
+                default_label: &gettext(locale, "First camera"),
+                current: call.camera.as_deref(),
+                devices: &cameras,
+                palette,
+            }
+            .show(ui, &mut actions, Action::SetCallCameraDevice);
+        }
     }
     app.actions.extend(actions);
 }
@@ -584,4 +744,51 @@ fn answer(
         },
     )
     .inner
+}
+
+/// A picture's size as a vector.
+fn image_size(image: &egui::ColorImage) -> Vec2 {
+    vec2(image.width() as f32, image.height() as f32)
+}
+
+/// The largest rect with `size`'s shape that fits inside `area`, centred.
+fn fit_inside(area: Rect, size: Vec2) -> Rect {
+    if size.x <= 0.0 || size.y <= 0.0 {
+        return area;
+    }
+    let scale = (area.width() / size.x).min(area.height() / size.y);
+    Rect::from_center_size(area.center(), size * scale)
+}
+
+/// Draws `image` through the kept texture, uploaded only when a new frame
+/// arrived and then in place: the surface also repaints for its timer, and a
+/// texture per repaint would churn GPU memory.
+fn call_texture(
+    ui: &egui::Ui,
+    kept: &mut Option<crate::app::CallTexture>,
+    name: &str,
+    image: &std::sync::Arc<egui::ColorImage>,
+) -> egui::TextureId {
+    match kept {
+        Some(kept) if std::sync::Arc::ptr_eq(&kept.frame, image) => kept.texture.id(),
+        Some(kept) => {
+            kept.texture.set(
+                egui::ImageData::from((**image).clone()),
+                TextureOptions::LINEAR,
+            );
+            kept.frame = std::sync::Arc::clone(image);
+            kept.texture.id()
+        }
+        None => {
+            let texture = ui
+                .ctx()
+                .load_texture(name, (**image).clone(), TextureOptions::LINEAR);
+            let id = texture.id();
+            *kept = Some(crate::app::CallTexture {
+                texture,
+                frame: std::sync::Arc::clone(image),
+            });
+            id
+        }
+    }
 }

@@ -129,6 +129,33 @@ impl App {
     pub(super) fn hide_private_call(&mut self) {
         if self.call_is_private() {
             self.call_surface_hidden = true;
+            // No picture lingers for the strip to lift.
+            self.drop_call_frames();
+        }
+    }
+
+    /// Forgets a video call's pictures, so nothing frozen is drawn as live.
+    fn drop_call_frames(&mut self) {
+        self.call_local_frame = None;
+        self.call_remote_frame = None;
+        self.call_local_texture = None;
+        self.call_remote_texture = None;
+    }
+
+    /// A video call's newest pictures, from the account the call is on.
+    pub(super) fn handle_call_video(
+        &mut self,
+        local: Option<std::sync::Arc<egui::ColorImage>>,
+        remote: Option<std::sync::Arc<egui::ColorImage>>,
+    ) {
+        if self.call_account.as_ref() != Some(&self.account().id) || !self.call_live() {
+            return;
+        }
+        if let Some(image) = local {
+            self.call_local_frame = Some(image);
+        }
+        if let Some(image) = remote {
+            self.call_remote_frame = Some(image);
         }
     }
 
@@ -171,6 +198,14 @@ impl App {
                 .is_none_or(|current| current.generation != update.generation);
         let finished = !update.phase.is_live();
         let was_live = self.call_live() && !other_account;
+        // A peer who stopped sending video leaves no picture: the last frame
+        // is not a live one, so the surface goes back to their photo.
+        if !update.remote_video || other_account {
+            self.call_remote_frame = None;
+        }
+        if !update.camera_on || other_account {
+            self.call_local_frame = None;
+        }
         self.call = Some(update);
         self.call_account = Some(account);
         if finished {
@@ -182,6 +217,7 @@ impl App {
                 return;
             }
             self.call_surface_until = Some(Instant::now() + CALL_FAREWELL);
+            self.drop_call_frames();
             // How a call ended is the reason the surface lingers, but a locked
             // chat still says nothing: its farewell stays behind the bar.
             self.call_surface_hidden = self.call_is_private();
@@ -234,7 +270,11 @@ impl App {
         } else {
             (
                 self.call_name(),
-                crate::i18n::gettext(self.locale, "Incoming voice call").into_owned(),
+                if call.video {
+                    crate::i18n::gettext(self.locale, "Incoming video call").into_owned()
+                } else {
+                    crate::i18n::gettext(self.locale, "Incoming voice call").into_owned()
+                },
                 self.call_avatar(),
             )
         };
@@ -274,6 +314,7 @@ impl App {
             self.call_surface_until = None;
             self.call = None;
             self.call_account = None;
+            self.drop_call_frames();
         }
         // Full screen belongs to the call surface while the reader is looking
         // at it: however the surface was put aside, the window comes back.
@@ -314,15 +355,20 @@ impl App {
         ctx: &egui::Context,
     ) -> Option<Action> {
         match action {
-            Action::StartCall(chat) => {
-                if self.call_live() {
-                    self.toast_error(crate::i18n::gettext(
-                        self.locale,
-                        "Hang up the current call first",
-                    ));
-                } else {
-                    self.backend.send(Command::StartCall { chat });
-                }
+            Action::StartCall(chat) | Action::StartVideoCall(chat) if self.call_live() => {
+                let _ = chat;
+                self.toast_error(crate::i18n::gettext(
+                    self.locale,
+                    "Hang up the current call first",
+                ));
+            }
+            Action::StartCall(chat) => self.backend.send(Command::StartCall { chat, video: false }),
+            Action::StartVideoCall(chat) => {
+                self.backend.send(Command::StartCall { chat, video: true });
+            }
+            Action::SetCallCamera(on) => self.send_call_command(Command::SetCallCamera(on)),
+            Action::SetCallCameraDevice(device) => {
+                self.send_call_command(Command::SetCallCameraDevice(device));
             }
             Action::AnswerCall => self.send_call_command(Command::AnswerCall),
             Action::DeclineCall => self.send_call_command(Command::DeclineCall),
@@ -371,6 +417,7 @@ impl App {
             self.call_surface_until = None;
             self.call_rang = None;
             self.call_ring_sound = None;
+            self.drop_call_frames();
         }
     }
 }
@@ -431,14 +478,19 @@ mod tests {
             generation,
             chat: ADA.to_owned(),
             direction: CallDirection::Incoming,
+            video: false,
             phase,
             started: (phase == CallPhase::Active).then(Instant::now),
             muted: false,
+            camera_on: false,
+            remote_video: false,
+            video_requested: false,
             outcome: None,
             peer_audio: None,
             lost_devices: Vec::new(),
             microphone: None,
             speaker: None,
+            camera: None,
         }
     }
 

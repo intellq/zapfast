@@ -909,6 +909,10 @@ pub async fn run(
         // Cloned before the select so its branches never borrow the worker: a live call is the only
         // thing that gives either of these a receiver.
         let mut call_events = worker.call.as_ref().map(|runtime| runtime.events.clone());
+        let mut call_frames = worker
+            .call
+            .as_ref()
+            .and_then(|runtime| runtime.frames.clone());
         tokio::select! {
             command = inbox.recv() => {
                 match command {
@@ -940,6 +944,12 @@ pub async fn run(
                     None => std::future::pending().await,
                 }
             } => worker.call_runtime(event),
+            Some(tick) = async {
+                match call_frames.as_mut() {
+                    Some(frames) => frames.recv().await.ok(),
+                    None => std::future::pending().await,
+                }
+            } => worker.call_frame(tick),
             _ = async {
                 match deadline {
                     Some(deadline) => tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await,
@@ -6050,13 +6060,15 @@ impl Worker {
             Command::SetAttachmentLimit(limit) => {
                 self.attachment_limit = limit.clamp(1024 * 1024, ATTACHMENT_DOWNLOAD_LIMIT);
             }
-            Command::StartCall { chat } => self.start_call(chat).await,
+            Command::StartCall { chat, video } => self.start_call(chat, video).await,
             Command::AnswerCall => self.answer_call().await,
             Command::DeclineCall => self.decline_call().await,
             Command::HangupCall => self.hangup_call().await,
             Command::SetCallMuted(muted) => self.set_call_muted(muted).await,
+            Command::SetCallCamera(on) => self.set_call_camera(on).await,
             Command::SetCallMicrophone(device) => self.set_call_microphone(device),
             Command::SetCallSpeaker(device) => self.set_call_speaker(device),
+            Command::SetCallCameraDevice(device) => self.set_call_camera_device(device).await,
             Command::RefreshCallDevices => {
                 self.emit_call_devices().await;
             }
@@ -15007,7 +15019,10 @@ mod tests {
             })
             .await;
         worker
-            .handle_command(Command::StartCall { chat: chat.into() })
+            .handle_command(Command::StartCall {
+                chat: chat.into(),
+                video: false,
+            })
             .await;
         let emitted: Vec<Event> = events.try_iter().collect();
         let unblock = "Unblock this contact to send messages";
@@ -15048,7 +15063,10 @@ mod tests {
             })
             .await;
         worker
-            .handle_command(Command::StartCall { chat: chat.into() })
+            .handle_command(Command::StartCall {
+                chat: chat.into(),
+                video: false,
+            })
             .await;
         let emitted: Vec<Event> = events.try_iter().collect();
         let refused = "Anonymous mode is on: nothing is sent";
@@ -15266,7 +15284,7 @@ mod tests {
         worker.archive.ensure_chat(PEER, "Fixture").unwrap();
         let call = crate::calls::Call::test_snapshot(PEER);
         let update = call.update();
-        worker.call = Some(calls::CallRuntime::new(call));
+        worker.call = Some(calls::CallRuntime::new(call, None));
         unconfirmed(&mut worker);
         // The update is withheld: the chat's lock state is not known yet.
         worker.emit(Event::Call(Box::new(update)));

@@ -4,6 +4,7 @@
 //! work. Commands and events cross channels, and events wake the UI.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::mpsc;
@@ -441,9 +442,10 @@ pub enum Command {
         chat: ChatId,
         message: String,
     },
-    /// Places a 1:1 voice call.
+    /// Places a 1:1 call, offering video from the first frame when asked.
     StartCall {
         chat: ChatId,
+        video: bool,
     },
     /// Answers the ringing incoming call with the real `<accept>`.
     AnswerCall,
@@ -453,11 +455,15 @@ pub enum Command {
     HangupCall,
     /// Mutes or unmutes the current call's microphone through the engine.
     SetCallMuted(bool),
+    /// Turns the current call's camera on or off.
+    SetCallCamera(bool),
     /// Rebinds the current call's microphone; `None` is the system default.
     SetCallMicrophone(Option<String>),
     /// Rebinds the current call's speaker; `None` is the system default.
     SetCallSpeaker(Option<String>),
-    /// Lists the microphones and speakers the call screen offers.
+    /// Switches the current call's camera node.
+    SetCallCameraDevice(Option<String>),
+    /// Lists the microphones, speakers and cameras the call screen offers.
     RefreshCallDevices,
     /// The devices a call should open with: the ones last picked, as the settings hold them.
     SetCallDevices {
@@ -1284,6 +1290,11 @@ pub enum Event {
     Call(Box<crate::calls::CallUpdate>),
     /// The devices the call screen can offer.
     CallDevices(Box<crate::calls::DeviceList>),
+    /// One video frame for the call screen: our own preview, the peer's picture, or both.
+    CallVideo {
+        local: Option<Arc<egui::ColorImage>>,
+        remote: Option<Arc<egui::ColorImage>>,
+    },
     /// Informational toast message.
     Info(String),
     /// A decoded image ready to be written to the clipboard on the interface thread.

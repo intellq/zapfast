@@ -237,6 +237,9 @@ libc = "0.2"
 # plain, square grey frame there (#397). The feature applies to eframe's
 # winit, the fork in [patch.crates-io].
 winit = { version = "0.30", default-features = false, features = ["wayland-csd-adwaita"] }
+# The camera for video calls, through Video4Linux, in Rust: no build-time
+# bindings, so building on Linux needs nothing new.
+linuxvideo = "0.3.5"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 apple-native-keyring-store = { version = "1.0.2", features = ["keychain"] }
@@ -252,6 +255,8 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 # Notifications through UNUserNotificationCenter: notify-rust's macOS backend
 # cannot stop waiting for a click, so released ones would pile up.
 mac-usernotifications = "0.3.1"
+# The camera for video calls, through AVFoundation.
+nokhwa = { version = "0.10.11", default-features = false, features = ["input-avfoundation"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-native-keyring-store = { version = "1.1", default-features = false }
@@ -260,6 +265,8 @@ winrt-notification = { package = "tauri-winrt-notification", version = "0.7.3" }
 windows-sys = { version = "0.60", features = ["Win32_Foundation", "Win32_Globalization", "Win32_System_Registry"] }
 # Accesses the native window handle for the taskbar overlay.
 raw-window-handle = "0.6"
+# The camera for video calls, through Media Foundation.
+nokhwa = { version = "0.10.11", default-features = false, features = ["input-msmf"] }
 # Pauses other apps' media through the system media transport controls while
 # recording or playing voice messages. The same version cpal already uses.
 windows = { version = "0.62", features = ["Media_Control", "Foundation_Collections", "Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_Com", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging",

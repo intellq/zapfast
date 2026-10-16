@@ -1,4 +1,4 @@
-//! 1:1 WhatsApp calling: signaling, media, audio devices, and state.
+//! 1:1 WhatsApp calling: signaling, media, audio devices, camera, and state.
 //!
 //! The protocol, the encryption and the media engine are whatsapp-rust's (`Client::voip()`); this
 //! module keeps the state the interface draws. Audio goes through rodio, the layer the rest of the
@@ -7,17 +7,49 @@
 //! wants inside [`crate::call_audio`], and each direction sits behind a *stable* channel, so
 //! changing the input or output device replaces only the stream behind it without the engine ever
 //! seeing a port close.
+//!
+//! Video is H.264 Annex-B both ways, because that is what the library transports: it never touches
+//! pixels. Capture encodes with the `openh264` encoder the app already links, and the peer's access
+//! units decode back to `egui` images with the `openh264` decoder `crate::video` already uses.
+//! Frames cross to the UI through [`VideoTick`]; no decode work happens on the UI thread.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
+use egui::ColorImage;
 
 use crate::model::CallDirection;
 use whatsapp_rust::prelude::{Client, Jid};
 use whatsapp_rust::types::call::{CallAction, IncomingCall};
-use whatsapp_rust::voip::{CallEvent, CallHandle};
+use whatsapp_rust::voip::{
+    CallEvent, CallHandle, TimedVideoFrame, VideoFrame, VideoSink, VideoSource,
+};
+
+/// The pixel budget one camera session encodes within: a landscape frame at most 1280 by 720, a
+/// portrait one at most 720 by 1280.
+///
+/// Following the camera's own aspect is what keeps a portrait camera portrait on the peer's screen
+/// and in the corner preview. Stretching it into one fixed landscape frame would either pad it into
+/// a letterbox or squash it, and neither is what the camera saw. The budget is 720p because that is
+/// what the peer's screen is: a smaller frame is scaled up twice (once by this side's bitrate and
+/// again by the phone) and reads as the soft, blocky picture a 640 by 360 call is.
+const CAPTURE_LONG_SIDE: usize = 1280;
+const CAPTURE_SHORT_SIDE: usize = 720;
+/// The largest the corner preview may be, in the same orientation as the capture. The preview is a
+/// thumbnail rather than the call, so it stays the size of one and costs nothing to draw.
+const PREVIEW_LONG_SIDE: usize = 320;
+const PREVIEW_SHORT_SIDE: usize = 180;
+/// The cadence the camera is asked for and the encoder is built for: what WhatsApp's own clients
+/// send at most. A camera that grants fewer frames is used at what it gives, and the frames carry
+/// their own capture times, so nothing plays back at the wrong speed.
+const VIDEO_FPS: u32 = 20;
+/// RTP video clock (90 kHz) divided by the capture cadence.
+const VIDEO_TS_STRIDE: u32 = 90_000 / VIDEO_FPS;
+/// The encoder's bitrate for the budget above, about what WhatsApp's own clients use for a 720p
+/// call, and low enough to fit the uplink a call shares with its own audio.
+const VIDEO_BITRATE: u32 = 1_500_000;
 
 // ---------------------------------------------------------------------------
 // State
@@ -65,7 +97,7 @@ impl CallPhase {
         )
     }
 
-    /// Whether the microphone and speaker pickers apply.
+    /// Whether the microphone, camera and device pickers apply.
     pub fn is_connected(self) -> bool {
         matches!(self, Self::Connecting | Self::Accepted | Self::Active)
     }
@@ -138,10 +170,17 @@ pub struct CallUpdate {
     pub chat: String,
     /// Which side placed the call.
     pub direction: CallDirection,
+    /// Whether this call carries video.
+    pub video: bool,
     pub phase: CallPhase,
     /// Set when the call became active; the timer counts from here.
     pub started: Option<Instant>,
     pub muted: bool,
+    pub camera_on: bool,
+    /// Whether the peer's picture has started arriving.
+    pub remote_video: bool,
+    /// Whether the peer asked to turn a voice call into a video call and waits for an answer.
+    pub video_requested: bool,
     /// How the call ended, once it has. Worded by the call screen, stored by the call history.
     pub outcome: Option<CallOutcome>,
     /// Set when the engine says the peer's audio is missing, so a silent call says why instead of
@@ -150,9 +189,10 @@ pub struct CallUpdate {
     /// Devices the user picked that the machine no longer has, so the call screen can name them
     /// instead of quietly using another one.
     pub lost_devices: Vec<LostDevice>,
-    /// The selected input and output nodes; `None` means the system default.
+    /// The selected input, output and camera nodes; `None` means the system default.
     pub microphone: Option<String>,
     pub speaker: Option<String>,
+    pub camera: Option<String>,
 }
 
 /// A microphone or speaker the platform reports.
@@ -172,18 +212,29 @@ pub struct CallDevices {
     pub speaker: Option<String>,
 }
 
+/// A camera the platform reports.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CameraDevice {
+    /// What [`crate::camera::Source::open`] takes back: an index, or the platform's own id.
+    pub id: String,
+    /// The name the platform reports.
+    pub label: String,
+}
+
 /// The devices the call screen offers.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DeviceList {
     pub microphones: Vec<AudioDevice>,
     pub speakers: Vec<AudioDevice>,
+    pub cameras: Vec<CameraDevice>,
 }
 
-/// Which kind of call device a selection belongs to.
+/// Which of the three kinds of call device a selection belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeviceKind {
     Microphone,
     Speaker,
+    Camera,
 }
 
 /// What a set of selections resolved to against the machine's own list.
@@ -191,6 +242,7 @@ pub enum DeviceKind {
 pub struct ResolvedDevices {
     pub microphone: Option<String>,
     pub speaker: Option<String>,
+    pub camera: Option<String>,
     /// Whatever had to be given up, so the call screen can say so in the reader's language.
     pub lost_devices: Vec<LostDevice>,
 }
@@ -219,6 +271,11 @@ pub fn device_name(list: &DeviceList, kind: DeviceKind, id: &str) -> String {
             .iter()
             .find(|device| device.id == id)
             .map(|device| device.label.clone()),
+        DeviceKind::Camera => list
+            .cameras
+            .iter()
+            .find(|device| device.id == id)
+            .map(|device| device.label.clone()),
     };
     label.unwrap_or_else(|| id.to_owned())
 }
@@ -232,9 +289,11 @@ pub fn resolve_devices(
     list: &DeviceList,
     microphone: Option<String>,
     speaker: Option<String>,
+    camera: Option<String>,
 ) -> ResolvedDevices {
     let microphones: Vec<&str> = list.microphones.iter().map(|d| d.id.as_str()).collect();
     let speakers: Vec<&str> = list.speakers.iter().map(|d| d.id.as_str()).collect();
+    let cameras: Vec<&str> = list.cameras.iter().map(|d| d.id.as_str()).collect();
     let mut lost: Vec<LostDevice> = Vec::new();
 
     let checked =
@@ -255,11 +314,58 @@ pub fn resolve_devices(
         };
     let microphone = checked(DeviceKind::Microphone, microphone, &microphones, &mut lost);
     let speaker = checked(DeviceKind::Speaker, speaker, &speakers, &mut lost);
+    // A camera has no system default the way an audio device does, so the picker's "First camera"
+    // has to mean the first camera the machine reports. Without this a fresh install — whose stored
+    // camera is `None` — could not start or answer a video call at all, and could not even reach the
+    // in-call picker to choose a node. A named camera the machine no longer has falls back the same
+    // way, and the fallback is reported, so the screen can say the old one is gone.
+    let camera = checked(DeviceKind::Camera, camera, &cameras, &mut lost)
+        .or_else(|| default_camera(list, None));
 
     ResolvedDevices {
         microphone,
         speaker,
+        camera,
         lost_devices: lost,
+    }
+}
+
+/// Reads the picker's "First camera" as a camera that exists.
+///
+/// A camera has no system default the way a sound card does, so `None` means the first camera the
+/// machine reports — the same reading [`resolve_devices`] applies when a call starts. A camera the
+/// machine no longer has falls back the same way. `None` comes back only when nothing is named and
+/// nothing is listed, and then the caller's own failure path says so rather than this inventing one.
+///
+/// Split out of [`resolve_devices`] so the two paths that change a camera mid-call — upgrading a
+/// voice call to video, and picking a device while one is running — read the default exactly as a
+/// call's startup does, and so that reading is testable without a machine.
+pub fn default_camera(list: &DeviceList, camera: Option<String>) -> Option<String> {
+    let named = camera.filter(|id| !id.is_empty());
+    match named {
+        // A camera the machine still reports is kept, even when the list is empty: an empty list
+        // means discovery could not run, not that nothing is plugged in.
+        Some(id) if list.cameras.is_empty() || list.cameras.iter().any(|c| c.id == id) => Some(id),
+        // A camera the machine no longer has, or no choice at all: the first one it does have.
+        _ => list.cameras.first().map(|camera| camera.id.clone()),
+    }
+}
+
+/// The corner preview's size for a capture of `capture`, in the capture's own orientation.
+fn preview_size(capture: (usize, usize)) -> (usize, usize) {
+    let bounds = if capture.1 > capture.0 {
+        (PREVIEW_SHORT_SIDE, PREVIEW_LONG_SIDE)
+    } else {
+        (PREVIEW_LONG_SIDE, PREVIEW_SHORT_SIDE)
+    };
+    crate::camera::fit_even(capture, bounds)
+}
+
+/// Whether an offer announces video.
+pub fn offer_is_video(action: &CallAction) -> bool {
+    match action {
+        CallAction::Offer { is_video, .. } => *is_video,
+        _ => false,
     }
 }
 
@@ -272,7 +378,7 @@ pub fn is_offer(action: &CallAction) -> bool {
 // Device discovery
 // ---------------------------------------------------------------------------
 
-/// Lists microphones and speakers for the call screen.
+/// Lists microphones, speakers and cameras for the call screen.
 ///
 /// They come from rodio, the same layer a call opens them through, so a picker offers what a call
 /// can actually take, on every platform: PipeWire or ALSA, CoreAudio, WASAPI.
@@ -280,6 +386,7 @@ pub fn devices() -> DeviceList {
     DeviceList {
         microphones: audio_devices(crate::call_audio::microphones()),
         speakers: audio_devices(crate::call_audio::speakers()),
+        cameras: cameras(),
     }
 }
 
@@ -288,6 +395,14 @@ fn audio_devices(found: Vec<(String, String)>) -> Vec<AudioDevice> {
     found
         .into_iter()
         .map(|(id, label)| AudioDevice { id, label })
+        .collect()
+}
+
+/// Lists the cameras the platform reports, through the camera module.
+fn cameras() -> Vec<CameraDevice> {
+    crate::camera::cameras()
+        .into_iter()
+        .map(|(id, label)| CameraDevice { id, label })
         .collect()
 }
 
@@ -331,6 +446,516 @@ async fn missing_audio_device_off_thread(
     .unwrap_or(None)
 }
 
+/// Whether a requested video path really came up.
+///
+/// The user pressed the video button, or the peer offered video; connecting with a media type
+/// nobody chose and not saying so is worse than refusing. The check runs before any signaling, so a
+/// camera or encoder that will not start fails the call instead of quietly downgrading it.
+fn require_video(requested: bool, pipeline: bool) -> Result<()> {
+    if requested && !pipeline {
+        return Err(anyhow!(
+            "video could not be started; the camera or its encoder is not available"
+        ));
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Video
+// ---------------------------------------------------------------------------
+
+/// One frame on its way to the UI.
+#[derive(Clone, Debug)]
+pub enum VideoTick {
+    /// Our own camera, for the corner preview.
+    Local(Arc<ColorImage>),
+    /// The peer's picture.
+    Remote(Arc<ColorImage>),
+    /// The peer's picture could not be decoded: the peer is asked for a keyframe.
+    Lost,
+}
+
+/// The camera side of the call: the camera module delivers YUV 4:2:0 at a fixed size, so the
+/// encoder and the preview both have a known layout, and the frames the engine wants are complete
+/// H.264 Annex-B access units led by an access-unit delimiter.
+///
+/// A device change starts a fresh thread rather than telling this one to switch: a running encoder
+/// carries state the new device's stream cannot inherit.
+struct CameraCapture {
+    timed: async_channel::Receiver<TimedVideoFrame>,
+    /// Cleared when the camera is no longer wanted, and read by the capture loop between frames.
+    running: Arc<AtomicBool>,
+    /// Set when the engine needs a keyframe; the next frame is encoded as one.
+    keyframe: Arc<AtomicBool>,
+    /// Set by the capture thread as it leaves, so `stop` can wait for the device to be released
+    /// before another camera opens it, without waiting forever on a driver that hangs.
+    finished: std::sync::mpsc::Receiver<()>,
+}
+
+/// How long a camera is given to open and build its encoder before the video direction gives up.
+///
+/// The wait is what keeps a busy camera or an encoder that will not start from signaling a video
+/// call with no outgoing picture. It covers macOS's permission prompt the first time a camera is
+/// used, which the capture thread waits on.
+const CAMERA_STARTUP: std::time::Duration = std::time::Duration::from_secs(20);
+/// How long a stopping camera is waited for before its thread is left to finish on its own.
+const CAMERA_RELEASE: std::time::Duration = std::time::Duration::from_secs(2);
+
+impl CameraCapture {
+    /// Opens `device` (the first camera when `None`) on a thread of its own and waits until it
+    /// delivers, so a call never signals video it cannot send. Blocking: call it off the async loop.
+    fn start(device: Option<String>, ticks: async_channel::Sender<VideoTick>) -> Result<Self> {
+        let (frames, timed) = async_channel::bounded::<TimedVideoFrame>(4);
+        let running = Arc::new(AtomicBool::new(true));
+        let keyframe = Arc::new(AtomicBool::new(false));
+        let (ready, came_up) = std::sync::mpsc::channel::<Result<(), String>>();
+        let (done, finished) = std::sync::mpsc::channel::<()>();
+        let alive = CaptureAlive(Arc::clone(&running));
+        let stopping = Arc::clone(&running);
+        let forced = Arc::clone(&keyframe);
+        std::thread::Builder::new()
+            .name("zapfast-camera".to_owned())
+            .spawn(move || {
+                let _alive = alive;
+                capture(device, frames, ticks, &stopping, &forced, ready);
+                let _ = done.send(());
+            })
+            .context("camera thread could not be started")?;
+        let capture = Self {
+            timed,
+            running,
+            keyframe,
+            finished,
+        };
+        match came_up.recv_timeout(CAMERA_STARTUP) {
+            Ok(Ok(())) => Ok(capture),
+            Ok(Err(error)) => Err(anyhow!(error)),
+            Err(_) => Err(anyhow!("the camera did not start in time")),
+        }
+    }
+
+    /// Ends the camera: the loop sees the cleared flag after the frame it is waiting for, and the
+    /// device is released before this returns, unless the driver hangs past [`CAMERA_RELEASE`].
+    fn stop(&mut self) {
+        if self.running.swap(false, Ordering::Relaxed) {
+            let _ = self.finished.recv_timeout(CAMERA_RELEASE);
+        }
+    }
+
+    fn running(&self) -> bool {
+        self.running.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for CameraCapture {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// Clears a capture's running flag on the way out, including when the thread panics.
+struct CaptureAlive(Arc<AtomicBool>);
+
+impl Drop for CaptureAlive {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Relaxed);
+    }
+}
+
+/// The `VideoSource` the engine pulls access units from.
+struct LocalVideoSource {
+    timed: async_channel::Receiver<TimedVideoFrame>,
+    /// Never fed: the engine uses the timestamped channel above.
+    empty: async_channel::Receiver<Vec<u8>>,
+}
+
+impl VideoSource for LocalVideoSource {
+    fn frames(&self) -> async_channel::Receiver<Vec<u8>> {
+        self.empty.clone()
+    }
+
+    fn timed_frames(&self) -> Option<async_channel::Receiver<TimedVideoFrame>> {
+        Some(self.timed.clone())
+    }
+
+    fn rtp_timestamp_stride(&self) -> u32 {
+        VIDEO_TS_STRIDE
+    }
+}
+
+/// The `VideoSink` the engine hands the peer's access units to.
+struct RemoteVideoSink {
+    tx: async_channel::Sender<VideoFrame>,
+}
+
+impl VideoSink for RemoteVideoSink {
+    fn playout(&self) -> async_channel::Sender<VideoFrame> {
+        self.tx.clone()
+    }
+}
+
+/// Everything the video direction owns, plus what a device change or camera toggle needs.
+pub struct VideoPipeline {
+    ticks: async_channel::Sender<VideoTick>,
+    remote_tx: async_channel::Sender<VideoFrame>,
+    camera: Option<CameraCapture>,
+    device: Option<String>,
+}
+
+impl VideoPipeline {
+    /// Starts the camera and the peer's decoder. The returned receiver carries both directions'
+    /// frames to the UI. Waits for the camera, so it runs on a blocking thread.
+    pub async fn start(
+        device: Option<String>,
+    ) -> Result<(Self, async_channel::Receiver<VideoTick>)> {
+        tokio::task::spawn_blocking(move || Self::start_blocking(device))
+            .await
+            .map_err(|error| anyhow!("the camera thread failed: {error}"))?
+    }
+
+    fn start_blocking(
+        device: Option<String>,
+    ) -> Result<(Self, async_channel::Receiver<VideoTick>)> {
+        let (ticks, tick_rx) = async_channel::bounded::<VideoTick>(2);
+        let (remote_tx, remote_rx) = async_channel::bounded::<VideoFrame>(8);
+        decode_remote(remote_rx, ticks.clone());
+        // A machine without a camera, or one whose camera is busy, still takes part in a video
+        // call: it sees the other side, its own camera reads as off, and the camera button says
+        // why when pressed.
+        let camera = match CameraCapture::start(device.clone(), ticks.clone()) {
+            Ok(camera) => Some(camera),
+            Err(error) => {
+                log::warn!("[CALL] the video call goes on without our camera: {error}");
+                None
+            }
+        };
+        Ok((
+            Self {
+                ticks,
+                remote_tx,
+                camera,
+                device,
+            },
+            tick_rx,
+        ))
+    }
+
+    fn source(&self) -> LocalVideoSource {
+        let (empty_tx, empty) = async_channel::bounded::<Vec<u8>>(1);
+        drop(empty_tx);
+        let timed = match &self.camera {
+            Some(camera) => camera.timed.clone(),
+            // No camera running: a closed timestamped channel, so the feed simply sees no frames.
+            None => {
+                let (unused, closed) = async_channel::bounded::<TimedVideoFrame>(1);
+                drop(unused);
+                closed
+            }
+        };
+        LocalVideoSource { timed, empty }
+    }
+
+    fn sink(&self) -> RemoteVideoSink {
+        RemoteVideoSink {
+            tx: self.remote_tx.clone(),
+        }
+    }
+
+    /// Releases the camera. A resume builds a new source, so nothing here is kept.
+    pub fn pause_camera(&mut self) {
+        if let Some(mut camera) = self.camera.take() {
+            camera.stop();
+        }
+    }
+
+    /// Starts capturing from `device` again, reusing the frame channel the UI already drains.
+    /// Waits for the camera, so it runs on a blocking thread.
+    pub async fn resume_camera(&mut self, device: Option<String>) -> Result<()> {
+        let previous = self.camera.take();
+        self.device = device.clone();
+        let ticks = self.ticks.clone();
+        // The old camera is released first, on the same blocking thread, so the new one never
+        // races it for the device.
+        let camera = tokio::task::spawn_blocking(move || {
+            drop(previous);
+            CameraCapture::start(device, ticks)
+        })
+        .await
+        .map_err(|error| anyhow!("the camera thread failed: {error}"))??;
+        self.camera = Some(camera);
+        Ok(())
+    }
+
+    /// Whether the camera is capturing right now. A capture thread that ended (an unplugged
+    /// camera, one another program took) reads as off, so the frame channel and the controls agree.
+    pub fn camera_running(&self) -> bool {
+        self.camera.as_ref().is_some_and(CameraCapture::running)
+    }
+
+    /// Asks the encoder for a keyframe, which the engine needs whenever the peer's decoder has
+    /// lost track (a lost packet, a resumed camera).
+    pub fn force_keyframe(&self) {
+        if let Some(camera) = &self.camera {
+            camera.keyframe.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Ends the video direction: the capture thread stops and the device is released.
+    pub fn shutdown(&mut self) {
+        if let Some(mut camera) = self.camera.take() {
+            camera.stop();
+        }
+    }
+}
+
+/// Captures from the camera, encodes each frame to an Annex-B access unit, and feeds the preview.
+///
+/// Runs on its own thread: the platforms' capture objects are not all `Send`, the camera read is
+/// blocking, and the `openh264` encoder is not shared. Everything it hands out goes through a
+/// bounded channel with `try_send`, so a stalled consumer drops a frame instead of stalling the
+/// camera.
+fn capture(
+    device: Option<String>,
+    timed: async_channel::Sender<TimedVideoFrame>,
+    ticks: async_channel::Sender<VideoTick>,
+    stopping: &AtomicBool,
+    keyframe: &AtomicBool,
+    ready: std::sync::mpsc::Sender<Result<(), String>>,
+) {
+    // The camera's own shape decides the frame the encoder runs at, within the budget either way
+    // round, so a portrait camera is encoded portrait.
+    let budget = (CAPTURE_LONG_SIDE, CAPTURE_SHORT_SIDE);
+    let mut source = match crate::camera::Source::open(device.as_deref(), budget, VIDEO_FPS) {
+        Ok(source) => source,
+        Err(error) => {
+            log::error!("[CALL] camera capture could not start: {error}");
+            let _ = ready.send(Err(error));
+            return;
+        }
+    };
+    let size = source.size();
+    let mut encoder = match video_encoder() {
+        Ok(encoder) => encoder,
+        Err(error) => {
+            log::error!("[CALL] camera encoder could not start: {error}");
+            source.stop();
+            ticks.close();
+            let _ = ready.send(Err(format!("the camera encoder could not start: {error}")));
+            return;
+        }
+    };
+    // The camera and the encoder are both up: only now is a video call worth signaling.
+    let _ = ready.send(Ok(()));
+    capture_frames(
+        &mut source,
+        size,
+        stopping,
+        keyframe,
+        &timed,
+        &ticks,
+        &mut encoder,
+        Instant::now(),
+    );
+    source.stop();
+}
+
+/// The H.264 encoder a call's camera feeds: Constrained Baseline, which is what WhatsApp's clients
+/// decode, with a keyframe every two seconds so a peer that lost one recovers on its own.
+fn video_encoder() -> std::result::Result<openh264::encoder::Encoder, openh264::Error> {
+    use openh264::encoder::{
+        BitRate, Encoder, EncoderConfig, FrameRate, IntraFramePeriod, Profile,
+    };
+    let config = EncoderConfig::new()
+        .profile(Profile::Baseline)
+        .bitrate(BitRate::from_bps(VIDEO_BITRATE))
+        .max_frame_rate(FrameRate::from_hz(VIDEO_FPS as f32))
+        .intra_frame_period(IntraFramePeriod::from_num_frames(VIDEO_FPS * 2))
+        .skip_frames(false);
+    Encoder::with_api_config(openh264::OpenH264API::from_source(), config)
+}
+
+/// Reads frames from one camera until the call stops it, encoding and previewing each one.
+#[allow(clippy::too_many_arguments)]
+fn capture_frames(
+    source: &mut crate::camera::Source,
+    size: (usize, usize),
+    stopping: &AtomicBool,
+    keyframe: &AtomicBool,
+    timed: &async_channel::Sender<TimedVideoFrame>,
+    ticks: &async_channel::Sender<VideoTick>,
+    encoder: &mut openh264::encoder::Encoder,
+    started: Instant,
+) {
+    let (width, height) = size;
+    let (luma_len, chroma_len) = (width * height, width * height / 4);
+    let mut bytes = vec![0u8; luma_len + chroma_len * 2];
+    let frame_gap = std::time::Duration::from_secs(1) / VIDEO_FPS;
+    let mut last_sent: Option<Instant> = None;
+    log::info!("[CALL] camera enabled size={width}x{height}");
+    loop {
+        if !stopping.load(Ordering::Relaxed) {
+            log::info!("[CALL] camera disabled");
+            return;
+        }
+        match source.read(&mut bytes) {
+            crate::camera::Read::Frame => {}
+            crate::camera::Read::Idle => continue,
+            crate::camera::Read::Ended => {
+                log::warn!("[CALL] the camera stopped delivering frames");
+                return;
+            }
+        }
+        // A camera faster than the call's cadence is thinned to it, so the encoder's rate control
+        // and the timestamps agree.
+        if last_sent.is_some_and(|last| last.elapsed() < frame_gap.mul_f32(0.8)) {
+            continue;
+        }
+        last_sent = Some(Instant::now());
+
+        let luma = &bytes[..luma_len];
+        let chroma_u = &bytes[luma_len..luma_len + chroma_len];
+        let chroma_v = &bytes[luma_len + chroma_len..];
+        let planes = Yuv420 {
+            y: luma,
+            u: chroma_u,
+            v: chroma_v,
+            size,
+        };
+        if keyframe.swap(false, Ordering::Relaxed) {
+            encoder.force_intra_frame();
+        }
+        match encoder.encode(&planes) {
+            Ok(stream) => {
+                // One access unit per encoded frame, led by an access-unit delimiter so the
+                // peer's depacketizer sees the boundaries an encoder would have produced.
+                let mut unit = vec![0x00, 0x00, 0x00, 0x01, 0x09, 0xF0];
+                stream.write_vec(&mut unit);
+                let elapsed = started.elapsed().as_micros() as u64;
+                let timestamp = (elapsed * 90 / 1000) as u32;
+                // A full queue means the wire is behind: dropping is the documented answer for
+                // video, and the next frame carries the picture forward anyway.
+                let _ = timed.try_send(
+                    TimedVideoFrame::builder()
+                        .data(unit)
+                        .timestamp(timestamp)
+                        .build(),
+                );
+            }
+            Err(error) => log::warn!("[CALL] camera frame could not be encoded: {error}"),
+        }
+
+        let image = crate::video::rgb_image(
+            luma,
+            chroma_u,
+            chroma_v,
+            (width, width / 2, width / 2),
+            (width, height),
+            preview_size(size),
+            // Our own frames arrive upright from the camera: there is no rotation to undo.
+            0,
+        );
+        let _ = ticks.try_send(VideoTick::Local(Arc::new(image)));
+    }
+}
+
+/// A camera frame as `openh264` wants it: three contiguous planes with no row padding.
+struct Yuv420<'a> {
+    y: &'a [u8],
+    u: &'a [u8],
+    v: &'a [u8],
+    size: (usize, usize),
+}
+
+impl openh264::formats::YUVSource for Yuv420<'_> {
+    fn dimensions(&self) -> (usize, usize) {
+        self.size
+    }
+
+    fn strides(&self) -> (usize, usize, usize) {
+        (self.size.0, self.size.0 / 2, self.size.0 / 2)
+    }
+
+    fn y(&self) -> &[u8] {
+        self.y
+    }
+
+    fn u(&self) -> &[u8] {
+        self.u
+    }
+
+    fn v(&self) -> &[u8] {
+        self.v
+    }
+}
+
+/// Decodes the peer's access units into pictures for the UI.
+///
+/// A decoder cannot start on a delta frame, so frames are skipped until the sink marks one as a
+/// keyframe. Runs on its own thread for the same reason the encoder does.
+fn decode_remote(
+    frames: async_channel::Receiver<VideoFrame>,
+    ticks: async_channel::Sender<VideoTick>,
+) {
+    let spawned = std::thread::Builder::new()
+        .name("zapfast-remote-video".to_owned())
+        .spawn(move || {
+            use openh264::formats::YUVSource as _;
+
+            let mut decoder = openh264::decoder::Decoder::new().ok();
+            let mut started = false;
+            let mut last_orientation = 0u8;
+            while let Ok(frame) = frames.recv_blocking() {
+                if !started {
+                    if !frame.keyframe {
+                        continue;
+                    }
+                    started = true;
+                }
+                let Some(decoder) = decoder.as_mut() else {
+                    return;
+                };
+                // The peer's camera rotation, which the frames carry so a phone held upright arrives
+                // upright. It rides the same bits on a keyframe and on a delta frame, and a peer
+                // that turns its phone changes it mid-call, so it is read per frame rather than once.
+                let orientation = frame.orientation & 0x03;
+                if orientation != last_orientation {
+                    last_orientation = orientation;
+                    log::info!(
+                        "[CALL] remote camera orientation is {} degrees",
+                        orientation as u32 * 90
+                    );
+                }
+                let turns = crate::video::orientation_turns(orientation);
+                match decoder.decode(&frame.data) {
+                    Ok(Some(decoded)) => {
+                        let (width, height) = decoded.dimensions();
+                        if width == 0 || height == 0 {
+                            continue;
+                        }
+                        let image = crate::video::rgb_image(
+                            decoded.y(),
+                            decoded.u(),
+                            decoded.v(),
+                            decoded.strides(),
+                            (width, height),
+                            (width, height),
+                            turns,
+                        );
+                        let _ = ticks.try_send(VideoTick::Remote(Arc::new(image)));
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        log::debug!("[CALL] remote video frame was not decodable: {error}");
+                        let _ = ticks.try_send(VideoTick::Lost);
+                    }
+                }
+            }
+        });
+    if let Err(error) = spawned {
+        log::error!("[CALL] remote video decoder could not start: {error}");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The call
 // ---------------------------------------------------------------------------
@@ -351,6 +976,7 @@ pub struct Call {
     call_id: String,
     chat: String,
     direction: CallDirection,
+    video: bool,
     phase: CallPhase,
     started: Option<Instant>,
     outcome: Option<CallOutcome>,
@@ -364,10 +990,19 @@ pub struct Call {
     media_ready: bool,
     mic: Option<AudioInput>,
     speaker: Option<AudioOutput>,
+    video_pipe: Option<VideoPipeline>,
+    remote_video: bool,
     microphone: Option<String>,
     speaker_device: Option<String>,
+    camera: Option<String>,
     /// The devices the user picked that the machine no longer has, newest check last.
     lost_devices: Vec<LostDevice>,
+    /// Whether the call asked the camera to capture. Kept apart from whether frames are really
+    /// arriving, so a camera that stopped on its own is told from one the user switched off.
+    camera_wanted: bool,
+    /// The peer's request to turn this voice call into a video call, which turning the camera on
+    /// answers.
+    peer_video_request: Option<whatsapp_rust::voip::VideoUpgradeToken>,
 }
 
 impl Call {
@@ -378,13 +1013,16 @@ impl Call {
         self
     }
 
-    /// Places an outgoing 1:1 call.
+    /// Places an outgoing 1:1 call. `video` offers video from the first frame, which is what makes
+    /// the peer's phone ring as a video call.
     pub async fn place(
         client: &Arc<Client>,
         chat: String,
+        video: bool,
         microphone: Option<String>,
         speaker: Option<String>,
-    ) -> Result<Self> {
+        camera: Option<String>,
+    ) -> Result<(Self, Option<async_channel::Receiver<VideoTick>>)> {
         let peer: Jid = chat
             .parse()
             .map_err(|error| anyhow!("not a WhatsApp JID: {error}"))?;
@@ -393,49 +1031,88 @@ impl Call {
         {
             return Err(anyhow!("no {missing} is available; a call needs one"));
         }
+        // Video first: a camera or encoder that will not start refuses the call before any stream
+        // exists and before the peer is rung, because a video call must not silently become voice.
+        let mut pipe = None;
+        if video {
+            match VideoPipeline::start(camera.clone()).await {
+                Ok((pipeline, frames)) => pipe = Some((pipeline, frames)),
+                Err(error) => log::warn!("[CALL] video pipeline could not start: {error}"),
+            }
+        }
+        require_video(video, pipe.is_some())?;
         let (mic, mic_rx) = AudioInput::spawn(microphone.clone());
         let (output, output_tx) = AudioOutput::spawn(speaker.clone());
 
         let voip = client.voip();
-        let placed = voip.call(&peer).audio(mic_rx, output_tx).start().await;
+        let builder = voip.call(&peer).audio(mic_rx, output_tx);
+        let placed = match &pipe {
+            Some((pipeline, _)) => {
+                builder
+                    .video(pipeline.source(), pipeline.sink())
+                    .start()
+                    .await
+            }
+            None => builder.start().await,
+        };
         let handle = match placed {
             Ok(handle) => Arc::new(handle),
             Err(error) => return Err(anyhow!("WhatsApp refused the call: {error}")),
         };
         // The destination is deliberately not logged: a call's chat id is the peer's phone
         // number, and this log ships.
-        log::info!("[CALL] outgoing created call_id={}", handle.call_id());
+        log::info!(
+            "[CALL] outgoing created call_id={} video={}",
+            handle.call_id(),
+            pipe.is_some()
+        );
 
-        Ok(Self {
-            generation: next_generation(),
-            call_id: handle.call_id().to_owned(),
-            chat,
-            direction: CallDirection::Outgoing,
-            phase: CallPhase::Dialing,
-            started: None,
-            outcome: None,
-            peer_audio: None,
-            incoming: None,
-            handle: Some(handle),
-            media_ready: false,
-            mic: Some(mic),
-            speaker: Some(output),
-            microphone,
-            speaker_device: speaker,
-            lost_devices: Vec::new(),
-        })
+        let (video_pipe, frames) = match pipe {
+            Some((pipeline, frames)) => (Some(pipeline), Some(frames)),
+            None => (None, None),
+        };
+        Ok((
+            Self {
+                generation: next_generation(),
+                call_id: handle.call_id().to_owned(),
+                chat,
+                direction: CallDirection::Outgoing,
+                video: video_pipe.is_some(),
+                phase: CallPhase::Dialing,
+                started: None,
+                outcome: None,
+                peer_audio: None,
+                incoming: None,
+                handle: Some(handle),
+                media_ready: false,
+                mic: Some(mic),
+                speaker: Some(output),
+                camera_wanted: video_pipe
+                    .as_ref()
+                    .is_some_and(VideoPipeline::camera_running),
+                peer_video_request: None,
+                video_pipe,
+                remote_video: false,
+                microphone,
+                speaker_device: speaker,
+                camera,
+                lost_devices: Vec::new(),
+            },
+            frames,
+        ))
     }
 
     /// Records an incoming offer so the UI can ask the user. No media exists until they answer,
     /// and answering opens the system's default devices unless others are picked meanwhile.
-    pub fn ringing(chat: String, incoming: Box<IncomingCall>) -> Self {
+    pub fn ringing(chat: String, incoming: Box<IncomingCall>, video: bool) -> Self {
         let call_id = incoming.action.call_id().to_owned();
-        log::info!("[CALL] incoming offer call_id={call_id}");
+        log::info!("[CALL] incoming offer call_id={call_id} video={video}");
         Self {
             generation: next_generation(),
             call_id,
             chat,
             direction: CallDirection::Incoming,
+            video,
             phase: CallPhase::Incoming,
             started: None,
             outcome: None,
@@ -445,9 +1122,14 @@ impl Call {
             media_ready: false,
             mic: None,
             speaker: None,
+            video_pipe: None,
+            remote_video: false,
             microphone: None,
             speaker_device: None,
+            camera: None,
             lost_devices: Vec::new(),
+            camera_wanted: false,
+            peer_video_request: None,
         }
     }
 
@@ -460,6 +1142,7 @@ impl Call {
             call_id: "test-call".to_owned(),
             chat: chat.to_owned(),
             direction: CallDirection::Incoming,
+            video: false,
             phase: CallPhase::Incoming,
             started: None,
             outcome: None,
@@ -469,9 +1152,14 @@ impl Call {
             media_ready: false,
             mic: None,
             speaker: None,
+            video_pipe: None,
+            remote_video: false,
             microphone: None,
             speaker_device: None,
+            camera: None,
             lost_devices: Vec::new(),
+            camera_wanted: false,
+            peer_video_request: None,
         }
     }
 
@@ -489,6 +1177,10 @@ impl Call {
         self.phase
     }
 
+    pub fn is_video(&self) -> bool {
+        self.video
+    }
+
     /// The live handle, once the call has one.
     pub fn handle(&self) -> Option<Arc<CallHandle>> {
         self.handle.clone()
@@ -500,14 +1192,22 @@ impl Call {
             generation: self.generation,
             chat: self.chat.clone(),
             direction: self.direction,
+            video: self.video,
             phase: self.phase,
             started: self.started,
             muted: self.handle.as_ref().is_some_and(|handle| handle.is_muted()),
+            camera_on: self
+                .video_pipe
+                .as_ref()
+                .is_some_and(VideoPipeline::camera_running),
+            remote_video: self.remote_video,
+            video_requested: self.peer_video_request.is_some(),
             outcome: self.outcome,
             peer_audio: self.peer_audio,
             lost_devices: self.lost_devices.clone(),
             microphone: self.microphone.clone(),
             speaker: self.speaker_device.clone(),
+            camera: self.camera.clone(),
         }
     }
 
@@ -545,10 +1245,11 @@ impl Call {
         lost
     }
 
-    /// Rebinds anything the machine no longer has: a headset switched off mid-call.
+    /// Rebinds anything the machine no longer has: a headset switched off, a camera unplugged.
     ///
     /// Returns what had to change, so the caller can say it. Nothing is reported against an empty
-    /// list, which is a discovery tool that could not run rather than an empty machine. A lost
+    /// list, which is a discovery tool that could not run rather than an empty machine. The call
+    /// itself is never ended here: a lost camera leaves the rest of the call alone, and a lost
     /// microphone or speaker moves to the system default.
     pub async fn verify_devices(&mut self, list: &DeviceList) -> Vec<(DeviceKind, String)> {
         let mut lost = Vec::new();
@@ -569,22 +1270,61 @@ impl Call {
             self.set_speaker(None);
             lost.push((DeviceKind::Speaker, device));
         }
+        if let Some(device) = self.camera.clone()
+            && !list.cameras.is_empty()
+            && !list.cameras.iter().any(|known| known.id == device)
+        {
+            self.camera = None;
+            lost.push((DeviceKind::Camera, device));
+            if self
+                .video_pipe
+                .as_ref()
+                .is_some_and(VideoPipeline::camera_running)
+            {
+                // The peer is being sent a stream with no source behind it: stop it properly
+                // rather than leaving the last frame frozen on their screen.
+                if let Err(error) = self.set_camera(false).await {
+                    log::warn!("[CALL] the peer was not told the camera is gone: {error}");
+                }
+            } else {
+                self.camera_wanted = false;
+            }
+        }
         lost
+    }
+
+    /// Whether the camera stopped on its own: the call still wants it, and no frames are coming.
+    ///
+    /// The peer has a video stream open at this point, so a stalled camera is stopped the same way
+    /// a switched-off one is instead of being left frozen.
+    pub fn camera_stalled(&self) -> bool {
+        self.camera_wanted
+            && self.handle.is_some()
+            && self
+                .video_pipe
+                .as_ref()
+                .is_some_and(|pipe| !pipe.camera_running())
     }
 
     /// The devices picked so far: what a call that has not started media yet should bind to, so a
     /// microphone chosen while the phone was ringing is the one the call actually uses.
-    pub fn selections(&self) -> (Option<String>, Option<String>) {
-        (self.microphone.clone(), self.speaker_device.clone())
+    pub fn selections(&self) -> (Option<String>, Option<String>, Option<String>) {
+        (
+            self.microphone.clone(),
+            self.speaker_device.clone(),
+            self.camera.clone(),
+        )
     }
 
-    /// Answers a ringing call: sends the real `<accept>` and brings up media.
+    /// Answers a ringing call: sends the real `<accept>`, brings up media, and returns the frame
+    /// channel for the UI.
     pub async fn answer(
         &mut self,
         client: &Arc<Client>,
         microphone: Option<String>,
         speaker: Option<String>,
-    ) -> Result<()> {
+        camera: Option<String>,
+    ) -> Result<Option<async_channel::Receiver<VideoTick>>> {
         let Some(incoming) = self.incoming.clone() else {
             return Err(anyhow!("nothing is ringing"));
         };
@@ -595,6 +1335,17 @@ impl Call {
         {
             return Err(anyhow!("no {missing} is available; a call needs one"));
         }
+        // The same rule as placing a call: a video offer that cannot start video is not accepted as
+        // something else behind the user's back. Nothing has been sent yet, so the call stays
+        // ringing and the user can still decline it.
+        let mut pipe = None;
+        if self.video {
+            match VideoPipeline::start(camera.clone()).await {
+                Ok((pipeline, frames)) => pipe = Some((pipeline, frames)),
+                Err(error) => log::warn!("[CALL] video pipeline could not start: {error}"),
+            }
+        }
+        require_video(self.video, pipe.is_some())?;
         let (mic, mic_rx) = AudioInput::spawn(microphone.clone());
         let (output, output_tx) = AudioOutput::spawn(speaker.clone());
 
@@ -602,11 +1353,16 @@ impl Call {
         // From here the library owns the answer: if it fails, its own guard ends the call with the
         // peer, so there is no offer left for [`Call::abandon`] to refuse.
         self.incoming = None;
-        let accepted = voip
-            .accept(&incoming)
-            .audio(mic_rx, output_tx)
-            .start()
-            .await;
+        let builder = voip.accept(&incoming).audio(mic_rx, output_tx);
+        let accepted = match &pipe {
+            Some((pipeline, _)) => {
+                builder
+                    .video(pipeline.source(), pipeline.sink())
+                    .start()
+                    .await
+            }
+            None => builder.start().await,
+        };
         let handle = match accepted {
             Ok(handle) => Arc::new(handle),
             Err(error) => return Err(anyhow!("WhatsApp refused the answer: {error}")),
@@ -618,13 +1374,25 @@ impl Call {
         self.speaker = Some(output);
         self.microphone = microphone;
         self.speaker_device = speaker;
+        self.camera = camera;
+        self.video &= pipe.is_some();
+        self.camera_wanted = pipe
+            .as_ref()
+            .is_some_and(|(pipeline, _)| pipeline.camera_running());
         // The user picked the phone up. The media plane is still coming up, so this is `Accepted`
         // rather than `Connecting`, which is what the peer's own `<accept>` means on an outgoing
         // call: neither phase claims the call is live yet.
         self.phase = CallPhase::Accepted;
         log::info!("[CALL] accepted locally call_id={}", self.call_id);
         self.became_active();
-        Ok(())
+        let frames = match pipe {
+            Some((pipeline, frames)) => {
+                self.video_pipe = Some(pipeline);
+                Some(frames)
+            }
+            None => None,
+        };
+        Ok(frames)
     }
 
     /// Ends a call this side could not answer: the offer is refused when it is still ours to
@@ -696,6 +1464,9 @@ impl Call {
 
     /// Releases every local resource. Safe to call twice.
     pub fn cleanup(&mut self) {
+        if let Some(mut pipe) = self.video_pipe.take() {
+            pipe.shutdown();
+        }
         if let Some(mut mic) = self.mic.take() {
             mic.stop();
         }
@@ -859,6 +1630,40 @@ impl Call {
                 );
                 None
             }
+            // The peer's own video state, which is the only thing that says their picture stopped.
+            // Without this the flag only ever went true, so a peer who turned their camera off was
+            // still reported as sending video and the decoder's last frame stayed on screen as if
+            // it were live.
+            // Outbound video cannot go on the wire until a keyframe does.
+            CallEvent::VideoKeyframeNeeded => {
+                if let Some(pipe) = &self.video_pipe {
+                    pipe.force_keyframe();
+                }
+                None
+            }
+            CallEvent::PeerVideoStateChanged {
+                state,
+                upgrade_token,
+                ..
+            } => {
+                if state.is_upgrade_request() && !self.video {
+                    // The peer turned their camera on in a voice call: the screen asks, and the
+                    // camera button answers. A request resolved by signaling has no token.
+                    let Some(token) = upgrade_token else {
+                        return None;
+                    };
+                    log::info!("[CALL] the peer asked for video call_id={}", self.call_id);
+                    self.peer_video_request = Some(*token);
+                    return Some(self.update());
+                }
+                if state.is_inactive_for_call_mode() {
+                    let withdrawn = self.peer_video_request.take().is_some();
+                    if self.remote_video_stopped() || withdrawn {
+                        return Some(self.update());
+                    }
+                }
+                None
+            }
             _ => None,
         }
     }
@@ -986,7 +1791,11 @@ impl Call {
         self.phase = CallPhase::Active;
         // The timer starts here, when there is really a call, never at the button press.
         self.started = Some(Instant::now());
-        log::info!("[CALL] active call_id={}", self.call_id);
+        log::info!(
+            "[CALL] active call_id={} video={}",
+            self.call_id,
+            self.video
+        );
         Some(self.update())
     }
 
@@ -1046,6 +1855,155 @@ impl Call {
         Some(self.update())
     }
 
+    /// Says a media stream the call owns has just been opened or closed.
+    ///
+    /// A camera is a second stream on this machine's audio graph, and the graph relinks every
+    /// stream already on it while the new one settles. The sink is told, so a pause that belongs to
+    /// the graph is not read as a device that died and is not recovered from by throwing the peer's
+    /// audio away.
+    fn media_stream_changed(&self) {
+        if let Some(speaker) = &self.speaker {
+            speaker.relink();
+        }
+    }
+
+    /// The engine's counters and this side's audio path, for one transition of a call.
+    ///
+    /// Called at every point a media stream comes or goes, so a report has the numbers from before
+    /// and after the change rather than one heartbeat somewhere in the middle. A call that goes
+    /// quiet when the camera comes on is diagnosed from these lines: `rtp_received` and
+    /// `audio_frames_decoded` climbing while `audio_sink_dropped` climbs says the peer is still
+    /// being heard and this side is the one dropping it, and a flat `rtp_received` says the
+    /// opposite.
+    pub fn note_transition(&self, marker: &str) {
+        self.log_media_stats_at(marker);
+    }
+
+    /// Turns the camera on or off through the engine's video direction.
+    pub async fn set_camera(&mut self, on: bool) -> Result<CallUpdate> {
+        let Some(handle) = self.handle.clone() else {
+            return Err(anyhow!("the call is not up"));
+        };
+        self.note_transition(if on {
+            "camera on requested"
+        } else {
+            "camera off requested"
+        });
+        if on {
+            let Some(pipe) = self.video_pipe.as_mut() else {
+                return Err(anyhow!("this call has no video"));
+            };
+            // The local capture comes up before the engine is asked to carry it. If the engine
+            // refuses, the capture that was just started is rolled back: leaving it running would
+            // be a camera holding the device and frames going to nobody, while the screen still
+            // reads the call as video-off.
+            pipe.resume_camera(self.camera.clone()).await?;
+            let (source, sink) = (pipe.source(), pipe.sink());
+            // The camera stream exists now, so the graph has relinked around it.
+            if let Some(speaker) = &self.speaker {
+                speaker.relink();
+            }
+            if let Err(error) = handle.resume_video(source, sink).await {
+                if let Some(pipe) = self.video_pipe.as_mut() {
+                    pipe.pause_camera();
+                }
+                self.camera_wanted = false;
+                self.media_stream_changed();
+                self.note_transition("camera on rolled back");
+                return Err(anyhow!("the camera could not be enabled: {error}"));
+            }
+            self.camera_wanted = true;
+        } else {
+            // The local capture is what must not outlive the press, so it is stopped whatever the
+            // engine says. A failure to tell the peer is still surfaced, but it cannot be allowed
+            // to leave the camera capturing and sending: the request was to turn it off.
+            let notified = handle.stop_video().await;
+            if let Some(pipe) = self.video_pipe.as_mut() {
+                pipe.pause_camera();
+            }
+            self.camera_wanted = false;
+            self.media_stream_changed();
+            if let Err(error) = notified {
+                self.note_transition("camera off, peer not told");
+                return Err(anyhow!(
+                    "the camera was stopped, but the peer was not told: {error}"
+                ));
+            }
+        }
+        log::info!("[CALL] camera enabled={on}");
+        self.note_transition(if on {
+            "camera on settled"
+        } else {
+            "camera off settled"
+        });
+        Ok(self.update())
+    }
+
+    /// Asks the peer for video on a call that started as voice, or turns the camera back on when
+    /// this is already a video call.
+    ///
+    /// The upgrade is the real one: `CallHandle::start_video` attaches the endpoints, enables the
+    /// media plane and sends `<video state=11>`, and the peer's answer arrives as video state
+    /// signaling. Returns the frame channel the UI should start draining.
+    ///
+    /// The camera arrives already resolved, the same way a call's startup resolves it: upgrading a
+    /// voice call on a fresh install opens the machine's own camera instead of failing on a `None`
+    /// that only ever meant "default device".
+    pub async fn upgrade_to_video(
+        &mut self,
+        camera: Option<String>,
+    ) -> Result<Option<async_channel::Receiver<VideoTick>>> {
+        let Some(handle) = self.handle.clone() else {
+            return Err(anyhow!("the call is not up"));
+        };
+        self.note_transition("video requested");
+        if self.video_pipe.is_none() {
+            let request = self.peer_video_request.take();
+            let (pipe, frames) = VideoPipeline::start(camera.clone()).await?;
+            self.media_stream_changed();
+            self.camera_wanted = pipe.camera_running();
+            self.video_pipe = Some(pipe);
+            self.camera = camera.clone();
+            self.video = true;
+            let (source, sink) = {
+                let pipe = self.video_pipe.as_ref().expect("just installed");
+                (pipe.source(), pipe.sink())
+            };
+            // A peer who asked for video is answered; otherwise the peer is asked.
+            let started = match request {
+                Some(token) => handle.accept_video(token, source, sink).await,
+                None => handle.start_video(source, sink).await,
+            };
+            if let Err(error) = started {
+                self.abandon_video();
+                return Err(anyhow!("the peer could not be asked for video: {error}"));
+            }
+            log::info!("[CALL] video upgrade requested call_id={}", self.call_id);
+            self.note_transition("video requested ok");
+            return Ok(Some(frames));
+        }
+        self.set_camera(true).await?;
+        Ok(None)
+    }
+
+    /// Gives back everything an upgrade that the peer refused had built.
+    ///
+    /// The peer was never asked, so there is no video call to be in: leaving the pipeline installed
+    /// would be a call the screen draws as sending a picture that was never announced, with a camera
+    /// holding the device and the frames going to nobody. The camera is stopped, the pipeline is
+    /// dropped, and the selection is cleared so the next press starts from the machine rather than
+    /// from a device this attempt had already taken.
+    fn abandon_video(&mut self) {
+        if let Some(mut pipe) = self.video_pipe.take() {
+            pipe.shutdown();
+        }
+        self.video = false;
+        self.camera = None;
+        self.camera_wanted = false;
+        self.media_stream_changed();
+        log::warn!("[CALL] video upgrade refused call_id={}", self.call_id);
+    }
+
     /// Rebinds the microphone. The engine's channel is untouched.
     pub fn set_microphone(&mut self, device: Option<String>) -> CallUpdate {
         self.microphone = device.clone();
@@ -1066,6 +2024,67 @@ impl Call {
         }
         log::info!("[CALL] speaker device {:?}", self.speaker_device);
         self.update()
+    }
+
+    /// Switches the camera. A running camera is restarted on the new node.
+    ///
+    /// The device arrives already resolved: `None` is the picker's "First camera", and a camera
+    /// has no system default, so the caller reads it as the first node the machine reports — exactly
+    /// as [`resolve_devices`] reads it when a call starts. Resolving it here instead would enumerate
+    /// devices on whatever thread is driving the call, which is the worker's async loop.
+    pub async fn set_camera_device(&mut self, device: Option<String>) -> Result<CallUpdate> {
+        self.camera = device.clone();
+        self.lost_devices.clear();
+        // Said before the switch is attempted, because the stream is going either way: the old
+        // camera is already released by the time a new one is opened, so the graph relinks whether
+        // or not the new node turns out to be usable.
+        if self
+            .video_pipe
+            .as_ref()
+            .is_some_and(VideoPipeline::camera_running)
+        {
+            self.media_stream_changed();
+        }
+        if let Some(pipe) = self.video_pipe.as_mut()
+            && pipe.camera_running()
+        {
+            pipe.resume_camera(device).await?;
+        }
+        log::info!("[CALL] camera device {:?}", self.camera);
+        Ok(self.update())
+    }
+
+    /// Whether the peer's picture is the one to show right now.
+    ///
+    /// The flag itself is private so it can only be set by a frame arriving and cleared by the
+    /// peer's own signaling; this is how the frame path asks before handing a picture to the UI.
+    pub fn peer_video_visible(&self) -> bool {
+        self.remote_video
+    }
+
+    /// Notes that the peer's picture arrived, so the UI can stop saying it is waiting.
+    pub fn saw_remote_video(&mut self) -> bool {
+        if self.remote_video {
+            return false;
+        }
+        self.remote_video = true;
+        log::info!("[CALL] remote video received call_id={}", self.call_id);
+        true
+    }
+
+    /// Notes that the peer's picture stopped, so the UI stops showing the last frame it had.
+    ///
+    /// `remote_video` only ever became true, and nothing turned it back: a peer who turned their
+    /// camera off left the call reported as sending video and the decoder's last frame on screen as
+    /// if it were live. The state that says otherwise is the peer's own `<video state=N>` signaling.
+    /// Returns whether this was a change, so only a change is published.
+    pub fn remote_video_stopped(&mut self) -> bool {
+        if !self.remote_video {
+            return false;
+        }
+        self.remote_video = false;
+        log::info!("[CALL] remote video stopped call_id={}", self.call_id);
+        true
     }
 }
 
@@ -1133,7 +2152,7 @@ fn silence_reason(reason: whatsapp_rust::voip_control::MediaSilenceReason) -> Si
 mod tests {
     use super::*;
 
-    /// A machine with a microphone and a speaker, named the way a picker would show them.
+    /// A machine with one of each, named the way a picker would show them.
     fn machine() -> DeviceList {
         DeviceList {
             microphones: vec![AudioDevice {
@@ -1143,6 +2162,10 @@ mod tests {
             speakers: vec![AudioDevice {
                 id: "alsa_output.usb-Generic_USB_Headset-00.analog-stereo".to_owned(),
                 label: "USB Headset Stereo".to_owned(),
+            }],
+            cameras: vec![CameraDevice {
+                id: "0".to_owned(),
+                label: "Laptop Camera".to_owned(),
             }],
         }
     }
@@ -1161,14 +2184,22 @@ mod tests {
                 "a device is labelled for the picker"
             );
         }
+        for device in &listed.cameras {
+            assert!(!device.id.is_empty(), "a camera is named by its node");
+            assert!(
+                !device.label.is_empty(),
+                "a camera is labelled for the picker"
+            );
+        }
     }
 
-    /// Changing the microphone or the speaker leaves the call's audio alone.
+    /// Changing the camera, the microphone or the speaker leaves the call's audio alone.
     ///
-    /// The devices below belong to the test rather than the machine, so this holds on a build host
-    /// with no sound at all.
+    /// This is the regression the video direction once caused: turning the camera on took the
+    /// remote audio with it. The devices below belong to the test rather than the machine, so this
+    /// holds on a build host with no camera and no sound at all.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn changing_audio_devices_leaves_the_calls_audio_running() {
+    async fn changing_media_devices_leaves_the_calls_audio_running() {
         let samples: Vec<f32> = (0..960).map(|sample| sample as f32 / 1_920.0).collect();
         let (_devices, speaker) = crate::call_audio::fake::install(samples, 2, 48_000, (48_000, 2));
         let mut call = dialing();
@@ -1180,9 +2211,15 @@ mod tests {
         // The microphone is delivering before anything else is touched.
         assert!(
             frames.recv().await.is_ok(),
-            "the microphone is delivering before any device changes"
+            "the microphone is delivering before the camera is touched"
         );
 
+        call.set_camera_device(Some("9".to_owned()))
+            .await
+            .expect("a camera can be selected");
+        call.set_camera_device(None)
+            .await
+            .expect("a camera can be cleared");
         call.set_speaker(Some("Second speaker".to_owned()));
         call.set_microphone(Some("Second microphone".to_owned()));
 
@@ -1191,16 +2228,88 @@ mod tests {
             .await
             .expect("the microphone channel survived the changes")
             .expect("the frames are still coming");
-        // Only the rebind opened a device.
+        // Only the rebind opened a device: the camera change never touches the audio at all.
         let started = std::time::Instant::now();
         while speaker.opened_count() < 2 && started.elapsed() < std::time::Duration::from_secs(5) {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         assert_eq!(
             speaker.opened(),
-            vec![None, Some("Second speaker".to_owned())]
+            vec![None, Some("Second speaker".to_owned())],
+            "the camera changes opened no audio device"
         );
         call.cleanup();
+    }
+
+    /// A video direction with a camera that reads as running, without a device behind it.
+    ///
+    /// Enough to drive the paths that only ask whether a camera is capturing, which is what a
+    /// machine with no camera cannot exercise otherwise.
+    fn pipeline_with_a_running_camera() -> VideoPipeline {
+        let (ticks, _ticks_rx) = async_channel::bounded::<VideoTick>(2);
+        let (remote_tx, _remote_rx) = async_channel::bounded::<VideoFrame>(8);
+        let (_frames, timed) = async_channel::bounded::<TimedVideoFrame>(4);
+        // No thread behind it: its end of the channel is already dropped.
+        let (_done, finished) = std::sync::mpsc::channel();
+        VideoPipeline {
+            ticks,
+            remote_tx,
+            camera: Some(CameraCapture {
+                timed,
+                running: Arc::new(AtomicBool::new(true)),
+                keyframe: Arc::new(AtomicBool::new(false)),
+                finished,
+            }),
+            device: None,
+        }
+    }
+
+    /// Opening or closing a camera tells the speaker the audio graph is relinking.
+    ///
+    /// A camera is a second stream on the same graph the call's audio runs on, and the graph
+    /// relinks every stream on it while the new one settles. Without this the sink is judged stalled
+    /// through that pause and recovers by throwing the peer's audio away, which is the reported
+    /// "camera on and the other side went quiet" with everything else still working.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_camera_change_tells_the_speaker_the_graph_is_relinking() {
+        let samples: Vec<f32> = (0..960).map(|sample| sample as f32 / 1_920.0).collect();
+        let (_devices, _speaker) =
+            crate::call_audio::fake::install(samples, 2, 48_000, (48_000, 2));
+        let mut call = dialing();
+        let (output, _frames) = AudioOutput::spawn(None);
+        call.speaker = Some(output);
+        call.video = true;
+        call.video_pipe = Some(pipeline_with_a_running_camera());
+        assert!(
+            !call.speaker.as_ref().is_some_and(AudioOutput::relink_open),
+            "nothing has relinked yet"
+        );
+        // Whether this machine has a tenth camera is not what is under test: the stream is
+        // torn down either way, so the sink is told either way.
+        let _ = call.set_camera_device(Some("9".to_owned())).await;
+        assert!(
+            call.speaker.as_ref().is_some_and(AudioOutput::relink_open),
+            "switching the camera tells the sink the graph is relinking"
+        );
+        call.cleanup();
+    }
+
+    /// An upgrade the peer refused leaves no half-installed video behind it.
+    ///
+    /// The call would otherwise draw itself as video with a camera holding the device, the frames
+    /// going to nobody, and the peer never having been asked, so the next press of the camera would
+    /// have to undo a state the user never asked for.
+    #[test]
+    fn a_refused_upgrade_gives_back_everything_it_built() {
+        let mut call = dialing();
+        call.video = true;
+        call.camera = Some("0".to_owned());
+        call.camera_wanted = true;
+        call.abandon_video();
+        assert!(!call.is_video(), "the call is a voice call again");
+        assert!(call.camera.is_none(), "and it holds no camera");
+        assert!(!call.camera_wanted, "so none is wanted");
+        assert!(call.video_pipe.is_none(), "and the pipeline is gone");
     }
 
     /// The engine's mute gate, as the engine's own media backend applies it to the frames a call
@@ -1306,7 +2415,8 @@ mod tests {
     }
 
     /// A call that is up stays up through a mute: the engine's channel keeps carrying whole frames,
-    /// and a device change made while muted rebinds the streams rather than restarting the call.
+    /// a device change made while muted rebinds the streams rather than restarting the call, and a
+    /// camera that cannot be turned on leaves the audio exactly as it was.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_muted_call_keeps_its_audio_and_its_phase() {
         let samples: Vec<f32> = (0..960).map(|sample| sample as f32 / 1_920.0).collect();
@@ -1323,6 +2433,13 @@ mod tests {
         // Muted, and everything the screen can do meanwhile is done to it.
         call.set_microphone(Some("Second microphone".to_owned()));
         call.set_speaker(Some("Second speaker".to_owned()));
+        call.set_camera_device(Some("9".to_owned()))
+            .await
+            .expect("a camera can be selected");
+        assert!(
+            call.set_camera(true).await.is_err(),
+            "a call with no video refuses the camera rather than ending the call"
+        );
 
         let mut quiet: Vec<Vec<i16>> = Vec::new();
         let mut heard: Vec<Vec<i16>> = Vec::new();
@@ -1352,7 +2469,7 @@ mod tests {
             heard.iter().flatten().any(|sample| *sample != 0),
             "unmuting brings the microphone back"
         );
-        // Neither the mute nor the device changes moved the call.
+        // Neither the mute, nor the device changes, nor the refused camera moved the call.
         assert_eq!(call.phase(), CallPhase::Active, "the call is still up");
         // A rebind is the pump's own work, on its own task, so the device it opened is waited for
         // rather than assumed to be there the moment the reader asked for it.
@@ -1380,20 +2497,192 @@ mod tests {
         call.cleanup();
     }
 
-    fn snapshot(phase: CallPhase) -> CallUpdate {
+    /// Opens this machine's camera and drives the pipeline the way a call does: start, pause,
+    /// resume, and end. A machine with no camera has nothing to drive and says so.
+    /// `cargo test --lib -- --ignored --nocapture calls::tests::hardware`
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "opens this machine's real camera"]
+    async fn hardware_pipeline_starts_pauses_and_stops_the_camera() {
+        let Some((device, label)) = crate::camera::cameras().into_iter().next() else {
+            eprintln!("no camera on this machine: nothing to drive");
+            return;
+        };
+        eprintln!("driving {device} ({label})");
+        let (mut pipe, ticks) = VideoPipeline::start(Some(device.clone()))
+            .await
+            .expect("the camera opens");
+        assert!(pipe.camera_running(), "a started camera reads as on");
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(5), ticks.recv())
+            .await
+            .expect("the camera delivers within five seconds")
+            .expect("the preview channel is open");
+        assert!(matches!(frame, VideoTick::Local(_)), "our own preview");
+        pipe.pause_camera();
+        assert!(!pipe.camera_running(), "a pause reads as off at once");
+        pipe.resume_camera(Some(device))
+            .await
+            .expect("the camera starts again");
+        assert!(pipe.camera_running(), "a resumed camera reads as on again");
+        pipe.shutdown();
+        assert!(
+            !pipe.camera_running(),
+            "a call that has ended leaves no camera running"
+        );
+    }
+
+    /// A video call goes on without a camera that cannot be opened: the other side's picture
+    /// still arrives, and our own camera reads as off.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_video_call_goes_on_without_a_camera_it_cannot_open() {
+        let (pipe, _ticks) = VideoPipeline::start(Some("no such camera".to_owned()))
+            .await
+            .expect("the decoder side starts");
+        assert!(!pipe.camera_running(), "the camera reads as off");
+    }
+
+    fn snapshot(phase: CallPhase, camera_on: bool) -> CallUpdate {
         CallUpdate {
             generation: 7,
             chat: "15551234567@s.whatsapp.net".to_owned(),
             direction: CallDirection::Outgoing,
+            video: true,
             phase,
             started: None,
             muted: false,
+            camera_on,
+            remote_video: false,
+            video_requested: false,
             outcome: None,
             peer_audio: None,
             lost_devices: Vec::new(),
             microphone: None,
             speaker: None,
+            camera: None,
         }
+    }
+
+    #[test]
+    fn a_call_with_no_camera_named_opens_with_the_machines_own() {
+        // No camera picked is what the picker calls "First camera". For a camera
+        // that has to mean the first one the machine reports, or a first video call could never
+        // start: there is no system default camera to fall back on.
+        let resolved = resolve_devices(&machine(), None, None, None);
+        assert_eq!(resolved.camera.as_deref(), Some("0"));
+        assert!(
+            resolved.lost_devices.is_empty(),
+            "nothing moved, so the screen has nothing to say"
+        );
+        // A machine that reports no camera at all still resolves to none, which is what makes the
+        // video pipeline refuse the call rather than offer the peer an empty stream.
+        let none = resolve_devices(&DeviceList::default(), None, None, None);
+        assert_eq!(none.camera, None);
+    }
+
+    /// Turning video on mid-call reads the default the same way a call's startup does.
+    ///
+    /// The two paths that change a camera while a call is up — upgrading a voice call to video and
+    /// picking a device in the call screen — used to pass the stored `None` straight to
+    /// `VideoPipeline::start`, which rejects it. A fresh install could then not turn its camera on
+    /// at all, even with a working camera attached, while starting a video call worked fine. Both
+    /// now go through `default_camera`, so the reading is the same one `resolve_devices` applies.
+    #[test]
+    fn a_camera_turned_on_mid_call_opens_the_machines_own() {
+        let machine = machine();
+        assert_eq!(
+            default_camera(&machine, None).as_deref(),
+            Some("0"),
+            "the picker's default means the first camera the machine reports"
+        );
+        // A camera that is still there is kept.
+        assert_eq!(
+            default_camera(&machine, Some("0".to_owned())).as_deref(),
+            Some("0")
+        );
+        // One the machine no longer has falls back rather than failing the switch.
+        assert_eq!(
+            default_camera(&machine, Some("7".to_owned())).as_deref(),
+            Some("0")
+        );
+        // No camera named and none reported stays none, so the caller refuses rather than invents.
+        assert_eq!(default_camera(&DeviceList::default(), None), None);
+        // An empty list means discovery could not run, not that nothing is plugged in: the choice
+        // stands rather than being silently swapped for nothing.
+        assert_eq!(
+            default_camera(&DeviceList::default(), Some("3".to_owned())).as_deref(),
+            Some("3")
+        );
+    }
+
+    /// A peer who turns their camera off stops being reported as sending video.
+    ///
+    /// `remote_video` only ever became true, and nothing turned it back, so a peer who stopped
+    /// their camera left the call reported as carrying video and the decoder's last frame on screen
+    /// as if it were live. The peer's own `<video state=N>` signaling is what says otherwise.
+    #[test]
+    fn a_peer_that_stops_its_camera_stops_being_reported_as_sending_video() {
+        use whatsapp_rust::voip::VideoState;
+        let peer = |state| CallEvent::PeerVideoStateChanged {
+            source: creator(),
+            call_creator: creator(),
+            state,
+            orientation: None,
+            upgrade_token: None,
+        };
+        let mut call = dialing();
+        call.video = true;
+        assert!(!call.remote_video);
+        assert!(!call.remote_video_stopped(), "nothing to stop");
+        assert!(call.saw_remote_video());
+        assert!(call.remote_video);
+        // The peer's own state saying video is inactive is what clears the flag.
+        let update = call.media(&peer(VideoState::Stopped));
+        assert!(update.is_some(), "the screen is told the picture stopped");
+        assert!(
+            !call.remote_video,
+            "a stopped peer camera is not a live picture"
+        );
+        // A repeated inactive state publishes nothing further.
+        assert!(
+            call.media(&peer(VideoState::Disabled)).is_none(),
+            "only a change is published"
+        );
+        // A state that is still active leaves it alone.
+        call.saw_remote_video();
+        assert!(
+            call.media(&peer(VideoState::Enabled)).is_none(),
+            "an active state is not a stop"
+        );
+        assert!(call.remote_video, "the picture is still there");
+    }
+
+    /// A peer who turns their camera on in a voice call asks; the screen says so, and a
+    /// withdrawn request is forgotten.
+    #[test]
+    fn a_peer_asking_for_video_is_shown_until_it_withdraws() {
+        use whatsapp_rust::voip::{VideoState, VideoUpgradeToken};
+        let token = VideoUpgradeToken::builder().generation(1).epoch(1).build();
+        let mut call = dialing();
+        let asked = call
+            .media(&CallEvent::PeerVideoStateChanged {
+                source: creator(),
+                call_creator: creator(),
+                state: VideoState::UpgradeRequestV2,
+                orientation: None,
+                upgrade_token: Some(token),
+            })
+            .expect("the request reaches the screen");
+        assert!(asked.video_requested);
+        assert!(!asked.video, "asking is not yet a video call");
+        let withdrawn = call
+            .media(&CallEvent::PeerVideoStateChanged {
+                source: creator(),
+                call_creator: creator(),
+                state: VideoState::UpgradeCancel,
+                orientation: None,
+                upgrade_token: None,
+            })
+            .expect("the withdrawal reaches the screen");
+        assert!(!withdrawn.video_requested);
     }
 
     #[test]
@@ -1403,9 +2692,11 @@ mod tests {
             &machine,
             Some(machine.microphones[0].id.clone()),
             Some(machine.speakers[0].id.clone()),
+            Some("0".to_owned()),
         );
         assert_eq!(resolved.microphone, Some(machine.microphones[0].id.clone()));
         assert_eq!(resolved.speaker, Some(machine.speakers[0].id.clone()));
+        assert_eq!(resolved.camera.as_deref(), Some("0"));
         assert!(
             resolved.lost_devices.is_empty(),
             "nothing moved, so the screen has nothing to say"
@@ -1418,12 +2709,18 @@ mod tests {
             &machine(),
             Some("bluez_input.AC_12_34_56".to_owned()),
             Some("bluez_output.AC_12_34_56".to_owned()),
+            Some("7".to_owned()),
         );
         assert_eq!(
             resolved.microphone, None,
             "the microphone moves to the default"
         );
         assert_eq!(resolved.speaker, None, "and so does the speaker");
+        assert_eq!(
+            resolved.camera.as_deref(),
+            Some("0"),
+            "a camera the machine does not have falls back to the one it does"
+        );
         assert_eq!(
             resolved.lost_devices,
             vec![
@@ -1435,6 +2732,10 @@ mod tests {
                     kind: DeviceKind::Speaker,
                     name: "bluez_output.AC_12_34_56".to_owned(),
                 },
+                LostDevice {
+                    kind: DeviceKind::Camera,
+                    name: "7".to_owned(),
+                },
             ]
         );
     }
@@ -1445,9 +2746,11 @@ mod tests {
             &DeviceList::default(),
             Some("bluez_input.AC".to_owned()),
             Some("bluez_output.AC".to_owned()),
+            Some("0".to_owned()),
         );
         assert_eq!(resolved.microphone.as_deref(), Some("bluez_input.AC"));
         assert_eq!(resolved.speaker.as_deref(), Some("bluez_output.AC"));
+        assert_eq!(resolved.camera.as_deref(), Some("0"));
         assert!(
             resolved.lost_devices.is_empty(),
             "a device list that could not be read says nothing about the devices"
@@ -1457,6 +2760,10 @@ mod tests {
     #[test]
     fn a_device_is_named_the_way_the_picker_named_it() {
         let machine = machine();
+        assert_eq!(
+            device_name(&machine, DeviceKind::Camera, "0"),
+            "Laptop Camera"
+        );
         assert_eq!(
             device_name(
                 &machine,
@@ -1532,12 +2839,84 @@ mod tests {
         assert_eq!(termination_outcome(None, false), CallOutcome::NoAnswer);
     }
 
+    /// The NAL unit types in one Annex-B access unit.
+    fn nal_types(unit: &[u8]) -> Vec<u8> {
+        unit.windows(4)
+            .enumerate()
+            .filter(|(_, window)| window[..3] == [0, 0, 1])
+            .filter_map(|(at, _)| unit.get(at + 3).map(|header| header & 0x1F))
+            .collect()
+    }
+
+    /// What the camera hands the engine is what WhatsApp decodes: Constrained Baseline access
+    /// units with their parameter sets on every keyframe, a keyframe on request, and pictures the
+    /// decoder the call screen uses reads back at the size they were sent.
+    #[test]
+    fn the_camera_encoder_makes_access_units_a_decoder_reads() {
+        use openh264::formats::YUVSource as _;
+        let (width, height) = (320, 240);
+        let luma: Vec<u8> = (0..width * height).map(|at| (at % width) as u8).collect();
+        let chroma = vec![128u8; width * height / 4];
+        let picture = Yuv420 {
+            y: &luma,
+            u: &chroma,
+            v: &chroma,
+            size: (width, height),
+        };
+        let mut encoder = video_encoder().expect("the encoder starts");
+        let mut decoder = openh264::decoder::Decoder::new().expect("the decoder starts");
+        let mut units = Vec::new();
+        for frame in 0..4 {
+            if frame == 3 {
+                encoder.force_intra_frame();
+            }
+            units.push(encoder.encode(&picture).expect("a frame encodes").to_vec());
+        }
+        let first = nal_types(&units[0]);
+        assert!(
+            first.contains(&7) && first.contains(&8) && first.contains(&5),
+            "the first unit is a keyframe with its parameter sets: {first:?}"
+        );
+        let sps = units[0]
+            .windows(4)
+            .position(|window| window[..3] == [0, 0, 1] && window[3] & 0x1F == 7)
+            .expect("a sequence parameter set");
+        assert_eq!(units[0][sps + 4], 66, "Baseline profile");
+        assert!(!nal_types(&units[1]).contains(&5), "then delta frames");
+        assert!(
+            nal_types(&units[3]).contains(&5),
+            "and a keyframe when asked"
+        );
+        let decoded = decoder
+            .decode(&units[0])
+            .expect("the decoder reads it")
+            .expect("a picture");
+        assert_eq!(decoded.dimensions(), (width, height));
+    }
+
+    #[test]
+    fn the_corner_preview_keeps_the_capture_shape() {
+        assert_eq!(preview_size((1280, 720)), (320, 180));
+        assert_eq!(preview_size((640, 480)), (240, 180));
+        assert_eq!(preview_size((720, 1280)), (180, 320));
+    }
+
     #[test]
     fn the_periodic_check_only_republishes_a_real_change() {
-        // The worker compares each fresh snapshot with the one the UI was handed, so a call that is
-        // merely ticking does not reach the screen again and a changed phase does.
-        assert_eq!(snapshot(CallPhase::Active), snapshot(CallPhase::Active));
-        assert_ne!(snapshot(CallPhase::Accepted), snapshot(CallPhase::Active));
+        // The worker compares each fresh snapshot with the one the UI was handed, so a camera that
+        // stopped on its own reaches the screen and a call that is merely ticking does not.
+        assert_eq!(
+            snapshot(CallPhase::Active, false),
+            snapshot(CallPhase::Active, false)
+        );
+        assert_ne!(
+            snapshot(CallPhase::Active, true),
+            snapshot(CallPhase::Active, false)
+        );
+        assert_ne!(
+            snapshot(CallPhase::Accepted, false),
+            snapshot(CallPhase::Active, false)
+        );
     }
 
     // The state machine, driven by the stanzas and media events themselves rather than by an engine.
@@ -1557,6 +2936,7 @@ mod tests {
             call_id: CALL_ID.to_owned(),
             chat: PEER.to_owned(),
             direction: CallDirection::Outgoing,
+            video: false,
             phase: CallPhase::Dialing,
             started: None,
             outcome: None,
@@ -1566,9 +2946,14 @@ mod tests {
             media_ready: false,
             mic: None,
             speaker: None,
+            video_pipe: None,
+            remote_video: false,
             microphone: None,
             speaker_device: None,
+            camera: None,
             lost_devices: Vec::new(),
+            camera_wanted: false,
+            peer_video_request: None,
         }
     }
 
@@ -1826,6 +3211,16 @@ mod tests {
     }
 
     #[test]
+    fn a_video_call_is_refused_rather_than_quietly_downgraded() {
+        // A voice call needs no camera, so no pipeline is not a failure.
+        assert!(require_video(false, false).is_ok());
+        assert!(require_video(false, true).is_ok());
+        assert!(require_video(true, true).is_ok());
+        // Video was asked for and did not start: the call is refused, not turned into voice.
+        assert!(require_video(true, false).is_err());
+    }
+
+    #[test]
     fn a_peer_terminate_before_the_call_is_active_is_not_an_answered_call() {
         // The peer answered, so we are past ringing, but the media plane never came up: the call
         // was never Active, so a terminate here is not a call of zero seconds that was answered.
@@ -1870,6 +3265,7 @@ mod hardware_tests {
         let list = super::devices();
         eprintln!("microphones: {:#?}", list.microphones);
         eprintln!("speakers: {:#?}", list.speakers);
+        eprintln!("cameras: {:#?}", list.cameras);
         for device in list.microphones.iter().chain(&list.speakers) {
             assert!(
                 !device.id.is_empty(),
@@ -1878,6 +3274,13 @@ mod hardware_tests {
             assert!(
                 !device.id.ends_with(".monitor"),
                 "a monitor of a sink is not an input anybody can speak into"
+            );
+        }
+        for camera in &list.cameras {
+            assert!(
+                !camera.id.is_empty(),
+                "a camera has an id: {}",
+                camera.label
             );
         }
     }

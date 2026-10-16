@@ -2324,20 +2324,20 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
             "wallpaper" => app.page = Page::Wallpaper,
             // The call surface itself: the incoming call waiting to be answered, and a call that
             // has been up for a few minutes.
-            "call" => call_sample(app, true),
-            "call-active" => call_sample(app, false),
+            "call" => call_sample(app, true, false),
+            "call-active" => call_sample(app, false, false),
             // The other states of a call: dialing, muted with the device
             // pickers open and a headset gone, its farewell, and the strip a
             // call keeps while the reader is in a chat.
             "call-outgoing" => {
-                call_sample(app, false);
+                call_sample(app, false, false);
                 if let Some(call) = app.call.as_mut() {
                     call.phase = CallPhase::Ringing;
                     call.started = None;
                 }
             }
             "call-devices" => {
-                call_sample(app, false);
+                call_sample(app, false, false);
                 app.call_devices = crate::calls::DeviceList {
                     microphones: vec![crate::calls::AudioDevice {
                         id: "studio-mic".into(),
@@ -2346,6 +2346,10 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
                     speakers: vec![crate::calls::AudioDevice {
                         id: "desk-speakers".into(),
                         label: "Desk Speakers".into(),
+                    }],
+                    cameras: vec![crate::calls::CameraDevice {
+                        id: "0".into(),
+                        label: "Integrated Camera".into(),
                     }],
                 };
                 app.call_devices_open = true;
@@ -2359,15 +2363,26 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
                 }
             }
             "call-ended" => {
-                call_sample(app, false);
+                call_sample(app, false, false);
                 if let Some(call) = app.call.as_mut() {
                     call.phase = CallPhase::Ended;
                     call.outcome = Some(crate::calls::CallOutcome::Answered);
                 }
             }
             "call-strip" => {
-                call_sample(app, false);
+                call_sample(app, false, false);
                 app.call_surface_hidden = true;
+            }
+            "call-video" => call_sample(app, false, true),
+            "call-video-incoming" => call_sample(app, true, true),
+            "call-video-off" => {
+                call_sample(app, false, true);
+                if let Some(call) = app.call.as_mut() {
+                    call.remote_video = false;
+                    call.camera_on = false;
+                }
+                app.call_remote_frame = None;
+                app.call_local_frame = None;
             }
             "wallpaper-image" => wallpaper_image_sample(app),
             "omarchy" | "omarchy-light" => {
@@ -3378,10 +3393,11 @@ pub fn sample_ids() -> Vec<&'static str> {
 
 /// Puts a synthetic call on screen, for the call previews and their layout test.
 ///
-/// Demo mode has no engine and no peer, so the surface is handed the same snapshot a real call
-/// publishes, filled in by hand: an invented call id and one of the sample chats. `incoming` is the
-/// call waiting to be accepted; otherwise the call is one that has been up for a few minutes.
-pub fn call_sample(app: &mut App, incoming: bool) {
+/// Demo mode has no engine, no peer, and no camera, so the surface is handed the same snapshot a
+/// real call publishes, filled in by hand: an invented call id, one of the sample chats, and a
+/// picture that is plainly a test pattern rather than anybody's room. `incoming` is the call
+/// waiting to be accepted; otherwise the call is one that has been up for a few minutes.
+pub fn call_sample(app: &mut App, incoming: bool, video: bool) {
     let chat = SAMPLES[0].id;
     app.call = Some(CallUpdate {
         generation: 1,
@@ -3391,6 +3407,7 @@ pub fn call_sample(app: &mut App, incoming: bool) {
         } else {
             CallDirection::Outgoing
         },
+        video,
         phase: if incoming {
             CallPhase::Incoming
         } else {
@@ -3401,13 +3418,41 @@ pub fn call_sample(app: &mut App, incoming: bool) {
         started: (!incoming)
             .then(|| std::time::Instant::now() - std::time::Duration::from_secs(221)),
         muted: false,
+        camera_on: video,
+        remote_video: video && !incoming,
+        video_requested: false,
         outcome: None,
         peer_audio: None,
         lost_devices: Vec::new(),
         microphone: None,
         speaker: None,
+        camera: None,
     });
     app.call_account = Some(app.account().id.clone());
+    if video && !incoming {
+        app.call_remote_frame = Some(std::sync::Arc::new(stock_frame([18, 32, 64], [4, 8, 16], true, 720)));
+        app.call_local_frame = Some(std::sync::Arc::new(stock_frame([240, 140, 60], [40, 30, 80], false, 320)));
+    }
+}
+
+/// A gradient as a video frame `height` tall, in portrait or landscape: the
+/// demo's stand-in for a camera, with no person a real call could show. The
+/// fork has no stock photos, so the frame is drawn from two colors.
+fn stock_frame(top: [u8; 3], bottom: [u8; 3], portrait: bool, height: u32) -> egui::ColorImage {
+    let height = height as usize;
+    let width = if portrait { height * 3 / 4 } else { height * 3 / 2 };
+    let mut pixels = Vec::with_capacity(width * height);
+    for y in 0..height {
+        let t = y as f32 / height.max(1) as f32;
+        let mix = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
+        let color = egui::Color32::from_rgb(
+            mix(top[0], bottom[0]),
+            mix(top[1], bottom[1]),
+            mix(top[2], bottom[2]),
+        );
+        pixels.extend(std::iter::repeat_n(color, width));
+    }
+    egui::ColorImage::new([width, height], pixels)
 }
 
 /// Synthetic call records for the Calls view and the transcript entries.
@@ -5467,6 +5512,8 @@ mod tests {
             "react-picker-empty",
             "react-custom",
             "react-other",
+            "calls",
+            "call-entries",
             "call",
             "call-active",
             "pinned",
@@ -5474,6 +5521,10 @@ mod tests {
             "call-devices",
             "call-ended",
             "call-strip",
+            "call-video",
+            "call-video,light",
+            "call-video-incoming",
+            "call-video-off",
         ] {
             let mut app = self::app();
             apply_flags(&mut app, Some(page));
@@ -15159,7 +15210,8 @@ mod call_surface_tests {
             "Hide the call screen",
             "Full screen",
             "Mute",
-            "Microphone and speaker",
+            "Start video",
+            "Devices",
             "Hang up",
         ] {
             assert!(
@@ -15199,20 +15251,34 @@ mod call_preview_tests {
     #[test]
     fn the_call_previews_hand_the_surface_a_live_call() {
         let mut screen = app();
-        call_sample(&mut screen, true);
+        call_sample(&mut screen, true, false);
         let incoming = screen.call.clone().expect("a call is on screen");
         assert_eq!(incoming.phase, CallPhase::Incoming);
         assert_eq!(incoming.direction, CallDirection::Incoming);
         assert!(incoming.phase.is_live(), "a ringing call is still a call");
+        assert!(
+            !incoming.video,
+            "the ringing preview is the voice one, so the two do not read alike"
+        );
 
         let mut screen = app();
-        call_sample(&mut screen, false);
+        call_sample(&mut screen, false, true);
         let live = screen.call.clone().expect("a call is on screen");
         assert_eq!(live.phase, CallPhase::Active);
         assert_eq!(live.direction, CallDirection::Outgoing);
         assert!(
             live.started.is_some(),
             "the duration has something to count from"
+        );
+        assert!(live.remote_video && live.camera_on);
+        assert!(
+            screen.call_remote_frame.is_some() && screen.call_local_frame.is_some(),
+            "a video preview has both pictures"
+        );
+        assert_eq!(
+            screen.call_remote_frame.as_ref().map(|frame| frame.size),
+            Some([540, 720]),
+            "the peer's picture keeps the shape a portrait phone sends"
         );
     }
 }

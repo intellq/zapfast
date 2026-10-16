@@ -21,7 +21,9 @@ finish-args:
   - --socket=wayland
   - --socket=fallback-x11
   - --share=ipc
-  - --device=dri
+  # The GPU, and the cameras for video calls: Flatpak has no narrower
+  # permission for Video4Linux devices.
+  - --device=all
   # Sound: PulseAudio, which PipeWire also answers.
   - --socket=pulseaudio
   # WhatsApp and attachment downloads.

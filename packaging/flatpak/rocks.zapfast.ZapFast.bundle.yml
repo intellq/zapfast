@@ -10,7 +10,7 @@ finish-args:
   - --socket=wayland
   - --socket=fallback-x11
   - --share=ipc
-  - --device=dri
+  - --device=all
   - --socket=pulseaudio
   - --share=network
   # Archive encryption key.
