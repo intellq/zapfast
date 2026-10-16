@@ -52,8 +52,10 @@ pub(super) fn deliver(
     wake: impl Fn() + Send + 'static,
     mut cancelled: tokio::sync::oneshot::Receiver<Stop>,
     may_wait: bool,
+    failed: impl FnOnce(),
 ) {
     if !authorized() {
+        failed();
         return;
     }
     // macOS always shows the application icon; custom sounds are played by
@@ -69,6 +71,7 @@ pub(super) fn deliver(
         Ok(runtime) => runtime,
         Err(error) => {
             log::debug!("no notification runtime: {error}");
+            failed();
             return;
         }
     };
@@ -77,6 +80,7 @@ pub(super) fn deliver(
             Ok(handle) => handle,
             Err(error) => {
                 log::debug!("no notification: {error}");
+                failed();
                 return;
             }
         };

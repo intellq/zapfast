@@ -83,6 +83,11 @@ name or description, in the interface language or in English.
   none, or an audio file.
 - **Play sounds for group messages**: when off, only mentions and replies to
   you make a sound in groups.
+- **Limit repeat notifications**: off by default. Choose **Direct messages**,
+  **Groups**, or **Direct messages and groups**. A limited chat sends one
+  notification (and its sound), then stays quiet for 10 minutes. Reading the
+  chat, here or on another device, starts over. In groups, a mention of you or a reply to you always
+  notifies. Settings for this account.
 
 **Privacy**
 
