@@ -99,6 +99,14 @@ impl Account {
     ) -> Self {
         let open_chat = settings.last_chat.clone();
         let reported_anonymous = settings.anonymous;
+        let chat_filter = match settings
+            .list_filter
+            .as_deref()
+            .and_then(crate::model::ListFilter::parse)
+        {
+            Some(crate::model::ListFilter::Chip(chip)) => chip,
+            _ => ChatFilter::All,
+        };
         Self {
             id,
             dirs,
@@ -149,7 +157,7 @@ impl Account {
             show_archived: false,
             show_calls: false,
             call_log: Vec::new(),
-            chat_filter: ChatFilter::All,
+            chat_filter,
             labels: Vec::new(),
             account_privacy: crate::privacy::Snapshot::default(),
             interactive_sending: HashSet::new(),

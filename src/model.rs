@@ -98,6 +98,51 @@ pub enum ChatFilter {
     Channels,
 }
 
+/// The chat list's filter as settings keep it: a chip or a label. `None` is
+/// the All chip.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ListFilter {
+    Chip(ChatFilter),
+    Label(String),
+}
+
+impl ListFilter {
+    const LABEL: &'static str = "label:";
+
+    /// The text stored for this filter; `None` for showing every chat.
+    pub fn key(chip: ChatFilter, label: Option<&str>) -> Option<String> {
+        if let Some(label) = label {
+            return Some(format!("{}{label}", Self::LABEL));
+        }
+        let key = match chip {
+            ChatFilter::All => return None,
+            ChatFilter::Unread => "unread",
+            ChatFilter::Private => "private",
+            ChatFilter::Favorites => "favorites",
+            ChatFilter::Groups => "groups",
+            ChatFilter::Channels => "channels",
+        };
+        Some(key.to_owned())
+    }
+
+    /// Reads a stored filter. Anything unknown, as a later version may
+    /// write, shows every chat.
+    pub fn parse(key: &str) -> Option<Self> {
+        if let Some(label) = key.strip_prefix(Self::LABEL) {
+            return (!label.is_empty()).then(|| Self::Label(label.to_owned()));
+        }
+        let chip = match key {
+            "unread" => ChatFilter::Unread,
+            "private" => ChatFilter::Private,
+            "favorites" => ChatFilter::Favorites,
+            "groups" => ChatFilter::Groups,
+            "channels" => ChatFilter::Channels,
+            _ => return None,
+        };
+        Some(Self::Chip(chip))
+    }
+}
+
 impl ChatFilter {
     pub const EVERY: [Self; 6] = [
         Self::All,
@@ -2445,6 +2490,25 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn list_filters_survive_their_stored_form() {
+        for chip in ChatFilter::EVERY {
+            let key = ListFilter::key(chip, None);
+            let read = key.as_deref().and_then(ListFilter::parse);
+            match chip {
+                ChatFilter::All => assert_eq!(read, None),
+                _ => assert_eq!(read, Some(ListFilter::Chip(chip))),
+            }
+        }
+        let key = ListFilter::key(ChatFilter::All, Some("label-7")).unwrap();
+        assert_eq!(
+            ListFilter::parse(&key),
+            Some(ListFilter::Label("label-7".into()))
+        );
+        assert_eq!(ListFilter::parse("something-newer"), None);
+        assert_eq!(ListFilter::parse("label:"), None);
+    }
 
     #[test]
     fn message_receipts_sort_each_recipient_into_one_list() {

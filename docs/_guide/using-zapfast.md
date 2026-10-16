@@ -263,8 +263,9 @@ disappear on your other devices.
 The chips under the search bar narrow the list to **Unread**, **Private**
 (one-to-one chats), or **Groups**. A chip with unread chats shows how many it
 has. Click the active chip again, or **All**, to see every chat. The
-filter applies only to this list: search and the archive still show everything,
-and it resets when ZapFast restarts.
+filter applies only to this list: search and the archive still show everything.
+ZapFast remembers the chip or label each account last showed and comes back
+to it at the next start.
 
 Right-click a chat to pin, archive, or mute it for eight hours, one week, or
 indefinitely. These changes also apply on your phone. `Ctrl+E` (Command+E on

@@ -949,6 +949,9 @@ pub struct AccountSettings {
     /// When the call log was last opened, in seconds: missed calls after it
     /// are the ones its button counts.
     pub calls_seen_at: i64,
+    /// The chip or label the chat list last showed, as
+    /// [`crate::model::ListFilter::key`] writes it; `None` shows every chat.
+    pub list_filter: Option<String>,
 }
 
 impl Default for AccountSettings {
@@ -964,6 +967,7 @@ impl Default for AccountSettings {
             anonymous: false,
             anonymous_until: None,
             calls_seen_at: 0,
+            list_filter: None,
         }
     }
 }
@@ -981,6 +985,7 @@ impl AccountSettings {
             anonymous: false,
             anonymous_until: None,
             calls_seen_at: 0,
+            list_filter: None,
         }
     }
 
