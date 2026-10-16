@@ -270,6 +270,10 @@ indefinitely. These changes also apply on your phone. `Ctrl+E` (Command+E on
 macOS) archives the open chat, or unarchives it from **Archived**, as in
 WhatsApp. Click the chat header to see its picture, number, and group members.
 
+Group info also shows the group's description above its members. You can
+select and copy its text, and a long description scrolls. To change the
+description, use your phone.
+
 ## Labels
 
 Labels are yours alone. They stay on this computer, they never reach your phone,
