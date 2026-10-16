@@ -1847,6 +1847,7 @@ pub enum Action {
     StartChat {
         id: ChatId,
         name: String,
+        dismiss_dialog: bool,
     },
     /// Opens a chat at a message search result.
     OpenMessage {

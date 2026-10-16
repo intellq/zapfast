@@ -1659,6 +1659,9 @@ fn confirm_leave_group(app: &mut App, ui: &mut egui::Ui, id: &str) {
 }
 
 /// Why the number dialogs cannot act yet.
+const INVALID_NUMBER: &str = crate::i18n::n_(
+    "Enter a phone number with its country code, using only digits, spaces, hyphens and brackets",
+);
 const NUMBER_TOO_SHORT: &str =
     crate::i18n::n_("Enter the whole number, starting with the country code");
 
@@ -1738,41 +1741,36 @@ fn new_contact(app: &mut App, ui: &mut egui::Ui) {
     theme::paragraph(
         ui,
         tr(
-            "Enter a phone number with its country code, without a plus sign or leading zero. Add a name to save the contact, or leave it blank to open the chat. WhatsApp uses the first name as the display name.",
+            "Enter a phone number with its country code. Add a name to save the contact, or leave it blank to message the number without saving it. WhatsApp uses the first name as the display name.",
         ),
         theme::regular(13.0),
         palette.secondary,
     );
     ui.add_space(4.0);
-    let boxed =
-        |ui: &mut egui::Ui, plus: bool, inner: &mut dyn FnMut(&mut egui::Ui) -> egui::Response| {
-            let field = Frame::new()
-                .fill(palette.surface)
-                .corner_radius(CornerRadius::same(theme::RADIUS))
-                .inner_margin(Margin::symmetric(12, 8))
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        // Use the field height to align the plus sign.
-                        ui.set_min_height(
-                            ui.ctx()
-                                .fonts_mut(|fonts| fonts.row_height(&theme::regular(16.0)))
-                                + 4.0,
-                        );
-                        if plus {
-                            theme::text(ui, "+", theme::semibold(16.0), palette.secondary);
-                        }
-                        inner(ui)
-                    })
-                    .inner
-                });
-            theme::focus_outline(
-                ui,
-                field.inner.id,
-                field.response.rect,
-                f32::from(theme::RADIUS),
-            );
-            field.inner
-        };
+    let boxed = |ui: &mut egui::Ui, inner: &mut dyn FnMut(&mut egui::Ui) -> egui::Response| {
+        let field = Frame::new()
+            .fill(palette.surface)
+            .corner_radius(CornerRadius::same(theme::RADIUS))
+            .inner_margin(Margin::symmetric(12, 8))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.set_min_height(
+                        ui.ctx()
+                            .fonts_mut(|fonts| fonts.row_height(&theme::regular(16.0)))
+                            + 4.0,
+                    );
+                    inner(ui)
+                })
+                .inner
+            });
+        theme::focus_outline(
+            ui,
+            field.inner.id,
+            field.response.rect,
+            f32::from(theme::RADIUS),
+        );
+        field.inner
+    };
     macro_rules! edit {
         ($buffer:expr, $salt:literal, $hint:expr, $width:expr) => {
             egui::TextEdit::singleline($buffer)
@@ -1789,11 +1787,11 @@ fn new_contact(app: &mut App, ui: &mut egui::Ui) {
         };
     }
     let phone_empty = app.new_contact_phone.is_empty();
-    let phone_field = boxed(ui, true, &mut |ui| {
+    let phone_field = boxed(ui, &mut |ui| {
         let response = ui.add(edit!(
             &mut app.new_contact_phone,
             "new-contact-phone",
-            "15551234567",
+            "+1 555 123 4567",
             f32::INFINITY
         ));
         if !response.has_focus() && phone_empty {
@@ -1819,7 +1817,7 @@ fn new_contact(app: &mut App, ui: &mut egui::Ui) {
             } else {
                 Align::LEFT
             };
-            let first = boxed(ui, false, &mut |ui| {
+            let first = boxed(ui, &mut |ui| {
                 ui.add(
                     edit!(
                         &mut app.new_contact_name,
@@ -1831,7 +1829,7 @@ fn new_contact(app: &mut App, ui: &mut egui::Ui) {
                     .layouter(&mut layouter),
                 )
             });
-            let last = boxed(ui, false, &mut |ui| {
+            let last = boxed(ui, &mut |ui| {
                 ui.add(
                     edit!(
                         &mut app.new_contact_last,
@@ -1846,12 +1844,10 @@ fn new_contact(app: &mut App, ui: &mut egui::Ui) {
             (first, last)
         })
         .inner;
-    let digits: String = app
-        .new_contact_phone
-        .chars()
-        .filter(char::is_ascii_digit)
-        .collect();
-    let ready = digits.len() >= 7 && !app.new_contact_pending;
+    // A leading plus, spaces, hyphens and brackets are formatting; anything
+    // else (an extension, a letter) would change the number, so it is refused.
+    let digits = crate::util::international_phone(&app.new_contact_phone).unwrap_or_default();
+    let ready = !digits.is_empty() && !app.new_contact_pending;
     let named = !app.new_contact_name.trim().is_empty() || !app.new_contact_last.trim().is_empty();
     let submitted =
         (phone_field.lost_focus() || first_field.lost_focus() || last_field.lost_focus())
@@ -1883,7 +1879,7 @@ fn new_contact(app: &mut App, ui: &mut egui::Ui) {
                     let hint = if app.new_contact_pending {
                         tr("Checking the number…")
                     } else {
-                        tr(NUMBER_TOO_SHORT)
+                        tr(INVALID_NUMBER)
                     };
                     let save = theme::pill_button(ui, &palette, tr("Save contact"), named)
                         .on_disabled_hover_text(hint)
@@ -2323,6 +2319,7 @@ fn chat_info(app: &mut App, ui: &mut egui::Ui, id: &str) {
                 Action::StartChat {
                     id: chat.id.clone(),
                     name: name.clone(),
+                    dismiss_dialog: true,
                 },
                 Action::CloseDialog,
             ],

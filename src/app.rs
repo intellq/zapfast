@@ -846,6 +846,20 @@ pub(crate) struct AttachmentDraft {
     quoting: Option<String>,
 }
 
+/// Localizes known number-lookup failures while preserving unknown failure details.
+fn contact_failure_message(locale: crate::i18n::Locale, error: &str) -> String {
+    match error {
+        "Could not check the number. Please try again." => {
+            crate::i18n::gettext(locale, "Could not check the number. Please try again.")
+                .into_owned()
+        }
+        "Enter a valid international phone number" => {
+            crate::i18n::gettext(locale, "Enter a valid international phone number").into_owned()
+        }
+        _ => error.to_owned(),
+    }
+}
+
 /// Attachment pending in the composer.
 pub enum Pending {
     /// Clipboard image as straight-alpha RGBA and optional preview.
@@ -2016,10 +2030,20 @@ impl App {
                 } else if let Some(chat) = self.chat(&id) {
                     let name = self.chat_title(chat);
                     self.wa_link_text = text.map(|text| (id.clone(), text));
-                    self.actions.push(Action::StartChat { id, name });
+                    self.actions.push(Action::StartChat {
+                        id,
+                        name,
+                        dismiss_dialog: true,
+                    });
                 } else if matches!(self.link, LinkStatus::Connected) {
                     self.wa_link_text = text.map(|text| (id, text));
+                    // Not owned by the dialog, so closing it leaves the lookup running.
+                    self.new_contact_sequence = self.new_contact_sequence.wrapping_add(1);
+                    let request = self.new_contact_sequence;
+                    self.new_contact_request = Some(request);
+                    self.new_contact_dialog_request = None;
                     self.backend.send(Command::NewContact {
+                        request,
                         phone,
                         full_name: None,
                         first_name: None,
@@ -4188,16 +4212,35 @@ impl App {
                     }
                 }
             }
-            Event::ContactReady { id, name } => {
-                self.new_contact_pending = false;
-                if live && self.dialog == Some(Dialog::NewContact) {
-                    self.dialog = None;
+            Event::ContactFailed { request, error } => {
+                if self.new_contact_request == Some(request) {
+                    self.new_contact_request = None;
+                    self.new_contact_dialog_request = None;
+                    self.new_contact_pending = false;
+                    if live {
+                        self.toast_error(contact_failure_message(self.locale, &error));
+                    }
                 }
-                let name = name
-                    .filter(|name| !name.is_empty())
-                    .unwrap_or_else(|| crate::util::phone(&id));
+            }
+            Event::ContactReady { request, id, name } => {
+                if self.new_contact_request != Some(request) {
+                    return;
+                }
+                let owned_by_dialog = self.new_contact_dialog_request.take() == Some(request);
+                self.new_contact_request = None;
+                self.new_contact_pending = false;
                 if live {
-                    self.actions.push(Action::StartChat { id, name });
+                    if owned_by_dialog && matches!(self.dialog, Some(Dialog::NewContact)) {
+                        self.dialog = None;
+                    }
+                    let name = name
+                        .filter(|name| !name.is_empty())
+                        .unwrap_or_else(|| crate::util::phone(&id));
+                    self.actions.push(Action::StartChat {
+                        id,
+                        name,
+                        dismiss_dialog: false,
+                    });
                 }
             }
             Event::Info(message) => self.toast(message),
@@ -4279,7 +4322,6 @@ impl App {
             }
             Event::Error(message) => {
                 self.sticker_import_pending = false;
-                self.new_contact_pending = false;
                 // The worker sends the English catalog key. `gettext` only
                 // accepts a static key, so unknown errors stay as the worker
                 // wrote them.
@@ -4374,6 +4416,11 @@ impl App {
                 }
             }
             LinkStatus::LoggedOut => {
+                // Account-scoped lookup results are discarded by the worker.
+                // End their UI requests too, so a later account can retry.
+                self.new_contact_request = None;
+                self.new_contact_dialog_request = None;
+                self.new_contact_pending = false;
                 let account = self.account().id.clone();
                 self.poll_voting.clear();
                 self.interactive_sending.clear();
@@ -5255,6 +5302,14 @@ impl App {
             return false;
         }
         true
+    }
+
+    /// Cancels dialog-owned lookups while preserving shared-contact requests.
+    fn cancel_contact_dialog_request(&mut self) {
+        if self.new_contact_dialog_request.take().is_some() {
+            self.new_contact_request = None;
+            self.new_contact_pending = false;
+        }
     }
 
     /// Opens an eligible chat, parking the previous draft and restoring this chat's composer.
@@ -6208,6 +6263,9 @@ impl App {
                 if page != Page::Settings && !self.app_lock.checking() {
                     self.app_lock.form = None;
                 }
+                if matches!(self.dialog, Some(Dialog::NewContact)) {
+                    self.cancel_contact_dialog_request();
+                }
                 self.page = page;
                 self.dialog = None;
                 self.emoji_start = None;
@@ -6244,7 +6302,11 @@ impl App {
             Action::OpenCallChat(id) => self.open_chat(id),
             Action::NavigateBack => self.navigate_back(ctx),
             Action::NavigateForward => self.navigate_forward(ctx),
-            Action::StartChat { id, name } => {
+            Action::StartChat {
+                id,
+                name,
+                dismiss_dialog,
+            } => {
                 if self.chat(&id).is_none() {
                     self.chats.push(Chat::new(id.clone(), name.clone()));
                     self.backend.send(Command::EnsureChat {
@@ -6253,7 +6315,9 @@ impl App {
                     });
                 }
                 self.open_chat(id.clone());
-                self.dialog = None;
+                if dismiss_dialog {
+                    self.dialog = None;
+                }
                 self.take_wa_link_text(&id);
             }
             Action::MessageYourself => {
@@ -6266,6 +6330,7 @@ impl App {
                             Action::StartChat {
                                 id,
                                 name: tr("You").to_owned(),
+                                dismiss_dialog: true,
                             },
                             ctx,
                         );
@@ -7538,6 +7603,7 @@ impl App {
                 self.backend.send(Command::SetFavorite(chat, favorite));
             }
             Action::ShowDialog(dialog) => {
+                self.cancel_contact_dialog_request();
                 self.clear_chat_lock_entry();
                 if dialog == Dialog::NewChat {
                     self.new_chat_search.clear();
@@ -7579,6 +7645,7 @@ impl App {
                 self.dialog = Some(dialog);
             }
             Action::CloseDialog => {
+                self.cancel_contact_dialog_request();
                 self.clear_chat_lock_entry();
                 self.dialog = None;
                 self.invite = None;
@@ -7613,7 +7680,22 @@ impl App {
                 last,
                 to_phone,
             } => {
+                let Some(phone) = crate::util::international_phone(&phone) else {
+                    self.toast_error(
+                        crate::i18n::gettext(
+                            self.locale,
+                            "Enter a valid international phone number",
+                        )
+                        .into_owned(),
+                    );
+                    return;
+                };
                 self.new_contact_pending = true;
+                self.new_contact_sequence = self.new_contact_sequence.wrapping_add(1);
+                let request = self.new_contact_sequence;
+                self.new_contact_request = Some(request);
+                self.new_contact_dialog_request =
+                    matches!(self.dialog, Some(Dialog::NewContact)).then_some(request);
                 let (full_name, first_name) = compose_name(&first, &last);
                 // The dialog's choice starts the next one.
                 if let Some(to_phone) = to_phone
@@ -7624,6 +7706,7 @@ impl App {
                     self.account_mut().mark_settings_dirty();
                 }
                 self.backend.send(Command::NewContact {
+                    request,
                     phone,
                     full_name,
                     first_name,
@@ -10507,6 +10590,350 @@ mod tests {
             app.attachment_drafts["locked"].quoting.as_deref(),
             Some("private-quote")
         );
+    }
+
+    /// Unrelated dialogs do not cancel a shared-contact lookup.
+    #[test]
+    fn shared_contact_lookup_survives_opening_and_closing_unrelated_dialogs() {
+        for success in [false, true] {
+            let mut app = app();
+            let (backend, _commands, events) = Backend::recording_with_events();
+            app.backend = backend;
+            let ctx = egui::Context::default();
+            app.apply(
+                Action::NewContact {
+                    phone: "15550000001".into(),
+                    first: String::new(),
+                    last: String::new(),
+                    to_phone: None,
+                },
+                &ctx,
+            );
+            let request = app.new_contact_request.unwrap();
+            app.apply(Action::ShowDialog(Dialog::Shortcuts), &ctx);
+            app.apply(Action::CloseDialog, &ctx);
+            app.apply(Action::ShowDialog(Dialog::NewContact), &ctx);
+            assert_eq!(app.new_contact_request, Some(request));
+            events
+                .send(if success {
+                    Event::ContactReady {
+                        request,
+                        id: "15550000001@s.whatsapp.net".into(),
+                        name: None,
+                    }
+                } else {
+                    Event::ContactFailed {
+                        request,
+                        error: "Could not check the number. Please try again.".into(),
+                    }
+                })
+                .unwrap();
+            app.handle_events();
+            app.apply_actions(&ctx);
+            assert_eq!(
+                app.dialog,
+                Some(Dialog::NewContact),
+                "independent completion does not dismiss the new dialog"
+            );
+            assert!(app.new_contact_request.is_none());
+            if success {
+                assert_eq!(app.open_chat.as_deref(), Some("15550000001@s.whatsapp.net"));
+            } else {
+                assert!(
+                    app.toasts
+                        .iter()
+                        .any(|toast| toast.message
+                            == "Could not check the number. Please try again.")
+                );
+            }
+        }
+    }
+
+    /// Verifies that a later sticker dialog survives dispatching a completed number lookup.
+    #[test]
+    fn completed_number_lookup_preserves_a_later_sticker_dialog() {
+        let mut app = app();
+        let (backend, _commands, events) = Backend::recording_with_events();
+        app.backend = backend;
+        let ctx = egui::Context::default();
+        app.apply(Action::ShowDialog(Dialog::NewContact), &ctx);
+        app.apply(
+            Action::NewContact {
+                phone: "15550000001".into(),
+                first: String::new(),
+                last: String::new(),
+                to_phone: None,
+            },
+            &ctx,
+        );
+        let request = app.new_contact_request.unwrap();
+        events
+            .send(Event::ContactReady {
+                request,
+                id: "15550000001@s.whatsapp.net".into(),
+                name: None,
+            })
+            .unwrap();
+        events
+            .send(Event::StickerPicture {
+                path: PathBuf::from("synthetic-sticker.png"),
+                width: 32,
+                height: 32,
+                transparent: false,
+            })
+            .unwrap();
+        app.handle_events();
+        assert_eq!(app.dialog, Some(Dialog::StickerMaker));
+        app.apply_actions(&ctx);
+        assert_eq!(app.dialog, Some(Dialog::StickerMaker));
+        assert_eq!(app.open_chat.as_deref(), Some("15550000001@s.whatsapp.net"));
+    }
+
+    /// Settings cancel number-entry lookups while shared-contact requests remain active.
+    #[test]
+    fn opening_settings_invalidates_dialog_lookups_but_keeps_shared_contacts() {
+        for dialog in [Some(Dialog::NewContact), Some(Dialog::NewContact), None] {
+            let mut app = app();
+            let (backend, _commands, events) = Backend::recording_with_events();
+            app.backend = backend;
+            let ctx = egui::Context::default();
+            app.dialog = dialog.clone();
+            app.apply(
+                Action::NewContact {
+                    phone: "15550000001".into(),
+                    first: String::new(),
+                    last: String::new(),
+                    to_phone: None,
+                },
+                &ctx,
+            );
+            let request = app.new_contact_request.unwrap();
+            app.apply(Action::ToggleSettings, &ctx);
+            events
+                .send(Event::ContactReady {
+                    request,
+                    id: "15550000001@s.whatsapp.net".into(),
+                    name: None,
+                })
+                .unwrap();
+            app.handle_events();
+            assert_eq!(app.page, Page::Settings);
+            let opened = app
+                .deferred_account_actions
+                .iter()
+                .any(|(account, action)| {
+                    account == &app.account().id && matches!(action, Action::StartChat { .. })
+                });
+            assert_eq!(
+                opened,
+                dialog.is_none(),
+                "shared-contact requests are independent of dialogs"
+            );
+        }
+    }
+
+    /// Invalid international numbers cannot reach the backend lookup.
+    #[test]
+    fn invalid_number_actions_never_start_a_lookup() {
+        let mut app = app();
+        let (backend, mut commands) = Backend::recording();
+        app.backend = backend;
+        app.apply(
+            Action::NewContact {
+                phone: "+1 555 1234567 ext. 89".into(),
+                first: String::new(),
+                last: String::new(),
+                to_phone: None,
+            },
+            &egui::Context::default(),
+        );
+        assert!(commands.try_recv().is_err());
+        assert!(!app.new_contact_pending);
+    }
+
+    /// Cancelled lookup completions cannot disturb a newer dialog.
+    #[test]
+    fn cancelled_number_lookups_cannot_open_or_close_a_new_dialog() {
+        let mut app = app();
+        let (backend, mut commands, events) = Backend::recording_with_events();
+        app.backend = backend;
+        let ctx = egui::Context::default();
+        let lookup = |phone: &str| Action::NewContact {
+            phone: phone.into(),
+            first: String::new(),
+            last: String::new(),
+            to_phone: None,
+        };
+        app.apply(Action::ShowDialog(Dialog::NewContact), &ctx);
+        app.apply(lookup("15550000001"), &ctx);
+        let first = app.new_contact_request.unwrap();
+        app.apply(Action::CloseDialog, &ctx);
+        app.apply(Action::ShowDialog(Dialog::NewContact), &ctx);
+        app.apply(lookup("15550000002"), &ctx);
+        let second = app.new_contact_request.unwrap();
+        events
+            .send(Event::ContactReady {
+                request: first,
+                id: "15550000001@s.whatsapp.net".into(),
+                name: None,
+            })
+            .unwrap();
+        events
+            .send(Event::ContactFailed {
+                request: first,
+                error: "Stale failure".into(),
+            })
+            .unwrap();
+        app.handle_events();
+        assert_eq!(app.dialog, Some(Dialog::NewContact));
+        assert_eq!(app.new_contact_request, Some(second));
+        assert!(app.new_contact_pending);
+        assert!(
+            !app.actions
+                .iter()
+                .any(|action| matches!(action, Action::StartChat { .. }))
+        );
+        assert!(app.toasts.is_empty());
+        events
+            .send(Event::ContactFailed {
+                request: second,
+                error: "Try again".into(),
+            })
+            .unwrap();
+        app.handle_events();
+        assert_eq!(app.dialog, Some(Dialog::NewContact));
+        assert!(!app.new_contact_pending);
+        assert!(app.new_contact_request.is_none());
+        app.apply(lookup("15550000002"), &ctx);
+        let retry = app.new_contact_request.unwrap();
+        assert_ne!(retry, second);
+        events
+            .send(Event::ContactReady {
+                request: retry,
+                id: "15550000002@s.whatsapp.net".into(),
+                name: None,
+            })
+            .unwrap();
+        app.handle_events();
+        assert!(app.dialog.is_none());
+        assert!(app.deferred_account_actions.iter().any(|(account, action)| account == &app.account().id && matches!(action, Action::StartChat { id, .. } if id == "15550000002@s.whatsapp.net")));
+        assert!(commands.try_recv().is_ok());
+    }
+
+    /// A hidden account's late lookup result cannot alter the visible account's dialog.
+    #[test]
+    fn hidden_account_number_lookups_leave_the_visible_request_alone() {
+        for failed in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let dirs = AppDirs::under(directory.path());
+            let mut app = App::headless(dirs.clone(), Settings::default()).0;
+            let (backend, _commands, events) = Backend::recording_with_events();
+            app.backend = backend;
+            let second_id = AccountId::parse("2").unwrap();
+            let (second, _) = Account::detached(
+                &dirs,
+                second_id.clone(),
+                crate::settings::AccountSettings::default(),
+            )
+            .unwrap();
+            app.accounts.push(second);
+            let ctx = egui::Context::default();
+            let lookup = || Action::NewContact {
+                phone: "15550000001".into(),
+                first: String::new(),
+                last: String::new(),
+                to_phone: None,
+            };
+            app.apply(Action::ShowDialog(Dialog::NewContact), &ctx);
+            app.apply(lookup(), &ctx);
+            let first_request = app.new_contact_request.unwrap();
+            app.switch_account(&second_id);
+            app.apply(Action::ShowDialog(Dialog::NewContact), &ctx);
+            app.apply(lookup(), &ctx);
+            let visible_request = app.new_contact_request.unwrap();
+            events
+                .send(if failed {
+                    Event::ContactFailed {
+                        request: first_request,
+                        error: "Synthetic lookup failure".into(),
+                    }
+                } else {
+                    Event::ContactReady {
+                        request: first_request,
+                        id: "15550000001@s.whatsapp.net".into(),
+                        name: None,
+                    }
+                })
+                .unwrap();
+            app.handle_events();
+            assert_eq!(app.account().id, second_id);
+            assert_eq!(app.dialog, Some(Dialog::NewContact));
+            assert_eq!(app.new_contact_request, Some(visible_request));
+            assert!(app.new_contact_pending);
+            assert!(app.toasts.is_empty());
+            assert!(
+                !app.actions
+                    .iter()
+                    .any(|action| matches!(action, Action::StartChat { .. }))
+            );
+            assert!(!app.accounts[0].new_contact_pending);
+            assert!(
+                !app.deferred_account_actions
+                    .iter()
+                    .any(|(_, action)| matches!(action, Action::StartChat { .. }))
+            );
+            assert!(app.accounts[0].new_contact_request.is_none());
+        }
+    }
+
+    /// Logout invalidates pending lookups and reconnect permits a fresh request.
+    #[test]
+    fn logout_ends_number_lookups_and_allows_retry_after_reconnect() {
+        let mut app = app();
+        let (backend, _commands, events) = Backend::recording_with_events();
+        app.backend = backend;
+        let ctx = egui::Context::default();
+        let lookup = || Action::NewContact {
+            phone: "15550000001".into(),
+            first: String::new(),
+            last: String::new(),
+            to_phone: None,
+        };
+        app.apply(Action::ShowDialog(Dialog::NewContact), &ctx);
+        app.apply(lookup(), &ctx);
+        let old_request = app.new_contact_request.unwrap();
+        app.handle_link(LinkStatus::LoggedOut, true);
+        assert!(!app.new_contact_pending);
+        assert!(app.new_contact_request.is_none());
+        assert!(app.new_contact_dialog_request.is_none());
+        app.handle_link(LinkStatus::Connected, true);
+        app.apply(lookup(), &ctx);
+        let retry = app.new_contact_request.unwrap();
+        assert_ne!(retry, old_request);
+        events
+            .send(Event::ContactReady {
+                request: old_request,
+                id: "15550000001@s.whatsapp.net".into(),
+                name: None,
+            })
+            .unwrap();
+        app.handle_events();
+        assert_eq!(app.new_contact_request, Some(retry));
+        assert!(app.new_contact_pending);
+        assert_eq!(app.dialog, Some(Dialog::NewContact));
+        assert!(
+            !app.actions
+                .iter()
+                .any(|action| matches!(action, Action::StartChat { .. }))
+        );
+        events
+            .send(Event::ContactFailed {
+                request: retry,
+                error: "Fixture retry failure".into(),
+            })
+            .unwrap();
+        app.handle_events();
+        assert!(!app.new_contact_pending);
     }
 
     #[test]
