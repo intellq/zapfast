@@ -27,18 +27,71 @@ fn rate() -> NonZero<u32> {
     NonZero::new(voice::RATE).expect("48 kHz is not zero")
 }
 
-/// Opens the default output device for playback.
+pub(crate) mod health;
+
+pub use health::Health;
+
+/// An open output device, with what its stream has reported.
+pub struct Output {
+    sink: rodio::MixerDeviceSink,
+    health: Health,
+}
+
+impl Output {
+    pub fn mixer(&self) -> &rodio::mixer::Mixer {
+        self.sink.mixer()
+    }
+
+    /// The device itself, for an owner that keeps the health apart.
+    pub fn into_sink(self) -> rodio::MixerDeviceSink {
+        self.sink
+    }
+
+    /// Whether the stream keeps failing: drop this and open another.
+    pub fn failed(&self) -> bool {
+        self.health.failed()
+    }
+}
+
+/// Opens the default output device for playback, reporting its stream's
+/// errors to `health` (#507).
 ///
-/// rodio reports the sink's drop through `stderr` by default. A desktop launch
-/// can have that closed: ZapFast inherits `stderr` from whatever started it,
-/// and that process can exit while ZapFast runs on. Rust ignores `SIGPIPE`, so
-/// the next write there fails with `Broken pipe` and the print macro panics,
-/// which aborts the whole app in a release build. Keep it off, and report
-/// failures of our own through the log instead.
-pub fn open_output() -> Result<rodio::MixerDeviceSink, rodio::DeviceSinkError> {
-    let mut output = rodio::DeviceSinkBuilder::open_default_sink()?;
-    output.log_on_drop(false);
-    Ok(output)
+/// rodio reports the sink's drop and every stream error through `stderr` by
+/// default. A desktop launch can have that closed: ZapFast inherits `stderr`
+/// from whatever started it, and that process can exit while ZapFast runs on.
+/// Rust ignores `SIGPIPE`, so the next write there fails with `Broken pipe`
+/// and the print macro panics, which aborts the whole app in a release build.
+/// Keep it off, and report failures of our own through the log instead.
+///
+/// This is rodio's `open_default_sink` with our error callback: the default
+/// device, else the first other device (not the null one) that opens.
+pub fn open_output(health: Health) -> Result<Output, rodio::DeviceSinkError> {
+    use rodio::cpal::traits::{DeviceTrait, HostTrait};
+    let opened = rodio::DeviceSinkBuilder::from_default_device()
+        .and_then(|builder| builder.with_error_callback(health.callback()).open_stream());
+    let mut sink = opened.or_else(|original| {
+        let Ok(devices) = rodio::cpal::default_host().output_devices() else {
+            return Err(original);
+        };
+        devices
+            .filter(|device| {
+                device
+                    .description()
+                    .is_ok_and(|about| about.driver().is_some_and(|driver| driver != "null"))
+            })
+            .find_map(|device| {
+                rodio::DeviceSinkBuilder::from_device(device)
+                    .and_then(|builder| {
+                        builder
+                            .with_error_callback(health.callback())
+                            .open_sink_or_fallback()
+                    })
+                    .ok()
+            })
+            .ok_or(original)
+    })?;
+    sink.log_on_drop(false);
+    Ok(Output { sink, health })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -135,7 +188,10 @@ type Decoded = Arc<Mutex<Option<Result<Vec<f32>, String>>>>;
 /// Plays one clip at a time through the default output device.
 pub struct Player {
     waker: Waker,
-    output: Option<(rodio::MixerDeviceSink, rodio::Player)>,
+    output: Option<(Output, rodio::Player)>,
+    /// When the output stream last failed, so a second failure soon after
+    /// pauses instead of reopening the device again and again.
+    output_failed: Option<Instant>,
     loaded: Option<Loaded>,
     decoding: Option<Decoding>,
     /// Playback speed applied to the current clip and to later ones.
@@ -192,6 +248,7 @@ impl Player {
         Self {
             waker,
             output: None,
+            output_failed: None,
             loaded: None,
             decoding: None,
             speed: SPEEDS[0],
@@ -326,6 +383,11 @@ impl Player {
             Some(loaded) if loaded.message == message => {
                 if loaded.done {
                     return self.restart(0.0);
+                }
+                if self.output.is_none() {
+                    // Paused when its output failed: open the device again.
+                    let fraction = fraction_of(loaded.base, loaded.samples.len());
+                    return self.restart(fraction);
                 }
                 if let Some((_, sink)) = &self.output {
                     if loaded.paused {
@@ -469,6 +531,7 @@ impl Player {
             // The speed may have moved on while this compression built.
             self.ensure_stretch();
         }
+        self.recover_output()?;
         let ended = match (&mut self.loaded, &self.output) {
             (Some(loaded), Some((_, sink))) if !loaded.done && !loaded.paused && sink.empty() => {
                 loaded.done = true;
@@ -482,6 +545,43 @@ impl Player {
             self.finished = self.loaded.as_ref().map(|loaded| loaded.message.clone());
         }
         Ok(())
+    }
+
+    /// Drops an output whose stream keeps failing (#507). A clip that was
+    /// playing carries on from where it was on a newly opened device, once;
+    /// if that fails again soon after, it pauses there until played again.
+    fn recover_output(&mut self) -> Result<(), String> {
+        if !self
+            .output
+            .as_ref()
+            .is_some_and(|(output, _)| output.failed())
+        {
+            return Ok(());
+        }
+        let Some(message) = self.loaded.as_ref().map(|loaded| loaded.message.clone()) else {
+            self.output = None;
+            return Ok(());
+        };
+        let position = self.status(&message).position;
+        self.output = None;
+        let Some(loaded) = self.loaded.as_mut() else {
+            return Ok(());
+        };
+        loaded.base = position;
+        let paused = loaded.paused || loaded.done;
+        let fraction = fraction_of(position, loaded.samples.len());
+        let recent = self
+            .output_failed
+            .is_some_and(|at| at.elapsed() < OUTPUT_RETRY);
+        self.output_failed = Some(Instant::now());
+        if paused {
+            return Ok(());
+        }
+        if recent {
+            loaded.paused = true;
+            return Err("The sound output stopped working. Press play to try again".to_owned());
+        }
+        self.restart(fraction)
     }
 
     fn load(&mut self, message: &str, path: &Path, start: f32) -> Result<(), String> {
@@ -519,8 +619,10 @@ impl Player {
         let total = clip_length(loaded.samples.len());
         let offset = ((fraction.clamp(0.0, 1.0) * buffer.len() as f32) as usize).min(buffer.len());
         if self.output.is_none() {
-            let device =
-                open_output().map_err(|error| format!("{}: {error}", tr("No sound output")))?;
+            let waker = self.waker.clone();
+            let health = Health::waking("voice playback", move || waker.wake());
+            let device = open_output(health)
+                .map_err(|error| format!("{}: {error}", tr("No sound output")))?;
             let sink = rodio::Player::connect_new(device.mixer());
             self.output = Some((device, sink));
         }
@@ -540,6 +642,19 @@ impl Player {
         loaded.done = false;
         Ok(())
     }
+}
+
+/// How soon after a failed output another failure pauses playback rather
+/// than reopening the device.
+const OUTPUT_RETRY: Duration = Duration::from_secs(10);
+
+/// Where `position` falls in a clip of `samples`, from 0 to 1.
+fn fraction_of(position: Duration, samples: usize) -> f32 {
+    let total = clip_length(samples);
+    if total.is_zero() {
+        return 0.0;
+    }
+    (position.as_secs_f64() / total.as_secs_f64()).clamp(0.0, 1.0) as f32
 }
 
 fn clip_length(samples: usize) -> Duration {

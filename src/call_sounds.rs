@@ -171,30 +171,55 @@ impl Drop for CallSounds {
     }
 }
 
+/// How long a sound whose output failed waits before opening it again,
+/// doubling up to the longest with each failure.
+const RETRY: Duration = Duration::from_secs(1);
+const RETRY_LONGEST: Duration = Duration::from_secs(30);
+
 /// Plays `tone` until it ends, or until `stop` for one that repeats.
+///
+/// An output that keeps failing (#507) is let go and opened again after a
+/// wait that doubles each time, instead of spinning on its errors.
 fn sound(tone: Tone, speaker: Option<&str>, stop: &AtomicBool) -> Result<(), String> {
-    // A speaker that went away leaves the tone on the default one.
-    let device = crate::call_audio::open_output(speaker).or_else(|error| {
-        if speaker.is_some() {
-            log::debug!("call sound on the default speaker: {error}");
-            crate::call_audio::open_output(None)
+    let mut retry = RETRY;
+    loop {
+        let health = crate::audio::Health::new("call sound");
+        // A speaker that went away leaves the tone on the default one.
+        let device = crate::call_audio::open_output(speaker, &health).or_else(|error| {
+            if speaker.is_some() {
+                log::debug!("call sound on the default speaker: {error}");
+                crate::call_audio::open_output(None, &health)
+            } else {
+                Err(error)
+            }
+        })?;
+        let player = rodio::Player::connect_new(device.mixer());
+        let decoder = rodio::Decoder::new(std::io::Cursor::new(tone.bytes()))
+            .map_err(|error| error.to_string())?;
+        if tone.repeats() {
+            player.append(decoder.buffered().repeat_infinite());
         } else {
-            Err(error)
+            player.append(decoder);
         }
-    })?;
-    let player = rodio::Player::connect_new(device.mixer());
-    let decoder = rodio::Decoder::new(std::io::Cursor::new(tone.bytes()))
-        .map_err(|error| error.to_string())?;
-    if tone.repeats() {
-        player.append(decoder.buffered().repeat_infinite());
-    } else {
-        player.append(decoder);
+        while !stop.load(Ordering::Relaxed) && !player.empty() && !health.failed() {
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        player.stop();
+        if !health.failed() {
+            return Ok(());
+        }
+        drop(player);
+        drop(device);
+        log::warn!("call sound output lost; trying again in {retry:?}");
+        let until = std::time::Instant::now() + retry;
+        while std::time::Instant::now() < until {
+            if stop.load(Ordering::Relaxed) {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        retry = (retry * 2).min(RETRY_LONGEST);
     }
-    while !stop.load(Ordering::Relaxed) && !player.empty() {
-        std::thread::sleep(Duration::from_millis(30));
-    }
-    player.stop();
-    Ok(())
 }
 
 #[cfg(test)]

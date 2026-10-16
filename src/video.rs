@@ -36,6 +36,10 @@ const DRIFT: Duration = Duration::from_millis(60);
 const UNSEEN: Duration = Duration::from_millis(1500);
 /// Longest wait between repaints while a video plays, for the progress.
 const TICK: Duration = Duration::from_millis(40);
+/// How long a video plays silently after its sound output failed before the
+/// sound is opened again, doubling up to the longest with each failure.
+const SOUND_RETRY: Duration = Duration::from_secs(1);
+const SOUND_RETRY_LONGEST: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State {
@@ -219,7 +223,7 @@ impl Backend {
 
 /// The sound of the playing video on the default output device.
 struct Sound {
-    device: rodio::MixerDeviceSink,
+    device: crate::audio::Output,
     sink: rodio::Player,
     /// Video time the queued sound starts from.
     base: Duration,
@@ -314,7 +318,7 @@ impl Sound {
             Err(_) if has_audio_track(path) == Some(false) => return Ok(None),
             Err(error) => return Err(error),
         };
-        let device = match crate::audio::open_output() {
+        let device = match crate::audio::open_output(crate::audio::Health::new("video sound")) {
             Ok(device) => device,
             Err(error) => {
                 log::warn!("video plays without sound: {error}");
@@ -609,6 +613,9 @@ struct Session {
     clock: Clock,
     sound: Option<Sound>,
     unsupported_audio: bool,
+    /// When to open the sound again after its output failed (#507), and how
+    /// long the wait after the next failure will be.
+    sound_retry: Option<(Instant, Duration)>,
     total: Duration,
     /// Decodes through FFmpeg or Media Foundation; cleared when it fails.
     backend: Option<Backend>,
@@ -641,6 +648,42 @@ impl Session {
             }
             State::Playing => {}
         }
+    }
+
+    /// Drops a sound whose output keeps failing (#507), and opens it again at
+    /// the clock's position after a wait that doubles with each failure, so
+    /// the video plays on silently in between.
+    fn recover_sound(&mut self, now: Instant, level: f32, backend: Option<Backend>, speed: f32) {
+        if self
+            .sound
+            .as_ref()
+            .is_some_and(|sound| sound.device.failed())
+        {
+            self.sound = None;
+            self.retry_sound(now);
+        }
+        let Some((at, _)) = self.sound_retry else {
+            return;
+        };
+        if self.sound.is_some() || now < at {
+            return;
+        }
+        self.sound = Sound::open(&self.path, self.clock.position(now), level, backend, speed)
+            .ok()
+            .flatten();
+        match &self.sound {
+            Some(sound) if self.state == State::Playing => sound.sink.play(),
+            Some(_) => {}
+            None => self.retry_sound(now),
+        }
+    }
+
+    fn retry_sound(&mut self, now: Instant) {
+        let wait = self
+            .sound_retry
+            .map_or(SOUND_RETRY, |(_, wait)| (wait * 2).min(SOUND_RETRY_LONGEST));
+        log::warn!("video sound lost; trying again in {wait:?}");
+        self.sound_retry = Some((now + wait, wait));
     }
 
     fn show(&mut self, ctx: &egui::Context, image: ColorImage) {
@@ -957,6 +1000,7 @@ impl Player {
             clock,
             sound,
             unsupported_audio,
+            sound_retry: None,
             total: Duration::ZERO,
             backend,
         });
@@ -1021,6 +1065,7 @@ impl Player {
     /// Takes decoded frames, shows the one that is due, and schedules the
     /// next repaint while the video plays.
     pub fn poll(&mut self, ctx: &egui::Context) -> Option<Notice> {
+        let (level, backend, speed) = (self.level(), self.backend(), self.speed);
         let session = self.session.as_mut()?;
         if session.unsupported_audio && !self.muted {
             let path = session.path.clone();
@@ -1071,6 +1116,7 @@ impl Player {
                 return None;
             }
         }
+        session.recover_sound(now, level, backend, speed);
         if session.state != State::Playing {
             return None;
         }

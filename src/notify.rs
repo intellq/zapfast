@@ -332,10 +332,19 @@ pub fn play_sound(sound: NotificationSound) {
             let played = (|| -> Result<(), String> {
                 let reader = source().map_err(|error| error.to_string())?;
                 let decoder = rodio::Decoder::new(reader).map_err(|error| error.to_string())?;
-                let device = crate::audio::open_output().map_err(|error| error.to_string())?;
+                let health = crate::audio::Health::new("notification sound");
+                let device =
+                    crate::audio::open_output(health).map_err(|error| error.to_string())?;
                 let player = rodio::Player::connect_new(device.mixer());
                 player.append(decoder);
-                player.sleep_until_end();
+                // Not `sleep_until_end`: a stream that keeps failing plays nothing, so the
+                // sound would never end and the stream would stay open (#507).
+                while !player.empty() {
+                    if device.failed() {
+                        return Err("the sound output failed".to_owned());
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
                 Ok(())
             })();
             if let Err(error) = played {
