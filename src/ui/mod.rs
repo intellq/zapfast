@@ -87,7 +87,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         banner(app, ui);
     }
     let narrow = narrow(ctx);
-    let list_only = narrow && app.page == Page::Chats && app.current_chat().is_none();
+    let list_only = narrow && list_pane_only(app);
     let view = narrow.then_some(if list_only {
         NarrowView::List
     } else {
@@ -122,6 +122,17 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     announce(app, ctx);
 }
 
+/// Whether a narrow window shows the list pane: the chat list with no chat
+/// open, or the Calls tab's history with no call chosen. Its header's
+/// buttons and rows lead on to the rest.
+fn list_pane_only(app: &App) -> bool {
+    match app.page {
+        Page::Chats => app.current_chat().is_none(),
+        Page::Calls => app.call_info.is_none(),
+        Page::Settings | Page::Wallpaper => false,
+    }
+}
+
 /// Emits the screen reader announcement nodes; private ones stay silent
 /// while the app is locked.
 fn announce(app: &mut App, ctx: &egui::Context) {
@@ -146,8 +157,13 @@ fn main_view(app: &mut App, ui: &mut egui::Ui, list_only: bool) -> Option<egui::
     let crowded = app.info_visible()
         && ui.available_width() - list_width < pane::INFO_MIN + pane::INFO_CONVERSATION_MIN;
     if !narrow(ui.ctx()) && !crowded {
+        // The Calls tab's history needs the full list pane: the collapsed
+        // rail is the chats' own.
         match app.sidebar_mode() {
             SidebarDisplayMode::Expanded => chats::show(app, ui),
+            SidebarDisplayMode::CollapsedIconsOnly if app.page == Page::Calls => {
+                chats::show(app, ui);
+            }
             SidebarDisplayMode::CollapsedIconsOnly => chats::compact_show(app, ui),
         }
     }

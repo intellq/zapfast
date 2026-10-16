@@ -424,31 +424,7 @@ fn new_chat(app: &mut App, ui: &mut egui::Ui) {
         search.request_focus();
     }
     let needle = crate::util::search_key(app.new_chat_search.trim());
-    let mut contacts = app.contacts.clone();
-    for chat in &app.chats {
-        if chat.kind == crate::model::ChatKind::Direct {
-            contacts
-                .entry(chat.id.clone())
-                .or_insert_with(|| crate::model::Contact {
-                    id: chat.id.clone(),
-                    full_name: Some(app.chat_title(chat)),
-                    ..Default::default()
-                });
-        }
-    }
-    let mut contacts: Vec<_> = contacts
-        .into_values()
-        .filter(|contact| {
-            crate::model::phone_of(&contact.id).is_some()
-                && app.me.as_deref() != Some(contact.id.as_str())
-                && !app.chat(&contact.id).is_some_and(|chat| chat.locked)
-                && (needle.is_empty()
-                    || crate::util::search_key(&app.display_name(&contact.id)).contains(&needle)
-                    || crate::model::phone_of(&contact.id)
-                        .is_some_and(|phone| phone.contains(&needle)))
-        })
-        .collect();
-    contacts.sort_by_key(|contact| crate::util::search_key(&app.display_name(&contact.id)));
+    let contacts = contact_choices(app, &needle);
     egui::ScrollArea::vertical()
         .id_salt("new-chat-contacts")
         .max_height((ui.ctx().content_rect().height() - 280.0).clamp(100.0, 420.0))
@@ -474,6 +450,40 @@ fn new_chat(app: &mut App, ui: &mut egui::Ui) {
         });
 }
 
+/// The people New chat and New call offer, by name: the contacts and the
+/// one-to-one chats, without ourselves or a locked chat, matching `needle`
+/// (a `search_key`) by name or number.
+pub(super) fn contact_choices(app: &App, needle: &str) -> Vec<crate::model::Contact> {
+    let mut contacts = app.contacts.clone();
+    for chat in &app.chats {
+        if chat.kind == crate::model::ChatKind::Direct {
+            contacts
+                .entry(chat.id.clone())
+                .or_insert_with(|| crate::model::Contact {
+                    id: chat.id.clone(),
+                    full_name: Some(app.chat_title(chat)),
+                    ..Default::default()
+                });
+        }
+    }
+    let mut contacts: Vec<_> = contacts
+        .into_values()
+        .filter(|contact| {
+            crate::model::phone_of(&contact.id).is_some()
+                && app.me.as_deref() != Some(contact.id.as_str())
+                && !app.chat(&contact.id).is_some_and(|chat| chat.locked)
+                && (needle.is_empty()
+                    || crate::util::search_key(&app.display_name(&contact.id)).contains(needle)
+                    || crate::model::phone_of(&contact.id)
+                        .is_some_and(|phone| phone.contains(needle)))
+        })
+        .collect();
+    contacts.sort_by_key(|contact| crate::util::search_key(&app.display_name(&contact.id)));
+    contacts
+}
+
+/// Draws recipient selection or, for two or more recipients, their
+/// confirmation. A single recipient is forwarded to without one.
 fn forward(app: &mut App, ui: &mut egui::Ui, from_chat: &str, messages: &[String]) {
     let palette = app.palette;
     let heading = if messages.len() == 1 {

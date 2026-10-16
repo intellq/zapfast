@@ -2352,6 +2352,17 @@ pub enum Action {
     StartCall(ChatId),
     /// Starts a 1:1 video call with the chat.
     StartVideoCall(ChatId),
+    /// Shows a call history row's details beside the Calls list: the
+    /// person, the ways to reach them, and every call with them. Carries the
+    /// row's first call, which picks the row out.
+    OpenCallInfo {
+        chat: ChatId,
+        message: String,
+    },
+    /// Closes the call details, back to the Calls page's start.
+    CloseCallInfo,
+    /// Opens the new-call list over the Calls list, or closes it.
+    ShowNewCall(bool),
     /// Answers the ringing incoming call.
     AnswerCall,
     /// Declines the ringing incoming call.

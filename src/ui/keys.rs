@@ -254,6 +254,10 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
             actions.push(Action::Open(Page::Settings));
         } else if app.page == Page::Settings && !app.settings_search.is_empty() {
             actions.push(Action::SearchSettings(String::new()));
+        } else if app.page == Page::Calls && app.new_call {
+            actions.push(Action::ShowNewCall(false));
+        } else if app.page == Page::Calls && app.call_info.is_some() {
+            actions.push(Action::CloseCallInfo);
         } else if app.page == Page::Settings || app.page == Page::Calls {
             actions.push(Action::Open(Page::Chats));
         } else if search_focused || !app.search.is_empty() {
@@ -792,6 +796,29 @@ mod tests {
             app.actions.as_slice(),
             [Action::Open(Page::Chats)]
         ));
+    }
+
+    #[test]
+    fn escape_closes_the_new_call_list_and_the_call_details_first() {
+        let root = tempfile::tempdir().unwrap();
+        let mut app = App::headless(
+            crate::paths::AppDirs::under(root.path()),
+            crate::settings::Settings::default(),
+        )
+        .0;
+        app.page = Page::Calls;
+        app.new_call = true;
+        app.call_info = Some(("ada@s.whatsapp.net".into(), "call-1".into()));
+        let ctx = egui::Context::default();
+        escape(&mut app, &ctx);
+        assert!(matches!(
+            app.actions.as_slice(),
+            [Action::ShowNewCall(false)]
+        ));
+        app.actions.clear();
+        app.new_call = false;
+        escape(&mut app, &ctx);
+        assert!(matches!(app.actions.as_slice(), [Action::CloseCallInfo]));
     }
 
     /// Escape leaves the call screen rather than the call.

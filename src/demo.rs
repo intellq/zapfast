@@ -2409,10 +2409,16 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
                 }
                 app.scroll_to_bottom = true;
             }
-            "calls" => {
+            "calls" | "calls-info" | "new-call" => {
                 app.page = Page::Calls;
+                app.open_chat = None;
                 let mut log = call_entries(crate::util::now());
                 log.sort_by_key(|message| std::cmp::Reverse(message.timestamp));
+                if part == "calls-info" {
+                    // The details of the newest row: Ada's two missed calls.
+                    app.call_info = Some((log[0].chat.clone(), log[0].id.clone()));
+                }
+                app.new_call = part == "new-call";
                 app.call_log = log;
                 app.call_log_loaded = true;
             }
@@ -3532,11 +3538,21 @@ fn call_entries(now: i64) -> Vec<Message> {
             CallStatus::Missed,
             0,
         ),
+        // Two missed calls in a row fold into one history row.
+        call(
+            SAMPLES[0].id,
+            "ada-1b",
+            false,
+            3,
+            false,
+            CallStatus::Missed,
+            0,
+        ),
         call(
             SAMPLES[0].id,
             "ada-2",
             true,
-            2,
+            5,
             true,
             CallStatus::Answered,
             754,
@@ -5839,6 +5855,8 @@ mod tests {
             "react-custom",
             "react-other",
             "calls",
+            "calls-info",
+            "new-call",
             "call-entries",
             "call",
             "call-active",

@@ -1835,7 +1835,12 @@ impl App {
         self.restore_composer();
         // Labels belong to their account: show the one this account showed.
         self.label_filter = self.remembered_label();
-        self.page = Page::Chats;
+        // The Calls tab stays open on the other account's calls.
+        if self.page == Page::Calls {
+            self.backend.send(Command::LoadCallLog);
+        } else {
+            self.page = Page::Chats;
+        }
         self.save_roster();
         self.wallpaper_image.reload();
         self.report_presence();
@@ -6649,9 +6654,13 @@ impl App {
                     let token = self.storage_token;
                     self.backend.send(Command::LoadStorageStats { token });
                 }
-                // The Calls page reads the account's calls as it opens.
+                // The Calls page reads the account's calls as it opens, and
+                // opens on the call history rather than the new-call list.
                 if page == Page::Calls {
                     self.backend.send(Command::LoadCallLog);
+                    if self.page != Page::Calls {
+                        self.new_call = false;
+                    }
                 }
                 // Typed passwords do not wait in a form nobody sees.
                 if page != Page::Settings && !self.app_lock.checking() {
@@ -6707,6 +6716,15 @@ impl App {
             | Action::LeaveCallSurface
             | Action::ReturnToCall
             | Action::ToggleCallFullscreen => {}
+            Action::OpenCallInfo { chat, message } => {
+                self.new_call = false;
+                self.call_info = Some((chat, message));
+            }
+            Action::CloseCallInfo => self.call_info = None,
+            Action::ShowNewCall(open) => {
+                self.new_call = open;
+                self.new_call_search.clear();
+            }
             Action::NavigateBack => self.navigate_back(ctx),
             Action::NavigateForward => self.navigate_forward(ctx),
             Action::StartChat {
@@ -11090,6 +11108,40 @@ mod tests {
             app.open_chat, None,
             "the first account's chat is not restored"
         );
+    }
+
+    /// The Calls tab stays open across a switch of account and shows that
+    /// account's calls; what each account had chosen there stays its own.
+    #[test]
+    fn the_calls_tab_follows_a_switch_of_account() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, mut commands) = two_accounts(directory.path());
+        let ctx = egui::Context::default();
+        app.apply(Action::Open(Page::Calls), &ctx);
+        app.apply(
+            Action::OpenCallInfo {
+                chat: "15550003333@s.whatsapp.net".into(),
+                message: "call-1".into(),
+            },
+            &ctx,
+        );
+        app.apply(Action::ShowNewCall(true), &ctx);
+        assert!(app.new_call);
+        app.apply(Action::SwitchAccount(AccountId::parse("2").unwrap()), &ctx);
+        assert_eq!(app.page, Page::Calls);
+        assert!(
+            std::iter::from_fn(|| commands.try_recv().ok())
+                .any(|command| matches!(command, Command::LoadCallLog)),
+            "the second account reads its own calls"
+        );
+        assert!(!app.new_call && app.call_info.is_none());
+        assert!(app.accounts[0].new_call && app.accounts[0].call_info.is_some());
+        // Coming back to the tab from elsewhere starts at the history.
+        app.apply(Action::SwitchAccount(AccountId::parse("1").unwrap()), &ctx);
+        app.apply(Action::Open(Page::Chats), &ctx);
+        app.apply(Action::Open(Page::Calls), &ctx);
+        assert!(!app.new_call);
+        assert!(app.call_info.is_some(), "the chosen call stays chosen");
     }
 
     #[test]
