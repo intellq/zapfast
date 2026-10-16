@@ -24,6 +24,11 @@ Back up the archive if you need its history. WhatsApp sends only recent
 history to a new device, although ZapFast can request some older messages from
 the phone. Clearing the media cache makes ZapFast download attachments again.
 Expired attachments may still be available through the phone.
+**Settings > Files > Change…** sends new downloads to another folder, leaving
+earlier ones in place. There, documents keep the name they were sent with; a
+file already in the folder is never replaced, and the download becomes
+`name (1).pdf`, `name (2).pdf`, and so on. Characters a file system refuses
+become `_`.
 
 On macOS, settings, state, and the logs are in
 `~/Library/Application Support/me.paolino.zapfast` and the caches in

@@ -158,6 +158,20 @@ async fn download_attachment(
     path: &Path,
     limit: Option<u64>,
 ) -> Result<PathBuf, String> {
+    fetch_attachment(client, downloadable, dir, path, limit, false).await
+}
+
+/// [`download_attachment`], and with `keep_others` a file already at `path`
+/// stays: the download takes the first free `name (n).ext` instead, as in
+/// the reader's own download folder. Returns where the file landed.
+async fn fetch_attachment(
+    client: &Client,
+    downloadable: &dyn Downloadable,
+    dir: &Path,
+    path: &Path,
+    limit: Option<u64>,
+    keep_others: bool,
+) -> Result<PathBuf, String> {
     if over_download_limit(downloadable.file_length(), limit) {
         return Err(tr(ATTACHMENT_LIMIT_ERROR).to_owned());
     }
@@ -173,11 +187,20 @@ async fn download_attachment(
         Ok(writer) => {
             // Close the verified file before publishing it, including on Windows.
             drop(writer);
-            match publish_attachment(&temporary, path).await {
-                Ok(()) => Ok(path.to_path_buf()),
+            let published = if keep_others {
+                publish_beside(&temporary, path)
+                    .await
+                    .map_err(|error| error.to_string())
+            } else {
+                publish_attachment(&temporary, path)
+                    .await
+                    .map(|()| path.to_path_buf())
+            };
+            match published {
+                Ok(path) => Ok(path),
                 Err(error) => {
                     let _ = tokio::fs::remove_file(&temporary).await;
-                    Err(error.to_string())
+                    Err(error)
                 }
             }
         }
@@ -206,6 +229,68 @@ async fn publish_attachment(temporary: &Path, path: &Path) -> Result<(), String>
     tokio::fs::rename(temporary, path)
         .await
         .map_err(|error| error.to_string())
+}
+
+/// Publishes a complete attachment at `path`, or at the first free
+/// `name (n).ext` beside it, never replacing a file already there: the
+/// reader's download folder holds their own files too. A hard link claims
+/// the name atomically; on a file system without them (FAT, some network
+/// shares) an empty file reserves it first.
+async fn publish_beside(temporary: &Path, path: &Path) -> io::Result<PathBuf> {
+    let (temporary, path) = (temporary.to_path_buf(), path.to_path_buf());
+    tokio::task::spawn_blocking(move || {
+        for candidate in (0..1000).map(|n| numbered_path(&path, n)) {
+            match std::fs::hard_link(&temporary, &candidate) {
+                Ok(()) => {
+                    let _ = std::fs::remove_file(&temporary);
+                    return Ok(candidate);
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(_) => {}
+            }
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&candidate)
+            {
+                Ok(reserved) => {
+                    drop(reserved);
+                    // Windows renames only onto a free name; the reserved
+                    // file is ours to remove.
+                    #[cfg(windows)]
+                    std::fs::remove_file(&candidate)?;
+                    return match std::fs::rename(&temporary, &candidate) {
+                        Ok(()) => Ok(candidate),
+                        Err(error) => {
+                            let _ = std::fs::remove_file(&candidate);
+                            Err(error)
+                        }
+                    };
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(io::Error::other("no free file name for the download"))
+    })
+    .await
+    .map_err(io::Error::other)?
+}
+
+/// `path` itself for 0, then `name (n).ext`, as file managers number copies.
+fn numbered_path(path: &Path, n: u32) -> PathBuf {
+    if n == 0 {
+        return path.to_path_buf();
+    }
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("download");
+    let numbered = match name.rsplit_once('.') {
+        Some((stem, extension)) if !stem.is_empty() => format!("{stem} ({n}).{extension}"),
+        _ => format!("{name} ({n})"),
+    };
+    path.with_file_name(numbered)
 }
 
 /// A hidden, per-attempt path in the destination directory, so a verified
@@ -7759,12 +7844,21 @@ impl Worker {
             None
         };
         let dir = self.download_dir();
+        // In the reader's own folder a document keeps the name it was sent
+        // with (#363); the cache keeps names unique by message.
+        let own_folder = dir != self.dirs.media_cache_dir();
         let commands = self.commands.clone();
         tokio::spawn(async move {
             let cache_id = card.map_or_else(|| id.clone(), |index| format!("{id}-card-{index}"));
-            let path = media_path(&dir, &chat, &cache_id, &mime, file_name.as_deref());
+            let named = file_name
+                .as_deref()
+                .filter(|_| own_folder)
+                .and_then(|name| named_media_path(&dir, &mime, name));
+            let keep_others = named.is_some();
+            let path = named
+                .unwrap_or_else(|| media_path(&dir, &chat, &cache_id, &mime, file_name.as_deref()));
             let result = with_attachment_deadline(ATTACHMENT_TIMEOUT, async {
-                match download_attachment(&client, &*downloadable, &dir, &path, attachment_limit)
+                match fetch_attachment(&client, &*downloadable, &dir, &path, attachment_limit, keep_others)
                     .await
                 {
                     Ok(path) => Ok(path),
@@ -7785,12 +7879,13 @@ impl Worker {
                                     Ok(MediaRetryResult::Success { direct_path }) => {
                                         match refreshed(direct_path) {
                                             Some(again) => {
-                                                download_attachment(
+                                                fetch_attachment(
                                                     &client,
                                                     &*again,
                                                     &dir,
                                                     &path,
                                                     attachment_limit,
+                                                    keep_others,
                                                 )
                                                 .await
                                             }
@@ -9415,6 +9510,45 @@ fn extension_for(mime: &str, file_name: Option<&str>) -> String {
 
 /// The largest sticker downloaded only for its first frame.
 const STICKER_POSTER_LIMIT: u64 = 4 * 1024 * 1024;
+
+/// A document's own name in the reader's download folder, made safe for
+/// every platform's file system: no path, no characters Windows refuses, no
+/// device names, no leading dot, at most 120 characters before a validated
+/// extension. `None` when nothing of the name is left.
+fn named_media_path(dir: &Path, mime: &str, file_name: &str) -> Option<PathBuf> {
+    let extension = extension_for(mime, Some(file_name));
+    // Only the last component of whatever path the sender's name holds.
+    let name = file_name.rsplit(['/', '\\']).next().unwrap_or_default();
+    let stem = name.rsplit_once('.').map_or(name, |(stem, _)| stem);
+    let stem: String = stem
+        .chars()
+        .map(|c| {
+            if c.is_control() || matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') {
+                '_'
+            } else {
+                c
+            }
+        })
+        .take(120)
+        .collect();
+    let stem = stem
+        .trim_start_matches(['.', ' '])
+        .trim_end_matches(['.', ' ']);
+    if stem.is_empty() {
+        return None;
+    }
+    let device = stem.split('.').next().unwrap_or(stem).to_ascii_uppercase();
+    let reserved = matches!(device.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || ((device.starts_with("COM") || device.starts_with("LPT"))
+            && device.len() == 4
+            && device[3..].chars().all(|c| c.is_ascii_digit()));
+    let stem = if reserved {
+        format!("_{stem}")
+    } else {
+        stem.to_owned()
+    };
+    Some(dir.join(format!("{stem}.{extension}")))
+}
 
 fn media_path(dir: &Path, chat: &str, id: &str, mime: &str, file_name: Option<&str>) -> PathBuf {
     let extension = extension_for(mime, file_name);
@@ -12053,6 +12187,78 @@ mod tests {
         );
         assert_eq!(extension_for("audio/ogg; codecs=opus", None), "ogg");
         assert_eq!(extension_for("application/x-unknown", None), "x-unknown");
+    }
+
+    #[test]
+    fn documents_keep_their_names_in_the_download_folder() {
+        let dir = Path::new("/downloads");
+        let named = |name| named_media_path(dir, "application/pdf", name);
+        assert_eq!(
+            named("Tax return 2026.pdf"),
+            Some(PathBuf::from("/downloads/Tax return 2026.pdf"))
+        );
+        assert_eq!(
+            named("Résumé – Ada.PDF"),
+            Some(PathBuf::from("/downloads/Résumé – Ada.pdf"))
+        );
+        assert_eq!(named("notes"), Some(PathBuf::from("/downloads/notes.pdf")));
+        assert_eq!(
+            named(r"..\..\evil:name?.pdf"),
+            Some(PathBuf::from("/downloads/evil_name_.pdf"))
+        );
+        assert_eq!(
+            named("../../.bashrc.pdf"),
+            Some(PathBuf::from("/downloads/bashrc.pdf"))
+        );
+        assert_eq!(named("con.pdf"), Some(PathBuf::from("/downloads/_con.pdf")));
+        assert_eq!(
+            named("COM1.txt.pdf"),
+            Some(PathBuf::from("/downloads/_COM1.txt.pdf"))
+        );
+        assert_eq!(named("..."), None);
+        assert_eq!(named(" .pdf"), None);
+        let long = "a".repeat(300) + ".pdf";
+        let path = named(&long).unwrap();
+        assert_eq!(path.file_name().unwrap().len(), 124);
+        for hostile in [
+            "../x.pdf",
+            r"..\x.pdf",
+            "/etc/x.pdf",
+            r"C:\x.pdf",
+            "a/b/c.pdf",
+        ] {
+            let path = named(hostile).unwrap();
+            assert_eq!(path.parent(), Some(dir), "{hostile}");
+        }
+    }
+
+    #[test]
+    fn numbered_copies_follow_the_file_managers() {
+        let path = Path::new("/d/report.pdf");
+        assert_eq!(numbered_path(path, 0), PathBuf::from("/d/report.pdf"));
+        assert_eq!(numbered_path(path, 2), PathBuf::from("/d/report (2).pdf"));
+        assert_eq!(
+            numbered_path(Path::new("/d/notes"), 1),
+            PathBuf::from("/d/notes (1)")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_download_never_replaces_a_file_in_the_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("report.pdf");
+        std::fs::write(&path, b"mine").unwrap();
+        let mut landed = Vec::new();
+        for body in [b"first".as_slice(), b"second"] {
+            let (temporary, _) = temporary_attachment_file(&path).unwrap();
+            std::fs::write(&temporary, body).unwrap();
+            landed.push(publish_beside(&temporary, &path).await.unwrap());
+            assert!(!temporary.exists());
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), b"mine");
+        assert_eq!(landed[0], dir.path().join("report (1).pdf"));
+        assert_eq!(landed[1], dir.path().join("report (2).pdf"));
+        assert_eq!(std::fs::read(&landed[1]).unwrap(), b"second");
     }
 
     #[test]
