@@ -8,6 +8,7 @@ use crate::backend::LinkStatus;
 use crate::model::{Action, Chat, ChatFilter, Contact, Dialog, Message, Page};
 use crate::theme::{self, Icon, Palette};
 
+use super::conversation;
 use super::focus::{Stop, TabStop};
 use super::labels;
 use super::widgets;
@@ -168,7 +169,7 @@ fn header(app: &mut App, ui: &mut egui::Ui) {
         .show(ui, |ui| {
             // With the side bar the buttons live there, and the list starts
             // with the search field unless the archive needs its way back.
-            let folder = app.show_archived || app.locked_folder;
+            let folder = app.show_archived || app.locked_folder || app.show_starred;
             if !side_bar || folder {
                 let row = ui.horizontal(|ui| {
                     if folder {
@@ -183,14 +184,20 @@ fn header(app: &mut App, ui: &mut egui::Ui) {
                         .tab_stop(Stop::Back)
                         .clicked()
                         {
-                            app.show_archived = false;
-                            if app.locked_folder {
-                                app.actions.push(Action::CloseLockedFolder);
+                            if app.show_starred {
+                                app.actions.push(Action::ToggleStarred);
+                            } else {
+                                app.show_archived = false;
+                                if app.locked_folder {
+                                    app.actions.push(Action::CloseLockedFolder);
+                                }
                             }
                         }
                         theme::text(
                             ui,
-                            if app.locked_folder {
+                            if app.show_starred {
+                                tr("Starred")
+                            } else if app.locked_folder {
                                 tr("Locked chats")
                             } else {
                                 tr("Archived")
@@ -212,7 +219,7 @@ fn header(app: &mut App, ui: &mut egui::Ui) {
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             // Five buttons beside the title need tighter gaps
                             // to leave it room at the list's usual width.
-                            if app.archived_count() > 0 && !app.call_log.is_empty() {
+                            if app.archived_count() > 0 || !app.call_log.is_empty() {
                                 ui.spacing_mut().item_spacing.x = 2.0;
                             }
                             settings_button(app, ui);
@@ -224,6 +231,7 @@ fn header(app: &mut App, ui: &mut egui::Ui) {
                             }
                             archived_button(app, ui);
                             super::calls::button(app, ui);
+                            starred_button(app, ui);
                         });
                     }
                 });
@@ -273,6 +281,8 @@ fn side_bar_column(app: &mut App, ui: &mut egui::Ui) {
     ui.add_space(10.0);
     let gap = 6.0;
     super::calls::button(app, ui);
+    ui.add_space(gap);
+    starred_button(app, ui);
     ui.add_space(gap);
     archived_button(app, ui);
     ui.add_space(gap);
@@ -360,6 +370,28 @@ fn hide_list_button(app: &mut App, ui: &mut egui::Ui) {
     }
 }
 
+/// The button that swaps the chat list for the starred messages. It turns
+/// accent while that list is open, and a second click goes back.
+fn starred_button(app: &mut App, ui: &mut egui::Ui) {
+    let palette = app.palette;
+    if theme::icon_button(
+        ui,
+        Icon::Star,
+        18.0,
+        if app.show_starred {
+            palette.accent
+        } else {
+            palette.secondary
+        },
+        palette.text,
+        tr("Starred messages"),
+    )
+    .clicked()
+    {
+        app.actions.push(Action::ToggleStarred);
+    }
+}
+
 /// The button to the archive, left of the one that hides the chat list. It is
 /// there while something is archived; inside the archive the arrow goes back.
 fn archived_button(app: &mut App, ui: &mut egui::Ui) {
@@ -399,7 +431,7 @@ fn macos_header(app: &mut App, ui: &mut egui::Ui) {
             ui.horizontal(|ui| {
                 ui.set_min_height(44.0);
                 ui.add_space((inset - 14.0).max(0.0));
-                if app.show_archived || app.locked_folder {
+                if app.show_archived || app.locked_folder || app.show_starred {
                     if theme::icon_button(
                         ui,
                         Icon::ArrowLeft,
@@ -411,14 +443,20 @@ fn macos_header(app: &mut App, ui: &mut egui::Ui) {
                     .tab_stop(Stop::Back)
                     .clicked()
                     {
-                        app.show_archived = false;
-                        if app.locked_folder {
-                            app.actions.push(Action::CloseLockedFolder);
+                        if app.show_starred {
+                            app.actions.push(Action::ToggleStarred);
+                        } else {
+                            app.show_archived = false;
+                            if app.locked_folder {
+                                app.actions.push(Action::CloseLockedFolder);
+                            }
                         }
                     }
                     theme::text(
                         ui,
-                        if app.locked_folder {
+                        if app.show_starred {
+                            tr("Starred")
+                        } else if app.locked_folder {
                             tr("Locked chats")
                         } else {
                             tr("Archived")
@@ -468,6 +506,7 @@ fn macos_header(app: &mut App, ui: &mut egui::Ui) {
                     }
                     archived_button(app, ui);
                     super::calls::button(app, ui);
+                    starred_button(app, ui);
                 });
             });
             ui.add_space(6.0);
@@ -509,6 +548,10 @@ pub fn filter_chip_id(filter: ChatFilter) -> egui::Id {
 /// Filter chips under the search field. Search lists every match, so the
 /// chips hide there.
 fn filter_chips(app: &mut App, ui: &mut egui::Ui) {
+    if app.show_starred {
+        // The starred panel replaces the chat list, so its filters go with it.
+        return;
+    }
     if !app.locked_folder_open() && !app.search.trim().is_empty() {
         return;
     }
@@ -608,6 +651,228 @@ fn filter_chips(app: &mut App, ui: &mut egui::Ui) {
     labels::chip_row(app, ui, &palette);
 }
 
+/// Stable id for a starred row, so its menu can be addressed by the demo,
+/// by tests, and by the row that keeps it open.
+pub(crate) fn list_row_id(chat: &str, id: &str) -> egui::Id {
+    egui::Id::new(("list-row", chat, id))
+}
+
+/// The starred messages, in the place the chat list usually takes. Newest
+/// star first, each row naming the chat, the moment, and the message.
+fn starred_list(app: &mut App, ui: &mut egui::Ui) {
+    let palette = app.palette;
+    if app.starred.is_empty() {
+        widgets::empty_state(
+            ui,
+            &palette,
+            Icon::Star,
+            crate::i18n::gettext(app.locale, "No starred messages").as_ref(),
+            crate::i18n::gettext(
+                app.locale,
+                "Right-click a message and choose Star to keep it here.",
+            )
+            .as_ref(),
+        );
+        return;
+    }
+    // Rows read the list from the app while they hand their actions back, so
+    // the actions are collected here and applied once the list is drawn.
+    let mut actions = Vec::new();
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            for entry in &app.starred {
+                starred_row(
+                    app,
+                    ui,
+                    &palette,
+                    &entry.message,
+                    entry.starred_at,
+                    conversation::Marks { starred: true },
+                    &mut actions,
+                );
+            }
+        });
+    app.actions.append(&mut actions);
+}
+
+/// One starred message: where it is, when it was starred, and the message's own
+/// words inside a bubble drawn from its side and fill. Clicking opens its chat
+/// at the message; right-clicking the bubble opens the chat's own menu.
+fn starred_row(
+    app: &App,
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    message: &Message,
+    marked_at: i64,
+    marks: conversation::Marks,
+    actions: &mut Vec<Action>,
+) {
+    let width = ui.available_width();
+    let clock = widgets::line(
+        ui,
+        &crate::util::clock(message.timestamp),
+        theme::regular(11.0),
+        palette.secondary,
+        80.0,
+        1,
+    );
+    let body_width = (width - 32.0 - 24.0 - clock.size().x - 10.0).max(60.0);
+    // The message's own words with WhatsApp's markup taken off and mentions
+    // named, the way the chat list previews one. Color emoji and wrapping go
+    // through the same line helper as chat text.
+    let summary = message.content.full_summary();
+    let words = crate::markup::plain(&app.resolve_mention_tokens(&summary), &[]);
+    let body = widgets::line(
+        ui,
+        &words,
+        theme::regular(13.0),
+        palette.text,
+        body_width,
+        12,
+    );
+    let bubble_height = body.size().y + 12.0;
+    let row_id = list_row_id(&message.chat, &message.id);
+    let (rect, _) =
+        ui.allocate_exact_size(vec2(width, 26.0 + bubble_height + 10.0), Sense::hover());
+    let response = ui.interact(rect, row_id, Sense::click());
+    theme::reveal_focus(&response);
+    let label = format!("{}, {words}", app.display_name_or(&message.chat, None));
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), &label)
+    });
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
+    if response.hovered() {
+        ui.painter()
+            .rect_filled(rect, 6.0, palette.surface_hover.gamma_multiply(0.5));
+    }
+    let name = app.display_name_or(&message.chat, None);
+    let when = crate::util::moment_stamp(app.locale, marked_at);
+    let name_line = widgets::line(
+        ui,
+        &name,
+        theme::medium(14.0),
+        palette.text,
+        width - 140.0,
+        1,
+    );
+    name_line.paint(
+        ui,
+        pos2(
+            rect.left() + 16.0,
+            rect.top() + 14.0 - name_line.size().y / 2.0,
+        ),
+        palette.text,
+    );
+    ui.painter().text(
+        pos2(rect.right() - 16.0, rect.top() + 14.0),
+        egui::Align2::RIGHT_CENTER,
+        when,
+        theme::regular(11.5),
+        palette.secondary,
+    );
+    // The message itself, as the bubble the chat shows: same fill, same side,
+    // with the time in its bottom corner.
+    let bubble_width = (body.size().x + 20.0 + clock.size().x + 6.0).min(width - 32.0);
+    let left = if message.from_me {
+        rect.right() - 16.0 - bubble_width
+    } else {
+        rect.left() + 16.0
+    };
+    let bubble = Rect::from_min_size(
+        pos2(left, rect.top() + 26.0),
+        vec2(bubble_width, bubble_height),
+    );
+    ui.painter().rect_filled(
+        bubble,
+        10.0,
+        if message.from_me {
+            palette.bubble_out
+        } else {
+            palette.bubble_in
+        },
+    );
+    body.paint(
+        ui,
+        pos2(bubble.left() + 10.0, bubble.top() + 6.0),
+        palette.text,
+    );
+    clock.paint(
+        ui,
+        pos2(
+            bubble.right() - 10.0 - clock.size().x,
+            bubble.bottom() - 6.0 - clock.size().y,
+        ),
+        palette.secondary,
+    );
+    // The bubble's rect is what the menu is anchored to, and what a test reads
+    // to click it.
+    ui.ctx()
+        .data_mut(|data| data.insert_temp(row_id.with("bubble"), bubble));
+    // Right-click is read from the input because the row's own response cannot
+    // tell the bubble from the name line above it. The menu opens only over the
+    // bubble, and only when no floating layer covers the chat panel.
+    let right_clicked = ui.input(|input| {
+        input.pointer.secondary_clicked()
+            && input
+                .pointer
+                .interact_pos()
+                .is_some_and(|pos| bubble.contains(pos))
+    }) && ui
+        .input(|input| input.pointer.interact_pos())
+        .is_some_and(|pos| {
+            ui.ctx()
+                .layer_id_at(pos)
+                .is_none_or(|layer| layer == response.layer_id)
+        });
+    #[cfg(any(test, feature = "demo"))]
+    let force_menu = app
+        .open_list_menu
+        .as_ref()
+        .is_some_and(|(chat, id)| chat == &message.chat && id == &message.id);
+    #[cfg(not(any(test, feature = "demo")))]
+    let force_menu = false;
+    let open = if right_clicked || force_menu {
+        Some(egui::SetOpenCommand::Bool(true))
+    } else if response.clicked() {
+        Some(egui::SetOpenCommand::Bool(false))
+    } else {
+        None
+    };
+    let popup = egui::Popup::menu(&response)
+        .open_memory(open)
+        .width(conversation::menu_width(
+            ui,
+            app.locale,
+            &app.settings.reaction_emoji,
+            message,
+        ))
+        .frame(widgets::menu_frame(palette));
+    let popup = if force_menu {
+        popup.at_position(bubble.left_top() + vec2(12.0, 8.0))
+    } else {
+        popup.at_pointer_fixed()
+    };
+    popup.show(|ui| {
+        let chat = app
+            .chat(&message.chat)
+            .cloned()
+            .unwrap_or_else(|| Chat::new(message.chat.clone(), name.clone()));
+        conversation::list_menu(app, ui, &chat, message, marks, actions);
+    });
+    if response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .clicked()
+    {
+        actions.push(Action::OpenMessage {
+            chat: message.chat.clone(),
+            message: message.id.clone(),
+        });
+    }
+}
+
 fn list(app: &mut App, ui: &mut egui::Ui) {
     let palette = app.palette;
     // Taken here so a send seen while the list is hidden cannot move it later.
@@ -620,6 +885,10 @@ fn list(app: &mut App, ui: &mut egui::Ui) {
         // Typing the secret code hides every other result: the folder entry
         // is all the search reveals until it is clicked.
         locked_entry(app, ui);
+        return;
+    }
+    if app.show_starred {
+        starred_list(app, ui);
         return;
     }
     if !app.search.trim().is_empty() {
@@ -1500,6 +1769,22 @@ pub fn compact_show(app: &mut App, ui: &mut egui::Ui) {
                 .clicked()
                 {
                     app.actions.push(Action::ToggleSidebar);
+                }
+                if theme::icon_button(
+                    ui,
+                    Icon::Star,
+                    18.0,
+                    if app.show_starred {
+                        palette.accent
+                    } else {
+                        palette.secondary
+                    },
+                    palette.text,
+                    crate::i18n::gettext(app.locale, "Starred messages").as_ref(),
+                )
+                .clicked()
+                {
+                    app.actions.push(Action::ToggleStarred);
                 }
             },
         );

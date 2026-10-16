@@ -290,6 +290,27 @@ pub enum Command {
         from: Option<i64>,
         until: Option<i64>,
     },
+    /// Stars or unstars one archived message.
+    SetStar {
+        chat: ChatId,
+        message: String,
+        starred: bool,
+    },
+    /// Asks for the starred messages.
+    LoadStarred,
+    /// Result of a star or unstar request.
+    Starred {
+        chat: ChatId,
+        message: String,
+        starred: bool,
+        /// Which attempt this answer belongs to. A later click or a phone
+        /// update wins, and this answer is ignored.
+        generation: u64,
+        /// The account that asked. A request that outlives its account must
+        /// not write the next one, whose generations start over.
+        session: u64,
+        result: Result<(), String>,
+    },
     /// Creates an archive chat before its first message is sent.
     EnsureChat {
         chat: ChatId,
@@ -984,6 +1005,21 @@ pub enum Event {
     /// Stored transcripts of voice messages, by chat and message id, sent
     /// with the drafts.
     Transcripts(Vec<(ChatId, String, crate::transcribe::Transcript)>),
+    /// The starred messages of one chat, for the mark in the conversation.
+    Stars {
+        chat: ChatId,
+        ids: Vec<String>,
+    },
+    /// A star that changed in the archive: one the server accepted for a
+    /// click here (`local`), or one made on the phone or another device.
+    StarChanged {
+        chat: ChatId,
+        message: String,
+        starred: bool,
+        local: bool,
+    },
+    /// The starred messages, newest star first.
+    StarredList(Vec<crate::archive::Starred>),
     /// Messages in one chat matching a search, newest first, echoing the
     /// query and range asked for so a stale answer can be told apart.
     ChatHits {

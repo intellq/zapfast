@@ -85,6 +85,17 @@ pub struct Account {
     pub call_log: Vec<crate::archive::LoggedCall>,
     pub chat_filter: ChatFilter,
     pub labels: Vec<Label>,
+    /// Starred messages, newest star first, and whether the left panel lists
+    /// them instead of the chats.
+    pub starred: Vec<crate::archive::Starred>,
+    pub show_starred: bool,
+    /// Ids of the starred messages of each chat, for the mark in the
+    /// conversation. Filled when a chat opens and on every confirmed star.
+    pub stars: HashMap<ChatId, HashSet<String>>,
+    /// A starred row asked to reply: the quote starts once the message it
+    /// points at is loaded, because the composer drops a quote whose message
+    /// has not arrived yet.
+    pub reply_when_loaded: Option<(ChatId, String)>,
     pub account_privacy: crate::privacy::Snapshot,
     pub interactive_sending: HashSet<(ChatId, String)>,
     pub group_saving: HashSet<ChatId>,
@@ -180,6 +191,10 @@ impl Account {
             call_log: Vec::new(),
             chat_filter,
             labels: Vec::new(),
+            starred: Vec::new(),
+            show_starred: false,
+            stars: HashMap::new(),
+            reply_when_loaded: None,
             account_privacy: crate::privacy::Snapshot::default(),
             interactive_sending: HashSet::new(),
             group_saving: HashSet::new(),

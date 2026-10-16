@@ -626,6 +626,9 @@ pub struct App {
     /// The new-contact dialog's "Save to phone" box.
     pub new_contact_to_phone: bool,
     pub sidebar_visible: bool,
+    /// Demo/test: keep this starred row's context menu open.
+    #[cfg(any(test, feature = "demo"))]
+    pub open_list_menu: Option<(ChatId, String)>,
     /// Name typed in the label manager.
     pub label_name: String,
     /// Colour the manager will use for the next label.
@@ -1446,6 +1449,8 @@ impl App {
             group_name_edit: None,
             new_contact_to_phone: true,
             sidebar_visible: true,
+            #[cfg(any(test, feature = "demo"))]
+            open_list_menu: None,
             label_name: String::new(),
             label_color: crate::archive::DEFAULT_COLOR.to_owned(),
             label_editing: None,
@@ -3516,6 +3521,37 @@ impl App {
                         .or_insert(transcript);
                 }
             }
+            Event::Stars { chat, ids } => {
+                self.stars.insert(chat, ids.into_iter().collect());
+            }
+            Event::StarChanged {
+                chat,
+                message,
+                starred,
+                local,
+            } => {
+                let ids = self.stars.entry(chat).or_default();
+                if starred {
+                    ids.insert(message);
+                } else {
+                    ids.remove(&message);
+                }
+                // Only a click here that WhatsApp confirmed says so. Stars
+                // synced from the phone arrive in bursts at link time and
+                // would stack a toast each.
+                if local && live {
+                    if starred {
+                        self.toast(crate::i18n::gettext(self.locale, "Starred"));
+                    } else {
+                        self.toast(crate::i18n::gettext(self.locale, "Star removed"));
+                    }
+                }
+                // The open list would otherwise show the old state.
+                if self.show_starred {
+                    self.backend.send(Command::LoadStarred);
+                }
+            }
+            Event::StarredList(list) => self.starred = list,
             Event::Chats(chats) => {
                 for chat in &chats {
                     if chat.unread == 0 {
@@ -3690,8 +3726,24 @@ impl App {
             }
             Event::MessageUpdated(message) => {
                 let message = *message;
+                // The starred panel holds its own copy. An edit has to
+                // replace that row, or the open list keeps the old text.
+                let in_starred = self.starred.iter().any(|entry| {
+                    entry.message.chat == message.chat && entry.message.id == message.id
+                });
                 if matches!(message.content, Content::Revoked { .. }) {
                     self.stop_deleted_voice(&message.chat, &message.id);
+                    // A revoke for everyone arrives as an update, not as a
+                    // deletion. The star it still holds would keep the row
+                    // in the open list with nothing left to unstar.
+                    self.forget_star(&message.chat, &message.id);
+                } else if in_starred {
+                    for entry in &mut self.starred {
+                        if entry.message.chat == message.chat && entry.message.id == message.id {
+                            entry.message = message.clone();
+                        }
+                    }
+                    self.reload_lists();
                 }
                 if let Some(conversation) = self.conversations.get_mut(&message.chat)
                     && let Some(existing) = conversation.message_mut(&message.id)
@@ -3853,9 +3905,19 @@ impl App {
                     self.editing = None;
                     self.composer.clear();
                 }
+                // A deleted message leaves the starred list.
+                self.forget_star(&chat, &id);
             }
-            Event::ChatRemoved { chat } => self.forget_chat(&chat),
-            Event::ChatCleared { chat, through } => self.handle_chat_cleared(&chat, through, live),
+            Event::ChatRemoved { chat } => {
+                self.forget_chat(&chat);
+                self.stars.remove(&chat);
+                self.reload_lists();
+            }
+            Event::ChatCleared { chat, through } => {
+                self.handle_chat_cleared(&chat, through, live);
+                self.stars.remove(&chat);
+                self.reload_lists();
+            }
             Event::Media {
                 card,
                 chat,
@@ -4258,6 +4320,9 @@ impl App {
                 self.conversations.clear();
                 self.contacts.clear();
                 self.avatars.clear();
+                self.starred.clear();
+                self.show_starred = false;
+                self.stars.clear();
                 self.account_privacy = crate::privacy::Snapshot::default();
                 self.account_receipts_off = false;
                 self.blocklist = None;
@@ -4335,12 +4400,20 @@ impl App {
                 self.open_chat = None;
             }
         }
+        let newly_locked = chat.locked && self.chat(&chat.id).is_none_or(|known| !known.locked);
+        let locked_id = chat.id.clone();
         match self.chats.iter_mut().find(|known| known.id == chat.id) {
             Some(existing) => *existing = chat,
             None => self.chats.push(chat),
         }
         self.chats
             .sort_by_key(|chat| std::cmp::Reverse(chat.last_activity));
+        // The starred query hides locked chats. Drop the row now, before the
+        // reload comes back, so the open panel does not keep painting it.
+        if newly_locked {
+            self.starred.retain(|entry| entry.message.chat != locked_id);
+            self.reload_lists();
+        }
     }
 
     fn close_locked_folder(&mut self) {
@@ -5169,6 +5242,14 @@ impl App {
             self.close_chat_search();
             self.reply_to = attachments.quoting;
             self.editing = None;
+            // A starred row's pending quote belongs to its own chat too.
+            if self
+                .reply_when_loaded
+                .as_ref()
+                .is_some_and(|(chat, _)| chat != &id)
+            {
+                self.reply_when_loaded = None;
+            }
             // A run of voice messages belongs to the chat it started in.
             self.voice_chat = None;
             self.voice_wanted = None;
@@ -6162,6 +6243,9 @@ impl App {
                     self.store_draft(&chat, self.drafts.get(&chat).map_or("", String::as_str));
                 }
                 self.reply_to = None;
+                // A pending quote belongs to the chat being left, like the
+                // quote it would start.
+                self.reply_when_loaded = None;
                 self.emoji_start = None;
                 self.mention_start = None;
                 self.reaction_target = None;
@@ -6552,10 +6636,36 @@ impl App {
                     self.mention_start = None;
                     self.set_composer_cursor(ctx, 0);
                 }
-                self.reply_to = Some(id);
+                self.reply_to = Some(id.clone());
                 self.focus_composer = true;
+                let loaded = self.open_chat.as_deref().is_some_and(|chat| {
+                    self.conversations
+                        .get(chat)
+                        .is_some_and(|conversation| conversation.message(&id).is_some())
+                });
+                if !loaded && let Some(chat) = self.open_chat.clone() {
+                    // A starred row can reply before its chat has paged to
+                    // the message. The quote starts again once that page arrives.
+                    self.reply_when_loaded = Some((chat, id));
+                } else {
+                    self.reply_when_loaded = None;
+                }
             }
-            Action::CancelReply => self.reply_to = None,
+            Action::CancelReply => {
+                self.reply_to = None;
+                self.reply_when_loaded = None;
+            }
+            Action::SetStar {
+                chat,
+                message,
+                starred,
+            } => {
+                self.backend.send(Command::SetStar {
+                    chat,
+                    message,
+                    starred,
+                });
+            }
             Action::ComposerLink { chat, link } => {
                 self.composer_link = link.map(|link| {
                     self.backend
@@ -6710,12 +6820,19 @@ impl App {
             }
             Action::CancelSelection => self.selection = None,
             Action::Edit(id) => {
-                let text = self
-                    .open_chat
-                    .as_deref()
-                    .and_then(|chat| self.conversations.get(chat))
-                    .and_then(|conversation| conversation.message(&id))
-                    .and_then(|message| message.content.editable_text().map(str::to_owned));
+                let open = self.open_chat.clone();
+                let text =
+                    open.as_deref()
+                        .and_then(|chat| self.conversations.get(chat))
+                        .and_then(|conversation| conversation.message(&id))
+                        .and_then(|message| message.content.editable_text().map(str::to_owned))
+                        .or_else(|| {
+                            let chat = open.as_deref()?;
+                            let entry = self.starred.iter().find(|entry| {
+                                entry.message.chat == chat && entry.message.id == id
+                            })?;
+                            entry.message.content.editable_text().map(str::to_owned)
+                        });
                 if let Some(text) = text {
                     self.editing = Some(id);
                     self.composer_tools_open = false;
@@ -6748,6 +6865,7 @@ impl App {
                     message.content = Content::REVOKED;
                 }
                 self.prune_selection();
+                self.forget_star(&chat, &id);
                 self.backend.send(Command::Revoke { chat, id });
             }
             Action::DeleteForMe {
@@ -7468,6 +7586,23 @@ impl App {
                 self.show_archived = show;
                 self.unread_kept.clear();
             }
+            Action::ToggleStarred => {
+                // The header button and the shortcut both land here. The
+                // sidebar has to be open for the list to be visible.
+                self.sidebar_visible = true;
+                self.show_starred = !self.show_starred;
+                if self.show_starred {
+                    self.show_archived = false;
+                    // The starred list takes the panel the folder held, and
+                    // the folder is a locked one: leave it on the way in.
+                    if self.locked_folder {
+                        self.close_locked_folder();
+                        self.search.clear();
+                        self.search_hits.clear();
+                    }
+                    self.backend.send(Command::LoadStarred);
+                }
+            }
             Action::SelectLabel(label) => self.select_label(label),
             Action::SetChatLabels { chat, labels } => {
                 self.backend.send(Command::SetChatLabels { chat, labels });
@@ -8184,6 +8319,45 @@ impl App {
         });
     }
 
+    /// Starts the quote a starred row asked for, once the message it points at
+    /// is in the open chat. The composer drops a quote whose message has not
+    /// loaded, so waiting for it here keeps Reply working from the list.
+    fn settle_pending_reply(&mut self) {
+        let Some((chat, id)) = self.reply_when_loaded.clone() else {
+            return;
+        };
+        let loaded = self.open_chat.as_deref() == Some(chat.as_str())
+            && self
+                .conversations
+                .get(&chat)
+                .is_some_and(|conversation| conversation.message(&id).is_some());
+        if !loaded {
+            return;
+        }
+        self.reply_when_loaded = None;
+        self.reply_to = Some(id);
+        self.focus_composer = true;
+    }
+
+    /// Asks the worker for the starred list again, for the one on screen. A
+    /// message that changed in the archive is a stale row otherwise.
+    fn reload_lists(&mut self) {
+        if self.show_starred {
+            self.backend.send(Command::LoadStarred);
+        }
+    }
+
+    /// Drops the star of a message that no longer exists. A message deleted
+    /// here, and one revoked for everyone, keep no star: the mark would stay
+    /// in the conversation and the open list would hold a row with nothing
+    /// left to unstar.
+    fn forget_star(&mut self, chat: &str, id: &str) {
+        if let Some(ids) = self.stars.get_mut(chat) {
+            ids.remove(id);
+        }
+        self.reload_lists();
+    }
+
     /// Chats pinned to the top, counted the way WhatsApp limits them.
     fn pinned_count(&self) -> usize {
         self.chats
@@ -8765,6 +8939,7 @@ impl App {
         crate::i18n::set_current(self.locale);
         let ctx = ui.ctx().clone();
         let ctx = &ctx;
+        self.settle_pending_reply();
         self.copy_rows
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -14682,6 +14857,108 @@ mod tests {
         );
         assert_eq!(app.reply_to.as_deref(), Some("original"));
         assert!(app.focus_composer);
+    }
+
+    #[test]
+    fn a_loaded_reply_drops_a_pending_one_and_cancel_drops_both() {
+        let mut app = app();
+        let chat = "fixture@s.whatsapp.net";
+        app.open_chat = Some(chat.into());
+        app.conversations.insert(
+            chat.into(),
+            Conversation {
+                messages: vec![message(chat, "here", 10)],
+                ..Default::default()
+            },
+        );
+        app.reply_when_loaded = Some((chat.into(), "gone".into()));
+        app.apply(Action::Reply("here".into()), &egui::Context::default());
+        assert_eq!(app.reply_to.as_deref(), Some("here"));
+        assert!(app.reply_when_loaded.is_none());
+        app.apply(Action::CancelReply, &egui::Context::default());
+        assert!(app.reply_to.is_none());
+        assert!(app.reply_when_loaded.is_none());
+    }
+
+    #[test]
+    fn locking_a_chat_drops_it_from_the_open_starred_list() {
+        let mut app = app();
+        let chat = "fixture@s.whatsapp.net";
+        app.chats.push(Chat::new(chat.into(), "Ada".into()));
+        app.show_starred = true;
+        app.starred.push(crate::archive::Starred {
+            message: message(chat, "m1", 10),
+            starred_at: 10,
+        });
+        let mut locked = Chat::new(chat.into(), "Ada".into());
+        locked.locked = true;
+        app.handle_chat_updated(locked, true);
+        assert!(app.starred.is_empty());
+    }
+
+    /// Stars synced from the phone arrive in a burst at link time; only a
+    /// click here that WhatsApp confirmed says so with a toast.
+    #[test]
+    fn only_a_confirmed_local_star_toasts() {
+        let mut app = app();
+        let chat = "fixture@s.whatsapp.net";
+        for id in ["m1", "m2", "m3"] {
+            app.apply_backend_event(
+                Event::StarChanged {
+                    chat: chat.into(),
+                    message: id.into(),
+                    starred: true,
+                    local: false,
+                },
+                true,
+            );
+        }
+        assert!(app.toasts.is_empty(), "phone stars stay quiet");
+        assert_eq!(app.stars[chat].len(), 3, "but still mark the messages");
+        app.apply_backend_event(
+            Event::StarChanged {
+                chat: chat.into(),
+                message: "m4".into(),
+                starred: true,
+                local: true,
+            },
+            true,
+        );
+        assert_eq!(app.toasts.len(), 1);
+        assert_eq!(app.toasts[0].message, "Starred");
+    }
+
+    #[test]
+    fn an_edited_message_replaces_the_open_starred_row() {
+        let mut app = app();
+        let (backend, mut commands, events) = Backend::recording_with_events();
+        app.backend = backend;
+        app.show_starred = true;
+        let chat = "fixture@s.whatsapp.net";
+        app.starred.push(crate::archive::Starred {
+            message: message(chat, "m1", 10),
+            starred_at: 1,
+        });
+        let mut edited = message(chat, "m1", 11);
+        edited.content = Content::text("edited");
+        events
+            .send(Event::MessageUpdated(Box::new(edited.clone())))
+            .unwrap();
+        app.handle_events();
+        assert_eq!(app.starred[0].message.content, edited.content);
+        assert!(
+            std::iter::from_fn(|| commands.try_recv().ok())
+                .any(|command| { matches!(command, Command::LoadStarred) })
+        );
+    }
+
+    #[test]
+    fn toggling_starred_opens_the_sidebar() {
+        let mut app = app();
+        app.sidebar_visible = false;
+        app.apply(Action::ToggleStarred, &egui::Context::default());
+        assert!(app.show_starred);
+        assert!(app.sidebar_visible);
     }
 
     #[test]

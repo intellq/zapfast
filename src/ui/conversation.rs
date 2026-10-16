@@ -2164,6 +2164,8 @@ struct View<'a> {
     anchor_at_top: bool,
     /// Demo/test: keep this message's context menu open.
     open_menu: Option<&'a str>,
+    /// Ids of the starred messages of this chat, for the mark in the footer.
+    starred: Option<&'a HashSet<String>>,
     reaction: Option<&'a str>,
     /// The reaction picker was opened from the message's context menu.
     reaction_menu: bool,
@@ -2326,6 +2328,7 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
         },
         anchor_at_top: app.scroll_anchor_at_top,
         open_menu: app.open_message_menu.as_deref(),
+        starred: app.stars.get(&chat.id),
         reaction: app
             .reaction_target
             .as_ref()
@@ -4251,7 +4254,8 @@ fn bubble_frame(
             // no more than the cap. Text spans that width and stays left-aligned.
             // Bubbles without cards use the natural text width.
             let cap = ((max_width - 20.0).min(ui.available_width())).max(0.0);
-            let reserve = footer_width(ui, message);
+            let starred = view.starred.is_some_and(|ids| ids.contains(&message.id));
+            let reserve = footer_width(ui, message, starred);
             let settled = settled_width(ui, view, message, cap);
             let slot = match settled {
                 Some(width) => {
@@ -4265,9 +4269,9 @@ fn bubble_frame(
             // While selecting, a click picks the message instead.
             let resend = resendable(view, message) && view.selection.is_empty();
             let resend_clicked = if over_picture && let Some(picture) = slot {
-                footer_over_picture(ui, view, message, picture, resend, actions)
+                footer_over_picture(ui, view, message, picture, resend, starred, actions)
             } else {
-                footer(ui, view, message, slot, resend, actions)
+                footer(ui, view, message, slot, resend, starred, actions)
             };
             if resend_clicked {
                 actions.push(Action::RetrySend {
@@ -4357,20 +4361,7 @@ fn bubble_frame(
                 .is_none_or(|layer| layer == bubble.layer_id)
         });
     let force_menu = view.open_menu == Some(message.id.as_str());
-    let quick = quick_reactions(message, view.reaction_emoji).len() as f32 + 1.0;
-    let width = widgets::menu_width(
-        ui,
-        &[
-            tr("Delete for everyone"),
-            tr("Show in folder"),
-            tr("Copy message ID"),
-            &crate::i18n::gettext(view.locale, "Open in system player"),
-            &crate::i18n::gettext(view.locale, "Message info"),
-            &crate::i18n::gettext(view.locale, "Reload earlier messages"),
-        ],
-        true,
-    )
-    .max(quick * 36.0 + 12.0);
+    let width = menu_width(ui, view.locale, view.reaction_emoji, message);
     let keyboard_clicked =
         bubble.clicked() && bubble.has_focus() && !ui.input(|input| input.pointer.any_click());
     let open = if right_clicked || force_menu || reacting || keyboard_clicked {
@@ -4408,7 +4399,7 @@ fn bubble_frame(
         popup.at_pointer_fixed()
     };
     let menu = popup.show(|ui| {
-        context_menu(ui, view, message, actions);
+        context_menu(ui, view, message, MenuOrigin::Chat, actions);
     });
     if let Some(menu) = menu {
         ui.ctx()
@@ -4525,7 +4516,8 @@ fn natural_text_width(ui: &egui::Ui, view: &View<'_>, message: &Message, cap: f3
         .map(|row| row.row.size.x)
         .fold(0.0, f32::max);
     let last = laid.galley.rows.last().map_or(0.0, |row| row.row.size.x);
-    let reserve = footer_width(ui, message);
+    let starred = view.starred.is_some_and(|ids| ids.contains(&message.id));
+    let reserve = footer_width(ui, message, starred);
     Some(if last + 8.0 + reserve <= cap {
         widest.max(last + 8.0 + reserve)
     } else {
@@ -4864,18 +4856,32 @@ fn paint_forwarded_label(
     rect
 }
 
-/// Width of the message footer.
-fn footer_width(ui: &egui::Ui, message: &Message) -> f32 {
-    let font = theme::regular(11.0);
-    let time = ui
-        .painter()
+/// Painted size of the star mark in the bubble footer.
+const FOOTER_MARK: f32 = 13.0;
+/// One gap: time to the mark.
+const FOOTER_MARK_GAP: f32 = 8.0;
+/// Room one visible mark keeps next to the clock.
+const FOOTER_MARK_SLOT: f32 = FOOTER_MARK + FOOTER_MARK_GAP;
+
+const FOOTER_STAR: Color32 = Color32::from_rgb(0xEA, 0xB3, 0x08);
+
+/// The clock's own width at the footer's size: the floor a footer starts from,
+/// and the one part of it that depends on the reader's clock format.
+fn clock_width(ui: &egui::Ui, message: &Message) -> f32 {
+    ui.painter()
         .layout_no_wrap(
             crate::util::clock(message.timestamp),
-            font.clone(),
+            theme::regular(11.0),
             Color32::WHITE,
         )
         .size()
-        .x;
+        .x
+}
+
+/// Width of the message footer.
+fn footer_width(ui: &egui::Ui, message: &Message, starred: bool) -> f32 {
+    let font = theme::regular(11.0);
+    let time = clock_width(ui, message);
     let edited = if message.edited {
         ui.painter()
             .layout_no_wrap(tr("edited").to_owned(), font, Color32::WHITE)
@@ -4894,7 +4900,11 @@ fn footer_width(ui: &egui::Ui, message: &Message) -> f32 {
     } else {
         0.0
     };
-    time + edited + not_sent + if message.from_me { 19.0 } else { 0.0 }
+    // Only a message that carries a mark reserves its slot, as WhatsApp does:
+    // a plain footer is the clock and the ticks alone. Starring grows that
+    // bubble's footer by one slot, and a later pin uses the same slot.
+    let marks = if starred { FOOTER_MARK_SLOT } else { 0.0 };
+    time + edited + not_sent + if message.from_me { 19.0 } else { 0.0 } + marks
 }
 
 /// Whether the message's time and ticks sit over its picture rather than
@@ -4945,6 +4955,7 @@ fn footer_over_picture(
     message: &Message,
     picture: Rect,
     resend: bool,
+    starred: bool,
     actions: &mut Vec<Action>,
 ) -> bool {
     let palette = &view.palette;
@@ -4957,8 +4968,11 @@ fn footer_over_picture(
             .layout_no_wrap(tr(NOT_SENT).to_owned(), theme::medium(11.0), Color32::WHITE)
     });
     let tick_width = if message.from_me { 19.0 } else { 0.0 };
-    let width =
-        time.size().x + failed.as_ref().map_or(0.0, |galley| galley.size().x + 6.0) + tick_width;
+    let marks = if starred { FOOTER_MARK_SLOT } else { 0.0 };
+    let width = time.size().x
+        + failed.as_ref().map_or(0.0, |galley| galley.size().x + 6.0)
+        + tick_width
+        + marks;
     let row = Rect::from_min_max(
         pos2(
             picture.right() - OVER_PICTURE_INSET.x - width,
@@ -5002,6 +5016,19 @@ fn footer_over_picture(
         ui.painter().galley(label.min, failed, Color32::WHITE);
         let status = Rect::from_min_max(label.min, pos2(row.right(), label.max.y));
         clicked = not_sent_status(ui, message, status, resend);
+    }
+    if starred {
+        x -= FOOTER_MARK_SLOT;
+        theme::paint_icon(
+            ui,
+            Icon::StarFill,
+            Rect::from_center_size(
+                pos2(x + FOOTER_MARK / 2.0, row.center().y),
+                Vec2::splat(FOOTER_MARK),
+            ),
+            FOOTER_MARK,
+            FOOTER_STAR,
+        );
     }
     ui.ctx().data_mut(|data| {
         data.insert_temp(footer_id(&message.chat, &message.id), row);
@@ -5067,6 +5094,7 @@ fn footer(
     message: &Message,
     slot: Option<Rect>,
     resend: bool,
+    starred: bool,
     actions: &mut Vec<Action>,
 ) -> bool {
     let palette = &view.palette;
@@ -5123,6 +5151,7 @@ fn footer(
         rect.center().y - 7.5..=rect.center().y + 7.5,
     );
     status_opens_info(ui, view, message, status, actions);
+    let mut clicked = false;
     if let Some(edited) = edited {
         x -= edited.size().x + 4.0;
         ui.painter().galley(
@@ -5139,9 +5168,22 @@ fn footer(
         );
         ui.painter().galley(label.min, failed, palette.text);
         let status = Rect::from_min_max(label.min, pos2(rect.right(), label.max.y));
-        return not_sent_status(ui, message, status, resend);
+        clicked = not_sent_status(ui, message, status, resend);
     }
-    false
+    if starred {
+        x -= FOOTER_MARK_SLOT;
+        theme::paint_icon(
+            ui,
+            Icon::StarFill,
+            Rect::from_center_size(
+                pos2(x + FOOTER_MARK / 2.0, rect.center().y),
+                Vec2::splat(FOOTER_MARK),
+            ),
+            FOOTER_MARK,
+            FOOTER_STAR,
+        );
+    }
+    clicked
 }
 
 /// The "not sent" word and red icon: explained on hover and to screen
@@ -5258,6 +5300,117 @@ pub(crate) fn reaction_choice(current: Option<&str>, emoji: &str) -> String {
     }
 }
 
+/// Width a message menu needs: its longest entry, or the quick-reaction row
+/// when that is wider. Both the bubble and a starred row use it, so the two
+/// menus come out the same size.
+pub(crate) fn menu_width(
+    ui: &egui::Ui,
+    locale: crate::i18n::Locale,
+    reaction_emoji: &[(String, u32)],
+    message: &Message,
+) -> f32 {
+    let quick = quick_reactions(message, reaction_emoji).len() as f32 + 1.0;
+    let labels = message_menu_labels(locale);
+    let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+    widgets::menu_width(ui, &refs, true).max(quick * 36.0 + 12.0)
+}
+
+/// Every label the message menu can show. The menu is as wide as the longest
+/// one, so Star and Unstar belong here: a long translation is otherwise cut.
+fn message_menu_labels(locale: crate::i18n::Locale) -> Vec<String> {
+    vec![
+        tr("Delete for everyone").to_owned(),
+        tr("Show in folder").to_owned(),
+        tr("Copy message ID").to_owned(),
+        crate::i18n::gettext(locale, "Open in system player").into_owned(),
+        crate::i18n::gettext(locale, "Message info").into_owned(),
+        crate::i18n::gettext(locale, "Reload earlier messages").into_owned(),
+        crate::i18n::gettext(locale, "Unstar").into_owned(),
+        crate::i18n::gettext(locale, "Star").into_owned(),
+    ]
+}
+
+/// Where a message menu was opened from. A starred row has no composer, no
+/// selection bar, and no revoke window of its own, so the entries that need one
+/// ask for the chat to be opened at the message first.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MenuOrigin {
+    Chat,
+    List,
+}
+
+/// How a left-list row's message is marked, for the menu's Star label.
+#[derive(Clone, Copy)]
+pub(crate) struct Marks {
+    pub starred: bool,
+}
+
+/// The message menu for a row drawn outside the conversation: the starred
+/// list. It is the chat's own menu, with the marks the list already knows, so
+/// both places offer exactly the same entries.
+pub(crate) fn list_menu(
+    app: &App,
+    ui: &mut egui::Ui,
+    chat: &Chat,
+    message: &Message,
+    marks: Marks,
+    actions: &mut Vec<Action>,
+) {
+    let stars: HashSet<String> = marks
+        .starred
+        .then(|| message.id.clone())
+        .into_iter()
+        .collect();
+    let names_or = |id: &str, hint: Option<&str>| app.display_name_or(id, hint);
+    let mention_names = |id: &str| app.mention_name(id);
+    let avatars = HashMap::new();
+    let keyboard_navigation = std::cell::Cell::new(false);
+    let quote_pictures = HashMap::new();
+    let view = View {
+        palette: app.palette,
+        locale: app.locale,
+        chat,
+        me: app.me.as_deref(),
+        download_settings: &app.settings,
+        connected: app.link.is_connected(),
+        account_receipts_off: app.account_receipts_off,
+        poll_voting: &app.poll_voting,
+        interactive_pending: &app.interactive_sending,
+        media_sending: &app.media_sending,
+        media_progress: &app.media_progress,
+        quote_pictures: &quote_pictures,
+        // Nothing scrolls, highlights, or selects in a list row.
+        anchor: None,
+        anchor_at_top: false,
+        open_menu: None,
+        reaction: None,
+        reaction_menu: false,
+        reaction_emoji: &app.settings.reaction_emoji,
+        keyboard_navigation: &keyboard_navigation,
+        names_or: &names_or,
+        mention_names: &mention_names,
+        avatars: &avatars,
+        contacts: &app.contacts,
+        now: crate::util::now(),
+        // A row drawn outside the conversation holds still.
+        animate: false,
+        player: &app.player,
+        transcriber: &app.transcriber,
+        transcripts: &app.transcripts,
+        transcripts_folded: &app.transcripts_folded,
+        video: &app.video,
+        video_expanded: None,
+        copy_rows: Some(app.copy_rows.as_ref()),
+        selecting: false,
+        motion_playing: None,
+        starred: marks.starred.then_some(&stars),
+        selection: &[],
+        selection_revocable: false,
+        selection_forwardable: false,
+    };
+    context_menu(ui, &view, message, MenuOrigin::List, actions);
+}
+
 /// Quick reactions plus our current reaction when needed.
 fn quick_reactions<'a>(message: &'a Message, preferred: &'a [(String, u32)]) -> Vec<&'a str> {
     let mut list = Vec::new();
@@ -5281,7 +5434,13 @@ fn quick_reactions<'a>(message: &'a Message, preferred: &'a [(String, u32)]) -> 
     list
 }
 
-fn context_menu(ui: &mut egui::Ui, view: &View<'_>, message: &Message, actions: &mut Vec<Action>) {
+fn context_menu(
+    ui: &mut egui::Ui,
+    view: &View<'_>,
+    message: &Message,
+    origin: MenuOrigin,
+    actions: &mut Vec<Action>,
+) {
     let palette = view.palette;
     let chat = &view.chat.id;
     let mine = own_reaction(message);
@@ -5372,7 +5531,29 @@ fn context_menu(ui: &mut egui::Ui, view: &View<'_>, message: &Message, actions: 
     if !matches!(message.content, Content::Revoked { .. })
         && widgets::menu_item(ui, &palette, Some(Icon::Reply), tr("Reply"))
     {
+        if matches!(origin, MenuOrigin::List) {
+            actions.push(Action::OpenMessage {
+                chat: chat.clone(),
+                message: message.id.clone(),
+            });
+        }
         actions.push(Action::Reply(message.id.clone()));
+    }
+    let starred = view.starred.is_some_and(|ids| ids.contains(&message.id));
+    let star_label = if starred {
+        crate::i18n::gettext(view.locale, "Unstar")
+    } else {
+        crate::i18n::gettext(view.locale, "Star")
+    };
+    if !matches!(message.content, Content::Revoked { .. })
+        && widgets::menu_item(ui, &palette, Some(Icon::Star), &star_label)
+    {
+        actions.push(Action::SetStar {
+            chat: chat.clone(),
+            message: message.id.clone(),
+            starred: !starred,
+        });
+        ui.close();
     }
     let forwardable = if group.len() > 1 {
         view.selection_forwardable
@@ -5388,6 +5569,12 @@ fn context_menu(ui: &mut egui::Ui, view: &View<'_>, message: &Message, actions: 
     if crate::app::can_select(&message.content)
         && widgets::menu_item(ui, &palette, Some(Icon::Check), tr("Select"))
     {
+        if matches!(origin, MenuOrigin::List) {
+            actions.push(Action::OpenMessage {
+                chat: chat.clone(),
+                message: message.id.clone(),
+            });
+        }
         actions.push(Action::SelectMessage(message.id.clone()));
     }
     let text = copyable_text(&message.content);
@@ -5449,6 +5636,12 @@ fn context_menu(ui: &mut egui::Ui, view: &View<'_>, message: &Message, actions: 
             && age <= crate::app::REVOKE_WINDOW.as_secs() as i64
     };
     if can_edit && widgets::menu_item(ui, &palette, Some(Icon::Pencil), tr("Edit")) {
+        if matches!(origin, MenuOrigin::List) {
+            actions.push(Action::OpenMessage {
+                chat: chat.clone(),
+                message: message.id.clone(),
+            });
+        }
         actions.push(Action::Edit(message.id.clone()));
     }
     if can_revoke && widgets::menu_item(ui, &palette, Some(Icon::Trash), tr("Delete for everyone"))
@@ -10346,6 +10539,124 @@ mod tests {
     }
 
     #[test]
+    fn the_footer_reserves_a_slot_only_when_the_message_is_starred() {
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let mut clock = 0.0;
+        let mut incoming = 0.0;
+        let mut starred = 0.0;
+        let mut own = 0.0;
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(400.0, 200.0))),
+                ..Default::default()
+            },
+            |ui| {
+                let from_them = crate::archive::tests::message("1@s.whatsapp.net", "m1", 0, false);
+                let from_me = crate::archive::tests::message("1@s.whatsapp.net", "m1", 0, true);
+                clock = clock_width(ui, &from_them);
+                incoming = footer_width(ui, &from_them, false);
+                starred = footer_width(ui, &from_them, true);
+                own = footer_width(ui, &from_me, false);
+            },
+        );
+        output.textures_delta.clear();
+        // Measured against the clock the reader's own format produces, not a
+        // number that only holds on a 24-hour one: the same footer is a third
+        // wider where the system shows "12:00 AM".
+        assert!(
+            (incoming - clock).abs() < 0.01,
+            "a plain incoming footer is just the clock, {incoming} vs {clock}"
+        );
+        assert!(
+            (starred - clock - FOOTER_MARK_SLOT).abs() < 0.5,
+            "a star adds one mark slot, {starred} vs {clock}"
+        );
+        assert!(
+            (own - incoming - 19.0).abs() < 0.5,
+            "our own messages add the delivery ticks, {own} vs {incoming}"
+        );
+    }
+
+    #[test]
+    fn the_footer_paints_a_star_mark_when_the_message_is_starred() {
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let directory = tempfile::tempdir().unwrap();
+        let (app, _events) = App::headless(
+            crate::paths::AppDirs::under(directory.path()),
+            crate::settings::Settings::default(),
+        );
+        let chat = Chat::new("1@s.whatsapp.net".into(), "Ada".into());
+        let names_or = |id: &str, hint: Option<&str>| app.display_name_or(id, hint);
+        let mention_names = |id: &str| app.mention_name(id);
+        let avatars = HashMap::new();
+        let quote_pictures = HashMap::new();
+        let keyboard_navigation = std::cell::Cell::new(false);
+        let view = View {
+            palette: Palette::dark(),
+            locale: app.locale,
+            chat: &chat,
+            me: None,
+            download_settings: &app.settings,
+            connected: false,
+            account_receipts_off: false,
+            poll_voting: &app.poll_voting,
+            interactive_pending: &app.interactive_sending,
+            media_sending: &app.media_sending,
+            media_progress: &app.media_progress,
+            quote_pictures: &quote_pictures,
+            anchor: None,
+            anchor_at_top: false,
+            open_menu: None,
+            reaction: None,
+            reaction_menu: false,
+            reaction_emoji: &app.settings.reaction_emoji,
+            keyboard_navigation: &keyboard_navigation,
+            names_or: &names_or,
+            mention_names: &mention_names,
+            avatars: &avatars,
+            contacts: &app.contacts,
+            now: 0,
+            animate: false,
+            player: &app.player,
+            transcriber: &app.transcriber,
+            transcripts: &app.transcripts,
+            transcripts_folded: &app.transcripts_folded,
+            video: &app.video,
+            video_expanded: None,
+            copy_rows: Some(app.copy_rows.as_ref()),
+            selecting: false,
+            motion_playing: None,
+            starred: None,
+            selection: &[],
+            selection_revocable: false,
+            selection_forwardable: false,
+        };
+        let shapes = |starred: bool| {
+            let message = crate::archive::tests::message("1@s.whatsapp.net", "m1", 0, false);
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(400.0, 200.0))),
+                    ..Default::default()
+                },
+                |ui| {
+                    footer(ui, &view, &message, None, false, starred, &mut Vec::new());
+                },
+            );
+            output.textures_delta.clear();
+            output.shapes.len()
+        };
+        assert_eq!(shapes(true), shapes(false) + 1, "a star paints one mark");
+    }
+
+    #[test]
+    fn the_star_mark_tint_is_not_the_secondary() {
+        let palette = Palette::dark();
+        assert_ne!(FOOTER_STAR, palette.secondary);
+    }
+
+    #[test]
     fn a_failed_footer_reserves_room_for_its_label() {
         let ctx = egui::Context::default();
         crate::theme::install(&ctx);
@@ -10370,12 +10681,12 @@ mod tests {
         };
         let mut widths = Vec::new();
         let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
-            widths.push(footer_width(ui, &message));
+            widths.push(footer_width(ui, &message, false));
             message.status = Delivery::Failed;
-            widths.push(footer_width(ui, &message));
+            widths.push(footer_width(ui, &message, false));
             // Only our own messages can fail to send.
             message.from_me = false;
-            widths.push(footer_width(ui, &message) + 19.0);
+            widths.push(footer_width(ui, &message, false) + 19.0);
         });
         output.textures_delta.clear();
         assert!(widths[1] > widths[0] + 30.0, "{widths:?}");
@@ -10603,6 +10914,16 @@ mod reaction_tests {
         assert_eq!(message.reactions[0].emoji, "🏆");
         assert!(!message.reactions[0].from_me);
         assert_eq!(quick_reactions(&message, &[]), QUICK_REACTIONS.to_vec());
+    }
+
+    #[test]
+    fn the_message_menu_measures_star_and_unstar() {
+        let locale = crate::i18n::Locale::default();
+        let labels = message_menu_labels(locale);
+        for word in ["Unstar", "Star"] {
+            let shown = crate::i18n::gettext(locale, word);
+            assert!(labels.iter().any(|label| label == shown.as_ref()));
+        }
     }
 }
 
