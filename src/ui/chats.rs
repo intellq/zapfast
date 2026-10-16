@@ -488,23 +488,36 @@ fn header_button_row(app: &mut App, ui: &mut egui::Ui, buttons: &[HeaderButton],
                 }
             }
             HeaderButton::Settings => {
-                let open = super::rail::Destination::Settings.lit(app);
-                if theme::icon_button(
-                    ui,
-                    Icon::Settings,
-                    HEADER_ICON,
-                    settings_button_color(app),
-                    palette.text,
-                    &super::keys::label(if open {
-                        tr("Close settings (Ctrl+,)")
+                let settings_open = app.page == Page::Settings;
+                // The archive works as Settings do: the gear is a solid red X
+                // while it is open, and the X leaves it.
+                let archive_open = app.show_archived && !settings_open;
+                let response = if settings_open {
+                    // Same as the avatar: the label says what the click does
+                    // now, not what it opened.
+                    theme::close_button(
+                        ui,
+                        HEADER_ICON,
+                        &super::keys::label(tr("Close settings (Ctrl+,)")),
+                    )
+                } else if archive_open {
+                    theme::close_button(ui, HEADER_ICON, tr("Close archived chats"))
+                } else {
+                    theme::icon_button(
+                        ui,
+                        Icon::Settings,
+                        HEADER_ICON,
+                        settings_button_color(app),
+                        palette.text,
+                        &super::keys::label(tr("Settings (Ctrl+,)")),
+                    )
+                };
+                if response.tab_stop(Stop::Settings).clicked() {
+                    app.actions.push(if archive_open {
+                        Action::ShowArchived(false)
                     } else {
-                        tr("Settings (Ctrl+,)")
-                    }),
-                )
-                .tab_stop(Stop::Settings)
-                .clicked()
-                {
-                    app.actions.push(Action::ToggleSettings);
+                        Action::ToggleSettings
+                    });
                 }
             }
             HeaderButton::Menu => menu_button(app, ui, macos),
