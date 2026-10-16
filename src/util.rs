@@ -270,6 +270,48 @@ pub fn moment_stamp(locale: Locale, unix_seconds: i64) -> String {
     }
 }
 
+/// The chat info line for a chat's disappearing-message timer, as WhatsApp
+/// words it: "Disappearing messages: 24 hours", "Disappearing messages: 7
+/// days", "Disappearing messages: 90 days", and "Disappearing messages: Off"
+/// for a timer WhatsApp turned off. A duration WhatsApp never offers falls
+/// back to its seconds, so an unexpected value reads as the number it is
+/// rather than as nothing.
+///
+/// `None` draws no line at all: nobody has told us this chat's timer, and
+/// saying so would be a guess.
+pub fn disappearing_line(locale: Locale, seconds: Option<u32>) -> Option<String> {
+    let seconds = seconds?;
+    use crate::i18n::gettext;
+    let value = match seconds {
+        0 => gettext(locale, "Off").into_owned(),
+        86_400 => gettext(locale, "24 hours").into_owned(),
+        604_800 => gettext(locale, "7 days").into_owned(),
+        7_776_000 => gettext(locale, "90 days").into_owned(),
+        _ => disappearing_duration(locale, seconds),
+    };
+    let label = gettext(locale, "Disappearing messages");
+    Some(format!("{label}: {value}"))
+}
+
+/// How long a chat's disappearing messages stay, in the largest whole unit.
+fn disappearing_duration(locale: Locale, seconds: u32) -> String {
+    use crate::i18n::ngettext;
+    let (count, text) = if seconds.is_multiple_of(86_400) {
+        let days = seconds / 86_400;
+        (days, ngettext(locale, "{} day", "{} days", days))
+    } else if seconds.is_multiple_of(3_600) {
+        let hours = seconds / 3_600;
+        (hours, ngettext(locale, "{} hour", "{} hours", hours))
+    } else {
+        let minutes = seconds.div_ceil(60);
+        (
+            minutes,
+            ngettext(locale, "{} minute", "{} minutes", minutes),
+        )
+    };
+    text.replace("{}", &count.to_string())
+}
+
 /// A contact's last-seen line as WhatsApp words it: "last seen today at
 /// 14:05", "last seen yesterday at 14:05", a weekday within the week, and
 /// only the date before that. The time follows the system's clock.
@@ -1159,6 +1201,30 @@ mod tests {
         assert_eq!(bytes(2_048), "2.0 KB");
         assert_eq!(bytes(5 * 1024 * 1024), "5.0 MB");
         assert_eq!(duration(75), "1:15");
+    }
+
+    /// WhatsApp's own durations read as WhatsApp words them, any other in its
+    /// largest whole unit, an explicit zero reads as off, and a chat whose
+    /// timer nobody has mentioned has no line at all.
+    #[test]
+    fn disappearing_timers_read_as_whatsapp_words_them() {
+        let line = |seconds| {
+            crate::util::disappearing_line(Locale::English, seconds)
+                .unwrap_or_default()
+                .replace("Disappearing messages: ", "")
+        };
+        assert_eq!(line(Some(0)), "Off");
+        assert_eq!(line(Some(86_400)), "24 hours");
+        assert_eq!(line(Some(604_800)), "7 days");
+        assert_eq!(line(Some(7_776_000)), "90 days");
+        assert_eq!(line(Some(3_600)), "1 hour");
+        assert_eq!(line(Some(172_800)), "2 days");
+        assert_eq!(line(Some(90)), "2 minutes");
+        assert_eq!(
+            crate::util::disappearing_line(Locale::English, None),
+            None,
+            "an unknown timer says nothing"
+        );
     }
 
     #[test]
