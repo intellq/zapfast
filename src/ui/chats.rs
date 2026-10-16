@@ -23,10 +23,16 @@ pub fn resize_handle_id() -> egui::Id {
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     search_keyboard(app, ui);
     let palette = app.palette;
+    // Without the rail the macOS traffic lights reach over the list's header.
+    let min_width = if !app.settings.rail_layout && theme::macos_chrome(ui.ctx()) {
+        (theme::traffic_light_inset(ui.ctx()) + 210.0).max(280.0)
+    } else {
+        260.0
+    };
     let panel = egui::Panel::left(PANEL)
         .resizable(true)
         .default_size(app.settings.sidebar_width)
-        .size_range(260.0..=520.0)
+        .size_range(min_width..=520.0)
         .show_separator_line(false)
         .frame(Frame::new().fill(palette.panel).inner_margin(Margin::ZERO));
     let response = panel.show(ui, |ui| body(app, ui));
@@ -44,7 +50,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
 pub fn full_show(app: &mut App, ui: &mut egui::Ui) {
     search_keyboard(app, ui);
     let palette = app.palette;
-    super::rail::show(app, ui, false);
+    if app.settings.rail_layout {
+        super::rail::show(app, ui, false);
+    }
     egui::CentralPanel::default()
         .frame(Frame::new().fill(palette.panel).inner_margin(Margin::ZERO))
         .show(ui, |ui| body(app, ui));
@@ -215,8 +223,12 @@ fn header(app: &mut App, ui: &mut egui::Ui) {
                             buttons_width,
                         );
                     } else {
-                        // Our avatar and the account switcher are in the
-                        // rail beside the list.
+                        // With the rail, our avatar and the account switcher
+                        // are in it; without, they start the row.
+                        if !app.settings.rail_layout {
+                            profile_button(app, ui, 34.0, Stop::HeaderProfile);
+                            ui.add_space(2.0);
+                        }
                         header_title(
                             ui,
                             &crate::i18n::gettext(app.locale, tab_title(&app.page)),
@@ -237,6 +249,22 @@ fn header(app: &mut App, ui: &mut egui::Ui) {
             ui.add_space(6.0);
             search_and_filters(app, ui);
         });
+}
+
+/// Our avatar, which opens the account switcher. A right click flips the
+/// layout between the list's own header and the navigation rail.
+pub(super) fn profile_button(
+    app: &mut App,
+    ui: &mut egui::Ui,
+    size: f32,
+    stop: Stop,
+) -> egui::Response {
+    let response = super::accounts::avatar_button(app, ui, size).tab_stop(stop);
+    if response.secondary_clicked() {
+        app.settings.rail_layout = !app.settings.rail_layout;
+        app.actions.push(Action::SettingsChanged);
+    }
+    response
 }
 
 /// The header's title beside our avatar: the tab the list shows.
@@ -335,7 +363,16 @@ enum HeaderButton {
     NewChat,
     NewCall,
     HideList,
+    /// The list's own header, without the rail: Calls, Archived, Settings
+    /// and the menu.
+    Calls,
+    Archived,
+    Settings,
+    Menu,
 }
+
+/// The gap between the header's buttons when it carries four of them.
+const TOP_SPACING: f32 = 2.0;
 
 /// The size of the header buttons' icons.
 const HEADER_ICON: f32 = 18.0;
@@ -366,18 +403,111 @@ fn header_buttons(ctx: &egui::Context, calls: bool) -> Vec<HeaderButton> {
 /// new-call list or the starred messages, whose Back leads out of them.
 fn list_header_buttons(app: &App, ctx: &egui::Context) -> Vec<HeaderButton> {
     let calls = app.page == Page::Calls;
-    if (calls && app.new_call) || (!calls && app.show_starred) {
+    if calls && app.new_call {
+        return Vec::new();
+    }
+    if !app.settings.rail_layout {
+        return top_buttons(app);
+    }
+    if !calls && app.show_starred {
         return Vec::new();
     }
     header_buttons(ctx, calls)
+}
+
+/// The buttons of the header without the rail, rightmost first: the menu,
+/// Settings, Archived (while something is archived, and outside the archive,
+/// whose Back leads out) and Calls.
+fn top_buttons(app: &App) -> Vec<HeaderButton> {
+    let mut buttons = vec![HeaderButton::Menu, HeaderButton::Settings];
+    if !app.show_archived && !app.locked_folder && app.archived_count() > 0 {
+        buttons.push(HeaderButton::Archived);
+    }
+    buttons.push(HeaderButton::Calls);
+    buttons
 }
 
 /// Draws `buttons` in a right-to-left layout, with the macOS shortcuts in
 /// their tooltips when `macos`.
 fn header_button_row(app: &mut App, ui: &mut egui::Ui, buttons: &[HeaderButton], macos: bool) {
     let palette = app.palette;
+    if buttons.contains(&HeaderButton::Menu) {
+        ui.spacing_mut().item_spacing.x = TOP_SPACING;
+    }
     for button in buttons {
         match button {
+            HeaderButton::Calls => {
+                let open = app.page == Page::Calls;
+                let tooltip = if open {
+                    crate::i18n::gettext(app.locale, "Back to the chats").into_owned()
+                } else {
+                    format!(
+                        "{} ({})",
+                        crate::i18n::gettext(app.locale, "Calls"),
+                        super::keys::label("Ctrl+Shift+2")
+                    )
+                };
+                if theme::icon_button(
+                    ui,
+                    Icon::Phone,
+                    HEADER_ICON,
+                    if open {
+                        palette.accent
+                    } else {
+                        palette.secondary
+                    },
+                    palette.text,
+                    &tooltip,
+                )
+                .tab_stop(Stop::Calls)
+                .clicked()
+                {
+                    let actions = if open {
+                        super::rail::Destination::Chats.actions(app)
+                    } else {
+                        super::rail::Destination::Calls.actions(app)
+                    };
+                    app.actions.extend(actions);
+                }
+            }
+            HeaderButton::Archived => {
+                // No badge: the archive's unread count stays on its chats.
+                if theme::icon_button(
+                    ui,
+                    Icon::Archive,
+                    HEADER_ICON,
+                    palette.secondary,
+                    palette.text,
+                    "Archived chats",
+                )
+                .tab_stop(Stop::Archived)
+                .clicked()
+                {
+                    let actions = super::rail::Destination::Archived.actions(app);
+                    app.actions.extend(actions);
+                }
+            }
+            HeaderButton::Settings => {
+                let open = super::rail::Destination::Settings.lit(app);
+                if theme::icon_button(
+                    ui,
+                    Icon::Settings,
+                    HEADER_ICON,
+                    settings_button_color(app),
+                    palette.text,
+                    &super::keys::label(if open {
+                        "Close settings (Ctrl+,)"
+                    } else {
+                        "Settings (Ctrl+,)"
+                    }),
+                )
+                .tab_stop(Stop::Settings)
+                .clicked()
+                {
+                    app.actions.push(Action::ToggleSettings);
+                }
+            }
+            HeaderButton::Menu => menu_button(app, ui, macos),
             HeaderButton::NewChat => {
                 if theme::icon_button(
                     ui,
@@ -431,13 +561,84 @@ fn header_button_row(app: &mut App, ui: &mut egui::Ui, buttons: &[HeaderButton],
     }
 }
 
+/// The gear's colour: the accent while Settings are open, else the
+/// header's usual one.
+pub(crate) fn settings_button_color(app: &App) -> egui::Color32 {
+    if super::rail::Destination::Settings.lit(app) {
+        app.palette.accent
+    } else {
+        app.palette.secondary
+    }
+}
+
 /// How wide `buttons` are drawn, with the spacing between them.
 fn header_buttons_width(ui: &egui::Ui, buttons: &[HeaderButton]) -> f32 {
     row_width(
         buttons.len(),
         HEADER_ICON + theme::ICON_BUTTON_PAD,
-        ui.spacing().item_spacing.x,
+        if buttons.contains(&HeaderButton::Menu) {
+            TOP_SPACING
+        } else {
+            ui.spacing().item_spacing.x
+        },
     )
+}
+
+/// The three-line button that ends the header without the rail, and the
+/// menu it opens: the starred messages, hiding the chat list (not on the
+/// Calls tab, whose history needs it, nor in a narrow window) and a new
+/// chat, with a new call first on the Calls tab.
+fn menu_button(app: &mut App, ui: &mut egui::Ui, macos: bool) {
+    let palette = app.palette;
+    let menu = theme::icon_button(
+        ui,
+        Icon::Menu,
+        HEADER_ICON,
+        palette.secondary,
+        palette.text,
+        tr("Menu"),
+    )
+    .tab_stop(Stop::Menu);
+    let calls = app.page == Page::Calls;
+    let locale = app.locale;
+    let starred = crate::i18n::gettext(locale, "Starred messages");
+    let hide = crate::i18n::gettext(
+        locale,
+        if macos {
+            "Hide the chat list (⌘B)"
+        } else {
+            "Hide the chat list (Ctrl+B)"
+        },
+    );
+    let new_chat = crate::i18n::gettext(locale, "New chat");
+    let new_call = crate::i18n::gettext(locale, "New call");
+    let can_hide = !calls && !super::narrow(ui.ctx());
+    let mut labels = vec![starred.as_ref(), new_chat.as_ref()];
+    if can_hide {
+        labels.push(hide.as_ref());
+    }
+    if calls {
+        labels.push(new_call.as_ref());
+    }
+    let width = widgets::menu_width(ui, &labels, true);
+    egui::Popup::menu(&menu)
+        .width(width)
+        .frame(widgets::menu_frame(&palette))
+        .show(|ui| {
+            if calls && widgets::menu_item(ui, &palette, Some(Icon::PhonePlus), new_call.as_ref()) {
+                app.actions.push(Action::ShowNewCall(true));
+            }
+            if widgets::menu_item(ui, &palette, Some(Icon::Star), starred.as_ref()) {
+                let actions = super::rail::Destination::Starred.actions(app);
+                app.actions.extend(actions);
+            }
+            if can_hide && widgets::menu_item(ui, &palette, Some(Icon::PanelLeft), hide.as_ref()) {
+                app.actions.push(Action::ToggleSidebar);
+            }
+            if widgets::menu_item(ui, &palette, Some(Icon::SquarePen), new_chat.as_ref()) {
+                app.actions.push(Action::ShowDialog(Dialog::NewChat));
+            }
+        });
 }
 
 /// How wide `count` items `edge` points wide are with `spacing` between them.
@@ -493,7 +694,12 @@ fn macos_header(app: &mut App, ui: &mut egui::Ui) {
             let row = ui.horizontal(|ui| {
                 ui.set_min_height(super::conversation::HEADER_ROW);
                 // The traffic lights reach past the rail over this header.
-                ui.add_space(super::rail::lights_overhang(ui.ctx()));
+                ui.add_space(if app.settings.rail_layout {
+                    super::rail::lights_overhang(ui.ctx())
+                } else {
+                    // No rail: the list's own header clears the lights.
+                    (theme::traffic_light_inset(ui.ctx()) - 14.0).max(0.0)
+                });
                 let buttons = list_header_buttons(app, ui.ctx());
                 if app.page == Page::Calls && app.new_call {
                     new_call_header(app, ui, 16.0, header_buttons_width(ui, &buttons));
@@ -547,8 +753,13 @@ fn macos_header(app: &mut App, ui: &mut egui::Ui) {
                         header_buttons_width(ui, &buttons),
                     );
                 } else {
-                    // Our avatar and the account switcher are in the rail,
-                    // under the traffic lights.
+                    // With the rail, our avatar and the account switcher are
+                    // in it, under the traffic lights; without, they start
+                    // the row.
+                    if !app.settings.rail_layout {
+                        profile_button(app, ui, 30.0, Stop::HeaderProfile);
+                        ui.add_space(2.0);
+                    }
                     header_title(
                         ui,
                         &crate::i18n::gettext(app.locale, tab_title(&app.page)),
@@ -654,6 +865,27 @@ fn filter_chips(app: &mut App, ui: &mut egui::Ui) {
                     let next = if selected { ChatFilter::All } else { filter };
                     app.actions.push(Action::SetChatFilter(next));
                 }
+            }
+            // With the rail, Locked is one of its destinations; without,
+            // it is a chip while chats are locked.
+            if !app.settings.rail_layout && (app.locked_count() > 0 || app.locked_folder_open()) {
+                let chip = widgets::filter_chip(
+                    ui,
+                    &palette,
+                    crate::i18n::gettext(app.locale, "Locked").as_ref(),
+                    0,
+                    app.locked_folder_open(),
+                )
+                .tab_stop(Stop::LockedChip)
+                .on_hover_text(tr("Open locked chats with your local code"));
+                ui.ctx()
+                    .data_mut(|data| data.insert_temp(egui::Id::new("locked-chip"), chip.rect));
+                if chip.clicked() {
+                    app.actions.push(Action::OpenLockedFolder);
+                }
+            } else {
+                ui.ctx()
+                    .data_mut(|data| data.remove::<egui::Rect>(egui::Id::new("locked-chip")));
             }
             ui.add_space(4.0);
         })
@@ -1741,8 +1973,64 @@ pub fn compact_chat_id(chat: &str) -> egui::Id {
 /// Width of the navigation rail, which the chats' avatars fill while the
 /// list is hidden. On macOS the traffic lights reach past it, over the
 /// header beside it.
-pub fn compact_width(_ctx: &egui::Context) -> f32 {
-    super::rail::WIDTH
+pub fn compact_width(ctx: &egui::Context, rail: bool) -> f32 {
+    if rail {
+        super::rail::WIDTH
+    } else {
+        COMPACT_WIDTH.max(theme::traffic_light_inset(ctx))
+    }
+}
+
+/// Width of the collapsed list without the rail.
+const COMPACT_WIDTH: f32 = 60.0;
+/// Height of its top row, level with the conversation header.
+const COMPACT_HEADER: f32 = 60.0;
+
+/// The chat list collapsed to avatars, when there is no rail: the list is
+/// out of the way, but every chat is still one click away.
+pub fn compact_show(app: &mut App, ui: &mut egui::Ui) {
+    let palette = app.palette;
+    // Its own panel id: sharing the full list's would hand that resizable
+    // panel this narrow width, and it would save it as the list's width.
+    let panel = egui::Panel::left("chat-rail")
+        .resizable(false)
+        .exact_size(compact_width(ui.ctx(), false))
+        .show_separator_line(false)
+        .frame(Frame::new().fill(palette.panel).inner_margin(Margin::ZERO));
+    let response = panel.show(ui, |ui| {
+        let inset = theme::traffic_light_inset(ui.ctx());
+        if inset > 0.0 {
+            // The traffic lights take the top row; the button goes below.
+            let (strip, _) =
+                ui.allocate_exact_size(vec2(ui.available_width(), COMPACT_HEADER), Sense::hover());
+            super::titlebar_drag(ui, strip);
+        }
+        ui.allocate_ui_with_layout(
+            vec2(
+                ui.available_width(),
+                if inset > 0.0 { 44.0 } else { COMPACT_HEADER },
+            ),
+            Layout::centered_and_justified(egui::Direction::TopDown),
+            |ui| {
+                if theme::icon_button(
+                    ui,
+                    Icon::PanelLeft,
+                    18.0,
+                    palette.secondary,
+                    palette.text,
+                    &super::keys::label("Show the chat list (Ctrl+B)"),
+                )
+                .tab_stop(Stop::Sidebar)
+                .clicked()
+                {
+                    app.actions.push(Action::ToggleSidebar);
+                }
+            },
+        );
+        compact_list(app, ui);
+    });
+    // Separate the rail from the conversation, exactly as the full list does.
+    widgets::paint_edge_beside(ui, &palette, response.response.rect);
 }
 
 /// The rail's avatars while the list is hidden: the chats the full list
@@ -1842,14 +2130,19 @@ pub(super) fn compact_list(app: &mut App, ui: &mut egui::Ui) {
     // Avatars cut off at either end fade into the rail, which says the
     // column scrolls on.
     let palette = app.palette;
+    let fade = if app.settings.rail_layout {
+        palette.rail()
+    } else {
+        palette.panel
+    };
     {
         let rect = output.inner_rect;
         let offset = output.state.offset.y;
         if offset > 0.5 {
-            widgets::fade_top(ui, rect, COMPACT_FADE, palette.rail());
+            widgets::fade_top(ui, rect, COMPACT_FADE, fade);
         }
         if output.content_size.y - offset - rect.height() > 0.5 {
-            widgets::fade_bottom(ui, rect, COMPACT_FADE, palette.rail());
+            widgets::fade_bottom(ui, rect, COMPACT_FADE, fade);
         }
     }
     #[cfg(test)]
@@ -2277,6 +2570,7 @@ mod tests {
             crate::paths::AppDirs::under(root.path()),
             crate::settings::Settings::default(),
         );
+        app.settings.rail_layout = true;
         app.page = Page::Calls;
         let ctx = egui::Context::default();
         assert_eq!(list_header_buttons(&app, &ctx), [NewCall]);
@@ -2569,7 +2863,7 @@ mod tests {
             "the rail draws the second chat too"
         );
         assert!(
-            (rect.width() - compact_width(&ctx)).abs() < 1.0,
+            (rect.width() - compact_width(&ctx, true)).abs() < 1.0,
             "an avatar cell is one panel wide, not {} points",
             rect.width()
         );

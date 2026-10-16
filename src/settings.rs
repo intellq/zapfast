@@ -544,6 +544,11 @@ pub struct Settings {
     /// Hides the row of chat filters (All, Unread, Private, ...) under the
     /// search field. The list then shows every chat.
     pub hide_chat_filters: bool,
+    /// Lays the chat list out with ZapFast's navigation rail on its left
+    /// (Chats, Calls, Starred, Archived, Settings and the account). Off, the
+    /// list keeps its own header with the account, Calls, Archived, Settings
+    /// and a menu. A right click on the account's picture flips it.
+    pub rail_layout: bool,
     /// Recently used emoji, newest first.
     pub recent_emoji: Vec<String>,
     /// Emoji reaction usage on this device, most-used first (recent breaks ties).
@@ -687,6 +692,7 @@ impl Default for Settings {
             last_chat: None,
             show_shortcut_hints: true,
             hide_chat_filters: false,
+            rail_layout: false,
             recent_emoji: Vec::new(),
             reaction_emoji: Vec::new(),
             giphy_key: String::new(),
@@ -1151,6 +1157,22 @@ impl AccountRoster {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_list_header_is_the_default_layout_and_the_choice_is_kept() {
+        assert!(!Settings::default().rail_layout);
+        // Settings saved before the rail, with or without the old side bar
+        // flag, load with the header layout.
+        let old: Settings = serde_json::from_str(r#"{"side_bar": true}"#).expect("old settings");
+        assert!(!old.rail_layout);
+        let rail = Settings {
+            rail_layout: true,
+            ..Settings::default()
+        };
+        let text = serde_json::to_string(&rail).expect("settings serialize");
+        let loaded: Settings = serde_json::from_str(&text).expect("settings load");
+        assert!(loaded.rail_layout);
+    }
 
     #[test]
     fn the_devices_a_call_used_come_back_after_a_restart() {

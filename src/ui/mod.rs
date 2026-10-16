@@ -158,16 +158,23 @@ fn main_view(app: &mut App, ui: &mut egui::Ui, list_only: bool) -> Option<egui::
     // step aside while the panel is open. The Calls tab's history needs the
     // full list pane: only the chats collapse into the rail's avatars.
     let full_list = app.sidebar_mode() == SidebarDisplayMode::Expanded || app.page == Page::Calls;
-    let mut list_width = chats::compact_width(ui.ctx());
+    let rail_layout = app.settings.rail_layout;
+    let mut list_width = chats::compact_width(ui.ctx(), rail_layout);
     if full_list {
-        list_width += app.settings.sidebar_width;
+        list_width = app.settings.sidebar_width + if rail_layout { list_width } else { 0.0 };
     }
     let crowded = app.info_visible()
         && ui.available_width() - list_width < pane::INFO_MIN + pane::INFO_CONVERSATION_MIN;
     if !narrow(ui.ctx()) && !crowded {
-        rail::show(app, ui, !full_list);
-        if full_list {
+        if rail_layout {
+            rail::show(app, ui, !full_list);
+            if full_list {
+                chats::show(app, ui);
+            }
+        } else if full_list {
             chats::show(app, ui);
+        } else {
+            chats::compact_show(app, ui);
         }
     }
     let search_overlay = pane::show(app, ui);
@@ -1229,6 +1236,7 @@ mod idle_tests {
             crate::settings::Settings::default(),
         )
         .0;
+        app.settings.rail_layout = true;
         app.link = LinkStatus::Connected;
         let chat = crate::model::Chat::new("123@s.whatsapp.net".into(), "Alice".into());
         app.chats.push(chat.clone());

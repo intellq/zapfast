@@ -10924,6 +10924,7 @@ mod tests {
     fn the_rail_leaves_the_archive_for_the_chat_list() {
         use crate::ui::focus::Stop;
         let mut app = app();
+        app.settings.rail_layout = true;
         let ctx = egui::Context::default();
         app.attach(&ctx);
         render(&mut app, &ctx);
@@ -14743,6 +14744,7 @@ mod tests {
     fn filters_stay_on_one_line_and_locked_is_only_shown_when_needed() {
         use crate::ui::rail::{Destination, destination_id};
         let mut app = app();
+        app.settings.rail_layout = true;
         for chat in &mut app.chats {
             chat.locked = false;
         }
@@ -15469,6 +15471,7 @@ mod tests {
             (false, false, true),
         ] {
             let mut app = app();
+            app.settings.rail_layout = true;
             app.settings.show_shortcut_hints = hints;
             // This tests navigation through a fixed transcript, not live
             // typing-indicator expiry while a slower CI runner draws it.
@@ -15606,6 +15609,7 @@ mod tests {
             "chat-search",
         ] {
             let mut app = app();
+            app.settings.rail_layout = true;
             apply_flags(&mut app, Some(page));
             let ctx = egui::Context::default();
             app.attach(&ctx);
@@ -17171,7 +17175,13 @@ mod rail_tests {
 
     /// The demo on `page`, laid out wide, in the macOS chrome when `macos`.
     fn open(page: &str, macos: bool) -> (App, egui::Context) {
+        open_layout(page, macos, true)
+    }
+
+    /// As [`open`], with the rail when `rail`, else the list's own header.
+    fn open_layout(page: &str, macos: bool, rail: bool) -> (App, egui::Context) {
         let mut app = app();
+        app.settings.rail_layout = rail;
         apply_flags(&mut app, Some(page));
         let ctx = egui::Context::default();
         app.attach(&ctx);
@@ -17266,7 +17276,7 @@ mod rail_tests {
             let rail = rail_rect(&ctx).expect("the rail is drawn");
             assert!(rail.left() < 1.0, "{macos}: at the left edge: {rail:?}");
             assert!(
-                (rail.width() - crate::ui::chats::compact_width(&ctx)).abs() < 1.0,
+                (rail.width() - crate::ui::chats::compact_width(&ctx, true)).abs() < 1.0,
                 "{macos}: as wide as the collapsed list was: {rail:?}"
             );
             let header = list_header(&ctx).expect("the list is drawn");
@@ -17782,5 +17792,219 @@ mod rail_tests {
         assert_eq!(app.page, Page::Calls);
         assert!(app.open_chat.is_none());
         assert!(rail_rect(&ctx).is_some() && list_header(&ctx).is_some());
+    }
+
+    /// One frame like [`frame`], returning where `needle` was painted.
+    fn find_text(
+        app: &mut App,
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+        needle: &str,
+    ) -> Option<egui::Pos2> {
+        fn walk(shape: &egui::Shape, needle: &str, found: &mut Option<egui::Pos2>) {
+            match shape {
+                egui::Shape::Text(text) if text.galley.text() == needle => {
+                    *found = Some(text.visual_bounding_rect().center());
+                }
+                egui::Shape::Vec(shapes) => {
+                    shapes.iter().for_each(|shape| walk(shape, needle, found))
+                }
+                _ => {}
+            }
+        }
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1180.0, 780.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                let ctx = ui.ctx().clone();
+                app.background_frame(&ctx);
+                app.frame_ui(ui);
+            },
+        );
+        output.textures_delta.clear();
+        let mut found = None;
+        for clipped in &output.shapes {
+            walk(&clipped.shape, needle, &mut found);
+        }
+        found
+    }
+
+    fn secondary_click(app: &mut App, ctx: &egui::Context, pos: egui::Pos2) {
+        frame(app, ctx, 1180.0, vec![egui::Event::PointerMoved(pos)]);
+        for pressed in [true, false] {
+            frame(
+                app,
+                ctx,
+                1180.0,
+                vec![egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Secondary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+            );
+        }
+        frame(app, ctx, 1180.0, Vec::new());
+    }
+
+    /// The default layout keeps the buttons in the list's header, in this
+    /// order from left to right, which is also the order of Tab.
+    #[test]
+    fn the_default_layout_is_the_header_on_top_of_the_list() {
+        for macos in [false, true] {
+            assert!(
+                !crate::settings::Settings::default().rail_layout,
+                "the header is the default"
+            );
+            let (mut app, ctx) = open_layout("chat", macos, false);
+            app.chats[0].archived = true;
+            frame(&mut app, &ctx, 1180.0, Vec::new());
+            assert!(rail_rect(&ctx).is_none(), "{macos}: no rail");
+            let header = list_header(&ctx).expect("the list header is drawn");
+            let order = [
+                Stop::HeaderProfile,
+                Stop::Calls,
+                Stop::Archived,
+                Stop::Settings,
+                Stop::Menu,
+            ];
+            let mut last = f32::MIN;
+            for stop in order {
+                let rect = stop_rect(&ctx, stop).unwrap_or_else(|| panic!("{macos}: {stop:?}"));
+                assert!(
+                    header.contains(rect.center()),
+                    "{macos}: {stop:?} in the header"
+                );
+                assert!(
+                    rect.left() > last,
+                    "{macos}: {stop:?} is to the right of the last"
+                );
+                last = rect.left();
+            }
+            let tab: Vec<_> = focus::stops(&ctx)
+                .into_iter()
+                .map(|(stop, _)| stop)
+                .filter(|stop| order.contains(stop))
+                .collect();
+            assert_eq!(tab, order, "{macos}: Tab follows the same order");
+        }
+    }
+
+    /// A right click on the account's picture flips between the layouts, in
+    /// both directions.
+    #[test]
+    fn a_right_click_on_the_avatar_switches_the_layout() {
+        let (mut app, ctx) = open_layout("chat", false, false);
+        let avatar = stop_rect(&ctx, Stop::HeaderProfile).expect("the avatar is in the header");
+        secondary_click(&mut app, &ctx, avatar.center());
+        assert!(app.settings.rail_layout, "the rail replaces the header");
+        assert!(rail_rect(&ctx).is_some());
+        let avatar = stop_rect(&ctx, Stop::Profile).expect("the avatar is on the rail");
+        secondary_click(&mut app, &ctx, avatar.center());
+        assert!(!app.settings.rail_layout, "and back to the header");
+        assert!(rail_rect(&ctx).is_none());
+        assert!(stop_rect(&ctx, Stop::HeaderProfile).is_some());
+    }
+
+    /// Settings turns accent while open, and the archive carries no badge.
+    #[test]
+    fn the_header_lights_settings_and_shows_no_archive_badge() {
+        let (mut app, ctx) = open_layout("chat", false, false);
+        app.chats[0].archived = true;
+        app.chats[0].unread = 3;
+        frame(&mut app, &ctx, 1180.0, Vec::new());
+        let archived = stop_rect(&ctx, Stop::Archived).expect("Archived is offered");
+        let badge = find_text(&mut app, &ctx, Vec::new(), "3");
+        assert!(
+            badge.is_none_or(|at| !archived.expand(8.0).contains(at)),
+            "no count over the archive icon"
+        );
+        let settings = stop_rect(&ctx, Stop::Settings).unwrap();
+        click(&mut app, &ctx, 1180.0, settings.center());
+        assert_eq!(app.page, Page::Settings);
+        assert_eq!(
+            crate::ui::chats::settings_button_color(&app),
+            app.palette.accent,
+            "the gear is lit while open"
+        );
+        let settings = stop_rect(&ctx, Stop::Settings).unwrap();
+        click(&mut app, &ctx, 1180.0, settings.center());
+        assert_eq!(app.page, Page::Chats, "a second click closes it");
+    }
+
+    /// The menu's three items run their actions.
+    #[test]
+    fn the_menu_runs_starred_hide_and_new_chat() {
+        for (item, check) in [
+            ("Starred messages", 0),
+            ("Hide the chat list (Ctrl+B)", 1),
+            ("New chat", 2),
+        ] {
+            let (mut app, ctx) = open_layout("chat", false, false);
+            let menu = stop_rect(&ctx, Stop::Menu).expect("the menu button");
+            click(&mut app, &ctx, 1180.0, menu.center());
+            let at = find_text(&mut app, &ctx, Vec::new(), item)
+                .unwrap_or_else(|| panic!("the menu offers {item}"));
+            click(&mut app, &ctx, 1180.0, at);
+            match check {
+                0 => assert!(app.show_starred, "starred messages open"),
+                1 => assert!(!app.sidebar_visible, "the list hides"),
+                _ => assert!(
+                    matches!(app.dialog, Some(crate::model::Dialog::NewChat)),
+                    "the new chat dialog opens"
+                ),
+            }
+        }
+    }
+
+    /// Hiding the list leaves the compact avatars, as the fork had them.
+    #[test]
+    fn the_hidden_list_collapses_to_avatars_without_the_rail() {
+        let (mut app, ctx) = open_layout("chat", false, false);
+        app.sidebar_visible = false;
+        frame(&mut app, &ctx, 1180.0, Vec::new());
+        frame(&mut app, &ctx, 1180.0, Vec::new());
+        assert!(rail_rect(&ctx).is_none());
+        let show = stop_rect(&ctx, Stop::Sidebar).expect("Show the chat list");
+        assert!(show.left() < 60.0);
+        let second = app.chats[1].id.clone();
+        assert!(
+            recorded(&ctx, crate::ui::chats::compact_chat_id(&second)).is_some(),
+            "the avatars stand in a column"
+        );
+    }
+
+    /// Where chats are locked, the Locked chip ends the row of filters.
+    #[test]
+    fn the_locked_chip_returns_without_the_rail() {
+        let mut app = app();
+        // The widest list, so the last chip is not scrolled out of sight.
+        app.settings.sidebar_width = 520.0;
+        app.settings.rail_layout = false;
+        apply_flags(&mut app, Some("chat"));
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        for _ in 0..3 {
+            frame(&mut app, &ctx, 1400.0, Vec::new());
+        }
+        for chat in &mut app.chats {
+            chat.locked = false;
+        }
+        frame(&mut app, &ctx, 1180.0, Vec::new());
+        assert!(recorded(&ctx, egui::Id::new("locked-chip")).is_none());
+        app.chats[0].locked = true;
+        frame(&mut app, &ctx, 1180.0, Vec::new());
+        let chip = recorded(&ctx, egui::Id::new("locked-chip")).expect("the Locked chip");
+        click(&mut app, &ctx, 1400.0, chip.center());
+        assert!(
+            matches!(app.dialog, Some(crate::model::Dialog::UnlockLockedChats)),
+            "the chip asks for the code"
+        );
     }
 }

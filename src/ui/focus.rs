@@ -26,11 +26,15 @@ pub enum Stop {
     /// and buttons. Show the chat list takes the rail's top while the
     /// list is hidden, and keeps Hide the chat list's place in the order.
     Chats,
+    /// Without the rail the header starts with our avatar, then Calls,
+    /// Archived, Settings and the menu.
+    HeaderProfile,
     Calls,
     Starred,
     Archived,
     Locked,
     Settings,
+    Menu,
     Profile,
     Back,
     NewChat,
@@ -45,6 +49,8 @@ pub enum Stop {
     Favorites,
     Groups,
     Channels,
+    /// The Locked chip, which ends the row where there is no rail.
+    LockedChip,
     /// One chip in the label row, by its position among the labels.
     Label(u8),
     ManageLabels,

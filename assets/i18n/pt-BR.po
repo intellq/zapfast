@@ -5847,3 +5847,12 @@ msgstr "Mostrar na conversa"
 
 msgid "Missed"
 msgstr "Perdidas"
+
+msgid "Menu"
+msgstr "Menu"
+
+msgid "Navigation sidebar"
+msgstr "Barra lateral de navegação"
+
+msgid "Put Chats, Calls, Starred, Archived and Settings in a bar beside the list. A right click on your picture switches it too."
+msgstr "Coloca Conversas, Ligações, Com estrela, Arquivadas e Configurações numa barra ao lado da lista. Um clique com o botão direito na sua foto também alterna."

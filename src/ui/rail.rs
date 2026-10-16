@@ -235,7 +235,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, hidden: bool) {
                 }
                 ui.add_space(GAP);
                 ui.vertical_centered(|ui| {
-                    super::accounts::avatar_button(app, ui, AVATAR).tab_stop(Stop::Profile);
+                    super::chats::profile_button(app, ui, AVATAR, Stop::Profile);
                 });
             });
     });

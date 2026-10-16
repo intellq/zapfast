@@ -299,7 +299,8 @@ fn header(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> Rect {
                 // lights itself.
                 if narrow && theme::macos_chrome(ui.ctx()) {
                     ui.add_space(theme::traffic_light_inset(ui.ctx()));
-                } else if app.sidebar_mode() == crate::model::SidebarDisplayMode::CollapsedIconsOnly
+                } else if app.settings.rail_layout
+                    && app.sidebar_mode() == crate::model::SidebarDisplayMode::CollapsedIconsOnly
                     && app.page == crate::model::Page::Chats
                 {
                     // Beside the rail alone, the lights reach over this header.

@@ -707,6 +707,7 @@ fastframe_icons::icons! {
         LogOut => lucide "log-out",
         MapPin => "map-pin",
         Maximize => lucide "maximize-2",
+        Menu => "menu",
         MessageCircle => "message-circle",
         Mic => lucide "mic",
         MicOff => "mic-off",

@@ -530,6 +530,14 @@ fn sections(app: &App) -> Vec<Section> {
         ),
         |settings| &mut settings.hide_chat_filters,
     );
+    appearance.toggle(
+        translated(locale, "Navigation sidebar"),
+        translated(
+            locale,
+            "Put Chats, Calls, Starred, Archived and Settings in a bar beside the list. A right click on your picture switches it too.",
+        ),
+        |settings| &mut settings.rail_layout,
+    );
     if crate::emoji::whatsapp_font_file(&app.dirs.emoji_font_dir()).is_some() {
         appearance.toggle(
             translated(locale, "WhatsApp emoji"),
