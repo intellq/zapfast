@@ -781,13 +781,17 @@ pub enum Content {
     /// writes itself carry an id that starts with [`CALL_ENTRY_PREFIX`] and are
     /// never sent anywhere.
     Call {
+        // The defaults and aliases also read the rows the fork's own call log
+        // filed before it moved to this one: `seconds` for the length, a
+        // participant count for a group call, and no `video` on a voice call.
+        #[serde(default)]
         video: bool,
         status: CallStatus,
         /// Seconds the call was up; zero when it never was.
-        #[serde(default)]
+        #[serde(default, alias = "seconds")]
         duration: u64,
         /// A group call.
-        #[serde(default)]
+        #[serde(default, deserialize_with = "group_call")]
         group: bool,
     },
 }
@@ -801,15 +805,36 @@ pub const CALL_ENTRY_PREFIX: &str = "zapfast-call-";
 /// call-log message and the call's record are stamped by different clocks.
 pub const CALL_ENTRY_WINDOW: i64 = 120;
 
+/// Whether a call row is a group call: `true` or `false`, or the number of
+/// people the fork's earlier call log stored for one.
+fn group_call<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Group {
+        Flag(bool),
+        People(u32),
+        Absent(()),
+    }
+    Ok(match Group::deserialize(deserializer)? {
+        Group::Flag(flag) => flag,
+        Group::People(_) => true,
+        Group::Absent(()) => false,
+    })
+}
+
 /// What became of a call.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CallStatus {
-    /// The two sides talked, so the call's length is real.
+    /// The two sides talked, so the call's length is real. The fork's earlier
+    /// call log also filed a call the phone still had going this way.
+    #[serde(alias = "ongoing")]
     Answered,
     /// Another of this account's devices took it.
     AnsweredElsewhere,
-    /// An incoming call nobody picked up.
+    /// An incoming call nobody picked up. The fork's earlier call log filed
+    /// the calls the phone silenced apart; they were missed all the same.
+    #[serde(alias = "silenced_dnd", alias = "silenced_unknown")]
     Missed,
     /// Refused, by either side.
     Declined,
@@ -2650,6 +2675,47 @@ mod storage_tests {
 
 #[cfg(test)]
 mod tests {
+    /// The call rows the fork's earlier call log filed read as calls of this
+    /// one, so no chat shows them as unsupported after the move.
+    #[test]
+    fn the_forks_earlier_call_rows_still_read_as_calls() {
+        use super::{CallStatus, Content};
+        let read = |json: &str| serde_json::from_str::<Content>(json).unwrap();
+        assert_eq!(
+            read(r#"{"kind":"call","outgoing":true,"status":"answered","seconds":192}"#),
+            Content::Call {
+                video: false,
+                status: CallStatus::Answered,
+                duration: 192,
+                group: false,
+            }
+        );
+        assert_eq!(
+            read(r#"{"kind":"call","outgoing":false,"status":"silenced_dnd","video":true,"group":4}"#),
+            Content::Call {
+                video: true,
+                status: CallStatus::Missed,
+                duration: 0,
+                group: true,
+            }
+        );
+        assert!(matches!(
+            read(r#"{"kind":"call","outgoing":false,"status":"ongoing"}"#),
+            Content::Call {
+                status: CallStatus::Answered,
+                ..
+            }
+        ));
+        // What this version writes reads back unchanged.
+        let current = Content::Call {
+            video: true,
+            status: CallStatus::NoAnswer,
+            duration: 0,
+            group: true,
+        };
+        assert_eq!(read(&serde_json::to_string(&current).unwrap()), current);
+    }
+
     /// Checks compatibility with older archived quotes that omitted a source chat.
     #[test]
     fn archived_quotes_without_a_source_chat_remain_readable() {
