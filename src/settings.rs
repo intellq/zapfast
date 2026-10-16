@@ -521,6 +521,9 @@ pub struct Settings {
     pub open_whatsapp_links: bool,
     /// Desktop notifications while away from the chat.
     pub notifications: bool,
+    /// Notifications name the chat and sender and show the message. Off,
+    /// every one says only "New message", as behind the app lock.
+    pub notification_content: bool,
     /// Sound for new messages, in one-to-one chats and groups alike.
     pub message_sound: NotificationSound,
     /// Sound for group messages that mention us or reply to one of ours, as
@@ -652,6 +655,7 @@ impl Default for Settings {
             start_minimized: false,
             open_whatsapp_links: true,
             notifications: true,
+            notification_content: true,
             message_sound: NotificationSound::None,
             mention_sound: NotificationSound::Alert,
             group_sounds: true,

@@ -861,6 +861,11 @@ fn sections(app: &App) -> Vec<Section> {
     );
     if app.account().settings.notifications {
         let (title, description) = sound_text(locale, false);
+        notifications.toggle(
+            translated(locale, "Show message content in notifications"),
+            translated(locale, "When off, they say only “New message”."),
+            |settings| &mut settings.notification_content,
+        );
         notifications.row(title, description, |ui, app| sound_control(ui, app, false));
         notifications.toggle(
             translated(locale, "Play sounds for group messages"),

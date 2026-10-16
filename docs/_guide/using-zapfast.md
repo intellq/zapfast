@@ -317,6 +317,8 @@ asks once for permission to show notifications. On Linux, a notification that ar
 window is open behind others also highlights ZapFast in the taskbar until you
 switch to it. Muted chats do not send notifications, and
 archived chats stay quiet until you unarchive them. You can change both settings.
+To keep messages off the screen, turn off **Show message content in
+notifications** in Settings: notifications then say only "New message".
 
 Press `Ctrl+/` or click the keyboard button under the composer to list all
 shortcuts.

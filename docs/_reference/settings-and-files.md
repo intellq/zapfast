@@ -69,6 +69,11 @@ name or description, in the interface language or in English.
 
 - **Desktop notifications**: for chats you are not looking at. Muted chats stay
   quiet.
+- **Show message content in notifications**: on by default. When off, every
+  notification says only "New message" from ZapFast, without the chat, the
+  sender, the text, or a picture, as behind the app lock, and plays only the
+  message sound. Clicking one still opens the message. Applies to every
+  account.
 - **Message sound** and **Mention sound**: Pidgin's sounds, the system sound,
   none, or an audio file.
 - **Play sounds for group messages**: when off, only mentions and replies to

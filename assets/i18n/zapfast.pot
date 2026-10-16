@@ -4783,6 +4783,12 @@ msgstr ""
 msgid "New message"
 msgstr ""
 
+#. Translators: the body of a notification that hides who wrote and
+#. what: a message has arrived.
+msgctxt "notification"
+msgid "New message"
+msgstr ""
+
 #: src/settings.rs:317
 msgid "After 1 minute"
 msgstr ""

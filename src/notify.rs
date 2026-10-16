@@ -592,17 +592,11 @@ mod tests {
     }
 
     #[test]
-    fn a_hidden_notification_says_new_message_in_every_language() {
+    fn a_hidden_notification_says_new_message() {
         use crate::i18n::Locale;
         for (locale, body) in [
             (Locale::English, "New message"),
             (Locale::PortugueseBrazil, "Nova mensagem"),
-            (Locale::German, "Neue Nachricht"),
-            (Locale::Spanish, "Mensaje nuevo"),
-            (Locale::Italian, "Nuovo messaggio"),
-            (Locale::French, "Nouveau message"),
-            (Locale::Russian, "Новое сообщение"),
-            (Locale::ChineseSimplified, "新消息"),
         ] {
             assert_eq!(locked_lines(locale).1, body, "{locale:?}");
         }

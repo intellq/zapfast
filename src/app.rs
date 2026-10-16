@@ -2014,8 +2014,8 @@ impl App {
         if reading {
             return;
         }
-        if self.app_lock.is_locked() {
-            self.notify_while_locked(chat_id, chat.is_group(), &message.id);
+        if self.app_lock.is_locked() || !self.settings.notification_content {
+            self.notify_without_content(chat_id, chat.is_group(), &message.id);
             return;
         }
         let (name, is_group) = (self.chat_title(chat), chat.is_group());
@@ -2050,13 +2050,14 @@ impl App {
         self.wants_attention = true;
     }
 
-    /// Announces a message while the app lock is on: "New message" from
-    /// ZapFast, without the chat, the sender, the text or a picture, so the
-    /// desktop shows nothing the lock screen hides. A chat's own sound and
-    /// the mention sound would tell who wrote, so only the message sound
-    /// plays, still silent for groups when group sounds are off. The click
-    /// target stays inside ZapFast: it opens the message once unlocked.
-    fn notify_while_locked(&mut self, chat_id: &str, is_group: bool, message: &str) {
+    /// Announces a message while the app lock is on, or with notification
+    /// content turned off: "New message" from ZapFast, without the chat, the
+    /// sender, the text or a picture, so the desktop shows nothing the lock
+    /// screen hides. A chat's own sound and the mention sound would tell who
+    /// wrote, so only the message sound plays, still silent for groups when
+    /// group sounds are off. The click target stays inside ZapFast: it opens
+    /// the message, once unlocked behind the lock.
+    fn notify_without_content(&mut self, chat_id: &str, is_group: bool, message: &str) {
         self.wants_attention = true;
         let (title, body) = crate::notify::locked_lines(self.locale);
         let sound = notification_sound(&self.settings, None, is_group, false);
@@ -16371,6 +16372,26 @@ mod app_lock_tests {
             shown.sound, app.settings.message_sound,
             "the chat's own sound would name it"
         );
+    }
+
+    #[test]
+    fn notifications_without_content_say_only_new_message() {
+        let mut app = unlocked_app();
+        let message = incoming(&mut app);
+        app.chats[0].notification_sound = Some(crate::settings::NotificationSound::Alert);
+        app.settings.notification_content = false;
+        app.maybe_notify(CHAT, &message);
+        let shown = app.notifications.shown.last().unwrap().clone();
+        assert_eq!(shown.title, "ZapFast");
+        assert_eq!(shown.body, "New message");
+        assert_eq!(shown.picture, None);
+        assert_eq!(shown.sound, app.settings.message_sound);
+
+        app.settings.notification_content = true;
+        app.maybe_notify(CHAT, &message);
+        let shown = app.notifications.shown.last().unwrap();
+        assert_eq!(shown.title, "Ada Lovelace");
+        assert_eq!(shown.body, "the engine is ready");
     }
 
     #[test]

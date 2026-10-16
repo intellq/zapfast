@@ -34,6 +34,12 @@ msgstr "Esqueci a senha. Desconectar este computador"
 msgid "New message"
 msgstr "Nova mensagem"
 
+#. Translators: the body of a notification that hides who wrote and
+#. what: a message has arrived.
+msgctxt "notification"
+msgid "New message"
+msgstr "Nova mensagem"
+
 msgid "App lock"
 msgstr "Bloqueio do ZapFast"
 
