@@ -11687,7 +11687,7 @@ mod tests {
         app.system_appearance = Some(crate::appearance::SystemAppearance::fixed(true));
         app.apply_theme(&ctx);
         assert_eq!(ctx.theme(), egui::Theme::Dark);
-        assert_eq!(app.palette, Palette::dark());
+        assert_eq!(app.palette, Palette::whatsapp_dark());
 
         app.settings.theme = ThemeChoice::Light;
         app.apply_theme(&ctx);

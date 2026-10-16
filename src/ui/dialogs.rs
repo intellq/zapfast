@@ -2367,7 +2367,6 @@ fn chat_info(app: &mut App, ui: &mut egui::Ui, id: &str) {
 }
 
 /// Where the pencil that renames a group was drawn, for interaction tests.
-
 pub fn group_name_button_id() -> egui::Id {
     egui::Id::new("group-name-edit")
 }
