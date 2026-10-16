@@ -231,6 +231,12 @@ zbus-secret-service-keyring-store = { version = "1.0.1", features = ["rt-tokio-c
 zbus = { version = "5.19", default-features = false, features = ["blocking-api", "tokio"] }
 # Reads the time locale's clock format.
 libc = "0.2"
+# winit draws the window's frame itself where the compositor will not, as
+# GNOME on Wayland does not: Adwaita-style rounded corners, title and
+# buttons. eframe without its default features leaves winit with only a
+# plain, square grey frame there (#397). The feature applies to eframe's
+# winit, the fork in [patch.crates-io].
+winit = { version = "0.30", default-features = false, features = ["wayland-csd-adwaita"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 apple-native-keyring-store = { version = "1.0.2", features = ["keychain"] }
