@@ -112,10 +112,48 @@ impl Client {
         Ok(())
     }
 
-    #[cfg_attr(feature = "tracing", tracing::instrument(name = "wa.send.node", level = "debug", skip_all, fields(tag = %node.tag), err(Debug)))]
     pub async fn send_node(&self, node: Node) -> Result<(), ClientError> {
-        let plaintext_buf = self.marshal_node_for_send(node)?;
-        self.send_raw_bytes(plaintext_buf).await
+        self.send_node_observed(node, None).await
+    }
+
+    #[cfg_attr(feature = "tracing", tracing::instrument(name = "wa.send.node", level = "debug", skip_all, fields(tag = %node.tag), err(Debug)))]
+    pub(crate) async fn send_node_observed(
+        &self,
+        node: Node,
+        observer: Option<Box<dyn wacore::socket::noise_socket::SendObserver>>,
+    ) -> Result<(), ClientError> {
+        let plaintext = self.marshal_node_for_send(node)?;
+        wacore_binary::util::check_plain_payload(&plaintext).map_err(SocketError::Marshal)?;
+        let socket = self.get_noise_socket()?;
+        let receiver = socket
+            .enqueue_send_observed(plaintext.into(), observer)
+            .await?;
+        NoiseSocket::await_send(receiver).await?;
+        Ok(())
+    }
+
+    /// Hold the captured socket across enqueue awaits, so a reconnect cannot
+    /// publish an old recovery request on the replacement socket.
+    pub(crate) async fn send_node_observed_in_scope(
+        &self,
+        node: Node,
+        observer: Option<Box<dyn wacore::socket::noise_socket::SendObserver>>,
+        generation: u64,
+        socket: Arc<NoiseSocket>,
+    ) -> Result<(), ClientError> {
+        if self.connection_generation.load(Ordering::Acquire) != generation
+            || self.authenticated_generation.load(Ordering::SeqCst) != generation
+            || !self.can_reach_server()
+        {
+            return Err(anyhow::anyhow!("connection changed before peer recovery send").into());
+        }
+        let plaintext = self.marshal_node_for_send(node)?;
+        wacore_binary::util::check_plain_payload(&plaintext).map_err(SocketError::Marshal)?;
+        let receiver = socket
+            .enqueue_send_observed(plaintext.into(), observer)
+            .await?;
+        NoiseSocket::await_send(receiver).await?;
+        Ok(())
     }
 
     /// Everything [`send_node`](Client::send_node) does short of the send:
@@ -144,7 +182,7 @@ impl Client {
         tracing::instrument(name = "wa.send.unified_session", level = "debug", skip_all)
     )]
     pub(crate) async fn send_unified_session(&self) {
-        if !self.is_connected() {
+        if !self.is_socket_connected() {
             debug!(target: "Client/UnifiedSession", "Skipping: not connected");
             return;
         }
@@ -159,57 +197,86 @@ impl Client {
         }
     }
 
-    /// Edit a message you own (`original_id`), replacing its content with
-    /// `new_content`.
+    /// Edit original content using a typed target and operation options.
+    ///
+    /// The result describes the new envelope, not the target. Community
+    /// announcement edits require `EditRequest::with_secret`. Determining the
+    /// group subtype may query metadata; rejection means no message send.
+    pub async fn edit_message<'a>(
+        &'a self,
+        request: crate::EditRequest<'a>,
+    ) -> Result<crate::SendResult, crate::SendError> {
+        Box::pin(self.edit_request_inner(request)).await
+    }
+
+    async fn edit_request_inner(
+        &self,
+        request: crate::EditRequest<'_>,
+    ) -> Result<crate::SendResult, crate::SendError> {
+        request.target.require_chat_operation()?;
+        request.target.require_own()?;
+        let to = request.target.chat();
+        let id = request.target.id().to_string();
+        let stanza_id = request.options.stanza_id.map(crate::StanzaId::into_string);
+        if let Some((creator, secret)) = request.encryption {
+            if creator.user.is_empty() || !(creator.is_pn() || creator.is_lid()) {
+                return Err(crate::SendError::InvalidRequest(
+                    "invalid original creator".into(),
+                ));
+            }
+            return self
+                .edit_message_encrypted_inner(
+                    to.clone(),
+                    id,
+                    secret.as_bytes(),
+                    Arc::unwrap_or_clone(request.content),
+                    Some(creator),
+                    stanza_id,
+                )
+                .await;
+        }
+        if to.is_group() && self.is_community_announce_group(to).await? {
+            return Err(crate::SendError::InvalidRequest(
+                "community announcement group edits require EditRequest::with_secret and the original message secret".into(),
+            ));
+        }
+        self.edit_message_inner(
+            to.clone(),
+            id,
+            Arc::unwrap_or_clone(request.content),
+            stanza_id,
+        )
+        .await
+    }
+
+    /// Explicit raw chat/id escape for hosts composing their own edit addressing.
+    /// Prefer [`Self::edit_message`] with [`crate::EditRequest`] for origin and
+    /// ownership validation. This raw path retains its manual routing contract.
     ///
     /// The returned [`SendResult`](crate::send::SendResult) describes the edit
     /// itself: `message_id` is the edit stanza's own fresh id (never
     /// `original_id`, which the server would deduplicate against the original
     /// and drop), and `message` the protocol message this crate built around
     /// `new_content`, keyed by `original_id`.
-    pub async fn edit_message(
+    pub async fn edit_message_raw(
         &self,
         to: impl Into<Jid>,
         original_id: impl Into<String>,
         new_content: wa::Message,
-    ) -> Result<crate::send::SendResult, crate::send::SendError> {
-        self.edit_message_inner(to.into(), original_id.into(), new_content, None)
-            .await
-    }
-
-    /// Edits a message you own (`original_id`) with caller-supplied
-    /// [`crate::send::EditOptions`]. The edit-path counterpart of
-    /// [`crate::send::SendOptions::message_id`] (which overrides the stanza id
-    /// for plain sends): `stanza_id` lets callers control the outer stanza id —
-    /// for example to collide it with an existing message so clients re-render
-    /// that slot.
-    ///
-    /// When `stanza_id` is set, no id-keyed local state is bound to the borrowed
-    /// id (the edit skips outbound-secret and retry-cache persistence, leaving
-    /// the original message's state intact), and whether the collision is
-    /// honored is server/client dependent — treat it as best-effort. See
-    /// [`crate::send::EditOptions::stanza_id`]. The result's `message_id` is
-    /// then the borrowed id.
-    pub async fn edit_message_with_options(
-        &self,
-        to: impl Into<Jid>,
-        original_id: impl Into<String>,
-        new_content: wa::Message,
-        options: crate::send::EditOptions,
-    ) -> Result<crate::send::SendResult, crate::send::SendError> {
+        options: crate::EditOptions,
+    ) -> Result<crate::SendResult, crate::SendError> {
+        let id = crate::MessageId::try_from(original_id.into())?;
         self.edit_message_inner(
             to.into(),
-            original_id.into(),
+            id.into_string(),
             new_content,
-            options.stanza_id,
+            options.stanza_id.map(crate::StanzaId::into_string),
         )
         .await
     }
 
-    /// Shared edit-send flow for [`Self::edit_message`] and
-    /// [`Self::edit_message_with_options`]. `request_id` overrides the outer
-    /// stanza id when `Some`; when `None` a fresh one is generated (the default,
-    /// safe behavior — see below).
+    /// Shared edit-send flow for the canonical request and explicit raw path.
+    /// `request_id` borrows the outer stanza id; `None` generates a fresh id.
     #[cfg_attr(feature = "tracing", tracing::instrument(name = "wa.send.edit", level = "debug", skip_all, fields(to = %to.observe()), err(Debug)))]
     async fn edit_message_inner(
         &self,
@@ -260,30 +327,34 @@ impl Client {
         .await
     }
 
-    /// Edit a message via the message-secret encrypted path (`secret_encrypted_message`
-    /// with `secret_enc_type = MESSAGE_EDIT`), instead of the plaintext protocolMessage
-    /// edit. This is the form Community Announcement Group / channel edits require, and
-    /// what WA Web sends when `message_edit_to_message_secret_sender_enabled` is on.
+    /// Explicit raw message-secret edit for an E2E chat. Newsletters use the
+    /// plaintext newsletter facade instead. Prefer [`crate::EditRequest::with_secret`]
+    /// to associate the original creation's exact creator namespace and secret.
     ///
     /// `message_secret` is the *original* message's 32-byte secret (you generated it when
     /// you sent that message). You can only edit your own messages, so the original
-    /// sender and the editor are both you.
+    /// sender and editor are assumed to use the current chat-specific identity.
+    /// This raw assumption is not a PN/LID cryptographic equivalence guarantee.
     ///
     /// Returns the edit's own [`SendResult`](crate::send::SendResult), like
     /// [`Client::edit_message`]; here `message` is the `secretEncryptedMessage`
     /// envelope, so `new_content` is not readable from it.
-    pub async fn edit_message_encrypted(
+    pub async fn edit_message_encrypted_raw(
         &self,
         to: impl Into<Jid>,
         original_id: impl Into<String>,
         message_secret: &[u8],
         new_content: wa::Message,
     ) -> Result<crate::send::SendResult, crate::send::SendError> {
+        let id = crate::MessageId::try_from(original_id.into())?;
+        let secret = crate::MessageSecret::try_from(message_secret)?;
         self.edit_message_encrypted_inner(
             to.into(),
-            original_id.into(),
-            message_secret,
+            id.into_string(),
+            secret.as_bytes(),
             new_content,
+            None,
+            None,
         )
         .await
     }
@@ -295,6 +366,8 @@ impl Client {
         original_id: String,
         message_secret: &[u8],
         new_content: wa::Message,
+        original_creator: Option<&Jid>,
+        request_id: Option<String>,
     ) -> Result<crate::send::SendResult, crate::send::SendError> {
         use crate::send::SendError;
         // Newsletters/channels are plaintext (no message-secret addon crypto) and the
@@ -319,10 +392,15 @@ impl Client {
                 .map_err(SendError::from_anyhow)?
                 .to_non_ad()
         } else {
-            self.pn().ok_or(SendError::NotLoggedIn)?.to_non_ad()
+            // The current DM editor uses the sending namespace (LID for bots),
+            // independently of the original creation's captured creator.
+            self.dm_sender_identity_for(&to)
+                .await
+                .ok_or(SendError::NotLoggedIn)?
+                .to_non_ad()
         };
         let participant = if to.is_group() {
-            Some(self_jid.to_string())
+            Some(original_creator.unwrap_or(&self_jid).to_non_ad_string())
         } else {
             None
         };
@@ -331,6 +409,7 @@ impl Client {
             &to,
             &original_id,
             participant,
+            &original_creator.unwrap_or(&self_jid).to_non_ad_string(),
             &self_jid.to_string(),
             message_secret,
             new_content,
@@ -340,7 +419,7 @@ impl Client {
             to,
             envelope,
             crate::types::message::EditAttribute::MessageEdit,
-            None,
+            request_id,
         )
         .await
     }
@@ -352,8 +431,8 @@ impl Client {
         to: &Jid,
         server_id: u64,
         reaction: &str,
-    ) -> Result<(), anyhow::Error> {
-        let request_id = self.generate_message_id();
+    ) -> Result<String, anyhow::Error> {
+        let request_id = self.generate_message_id_at(wacore::time::now_secs_u64());
 
         let stanza = NodeBuilder::new("message")
             .attr("to", to)
@@ -364,7 +443,7 @@ impl Client {
             .build();
 
         self.send_node(stanza).await?;
-        Ok(())
+        Ok(request_id)
     }
 
     /// Register a oneshot waiter for a server ack by message ID.
@@ -372,10 +451,10 @@ impl Client {
     /// Sync: registration is just a `std::sync::Mutex` insert (no await).
     /// Register a waiter that receives the ack node itself.
     ///
-    /// Used where the caller needs the response: the VoIP offer reads the relay
-    /// out of its ack. A phash check does not, which is why that path uses
-    /// [`Self::register_phash_waiter`] and pays no channel per message. Gated on
-    /// the only consumer's feature, or it is dead code in a default build.
+    /// VoIP reads the relay from its ACK. Group-history uses the guarded,
+    /// non-replacing variant below so concurrent retries cannot steal waiters.
+    /// A phash check does not need the node, which is why ordinary sends use
+    /// [`Self::register_phash_waiter`].
     #[cfg(feature = "voip-control")]
     pub(crate) fn register_ack_waiter(
         &self,
@@ -385,6 +464,23 @@ impl Client {
         self.response_waiters_guard()
             .insert(message_id.to_string(), ResponseWaiter::Iq(tx));
         rx
+    }
+
+    /// Register an ACK waiter only if this message ID is not already pending.
+    /// Returns the entry generation so timeout cleanup cannot remove a newer
+    /// waiter that reuses the same ID after this one was consumed.
+    pub(crate) fn try_register_ack_waiter(
+        &self,
+        message_id: &str,
+    ) -> Option<(
+        futures::channel::oneshot::Receiver<Arc<wacore_binary::OwnedNodeRef>>,
+        NonZeroU64,
+    )> {
+        let (tx, rx) = futures::channel::oneshot::channel();
+        let generation = self
+            .response_waiters_guard()
+            .try_insert_guarded(message_id.to_string(), ResponseWaiter::Iq(tx))?;
+        Some((rx, generation))
     }
 
     /// Register the phash the server is expected to echo for this send.
@@ -466,22 +562,57 @@ impl Client {
         }
     }
 
-    /// Register a chatstate handler which will be invoked when a `<chatstate>` stanza is received.
+    /// Subscribe to chatstate through the core event bus. The adapter preserves
+    /// chat, group participant and typing/audio/idle state, so a synchronous
+    /// observer need not translate presence/media pairs or recover the optional
+    /// group participant. For async callbacks or configurable delivery, use
+    /// [`crate::CallbackEventHandler`] with [`Self::subscribe_handler`] instead.
     ///
-    /// The handler receives a `ChatStateEvent` with the parsed chat state information.
-    pub fn register_chatstate_handler(&self, handler: Arc<dyn Fn(ChatStateEvent) + Send + Sync>) {
-        let mut guard = self
-            .chatstate_handlers
-            .write()
-            .unwrap_or_else(|p| p.into_inner());
-        let mut handlers = Vec::with_capacity(guard.len() + 1);
-        handlers.extend(guard.iter().cloned());
-        handlers.push(handler);
-        *guard = Arc::from(handlers);
-        // Published after the snapshot is in place, so a reader that sees a
-        // non-zero count always finds the handler behind it.
-        self.chatstate_handler_count
-            .store(guard.len(), Ordering::Release);
+    /// Migration from permanent registration: retain the returned Subscription
+    /// in the owner's scope rather than discarding it. Dropping it removes future
+    /// deliveries (an old bus snapshot may still deliver).
+    /// Accepted work is cancelled when the adapter is dropped or Client shuts down.
+    /// Each registration uses an ordered, non-blocking 256-event mailbox; overflow
+    /// drops the newest event and increments Client::stats().events_dropped.
+    /// Synchronous user code runs on a worker, but cannot be preempted once entered.
+    ///
+    /// ```no_run
+    /// # use std::sync::Arc;
+    /// # use whatsapp_rust::Client;
+    /// # fn observe(client: &Arc<Client>) {
+    /// let subscription = client.subscribe_chatstate_handler(Arc::new(|event| {
+    ///     println!("{:?}: {:?}", event.chat, event.state);
+    /// }));
+    /// // Keep subscription in the observer owner's state until it should stop.
+    /// drop(subscription);
+    /// # }
+    /// ```
+    pub fn subscribe_chatstate_handler(
+        self: &Arc<Self>,
+        handler: Arc<dyn Fn(ChatStateEvent) + Send + Sync>,
+    ) -> wacore::types::events::Subscription {
+        use crate::bot::{CallbackEventHandler, EventDelivery};
+        use crate::handlers::chatstate::ChatstateRegistration;
+        use wacore::types::events::{EventInterest, EventKind};
+
+        let callback = CallbackEventHandler::from_callback(
+            self,
+            EventInterest::of(&[EventKind::ChatPresence]),
+            EventDelivery::Ordered { capacity: 256 },
+            move |event, _client| {
+                let handler = handler.clone();
+                async move {
+                    if let Event::ChatPresence(presence) = &*event {
+                        handler(ChatStateEvent::from_presence(presence));
+                    }
+                }
+            },
+        );
+        self.chatstate_handler_count.fetch_add(1, Ordering::Relaxed);
+        self.subscribe_handler(Arc::new(ChatstateRegistration {
+            callback,
+            count: self.chatstate_handler_count.clone(),
+        }))
     }
 
     /// Dispatch a parsed chatstate stanza to registered handlers.
@@ -495,25 +626,25 @@ impl Client {
         &self,
         stanza: wacore::iq::chatstate::ChatstateStanza,
     ) {
-        use wacore::iq::chatstate::{ChatstateSource, ReceivedChatState};
+        use wacore::iq::chatstate::ChatstateSource;
         use wacore::types::events::ChatPresenceUpdate;
         use wacore::types::message::MessageSource;
-        use wacore::types::presence::{ChatPresence, ChatPresenceMedia};
 
-        // Dispatch via event bus
+        if !self
+            .core
+            .event_bus
+            .has_handler_for(wacore::types::events::EventKind::ChatPresence)
+        {
+            return;
+        }
+        #[cfg(test)]
+        self.chatstate_events_built.fetch_add(1, Ordering::Release);
+
         let (chat, sender, is_group) = match &stanza.source {
             ChatstateSource::User { from } => (from.clone(), from.clone(), false),
             ChatstateSource::Group { from, participant } => {
                 (from.clone(), participant.clone(), true)
             }
-        };
-
-        let (state, media) = match stanza.state {
-            ReceivedChatState::Typing => (ChatPresence::Composing, ChatPresenceMedia::Text),
-            ReceivedChatState::RecordingAudio => {
-                (ChatPresence::Composing, ChatPresenceMedia::Audio)
-            }
-            ReceivedChatState::Idle => (ChatPresence::Paused, ChatPresenceMedia::Text),
         };
 
         self.core.event_bus.dispatch(Event::ChatPresence(
@@ -529,32 +660,9 @@ impl Client {
                     broadcast_list_owner: None,
                     recipient: None,
                 })
-                .state(state)
-                .media(media)
+                .state(stanza.state)
                 .build(),
         ));
-
-        // Invoke legacy callback handlers. Building the event is only worth it
-        // once something reads it, and the default registers nothing.
-        if self.chatstate_handler_count.load(Ordering::Acquire) == 0 {
-            return;
-        }
-        #[cfg(test)]
-        self.chatstate_events_built.fetch_add(1, Ordering::Release);
-        let event = ChatStateEvent::from_stanza(stanza);
-        let handlers = self
-            .chatstate_handlers
-            .read()
-            .unwrap_or_else(|p| p.into_inner())
-            .clone();
-        for handler in handlers.iter().cloned() {
-            let event_clone = event.clone();
-            self.runtime
-                .spawn(Box::pin(async move {
-                    (handler)(event_clone);
-                }))
-                .detach();
-        }
     }
 
     /// Whether delivery receipts should be sent active (rendered as ticks) vs
@@ -584,17 +692,34 @@ impl Client {
     }
 }
 
-/// Build the outgoing `secret_encrypted_message` (MESSAGE_EDIT) envelope: encrypt the
-/// protocolMessage(MESSAGE_EDIT) under the original message's secret and wrap it with
-/// `messageContextInfo.messageSecret`, matching WAWebGenerateSecretMessageEditProto.
+/// Encrypt the edit protocol message under the original creation's secret.
+/// The replacement content selects both the envelope kind and HKDF use case;
+/// the addressing reference alone does not describe the original body kind.
 fn build_secret_message_edit(
     to: &Jid,
     original_id: &str,
     participant: Option<String>,
+    creator_jid_str: &str,
     self_jid_str: &str,
     message_secret: &[u8],
     new_content: wa::Message,
 ) -> Result<wa::Message, anyhow::Error> {
+    use wa::message::secret_encrypted_message::SecretEncType;
+    use wacore::secret_enc_addon::{AddonContext, ModificationType, encrypt_addon};
+
+    let (secret_enc_type, modification_type) = if new_content.event_message.is_set() {
+        (SecretEncType::EventEdit, ModificationType::EventEdit)
+    } else if new_content.poll_creation_message.is_set()
+        || new_content.poll_creation_message_v2.is_set()
+        || new_content.poll_creation_message_v3.is_set()
+        || new_content.poll_creation_message_v4.is_set()
+        || new_content.poll_creation_message_v5.is_set()
+        || new_content.poll_creation_message_v6.is_set()
+    {
+        (SecretEncType::PollEdit, ModificationType::PollEdit)
+    } else {
+        (SecretEncType::MessageEdit, ModificationType::MessageEdit)
+    };
     let inner = crate::send::build_edit_message(
         to,
         original_id.to_string(),
@@ -603,35 +728,43 @@ fn build_secret_message_edit(
         wacore::time::now_millis(),
     );
 
-    // You can only edit your own message, so original-sender == editor == self.
-    let ctx = wacore::message_edit::MessageEditContext {
-        original_msg_id: original_id,
-        original_sender_jid: self_jid_str,
-        editor_jid: self_jid_str,
+    // The creator is the original cryptographic namespace, not a routing alias.
+    let ctx = AddonContext {
+        stanza_id: original_id,
+        parent_msg_original_sender: creator_jid_str,
+        modification_sender: self_jid_str,
+        modification_type,
     };
-    let (enc_payload, iv) =
-        wacore::message_edit::encrypt_message_edit(&inner, message_secret, &ctx)?;
+    let (enc_payload, iv) = encrypt_addon(
+        &waproto::codec::message_to_vec(&inner),
+        message_secret,
+        &ctx,
+    )?;
 
-    Ok(wa::Message {
-        secret_encrypted_message: buffa::MessageField::some(wa::message::SecretEncryptedMessage {
-            target_message_key: buffa::MessageField::some(wa::MessageKey {
-                remote_jid: Some(to.to_string()),
-                from_me: Some(true),
-                id: Some(original_id.to_string()),
-                participant,
-            }),
-            enc_payload: Some(enc_payload),
-            enc_iv: Some(iv.to_vec()),
-            secret_enc_type: Some(
-                wa::message::secret_encrypted_message::SecretEncType::MessageEdit,
-            ),
-            remote_key_id: None,
-        }),
-        message_context_info: buffa::MessageField::some(wa::MessageContextInfo {
-            message_secret: Some(message_secret.to_vec()),
-            ..Default::default()
-        }),
-        ..Default::default()
+    Ok({
+        let mut proto = wa::Message::default();
+        proto.secret_encrypted_message = buffa::MessageField::some({
+            let mut proto = wa::message::SecretEncryptedMessage::default();
+            proto.target_message_key = buffa::MessageField::some({
+                let mut proto = wa::MessageKey::default();
+                proto.remote_jid = Some(to.to_string());
+                proto.from_me = Some(true);
+                proto.id = Some(original_id.to_string());
+                proto.participant = participant;
+                proto
+            });
+            proto.enc_payload = Some(enc_payload);
+            proto.enc_iv = Some(iv.to_vec());
+            proto.secret_enc_type = Some(secret_enc_type);
+            proto.remote_key_id = None;
+            proto
+        });
+        proto.message_context_info = buffa::MessageField::some({
+            let mut proto = wa::MessageContextInfo::default();
+            proto.message_secret = Some(message_secret.to_vec());
+            proto
+        });
+        proto
     })
 }
 
@@ -640,17 +773,134 @@ mod secret_message_edit_tests {
     use super::*;
 
     #[test]
+    fn secret_edit_content_kind_and_hkdf_stay_paired() {
+        use wa::message::secret_encrypted_message::SecretEncType;
+        use wacore::secret_enc_addon::ModificationType;
+
+        let to = Jid::pn("15550000001");
+        let creator = "100000000000001@lid";
+        let editor = "15550000002@s.whatsapp.net";
+        let secret = [0x33; 32];
+        for variant in 0..8 {
+            let mut content = wa::Message::default();
+            match variant {
+                0 => {
+                    content.event_message.get_or_insert_default().name =
+                        Some("Updated event".into())
+                }
+                1 => {
+                    content.poll_creation_message.get_or_insert_default().name =
+                        Some("Updated poll".into())
+                }
+                2 => {
+                    content
+                        .poll_creation_message_v2
+                        .get_or_insert_default()
+                        .name = Some("Updated poll".into())
+                }
+                3 => {
+                    content
+                        .poll_creation_message_v3
+                        .get_or_insert_default()
+                        .name = Some("Updated poll".into())
+                }
+                4 => {
+                    content
+                        .poll_creation_message_v4
+                        .get_or_insert_default()
+                        .message
+                        .get_or_insert_default()
+                        .poll_creation_message_v3
+                        .get_or_insert_default()
+                        .name = Some("Updated poll".into())
+                }
+                5 => {
+                    content
+                        .poll_creation_message_v5
+                        .get_or_insert_default()
+                        .name = Some("Updated poll".into())
+                }
+                6 => {
+                    content
+                        .poll_creation_message_v6
+                        .get_or_insert_default()
+                        .name = Some("Updated poll".into())
+                }
+                _ => content.conversation = Some("Updated text".into()),
+            }
+            let (kind, modification) = match variant {
+                0 => (SecretEncType::EventEdit, ModificationType::EventEdit),
+                1..=6 => (SecretEncType::PollEdit, ModificationType::PollEdit),
+                _ => (SecretEncType::MessageEdit, ModificationType::MessageEdit),
+            };
+            let envelope = build_secret_message_edit(
+                &to,
+                "ORIGINAL",
+                None,
+                creator,
+                editor,
+                &secret,
+                content.clone(),
+            )
+            .unwrap();
+            let envelope = envelope.secret_encrypted_message.as_option().unwrap();
+            assert_eq!(envelope.secret_enc_type, Some(kind));
+            let context = wacore::message_edit::MessageEditContext {
+                original_msg_id: "ORIGINAL",
+                original_sender_jid: creator,
+                editor_jid: editor,
+            };
+            let inner = wacore::message_edit::decrypt_secret_encrypted(
+                envelope.enc_payload.as_deref().unwrap(),
+                envelope.enc_iv.as_deref().unwrap(),
+                &secret,
+                modification,
+                &context,
+            )
+            .unwrap();
+            assert_eq!(
+                inner.protocol_message.edited_message.as_option(),
+                Some(&content)
+            );
+            let wrong_modification = if variant == 7 {
+                ModificationType::EventEdit
+            } else {
+                ModificationType::MessageEdit
+            };
+            assert!(
+                wacore::message_edit::decrypt_secret_encrypted(
+                    envelope.enc_payload.as_deref().unwrap(),
+                    envelope.enc_iv.as_deref().unwrap(),
+                    &secret,
+                    wrong_modification,
+                    &context,
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
     fn secret_message_edit_roundtrip() {
         let secret = [0x33u8; 32];
         let to: Jid = "5511777777777@s.whatsapp.net".parse().unwrap();
         let self_str = "5511999999999@s.whatsapp.net";
-        let new_content = wa::Message {
-            conversation: Some("edited!".into()),
-            ..Default::default()
+        let new_content = {
+            let mut proto = wa::Message::default();
+            proto.conversation = Some("edited!".into());
+            proto
         };
 
-        let envelope =
-            build_secret_message_edit(&to, "ORIGID", None, self_str, &secret, new_content).unwrap();
+        let envelope = build_secret_message_edit(
+            &to,
+            "ORIGID",
+            None,
+            self_str,
+            self_str,
+            &secret,
+            new_content,
+        )
+        .unwrap();
 
         let sem = envelope.secret_encrypted_message.as_option().unwrap();
         assert_eq!(
@@ -692,18 +942,13 @@ mod secret_message_edit_tests {
         let secret = [0x33u8; 32];
         let to: Jid = "5511777777777@s.whatsapp.net".parse().unwrap();
         let self_str = "5511999999999@s.whatsapp.net";
-        let envelope = build_secret_message_edit(
-            &to,
-            "ORIGID",
-            None,
-            self_str,
-            &secret,
-            wa::Message {
-                conversation: Some("edited!".into()),
-                ..Default::default()
-            },
-        )
-        .unwrap();
+        let envelope =
+            build_secret_message_edit(&to, "ORIGID", None, self_str, self_str, &secret, {
+                let mut proto = wa::Message::default();
+                proto.conversation = Some("edited!".into());
+                proto
+            })
+            .unwrap();
         let sem = envelope.secret_encrypted_message.as_option().unwrap();
         let ctx = wacore::message_edit::MessageEditContext {
             original_msg_id: "ORIGID",

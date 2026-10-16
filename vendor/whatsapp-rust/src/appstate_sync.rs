@@ -17,6 +17,7 @@ mod tests {
     use wacore::appstate::keys::{ExpandedAppStateKeys, expand_app_state_keys};
     use wacore::appstate::patch_decode::{CollectionSyncError, PatchList, WAPatchName};
     use wacore::appstate::processor::AppStateMutationMAC;
+    use wacore::appstate_sync::AppStateMutationPersistence;
     use wacore::appstate_sync::RecoveryOutcome;
     use wacore::libsignal::crypto::aes_256_cbc_encrypt_into;
     use wacore::store::error::Result as StoreResult;
@@ -30,6 +31,7 @@ mod tests {
 
     #[derive(Default, Clone)]
     struct MockBackend {
+        token_store: Arc<wacore::store::InMemoryBackend>,
         versions: Arc<Mutex<HashMap<String, HashState>>>,
         macs: MockMacMap,
         keys: Arc<Mutex<HashMap<Vec<u8>, AppStateSyncKey>>>,
@@ -46,6 +48,11 @@ mod tests {
         // Counts version writes, so a test can tell a sync that recorded
         // something from one that had nothing to record.
         set_version_calls: Arc<portable_atomic::AtomicU64>,
+        status_privacy: Arc<Mutex<Option<wa::sync_action_value::StatusPrivacyAction>>>,
+        status_privacy_versions: Arc<Mutex<Vec<Option<u64>>>>,
+        fail_status_privacy: Arc<Mutex<bool>>,
+        fail_lid_mappings: Arc<Mutex<bool>>,
+        lid_mapping_versions: Arc<Mutex<Vec<Option<u64>>>>,
     }
 
     // Implement SignalStore - Signal protocol cryptographic operations
@@ -182,6 +189,28 @@ mod tests {
         async fn delete_mutation_macs(&self, _: &str, _: &[Vec<u8>]) -> StoreResult<()> {
             Ok(())
         }
+        async fn commit_patch(
+            &self,
+            name: &str,
+            state: HashState,
+            removed_index_macs: &[Vec<u8>],
+            added: &[AppStateMutationMAC],
+        ) -> StoreResult<()> {
+            // Acquire both locks before any mutation; cancellation while acquiring
+            // the second one still leaves the previous cursor and MACs intact.
+            let mut versions = self.versions.lock().await;
+            let mut macs = self.macs.lock().await;
+            versions.insert(name.to_string(), state);
+            for index in removed_index_macs {
+                macs.remove(&(name.to_string(), index.clone()));
+            }
+            for m in added {
+                macs.insert((name.to_string(), m.index_mac.clone()), m.value_mac.clone());
+            }
+            self.set_version_calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(())
+        }
         async fn clear_mutation_macs(&self, name: &str) -> StoreResult<()> {
             if *self.fail_clear_macs.lock().await {
                 return Err(wacore::store::error::StoreError::Io(std::io::Error::other(
@@ -215,17 +244,30 @@ mod tests {
         async fn delete_sender_key_device_rows(&self, _: &[&str]) -> StoreResult<()> {
             Ok(())
         }
-        async fn get_lid_mapping(&self, _: &str) -> StoreResult<Option<LidPnMappingEntry>> {
-            Ok(None)
+        async fn get_lid_mapping(&self, lid: &str) -> StoreResult<Option<LidPnMappingEntry>> {
+            self.token_store.get_lid_mapping(lid).await
         }
-        async fn get_pn_mapping(&self, _: &str) -> StoreResult<Option<LidPnMappingEntry>> {
-            Ok(None)
+        async fn get_pn_mapping(&self, pn: &str) -> StoreResult<Option<LidPnMappingEntry>> {
+            self.token_store.get_pn_mapping(pn).await
         }
-        async fn put_lid_mapping(&self, _: &LidPnMappingEntry) -> StoreResult<()> {
-            Ok(())
+        async fn put_lid_mapping(&self, mapping: &LidPnMappingEntry) -> StoreResult<()> {
+            self.put_lid_mappings(std::slice::from_ref(mapping)).await
+        }
+        async fn put_lid_mappings(&self, mappings: &[LidPnMappingEntry]) -> StoreResult<()> {
+            let version = self
+                .get_version(WAPatchName::Regular.as_str())
+                .await?
+                .map(|s| s.version);
+            self.lid_mapping_versions.lock().await.push(version);
+            if *self.fail_lid_mappings.lock().await {
+                return Err(wacore::store::error::StoreError::Io(std::io::Error::other(
+                    "injected LID mapping failure",
+                )));
+            }
+            self.token_store.put_lid_mappings(mappings).await
         }
         async fn get_all_lid_mappings(&self) -> StoreResult<Vec<LidPnMappingEntry>> {
-            Ok(vec![])
+            self.token_store.get_all_lid_mappings().await
         }
         async fn save_base_key(&self, _: &str, _: &str, _: &[u8]) -> StoreResult<()> {
             Ok(())
@@ -247,25 +289,50 @@ mod tests {
         }
         async fn get_tc_token(
             &self,
-            _: &str,
+            jid: &str,
         ) -> StoreResult<Option<wacore::store::traits::TcTokenEntry>> {
-            Ok(None)
+            self.token_store.get_tc_token(jid).await
         }
         async fn put_tc_token(
             &self,
-            _: &str,
-            _: &wacore::store::traits::TcTokenEntry,
+            jid: &str,
+            entry: &wacore::store::traits::TcTokenEntry,
         ) -> StoreResult<()> {
-            Ok(())
+            self.token_store.put_tc_token(jid, entry).await
         }
-        async fn delete_tc_token(&self, _: &str) -> StoreResult<()> {
-            Ok(())
+        async fn touch_tc_token_sender_timestamp(
+            &self,
+            jid: &str,
+            sender_timestamp: i64,
+        ) -> StoreResult<()> {
+            self.token_store
+                .touch_tc_token_sender_timestamp(jid, sender_timestamp)
+                .await
+        }
+        async fn store_received_tc_token(
+            &self,
+            jid: &str,
+            token: &[u8],
+            token_timestamp: i64,
+        ) -> StoreResult<()> {
+            self.token_store
+                .store_received_tc_token(jid, token, token_timestamp)
+                .await
+        }
+        async fn delete_tc_token(&self, jid: &str) -> StoreResult<()> {
+            self.token_store.delete_tc_token(jid).await
         }
         async fn get_all_tc_token_jids(&self) -> StoreResult<Vec<String>> {
-            Ok(vec![])
+            self.token_store.get_all_tc_token_jids().await
         }
-        async fn delete_expired_tc_tokens(&self, _: i64, _: i64) -> StoreResult<u32> {
-            Ok(0)
+        async fn delete_expired_tc_tokens(
+            &self,
+            token_cutoff: i64,
+            sender_cutoff: i64,
+        ) -> StoreResult<u32> {
+            self.token_store
+                .delete_expired_tc_tokens(token_cutoff, sender_cutoff)
+                .await
         }
         async fn store_sent_message(&self, _: &str, _: &str, _: &[u8]) -> StoreResult<()> {
             Ok(())
@@ -288,12 +355,12 @@ mod tests {
             Ok(entries.len())
         }
 
-        async fn get_msg_secret(
+        async fn get_stored_msg_secret(
             &self,
             _chat: &str,
             _sender: &str,
             _msg_id: &str,
-        ) -> StoreResult<Option<Vec<u8>>> {
+        ) -> StoreResult<Option<wacore::store::traits::StoredMessageSecret>> {
             Ok(None)
         }
 
@@ -320,6 +387,31 @@ mod tests {
         }
     }
 
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AppStateMutationPersistence for MockBackend {
+        async fn persist_status_privacy(
+            &self,
+            action: &wa::sync_action_value::StatusPrivacyAction,
+        ) -> StoreResult<()> {
+            let version = self
+                .versions
+                .lock()
+                .await
+                .values()
+                .next()
+                .map(|state| state.version);
+            self.status_privacy_versions.lock().await.push(version);
+            if *self.fail_status_privacy.lock().await {
+                return Err(wacore::store::error::StoreError::Io(std::io::Error::other(
+                    "injected status privacy failure",
+                )));
+            }
+            *self.status_privacy.lock().await = Some(action.clone());
+            Ok(())
+        }
+    }
+
     fn create_encrypted_mutation(
         op: wa::syncd_mutation::SyncdOperation,
         index_mac: &[u8],
@@ -338,20 +430,672 @@ mod tests {
         let mut value_blob = value_with_iv;
         value_blob.extend_from_slice(&value_mac);
 
-        wa::SyncdMutation {
-            operation: Some(op.into()),
-            record: buffa::MessageField::some(wa::SyncdRecord {
-                index: buffa::MessageField::some(wa::SyncdIndex {
-                    blob: Some(index_mac.to_vec()),
-                }),
-                value: buffa::MessageField::some(wa::SyncdValue {
-                    blob: Some(value_blob),
-                }),
-                key_id: buffa::MessageField::some(wa::KeyId {
-                    id: Some(key_id_bytes.to_vec()),
-                }),
-            }),
+        {
+            let mut proto = wa::SyncdMutation::default();
+            proto.operation = Some(op.into());
+            proto.record = buffa::MessageField::some({
+                let mut proto = wa::SyncdRecord::default();
+                proto.index = buffa::MessageField::some({
+                    let mut proto = wa::SyncdIndex::default();
+                    proto.blob = Some(index_mac.to_vec());
+                    proto
+                });
+                proto.value = buffa::MessageField::some({
+                    let mut proto = wa::SyncdValue::default();
+                    proto.blob = Some(value_blob);
+                    proto
+                });
+                proto.key_id = buffa::MessageField::some({
+                    let mut proto = wa::KeyId::default();
+                    proto.id = Some(key_id_bytes.to_vec());
+                    proto
+                });
+                proto
+            });
+            proto
         }
+    }
+
+    fn status_privacy_action() -> wa::sync_action_value::StatusPrivacyAction {
+        {
+            let mut proto = wa::sync_action_value::StatusPrivacyAction::default();
+            proto.mode = Some(buffa::EnumValue::Unknown(99));
+            proto.user_jid = vec!["120363000000000042@lid".into()];
+            proto.custom_lists = vec![{
+                let mut proto = wa::sync_action_value::status_privacy_action::CustomList::default();
+                proto.list_id = Some("friends".into());
+                proto.user_jid = vec!["120363000000000043@lid".into()];
+                proto
+            }];
+            proto
+        }
+    }
+
+    async fn status_privacy_patch_scenario(
+        snapshot: bool,
+        install_persistence: bool,
+    ) -> (
+        Arc<MockBackend>,
+        AppStateProcessor,
+        PatchList,
+        wa::sync_action_value::StatusPrivacyAction,
+    ) {
+        let backend = Arc::new(MockBackend::default());
+        let processor =
+            AppStateProcessor::new(backend.clone(), Arc::new(crate::runtime_impl::TokioRuntime));
+        let processor = if install_persistence {
+            processor.with_mutation_persistence(backend.clone())
+        } else {
+            processor
+        };
+        let key_id = b"status_privacy_key".to_vec();
+        let master_key = [21u8; 32];
+        let keys = expand_app_state_keys(&master_key);
+        backend
+            .set_sync_key(
+                &key_id,
+                AppStateSyncKey {
+                    key_data: master_key.to_vec(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        if snapshot {
+            backend
+                .set_version(
+                    WAPatchName::Regular.as_str(),
+                    HashState {
+                        version: 1,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+        }
+
+        let action = status_privacy_action();
+        let plaintext = {
+            let mut proto = wa::SyncActionData::default();
+            proto.index = Some(br#"["status_privacy"]"#.to_vec());
+            proto.value = buffa::MessageField::some({
+                let mut proto = wa::SyncActionValue::default();
+                proto.status_privacy = buffa::MessageField::some(action.clone());
+                proto
+            });
+            proto
+        }
+        .encode_to_vec();
+        let mutation = create_encrypted_mutation(
+            wa::syncd_mutation::SyncdOperation::Set,
+            &[0x31; 32],
+            &plaintext,
+            &keys,
+            &key_id,
+        );
+        let version = if snapshot { 2 } else { 1 };
+        let list = if snapshot {
+            PatchList {
+                name: WAPatchName::Regular,
+                has_more_patches: false,
+                patches: Vec::new(),
+                snapshot: Some({
+                    let mut proto = wa::SyncdSnapshot::default();
+                    proto.version = buffa::MessageField::some({
+                        let mut proto = wa::SyncdVersion::default();
+                        proto.version = Some(version);
+                        proto
+                    });
+                    proto.records = vec![mutation.record.expect("status record")];
+                    proto.key_id = buffa::MessageField::some({
+                        let mut proto = wa::KeyId::default();
+                        proto.id = Some(key_id);
+                        proto
+                    });
+                    proto
+                }),
+                snapshot_ref: None,
+                error: None,
+            }
+        } else {
+            PatchList {
+                name: WAPatchName::Regular,
+                has_more_patches: false,
+                patches: vec![{
+                    let mut proto = wa::SyncdPatch::default();
+                    proto.mutations = vec![mutation];
+                    proto.version = buffa::MessageField::some({
+                        let mut proto = wa::SyncdVersion::default();
+                        proto.version = Some(version);
+                        proto
+                    });
+                    proto.key_id = buffa::MessageField::some({
+                        let mut proto = wa::KeyId::default();
+                        proto.id = Some(key_id);
+                        proto
+                    });
+                    proto
+                }],
+                snapshot: None,
+                snapshot_ref: None,
+                error: None,
+            }
+        };
+        (backend, processor, list, action)
+    }
+
+    async fn pn_for_lid_chat_patch_scenario(
+        snapshot: bool,
+        install_persistence: bool,
+    ) -> (
+        Arc<MockBackend>,
+        AppStateProcessor,
+        PatchList,
+        wa::SyncActionValue,
+    ) {
+        let backend = Arc::new(MockBackend::default());
+        let processor =
+            AppStateProcessor::new(backend.clone(), Arc::new(crate::runtime_impl::TokioRuntime));
+        let processor = if install_persistence {
+            processor.with_mutation_persistence(backend.clone())
+        } else {
+            processor
+        };
+        let key_id = b"pn_for_lid_chat_key".to_vec();
+        let master_key = [21u8; 32];
+        let keys = expand_app_state_keys(&master_key);
+        backend
+            .set_sync_key(
+                &key_id,
+                AppStateSyncKey {
+                    key_data: master_key.to_vec(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        if snapshot {
+            backend
+                .set_version(
+                    WAPatchName::Regular.as_str(),
+                    HashState {
+                        version: 1,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+        }
+
+        let mut action = wa::SyncActionValue::default();
+        action.pn_for_lid_chat_action.get_or_insert_default().pn_jid =
+            Some("12025550111@s.whatsapp.net".into());
+        let plaintext = {
+            let mut proto = wa::SyncActionData::default();
+            proto.index = Some(br#"["pnForLidChat","100000001@lid"]"#.to_vec());
+            proto.value = buffa::MessageField::some(action.clone());
+            proto
+        }
+        .encode_to_vec();
+        let mutation = create_encrypted_mutation(
+            wa::syncd_mutation::SyncdOperation::Set,
+            &[0x31; 32],
+            &plaintext,
+            &keys,
+            &key_id,
+        );
+        let version = if snapshot { 2 } else { 1 };
+        let list = if snapshot {
+            PatchList {
+                name: WAPatchName::Regular,
+                has_more_patches: false,
+                patches: Vec::new(),
+                snapshot: Some({
+                    let mut proto = wa::SyncdSnapshot::default();
+                    proto.version = buffa::MessageField::some({
+                        let mut proto = wa::SyncdVersion::default();
+                        proto.version = Some(version);
+                        proto
+                    });
+                    proto.records = vec![mutation.record.expect("status record")];
+                    proto.key_id = buffa::MessageField::some({
+                        let mut proto = wa::KeyId::default();
+                        proto.id = Some(key_id);
+                        proto
+                    });
+                    proto
+                }),
+                snapshot_ref: None,
+                error: None,
+            }
+        } else {
+            PatchList {
+                name: WAPatchName::Regular,
+                has_more_patches: false,
+                patches: vec![{
+                    let mut proto = wa::SyncdPatch::default();
+                    proto.mutations = vec![mutation];
+                    proto.version = buffa::MessageField::some({
+                        let mut proto = wa::SyncdVersion::default();
+                        proto.version = Some(version);
+                        proto
+                    });
+                    proto.key_id = buffa::MessageField::some({
+                        let mut proto = wa::KeyId::default();
+                        proto.id = Some(key_id);
+                        proto
+                    });
+                    proto
+                }],
+                snapshot: None,
+                snapshot_ref: None,
+                error: None,
+            }
+        };
+        (backend, processor, list, action)
+    }
+
+    #[tokio::test]
+    async fn public_processor_learns_pn_for_lid_before_advancing_the_cursor() {
+        for snapshot in [false, true] {
+            let (backend, _, list, _) = pn_for_lid_chat_patch_scenario(snapshot, false).await;
+            let client = crate::test_utils::create_test_client_with_backend(backend.clone()).await;
+            let (_, state, _) = client
+                .get_app_state_processor()
+                .process_patch_list(list, false)
+                .await
+                .unwrap();
+            assert_eq!(
+                backend.lid_mapping_versions.lock().await.as_slice(),
+                &[if snapshot { Some(1) } else { None }]
+            );
+            assert_eq!(
+                backend
+                    .get_version("regular")
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .version,
+                state.version
+            );
+            client.lid_pn_cache.clear().await;
+            let mapping = client
+                .get_lid_pn_entry(&wacore_binary::Jid::lid("100000001"))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(mapping.phone_number.as_ref(), "12025550111");
+        }
+    }
+
+    #[tokio::test]
+    async fn public_processor_retries_pn_for_lid_after_a_durable_write_failure() {
+        for snapshot in [false, true] {
+            let (backend, _, list, _) = pn_for_lid_chat_patch_scenario(snapshot, false).await;
+            let client = crate::test_utils::create_test_client_with_backend(backend.clone()).await;
+            *backend.fail_lid_mappings.lock().await = true;
+            let processor = client.get_app_state_processor();
+            assert!(
+                processor
+                    .process_patch_list(list.clone(), false)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                backend
+                    .get_version("regular")
+                    .await
+                    .unwrap()
+                    .map(|s| s.version),
+                if snapshot { Some(1) } else { None }
+            );
+            assert!(
+                backend
+                    .get_lid_mapping("100000001")
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            *backend.fail_lid_mappings.lock().await = false;
+            processor.process_patch_list(list, false).await.unwrap();
+            client.lid_pn_cache.clear().await;
+            let mapping = client
+                .get_lid_pn_entry(&wacore_binary::Jid::lid("100000001"))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(mapping.phone_number.as_ref(), "12025550111");
+        }
+    }
+
+    #[tokio::test]
+    async fn public_processor_applies_status_privacy_without_a_persistence_hook() {
+        for snapshot in [false, true] {
+            let (backend, processor, list, action) =
+                status_privacy_patch_scenario(snapshot, false).await;
+            let (mutations, state, _) = processor.process_patch_list(list, false).await.unwrap();
+            assert_eq!(mutations.len(), 1);
+            assert_eq!(
+                wacore::appstate_sync::status_privacy_action(&mutations[0]),
+                Some(&action)
+            );
+            assert_eq!(state.version, if snapshot { 2 } else { 1 });
+            assert_eq!(
+                backend
+                    .get_version(WAPatchName::Regular.as_str())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .version,
+                state.version
+            );
+            assert!(backend.status_privacy.lock().await.is_none());
+        }
+    }
+
+    async fn committed_before_status_privacy_scenario(
+        snapshot_first: bool,
+    ) -> (Arc<MockBackend>, AppStateProcessor, PatchList) {
+        let backend = Arc::new(MockBackend::default());
+        let processor =
+            AppStateProcessor::new(backend.clone(), Arc::new(crate::runtime_impl::TokioRuntime))
+                .with_mutation_persistence(backend.clone());
+        let key_id = b"partial_status_privacy_key".to_vec();
+        let master_key = [23u8; 32];
+        let keys = expand_app_state_keys(&master_key);
+        backend
+            .set_sync_key(
+                &key_id,
+                AppStateSyncKey {
+                    key_data: master_key.to_vec(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let nct_plaintext = {
+            let mut proto = wa::SyncActionData::default();
+            proto.index = Some(br#"["nct_salt_sync"]"#.to_vec());
+            proto.value = buffa::MessageField::some({
+                let mut proto = wa::SyncActionValue::default();
+                proto.nct_salt_sync_action = buffa::MessageField::some({
+                    let mut proto = wa::sync_action_value::NctSaltSyncAction::default();
+                    proto.salt = Some(vec![1, 2, 3]);
+                    proto
+                });
+                proto
+            });
+            proto
+        }
+        .encode_to_vec();
+        let nct = create_encrypted_mutation(
+            wa::syncd_mutation::SyncdOperation::Set,
+            &[0x41; 32],
+            &nct_plaintext,
+            &keys,
+            &key_id,
+        );
+        let status_plaintext = {
+            let mut proto = wa::SyncActionData::default();
+            proto.index = Some(br#"["status_privacy"]"#.to_vec());
+            proto.value = buffa::MessageField::some({
+                let mut proto = wa::SyncActionValue::default();
+                proto.status_privacy = buffa::MessageField::some(status_privacy_action());
+                proto
+            });
+            proto
+        }
+        .encode_to_vec();
+        let status = create_encrypted_mutation(
+            wa::syncd_mutation::SyncdOperation::Set,
+            &[0x42; 32],
+            &status_plaintext,
+            &keys,
+            &key_id,
+        );
+        let status_patch = {
+            let mut proto = wa::SyncdPatch::default();
+            proto.mutations = vec![status];
+            proto.version = buffa::MessageField::some({
+                let mut proto = wa::SyncdVersion::default();
+                proto.version = Some(2);
+                proto
+            });
+            proto.key_id = buffa::MessageField::some({
+                let mut proto = wa::KeyId::default();
+                proto.id = Some(key_id.clone());
+                proto
+            });
+            proto
+        };
+        let list = if snapshot_first {
+            PatchList {
+                name: WAPatchName::RegularHigh,
+                has_more_patches: false,
+                patches: vec![status_patch],
+                snapshot: Some({
+                    let mut proto = wa::SyncdSnapshot::default();
+                    proto.version = buffa::MessageField::some({
+                        let mut proto = wa::SyncdVersion::default();
+                        proto.version = Some(1);
+                        proto
+                    });
+                    proto.records = vec![nct.record.expect("nct snapshot record")];
+                    proto.key_id = buffa::MessageField::some({
+                        let mut proto = wa::KeyId::default();
+                        proto.id = Some(key_id);
+                        proto
+                    });
+                    proto
+                }),
+                snapshot_ref: None,
+                error: None,
+            }
+        } else {
+            PatchList {
+                name: WAPatchName::RegularHigh,
+                has_more_patches: false,
+                patches: vec![
+                    {
+                        let mut proto = wa::SyncdPatch::default();
+                        proto.mutations = vec![nct];
+                        proto.version = buffa::MessageField::some({
+                            let mut proto = wa::SyncdVersion::default();
+                            proto.version = Some(1);
+                            proto
+                        });
+                        proto.key_id = buffa::MessageField::some({
+                            let mut proto = wa::KeyId::default();
+                            proto.id = Some(key_id.clone());
+                            proto
+                        });
+                        proto
+                    },
+                    status_patch,
+                ],
+                snapshot: None,
+                snapshot_ref: None,
+                error: None,
+            }
+        };
+        *backend.fail_status_privacy.lock().await = true;
+        (backend, processor, list)
+    }
+
+    async fn assert_nct_commit_survives_later_status_failure(snapshot_first: bool) {
+        let (backend, processor, list) =
+            committed_before_status_privacy_scenario(snapshot_first).await;
+        let error = processor
+            .process_patch_list(list, false)
+            .await
+            .expect_err("status persistence should fail");
+        let committed = error
+            .downcast::<wacore::appstate_sync::CommittedMutationsError>()
+            .expect("committed mutations should travel with the error");
+        let (mutations, state, collection, source) = committed.into_parts();
+        assert_eq!(collection, WAPatchName::RegularHigh);
+        assert_eq!(state.version, 1);
+        assert_eq!(mutations.len(), 1);
+        assert_eq!(mutations[0].index, ["nct_salt_sync"]);
+        assert!(format!("{source:#}").contains("injected status privacy failure"));
+        assert_eq!(
+            backend
+                .get_version(WAPatchName::RegularHigh.as_str())
+                .await
+                .unwrap()
+                .unwrap()
+                .version,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn multi_collection_error_preserves_prior_results() {
+        let (backend, processor, mut list) = committed_before_status_privacy_scenario(false).await;
+        let mut status_patch = list.patches.pop().expect("status patch");
+        let nct_patch = list.patches.pop().expect("nct patch");
+        status_patch.version = buffa::MessageField::some({
+            let mut proto = wa::SyncdVersion::default();
+            proto.version = Some(1);
+            proto
+        });
+        let first = PatchList {
+            name: WAPatchName::RegularHigh,
+            patches: vec![nct_patch],
+            ..list.clone()
+        };
+        let second = PatchList {
+            name: WAPatchName::Regular,
+            patches: vec![status_patch],
+            ..list
+        };
+        let download = |_ext: &wa::ExternalBlobReference| -> anyhow::Result<bytes::Bytes> {
+            Err(anyhow::anyhow!("unexpected external blob"))
+        };
+
+        let error = processor
+            .process_patch_lists(vec![first, second], &download, false)
+            .await
+            .expect_err("second collection should fail status persistence");
+        let committed = error
+            .downcast::<wacore::appstate_sync::CommittedPatchListsError>()
+            .expect("prior collection results should travel with the error");
+        let (results, source) = committed.into_parts();
+        assert_eq!(results.len(), 1);
+        let (mutations, state, applied) = &results[0];
+        assert_eq!(applied.name, WAPatchName::RegularHigh);
+        assert_eq!(state.version, 1);
+        assert_eq!(mutations.len(), 1);
+        assert_eq!(mutations[0].index, ["nct_salt_sync"]);
+        assert!(format!("{source:#}").contains("injected status privacy failure"));
+        assert_eq!(
+            backend
+                .get_version(WAPatchName::RegularHigh.as_str())
+                .await
+                .unwrap()
+                .unwrap()
+                .version,
+            1
+        );
+        assert!(
+            backend
+                .get_version(WAPatchName::Regular.as_str())
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn earlier_patch_mutations_survive_a_later_status_save_failure() {
+        assert_nct_commit_survives_later_status_failure(false).await;
+    }
+
+    #[tokio::test]
+    async fn snapshot_mutations_survive_a_later_status_save_failure() {
+        assert_nct_commit_survives_later_status_failure(true).await;
+    }
+
+    #[tokio::test]
+    async fn status_privacy_patch_replays_after_a_failed_save() {
+        let (backend, processor, list, action) = status_privacy_patch_scenario(false, true).await;
+        *backend.fail_status_privacy.lock().await = true;
+        assert!(
+            processor
+                .process_patch_list(list.clone(), false)
+                .await
+                .is_err()
+        );
+        assert!(
+            backend
+                .get_version(WAPatchName::Regular.as_str())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(backend.status_privacy.lock().await.is_none());
+
+        *backend.fail_status_privacy.lock().await = false;
+        let restarted =
+            AppStateProcessor::new(backend.clone(), Arc::new(crate::runtime_impl::TokioRuntime))
+                .with_mutation_persistence(backend.clone());
+        restarted.process_patch_list(list, false).await.unwrap();
+        assert_eq!(backend.status_privacy.lock().await.as_ref(), Some(&action));
+        assert_eq!(
+            backend
+                .get_version(WAPatchName::Regular.as_str())
+                .await
+                .unwrap()
+                .unwrap()
+                .version,
+            1
+        );
+        assert_eq!(
+            &*backend.status_privacy_versions.lock().await,
+            &[None, None]
+        );
+    }
+
+    #[tokio::test]
+    async fn status_privacy_snapshot_replays_after_a_failed_save() {
+        let (backend, processor, list, action) = status_privacy_patch_scenario(true, true).await;
+        *backend.fail_status_privacy.lock().await = true;
+        assert!(
+            processor
+                .process_patch_list(list.clone(), false)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            backend
+                .get_version(WAPatchName::Regular.as_str())
+                .await
+                .unwrap()
+                .unwrap()
+                .version,
+            1
+        );
+
+        *backend.fail_status_privacy.lock().await = false;
+        let restarted =
+            AppStateProcessor::new(backend.clone(), Arc::new(crate::runtime_impl::TokioRuntime))
+                .with_mutation_persistence(backend.clone());
+        restarted.process_patch_list(list, false).await.unwrap();
+        assert_eq!(backend.status_privacy.lock().await.as_ref(), Some(&action));
+        assert_eq!(
+            backend
+                .get_version(WAPatchName::Regular.as_str())
+                .await
+                .unwrap()
+                .unwrap()
+                .version,
+            2
+        );
+        assert_eq!(
+            &*backend.status_privacy_versions.lock().await,
+            &[Some(1), Some(1)]
+        );
     }
 
     /// Builds the reply a primary device sends back, with one record per index.
@@ -362,38 +1106,134 @@ mod tests {
         key_id: &[u8],
         records: &[(&str, [u8; 32])],
     ) -> wa::SyncdSnapshotRecovery {
-        wa::SyncdSnapshotRecovery {
-            version: buffa::MessageField::some(wa::SyncdVersion {
-                version: Some(version),
-            }),
-            collection_name: Some(collection.to_string()),
-            collection_lthash: Some(lthash.to_vec()),
-            mutation_records: records
+        {
+            let mut proto = wa::SyncdSnapshotRecovery::default();
+            proto.version = buffa::MessageField::some({
+                let mut proto = wa::SyncdVersion::default();
+                proto.version = Some(version);
+                proto
+            });
+            proto.collection_name = Some(collection.to_string());
+            proto.collection_lthash = Some(lthash.to_vec());
+            proto.mutation_records = records
                 .iter()
-                .map(|(index_json, value_mac)| wa::SyncdPlainTextRecord {
-                    value: buffa::MessageField::some(wa::SyncActionData {
-                        index: Some(index_json.as_bytes().to_vec()),
-                        version: Some(version as i32),
-                        // Carried, because it is the whole point: every consumer
+                .map(|(index_json, value_mac)| {
+                    let mut proto = wa::SyncdPlainTextRecord::default();
+                    proto.value = buffa::MessageField::some({
+                        let mut proto = wa::SyncActionData::default();
+                        proto.index = Some(index_json.as_bytes().to_vec());
+                        proto.version = Some(version as i32); // Carried, because it is the whole point: every consumer
                         // event is built from `action_value`, so a regression
                         // that dropped it would pass a suite asserting only the
                         // index and the operation.
-                        value: buffa::MessageField::some(wa::SyncActionValue {
-                            mute_action: buffa::MessageField::some(
-                                wa::sync_action_value::MuteAction {
-                                    muted: Some(true),
-                                    ..Default::default()
-                                },
-                            ),
-                            ..Default::default()
-                        }),
-                        ..Default::default()
-                    }),
-                    key_id: Some(key_id.to_vec()),
-                    mac: Some(value_mac.to_vec()),
+
+                        proto.value = buffa::MessageField::some({
+                            let mut proto = wa::SyncActionValue::default();
+                            proto.mute_action = buffa::MessageField::some({
+                                let mut proto = wa::sync_action_value::MuteAction::default();
+                                proto.muted = Some(true);
+                                proto
+                            });
+                            proto
+                        });
+                        proto
+                    });
+                    proto.key_id = Some(key_id.to_vec());
+                    proto.mac = Some(value_mac.to_vec());
+                    proto
                 })
-                .collect(),
+                .collect();
+            proto
         }
+    }
+
+    #[tokio::test]
+    async fn status_privacy_recovery_replays_after_a_failed_save() {
+        let backend = Arc::new(MockBackend::default());
+        let key_id = b"status_recovery_key".to_vec();
+        backend
+            .set_sync_key(
+                &key_id,
+                AppStateSyncKey {
+                    key_data: vec![17; 32],
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        backend
+            .set_version(
+                WAPatchName::RegularLow.as_str(),
+                HashState {
+                    version: 0,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let action = status_privacy_action();
+        let mut recovery = recovery_of(
+            WAPatchName::RegularLow.as_str(),
+            253,
+            [0x5A; 128],
+            &key_id,
+            &[(r#"["status_privacy"]"#, [0x11; 32])],
+        );
+        let value = recovery.mutation_records[0]
+            .value
+            .as_option_mut()
+            .and_then(|data| data.value.as_option_mut())
+            .expect("status recovery value");
+        value.mute_action = buffa::MessageField::none();
+        value.status_privacy = buffa::MessageField::some(action.clone());
+
+        *backend.fail_status_privacy.lock().await = true;
+        let processor =
+            AppStateProcessor::new(backend.clone(), Arc::new(crate::runtime_impl::TokioRuntime))
+                .with_mutation_persistence(backend.clone());
+        assert!(
+            processor
+                .apply_snapshot_recovery(
+                    recovery.clone(),
+                    WAPatchName::RegularLow.as_str(),
+                    &|| true,
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            backend
+                .get_version(WAPatchName::RegularLow.as_str())
+                .await
+                .unwrap()
+                .unwrap()
+                .version,
+            0
+        );
+
+        *backend.fail_status_privacy.lock().await = false;
+        let restarted =
+            AppStateProcessor::new(backend.clone(), Arc::new(crate::runtime_impl::TokioRuntime))
+                .with_mutation_persistence(backend.clone());
+        let outcome = restarted
+            .apply_snapshot_recovery(recovery, WAPatchName::RegularLow.as_str(), &|| true)
+            .await
+            .unwrap();
+        assert!(matches!(outcome, RecoveryOutcome::Applied(_)));
+        assert_eq!(backend.status_privacy.lock().await.as_ref(), Some(&action));
+        assert_eq!(
+            backend
+                .get_version(WAPatchName::RegularLow.as_str())
+                .await
+                .unwrap()
+                .unwrap()
+                .version,
+            253
+        );
+        assert_eq!(
+            &*backend.status_privacy_versions.lock().await,
+            &[Some(0), Some(0)]
+        );
     }
 
     /// The version and the ltHash are the primary's, written as given.
@@ -777,6 +1617,82 @@ mod tests {
         );
     }
 
+    /// The marker keeps the generation it was asked on, so an answer that
+    /// outlives its connection can be refused before changing the collection.
+    #[tokio::test]
+    async fn a_recovery_request_remembers_the_generation_it_was_asked_on() {
+        let backend = Arc::new(MockBackend::default());
+        let processor =
+            AppStateProcessor::new(backend.clone(), Arc::new(crate::runtime_impl::TokioRuntime));
+
+        assert!(
+            processor
+                .mark_recovery_requested_on_generation("regular_low", 7)
+                .await
+        );
+        processor
+            .note_recovery_request_id("regular_low", "req-7")
+            .await;
+        assert_eq!(
+            processor
+                .take_recovery_request_with_generation_by_id("req-7")
+                .await,
+            Some(("regular_low".to_string(), 7))
+        );
+        assert_eq!(
+            processor
+                .take_recovery_request_with_generation_by_id("req-7")
+                .await,
+            None,
+            "taken once"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_new_generation_replaces_unanswered_and_claimed_recovery_requests() {
+        for claimed in [false, true] {
+            let processor = AppStateProcessor::new(
+                Arc::new(MockBackend::default()),
+                Arc::new(crate::runtime_impl::TokioRuntime),
+            );
+            assert!(
+                processor
+                    .mark_recovery_requested_with_id("regular_low", 7, "old")
+                    .await
+            );
+            if claimed {
+                assert_eq!(
+                    processor
+                        .claim_recovery_request_with_generation_by_id("old")
+                        .await,
+                    Some(("regular_low".into(), 7))
+                );
+            }
+            assert!(
+                !processor
+                    .mark_recovery_requested_with_id("regular_low", 7, "duplicate")
+                    .await
+            );
+            assert!(
+                processor
+                    .mark_recovery_requested_with_id("regular_low", 8, "new")
+                    .await
+            );
+            assert!(
+                !processor
+                    .mark_recovery_requested_with_id("regular_low", 7, "stale-sender")
+                    .await
+            );
+            assert_eq!(processor.take_recovery_request_by_id("old").await, None);
+            assert_eq!(
+                processor
+                    .take_recovery_request_with_generation_by_id("new")
+                    .await,
+                Some(("regular_low".into(), 8))
+            );
+        }
+    }
+
     /// One reply per request, and none at all for a request nobody made.
     #[tokio::test]
     async fn a_recovery_request_is_taken_once() {
@@ -790,11 +1706,15 @@ mod tests {
         );
 
         assert!(
-            processor.mark_recovery_requested("regular_low").await,
+            processor
+                .mark_recovery_requested_on_generation("regular_low", 0)
+                .await,
             "the first ask is a new one"
         );
         assert!(
-            !processor.mark_recovery_requested("regular_low").await,
+            !processor
+                .mark_recovery_requested_on_generation("regular_low", 0)
+                .await,
             "a second ask while one is outstanding is suppressed: the reply already coming answers it"
         );
         assert!(processor.take_recovery_request("regular_low").await);
@@ -806,7 +1726,11 @@ mod tests {
         // And an answer is claimed, not merely recognised: a response repeating
         // its result, or a second copy of it, would otherwise each inflate and
         // decode a whole collection against the one ask.
-        assert!(processor.mark_recovery_requested("regular_low").await);
+        assert!(
+            processor
+                .mark_recovery_requested_on_generation("regular_low", 0)
+                .await
+        );
         processor
             .note_recovery_request_id("regular_low", "req-1")
             .await;
@@ -847,12 +1771,14 @@ mod tests {
             .await
             .expect("test backend should accept sync key");
 
-        let original_plaintext = wa::SyncActionData {
-            value: buffa::MessageField::some(wa::SyncActionValue {
-                timestamp: Some(1000),
-                ..Default::default()
-            }),
-            ..Default::default()
+        let original_plaintext = {
+            let mut proto = wa::SyncActionData::default();
+            proto.value = buffa::MessageField::some({
+                let mut proto = wa::SyncActionValue::default();
+                proto.timestamp = Some(1000);
+                proto
+            });
+            proto
         }
         .encode_to_vec();
         let original_mutation = create_encrypted_mutation(
@@ -897,12 +1823,14 @@ mod tests {
             .await
             .expect("test backend should accept mutation MACs");
 
-        let new_plaintext = wa::SyncActionData {
-            value: buffa::MessageField::some(wa::SyncActionValue {
-                timestamp: Some(2000),
-                ..Default::default()
-            }),
-            ..Default::default()
+        let new_plaintext = {
+            let mut proto = wa::SyncActionData::default();
+            proto.value = buffa::MessageField::some({
+                let mut proto = wa::SyncActionValue::default();
+                proto.timestamp = Some(2000);
+                proto
+            });
+            proto
         }
         .encode_to_vec();
         let overwrite_mutation = create_encrypted_mutation(
@@ -916,13 +1844,20 @@ mod tests {
         let patch_list = PatchList {
             name: collection_name,
             has_more_patches: false,
-            patches: vec![wa::SyncdPatch {
-                mutations: vec![overwrite_mutation.clone()],
-                version: buffa::MessageField::some(wa::SyncdVersion { version: Some(2) }),
-                key_id: buffa::MessageField::some(wa::KeyId {
-                    id: Some(key_id_bytes),
-                }),
-                ..Default::default()
+            patches: vec![{
+                let mut proto = wa::SyncdPatch::default();
+                proto.mutations = vec![overwrite_mutation.clone()];
+                proto.version = buffa::MessageField::some({
+                    let mut proto = wa::SyncdVersion::default();
+                    proto.version = Some(2);
+                    proto
+                });
+                proto.key_id = buffa::MessageField::some({
+                    let mut proto = wa::KeyId::default();
+                    proto.id = Some(key_id_bytes);
+                    proto
+                });
+                proto
             }],
             snapshot: None,
             snapshot_ref: None,
@@ -993,12 +1928,14 @@ mod tests {
                 .await
                 .expect("test backend should accept sync key");
             let keys = expand_app_state_keys(&master_key);
-            let plaintext = wa::SyncActionData {
-                value: buffa::MessageField::some(wa::SyncActionValue {
-                    timestamp: Some(1000 + i as i64),
-                    ..Default::default()
-                }),
-                ..Default::default()
+            let plaintext = {
+                let mut proto = wa::SyncActionData::default();
+                proto.value = buffa::MessageField::some({
+                    let mut proto = wa::SyncActionValue::default();
+                    proto.timestamp = Some(1000 + i as i64);
+                    proto
+                });
+                proto
             }
             .encode_to_vec();
             let mutation = create_encrypted_mutation(
@@ -1008,13 +1945,20 @@ mod tests {
                 &keys,
                 &key_id,
             );
-            patches.push(wa::SyncdPatch {
-                mutations: vec![mutation],
-                version: buffa::MessageField::some(wa::SyncdVersion {
-                    version: Some(i as u64 + 1),
-                }),
-                key_id: buffa::MessageField::some(wa::KeyId { id: Some(key_id) }),
-                ..Default::default()
+            patches.push({
+                let mut proto = wa::SyncdPatch::default();
+                proto.mutations = vec![mutation];
+                proto.version = buffa::MessageField::some({
+                    let mut proto = wa::SyncdVersion::default();
+                    proto.version = Some(i as u64 + 1);
+                    proto
+                });
+                proto.key_id = buffa::MessageField::some({
+                    let mut proto = wa::KeyId::default();
+                    proto.id = Some(key_id);
+                    proto
+                });
+                proto
             });
         }
         let patch_list = PatchList {
@@ -1088,12 +2032,14 @@ mod tests {
             .await
             .expect("test backend should accept mutation MACs");
 
-        let plaintext = wa::SyncActionData {
-            value: buffa::MessageField::some(wa::SyncActionValue {
-                timestamp: Some(2000),
-                ..Default::default()
-            }),
-            ..Default::default()
+        let plaintext = {
+            let mut proto = wa::SyncActionData::default();
+            proto.value = buffa::MessageField::some({
+                let mut proto = wa::SyncActionValue::default();
+                proto.timestamp = Some(2000);
+                proto
+            });
+            proto
         }
         .encode_to_vec();
         let record = create_encrypted_mutation(
@@ -1110,13 +2056,20 @@ mod tests {
             name: collection_name,
             has_more_patches: false,
             patches: vec![],
-            snapshot: Some(wa::SyncdSnapshot {
-                version: buffa::MessageField::some(wa::SyncdVersion { version: Some(2) }),
-                records: vec![record],
-                key_id: buffa::MessageField::some(wa::KeyId {
-                    id: Some(key_id_bytes),
-                }),
-                ..Default::default()
+            snapshot: Some({
+                let mut proto = wa::SyncdSnapshot::default();
+                proto.version = buffa::MessageField::some({
+                    let mut proto = wa::SyncdVersion::default();
+                    proto.version = Some(2);
+                    proto
+                });
+                proto.records = vec![record];
+                proto.key_id = buffa::MessageField::some({
+                    let mut proto = wa::KeyId::default();
+                    proto.id = Some(key_id_bytes);
+                    proto
+                });
+                proto
             }),
             snapshot_ref: None,
             error: None,
@@ -1136,12 +2089,14 @@ mod tests {
         let key_id_bytes = b"snap_key_id".to_vec();
         let master_key = [9u8; 32];
         let keys = expand_app_state_keys(&master_key);
-        let plaintext = wa::SyncActionData {
-            value: buffa::MessageField::some(wa::SyncActionValue {
-                timestamp: Some(3000),
-                ..Default::default()
-            }),
-            ..Default::default()
+        let plaintext = {
+            let mut proto = wa::SyncActionData::default();
+            proto.value = buffa::MessageField::some({
+                let mut proto = wa::SyncActionValue::default();
+                proto.timestamp = Some(3000);
+                proto
+            });
+            proto
         }
         .encode_to_vec();
         for (version, index_mac) in [(3u64, [0x22u8; 32]), (4, [0x33; 32])] {
@@ -1152,15 +2107,20 @@ mod tests {
                 &keys,
                 &key_id_bytes,
             );
-            patch_list.patches.push(wa::SyncdPatch {
-                mutations: vec![mutation],
-                version: buffa::MessageField::some(wa::SyncdVersion {
-                    version: Some(version),
-                }),
-                key_id: buffa::MessageField::some(wa::KeyId {
-                    id: Some(key_id_bytes.clone()),
-                }),
-                ..Default::default()
+            patch_list.patches.push({
+                let mut proto = wa::SyncdPatch::default();
+                proto.mutations = vec![mutation];
+                proto.version = buffa::MessageField::some({
+                    let mut proto = wa::SyncdVersion::default();
+                    proto.version = Some(version);
+                    proto
+                });
+                proto.key_id = buffa::MessageField::some({
+                    let mut proto = wa::KeyId::default();
+                    proto.id = Some(key_id_bytes.clone());
+                    proto
+                });
+                proto
             });
         }
 
@@ -1285,12 +2245,14 @@ mod tests {
             .await
             .expect("test backend should accept mutation MACs");
 
-        let plaintext = wa::SyncActionData {
-            value: buffa::MessageField::some(wa::SyncActionValue {
-                timestamp: Some(5000),
-                ..Default::default()
-            }),
-            ..Default::default()
+        let plaintext = {
+            let mut proto = wa::SyncActionData::default();
+            proto.value = buffa::MessageField::some({
+                let mut proto = wa::SyncActionValue::default();
+                proto.timestamp = Some(5000);
+                proto
+            });
+            proto
         }
         .encode_to_vec();
         let mutations: Vec<wa::SyncdMutation> = [&index_mac, &second_index_mac]
@@ -1455,9 +2417,14 @@ mod tests {
         let patch_list = PatchList {
             name: WAPatchName::Regular,
             has_more_patches: false,
-            patches: vec![wa::SyncdPatch {
-                version: buffa::MessageField::some(wa::SyncdVersion { version: Some(5) }),
-                ..Default::default()
+            patches: vec![{
+                let mut proto = wa::SyncdPatch::default();
+                proto.version = buffa::MessageField::some({
+                    let mut proto = wa::SyncdVersion::default();
+                    proto.version = Some(5);
+                    proto
+                });
+                proto
             }],
             snapshot: None,
             snapshot_ref: None,
@@ -1515,9 +2482,14 @@ mod tests {
         let patch_list = PatchList {
             name,
             has_more_patches: false,
-            patches: vec![wa::SyncdPatch {
-                version: buffa::MessageField::some(wa::SyncdVersion { version: Some(1) }),
-                ..Default::default()
+            patches: vec![{
+                let mut proto = wa::SyncdPatch::default();
+                proto.version = buffa::MessageField::some({
+                    let mut proto = wa::SyncdVersion::default();
+                    proto.version = Some(1);
+                    proto
+                });
+                proto
             }],
             snapshot: None,
             snapshot_ref: None,
@@ -1551,11 +2523,14 @@ mod tests {
             AppStateProcessor::new(backend.clone(), Arc::new(crate::runtime_impl::TokioRuntime));
 
         let snapshot_key_id = b"snapshot-key-xyz".to_vec();
-        let snapshot_bytes = wa::SyncdSnapshot {
-            key_id: buffa::MessageField::some(wa::KeyId {
-                id: Some(snapshot_key_id.clone()),
-            }),
-            ..Default::default()
+        let snapshot_bytes = {
+            let mut proto = wa::SyncdSnapshot::default();
+            proto.key_id = buffa::MessageField::some({
+                let mut proto = wa::KeyId::default();
+                proto.id = Some(snapshot_key_id.clone());
+                proto
+            });
+            proto
         }
         .encode_to_vec();
         let direct_path = "/snapshot/blob".to_string();
@@ -1565,9 +2540,10 @@ mod tests {
             has_more_patches: false,
             patches: vec![],
             snapshot: None,
-            snapshot_ref: Some(wa::ExternalBlobReference {
-                direct_path: Some(direct_path),
-                ..Default::default()
+            snapshot_ref: Some({
+                let mut proto = wa::ExternalBlobReference::default();
+                proto.direct_path = Some(direct_path);
+                proto
             }),
             error: None,
         };
@@ -1652,13 +2628,15 @@ mod tests {
         keys: &ExpandedAppStateKeys,
         key_id: &[u8],
     ) -> wa::SyncdMutation {
-        let plaintext = wa::SyncActionData {
-            index: Some(index.to_vec()),
-            value: buffa::MessageField::some(wa::SyncActionValue {
-                timestamp: Some(timestamp),
-                ..Default::default()
-            }),
-            ..Default::default()
+        let plaintext = {
+            let mut proto = wa::SyncActionData::default();
+            proto.index = Some(index.to_vec());
+            proto.value = buffa::MessageField::some({
+                let mut proto = wa::SyncActionValue::default();
+                proto.timestamp = Some(timestamp);
+                proto
+            });
+            proto
         }
         .encode_to_vec();
         create_encrypted_mutation(
@@ -1713,20 +2691,25 @@ mod tests {
             (6u64, [0x21u8; 32], [0x99u8; 128]),
             (7, [0x22; 32], [0x9A; 128]),
         ] {
-            let mut patch = wa::SyncdPatch {
-                version: buffa::MessageField::some(wa::SyncdVersion {
-                    version: Some(version),
-                }),
-                mutations: vec![validating_mutation(
+            let mut patch = {
+                let mut proto = wa::SyncdPatch::default();
+                proto.version = buffa::MessageField::some({
+                    let mut proto = wa::SyncdVersion::default();
+                    proto.version = Some(version);
+                    proto
+                });
+                proto.mutations = vec![validating_mutation(
                     &index_mac,
                     version as i64 * 1000,
                     &keys,
                     &key_id,
-                )],
-                key_id: buffa::MessageField::some(wa::KeyId {
-                    id: Some(key_id.clone()),
-                }),
-                ..Default::default()
+                )];
+                proto.key_id = buffa::MessageField::some({
+                    let mut proto = wa::KeyId::default();
+                    proto.id = Some(key_id.clone());
+                    proto
+                });
+                proto
             };
             sign_patch_over_foreign_base(&mut patch, &keys, name.as_str(), version, foreign_hash);
 
@@ -1806,23 +2789,39 @@ mod tests {
             ..Default::default()
         };
         snapshot_state.update_hash_from_records(std::slice::from_ref(&record));
-        let snapshot = wa::SyncdSnapshot {
-            version: buffa::MessageField::some(wa::SyncdVersion { version: Some(10) }),
-            records: vec![record],
-            key_id: buffa::MessageField::some(wa::KeyId {
-                id: Some(key_id.clone()),
-            }),
-            mac: Some(snapshot_state.generate_snapshot_mac(name.as_str(), &keys.snapshot_mac)),
+        let snapshot = {
+            let mut proto = wa::SyncdSnapshot::default();
+            proto.version = buffa::MessageField::some({
+                let mut proto = wa::SyncdVersion::default();
+                proto.version = Some(10);
+                proto
+            });
+            proto.records = vec![record];
+            proto.key_id = buffa::MessageField::some({
+                let mut proto = wa::KeyId::default();
+                proto.id = Some(key_id.clone());
+                proto
+            });
+            proto.mac =
+                Some(snapshot_state.generate_snapshot_mac(name.as_str(), &keys.snapshot_mac));
+            proto
         };
 
         // The trailing patch the diverged client pushed before it was reset.
-        let mut trailing = wa::SyncdPatch {
-            version: buffa::MessageField::some(wa::SyncdVersion { version: Some(11) }),
-            mutations: vec![validating_mutation(&[0x32; 32], 11_000, &keys, &key_id)],
-            key_id: buffa::MessageField::some(wa::KeyId {
-                id: Some(key_id.clone()),
-            }),
-            ..Default::default()
+        let mut trailing = {
+            let mut proto = wa::SyncdPatch::default();
+            proto.version = buffa::MessageField::some({
+                let mut proto = wa::SyncdVersion::default();
+                proto.version = Some(11);
+                proto
+            });
+            proto.mutations = vec![validating_mutation(&[0x32; 32], 11_000, &keys, &key_id)];
+            proto.key_id = buffa::MessageField::some({
+                let mut proto = wa::KeyId::default();
+                proto.id = Some(key_id.clone());
+                proto
+            });
+            proto
         };
         sign_patch_over_foreign_base(&mut trailing, &keys, name.as_str(), 11, [0x77; 128]);
 

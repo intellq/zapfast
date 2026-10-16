@@ -1,10 +1,59 @@
 //! MEX (Meta Exchange) GraphQL feature.
 //!
 //! Protocol types are defined in `wacore::iq::mex`.
+//!
+//! # Migration
+//!
+//! Replace `MexRequest::new(name, id, keys, variables)` with
+//! `mex_operation!(module).request(variables)`, and both `query(request)` and
+//! `mutate(request)` with `execute(request)`. Neither alias checked operation
+//! kind; the canonical executor accepts queries and mutations alike.
+//!
+//! ```no_run
+//! use whatsapp_rust::{Client, MexError, mex_operation,
+//!     wacore::iq::mex_operations::join_newsletter};
+//! # async fn join(client: &Client) -> Result<(), MexError> {
+//! let request = mex_operation!(join_newsletter).request(join_newsletter::Variables {
+//!     newsletter_id: Some("123456789@newsletter".into()),
+//! });
+//! let response = client.mex().execute(request).await?;
+//! // Parse response.data in the domain layer, not a generated output mirror.
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! For custom documents retain explicit [`MexRequest::new_raw`] or
+//! [`MexOperation::from_raw_parts`]; for imperfect generated inputs use
+//! [`MexOperation::raw_request`]. Declared keys remain diagnostic, not mandatory.
+//! Match fatal extension codes on [`MexError::GraphQl`] (formerly the source-less
+//! `ExtensionError`); execution preserves the original IQ/parse source chain.
+//!
+//! Removed entry points are no longer available:
+//! ```compile_fail
+//! use whatsapp_rust::MexRequest;
+//! let request = MexRequest::new("CustomQuery", "123456789", &[], ());
+//! ```
+//! ```compile_fail
+//! # async fn removed(client: &whatsapp_rust::Client) {
+//! use whatsapp_rust::{mex_operation, wacore::iq::mex_operations::get_username};
+//! client.mex().query(mex_operation!(get_username).request(get_username::Variables {})).await;
+//! # }
+//! ```
+//! ```compile_fail
+//! # async fn removed(client: &whatsapp_rust::Client) {
+//! use whatsapp_rust::{mex_operation, wacore::iq::mex_operations::get_username};
+//! client.mex().mutate(mex_operation!(get_username).request(get_username::Variables {})).await;
+//! # }
+//! ```
+//! ```compile_fail
+//! use whatsapp_rust::MexError;
+//! let error = MexError::ExtensionError { code: 404, message: "absent".into() };
+//! ```
 
 use crate::client::Client;
 use crate::request::IqError;
 use serde::Serialize;
+use std::marker::PhantomData;
 use thiserror::Error;
 use wacore::WireEnum;
 use wacore::iq::mex::MexQuerySpec;
@@ -31,8 +80,14 @@ pub enum MexError {
     #[error("MEX payload contained an invalid JID")]
     InvalidJid(#[from] JidError),
 
-    #[error("MEX extension error: code={code}, message='{message}'")]
-    ExtensionError { code: i32, message: String },
+    /// Fatal GraphQL rejection, retaining the original IQ/parse source chain.
+    #[error("MEX GraphQL error: code={code}, message='{message}'")]
+    GraphQl {
+        code: i32,
+        message: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 
     #[error("IQ request failed")]
     Request(#[from] IqError),
@@ -41,52 +96,140 @@ pub enum MexError {
     Json(#[from] serde_json::Error),
 }
 
-/// MEX request: a persisted-query descriptor plus its typed variables.
+/// A persisted MEX operation and its associated variables type.
 ///
-/// Variables are serialized straight to the wire in the IQ spec (no intermediate
-/// `serde_json::Value`). Build one with the `mex_request!` macro, which pulls
-/// `NAME`/`DOC_ID` from a generated [`wacore::iq::mex_operations`] module so the
-/// op is named once.
+/// Build with [`crate::mex_operation!`] to bind `NAME`, `DOC_ID`, `VARIABLE_KEYS`
+/// and `Variables` from the same generated module. No response type is inferred:
+/// generated response mirrors are heuristic, and domain parsers remain necessary.
+/// Metadata is immutable; this descriptor owns no variables and is cheap to copy.
+#[derive(Debug)]
+pub struct MexOperation<V> {
+    doc: MexDoc,
+    declared_variables: &'static [&'static str],
+    variables_type: PhantomData<fn(V) -> V>,
+}
+
+impl<V> Copy for MexOperation<V> {}
+
+impl<V> Clone for MexOperation<V> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<V> MexOperation<V> {
+    /// Advanced, unchecked binding for custom persisted operations.
+    ///
+    /// The caller is responsible for metadata consistency and choosing `V`.
+    /// Prefer [`crate::mex_operation!`] for generated operations; this constructor
+    /// is also the public implementation hook used by that macro.
+    pub const fn from_raw_parts(doc: MexDoc, declared_variables: &'static [&'static str]) -> Self {
+        Self {
+            doc,
+            declared_variables,
+            variables_type: PhantomData,
+        }
+    }
+
+    pub const fn doc(&self) -> MexDoc {
+        self.doc
+    }
+
+    pub const fn declared_variables(&self) -> &'static [&'static str] {
+        self.declared_variables
+    }
+
+    /// Bind precisely this operation's variables type.
+    pub fn request(self, variables: V) -> MexRequest<V> {
+        self.raw_request(variables)
+    }
+
+    /// Explicit escape hatch for inputs the generated mirror represents poorly.
+    ///
+    /// Metadata still comes from this operation, but `W` is not checked against
+    /// its generated `Variables`. Any serializable value is written directly to
+    /// the wire, without converting it to `serde_json::Value` first.
+    pub fn raw_request<W>(self, variables: W) -> MexRequest<W> {
+        MexRequest::new_raw(self.doc, self.declared_variables, variables)
+    }
+}
+
+/// Bind a generated MEX module's metadata and variables type, naming it once.
+///
+/// ```
+/// use whatsapp_rust::{mex_operation, wacore::iq::mex_operations::join_newsletter};
+/// let op = mex_operation!(join_newsletter);
+/// let request = op.request(join_newsletter::Variables {
+///     newsletter_id: Some("123456789@newsletter".into()),
+/// });
+/// assert_eq!(request.doc().id, join_newsletter::DOC_ID);
+/// ```
+///
+/// Unrelated variables do not compile (use `raw_request` deliberately instead):
+/// ```compile_fail
+/// use whatsapp_rust::{mex_operation, wacore::iq::mex_operations::{join_newsletter, get_username}};
+/// mex_operation!(join_newsletter).request(get_username::Variables {});
+/// ```
+#[macro_export]
+macro_rules! mex_operation {
+    ($op:path $(,)?) => {{
+        use $op as __mex_op;
+        $crate::MexOperation::<__mex_op::Variables>::from_raw_parts(
+            $crate::MexDoc {
+                name: __mex_op::NAME,
+                id: __mex_op::DOC_ID,
+            },
+            __mex_op::VARIABLE_KEYS,
+        )
+    }};
+}
+
+/// MEX request with immutable operation metadata and serializable variables.
+///
+/// Prefer [`crate::mex_operation!`] followed by [`MexOperation::request`] or
+/// [`MexOperation::raw_request`]. Execution serializes directly to wire bytes;
+/// only the opt-in [`Self::missing_variables`] diagnostic builds a JSON value.
+///
+/// Metadata cannot be overwritten independently after construction:
+/// ```compile_fail
+/// use whatsapp_rust::{mex_operation, wacore::iq::mex_operations::join_newsletter};
+/// let mut request = mex_operation!(join_newsletter).request(join_newsletter::Variables { newsletter_id: None });
+/// request.doc.id = "another operation";
+/// ```
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct MexRequest<V> {
-    /// GraphQL persisted-query descriptor (name + id).
-    pub doc: MexDoc,
-    /// The variable names the persisted document declares, from the op module's
-    /// `VARIABLE_KEYS`. Carried so a payload can be checked against them even
-    /// when the variables are a loosely-typed `json!`.
-    pub declared_variables: &'static [&'static str],
-    /// Typed query variables: a generated `Variables`, or any `Serialize` value
-    /// (e.g. a `json!` object) for inputs the generated mirror types too loosely.
+    doc: MexDoc,
+    declared_variables: &'static [&'static str],
     pub variables: V,
 }
 
 impl<V> MexRequest<V> {
-    /// Pair a `(name, id, declared variables)` from a generated op module with
-    /// its variables. Prefer the `mex_request!` macro, which names the op once.
-    pub fn new(
-        name: &'static str,
-        id: &'static str,
-        declared_variables: &'static [&'static str],
-        variables: V,
-    ) -> Self {
+    /// Advanced raw construction for custom persisted documents.
+    /// The caller is responsible for the document ID, name and declared keys.
+    pub fn new_raw(doc: MexDoc, declared_variables: &'static [&'static str], variables: V) -> Self {
         Self {
-            doc: MexDoc { name, id },
+            doc,
             declared_variables,
             variables,
         }
+    }
+
+    pub const fn doc(&self) -> MexDoc {
+        self.doc
+    }
+
+    pub const fn declared_variables(&self) -> &'static [&'static str] {
+        self.declared_variables
     }
 }
 
 impl<V: Serialize> MexRequest<V> {
     /// Declared variables this request's payload does not carry.
     ///
-    /// A persisted query the server cannot bind every variable of comes back as
-    /// a bare `400 Bad Request`, so serializing and looking is the only way to
-    /// see the omission before it reaches the wire. A non-empty result is not
-    /// automatically wrong: WhatsApp Web omits an optional variable it has no
-    /// value for, and this reports that the same way. That is also why the send
-    /// path does not check it: an assert here would fire on `fetch_all_subgroups`,
-    /// which is correct precisely because it omits one. Tests know the wanted set.
+    /// Diagnostic only: declared keys do not encode requiredness. A non-empty
+    /// result can be valid, including optional omissions in `fetch_all_subgroups`.
+    /// Execution never invokes this diagnostic or rejects absent keys.
     pub fn missing_variables(&self) -> Result<Vec<&'static str>, serde_json::Error> {
         let value = serde_json::to_value(&self.variables)?;
         let Some(object) = value.as_object() else {
@@ -101,33 +244,15 @@ impl<V: Serialize> MexRequest<V> {
     }
 }
 
-/// Build a [`MexRequest`] from a generated mex operation module, pulling its
-/// `NAME`/`DOC_ID` so the op is named once. Two forms:
-///
-/// ```ignore
-/// // typed Variables, struct-literal sugar:
-/// mex_request!(join_newsletter { newsletter_id: Some(jid.to_string()) })
-/// // explicit value (typed Variables value, or a json! for loosely-typed inputs):
-/// mex_request!(update_group_property, serde_json::json!({ "group_id": id }))
-/// ```
+// Internal construction sugar for domain callers. The comma form
+// deliberately uses raw variables. Public callers use mex_operation! instead.
 macro_rules! mex_request {
     ($op:path { $($body:tt)* }) => {{
         use $op as __mex_op;
-        $crate::features::mex::MexRequest::new(
-            __mex_op::NAME,
-            __mex_op::DOC_ID,
-            __mex_op::VARIABLE_KEYS,
-            __mex_op::Variables { $($body)* },
-        )
+        $crate::mex_operation!($op).request(__mex_op::Variables { $($body)* })
     }};
     ($op:path, $vars:expr $(,)?) => {{
-        use $op as __mex_op;
-        $crate::features::mex::MexRequest::new(
-            __mex_op::NAME,
-            __mex_op::DOC_ID,
-            __mex_op::VARIABLE_KEYS,
-            $vars,
-        )
+        $crate::mex_operation!($op).raw_request($vars)
     }};
 }
 pub(crate) use mex_request;
@@ -137,7 +262,22 @@ pub(crate) use mex_request;
 const NEW_CHAT_THREAD_CAPPING_TYPE: &str = "INDIVIDUAL_NEW_CHAT_THREAD";
 
 /// Where the account stands against the cap.
+/// Unknown wire values are preserved by all capping classifications. Consumers
+/// must allow additional recognized variants in future releases.
+///
+/// ```
+/// use whatsapp_rust::{CappingStatus, CappingOteStatus, CappingMvStatus};
+/// let status = CappingStatus::from("FUTURE_CAP");
+/// match &status {
+///     CappingStatus::Other(value) => assert_eq!(value, "FUTURE_CAP"),
+///     _ => panic!("unexpected classification"),
+/// }
+/// assert_eq!(status.as_str(), "FUTURE_CAP");
+/// assert_eq!(CappingOteStatus::from("FUTURE_OTE").as_str(), "FUTURE_OTE");
+/// assert_eq!(CappingMvStatus::from("FUTURE_MV").as_str(), "FUTURE_MV");
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, WireEnum)]
+#[non_exhaustive]
 pub enum CappingStatus {
     #[wire = "NONE"]
     None,
@@ -153,6 +293,7 @@ pub enum CappingStatus {
 
 /// Eligibility for the one-time extension that lifts the cap for a cycle.
 #[derive(Debug, Clone, PartialEq, Eq, WireEnum)]
+#[non_exhaustive]
 pub enum CappingOteStatus {
     #[wire = "NOT_ELIGIBLE"]
     NotEligible,
@@ -168,6 +309,7 @@ pub enum CappingOteStatus {
 
 /// Meta Verified subscription state, which is what lifts the cap permanently.
 #[derive(Debug, Clone, PartialEq, Eq, WireEnum)]
+#[non_exhaustive]
 pub enum CappingMvStatus {
     #[wire = "NOT_ELIGIBLE"]
     NotEligible,
@@ -238,27 +380,25 @@ impl<'a> Mex<'a> {
         Self { client }
     }
 
-    /// Execute a GraphQL query.
+    /// Execute a persisted MEX operation, whether query or mutation.
+    ///
+    /// Serializes variables directly to wire bytes. Declared-variable omissions
+    /// are not validated: the catalog does not encode requiredness. Returns the
+    /// raw GraphQL response, not a heuristically inferred response type.
     #[inline]
-    pub async fn query<V: Serialize>(
+    pub async fn execute<V: Serialize>(
         &self,
         request: MexRequest<V>,
     ) -> Result<MexResponse, MexError> {
-        self.execute_request(request).await
-    }
-
-    /// Execute a GraphQL mutation.
-    #[inline]
-    pub async fn mutate<V: Serialize>(
-        &self,
-        request: MexRequest<V>,
-    ) -> Result<MexResponse, MexError> {
-        self.execute_request(request).await
+        let spec = MexQuerySpec::new(request.doc, &request.variables)?;
+        self.execute_spec(spec).await
     }
 
     /// Fetch the account's current reachout-timelock state.
     pub async fn fetch_reachout_timelock(&self) -> Result<ReachoutTimelock, MexError> {
-        let response = self.query(mex_request!(fetch_reachout_timelock {})).await?;
+        let response = self
+            .execute(mex_request!(fetch_reachout_timelock {}))
+            .await?;
         decode_reachout_timelock(response.data)
     }
 
@@ -273,7 +413,7 @@ impl<'a> Mex<'a> {
         &self,
     ) -> Result<NewChatMessageCapping, MexError> {
         let response = self
-            .query(mex_request!(fetch_new_chat_message_capping_info {
+            .execute(mex_request!(fetch_new_chat_message_capping_info {
                 input: Some(fetch_new_chat_message_capping_info::Input {
                     r#type: Some(NEW_CHAT_THREAD_CAPPING_TYPE.to_string()),
                 }),
@@ -289,27 +429,16 @@ impl<'a> Mex<'a> {
     /// account's identity in a way the server does not undo, so those two
     /// persisted operations stay unwrapped.
     pub async fn get_username(&self) -> Result<Option<OwnUsername>, MexError> {
-        let response = match self.query(mex_request!(get_username {})).await {
+        let response = match self.execute(mex_request!(get_username {})).await {
             Ok(response) => response,
             // The official job reads a 404 as "this account has no username",
             // and reaches it from both shapes: WAWebMexNativeClient raises the
             // same error for a fatal GraphQL extension code and for an IQ one.
-            Err(MexError::ExtensionError { code: 404, .. })
+            Err(MexError::GraphQl { code: 404, .. })
             | Err(MexError::Request(IqError::ServerError { code: 404, .. })) => return Ok(None),
             Err(err) => return Err(err),
         };
         decode_own_username(response.data)
-    }
-
-    #[inline]
-    async fn execute_request<V: Serialize>(
-        &self,
-        request: MexRequest<V>,
-    ) -> Result<MexResponse, MexError> {
-        // Serialize the variables here so a caller-side serialization error
-        // surfaces as MexError::Json instead of a malformed empty request.
-        let spec = MexQuerySpec::new(request.doc, &request.variables)?;
-        self.execute_spec(spec).await
     }
 
     // Non-generic so the execute/error-handling body instantiates once, not
@@ -318,18 +447,21 @@ impl<'a> Mex<'a> {
         // A fatal GraphQL error fails the spec's own parse, so it arrives as an
         // `IqError::ParseError` carrying the typed source. Recovering the code
         // here is what lets a caller act on one, rather than on a message.
-        match self.client.execute(spec).await {
-            Ok(response) => Ok(response),
-            Err(IqError::ParseError(err)) => Err(match err.downcast_ref::<MexFatalError>() {
-                Some(fatal) => MexError::ExtensionError {
-                    code: fatal.code,
-                    message: fatal.message.clone(),
-                },
-                None => MexError::Request(IqError::ParseError(err)),
-            }),
-            Err(err) => Err(err.into()),
-        }
+        self.client.execute(spec).await.map_err(classify_iq_error)
     }
+}
+
+fn classify_iq_error(source: IqError) -> MexError {
+    if let IqError::ParseError(err) = &source
+        && let Some(fatal) = err.downcast_ref::<MexFatalError>()
+    {
+        return MexError::GraphQl {
+            code: fatal.code,
+            message: fatal.message.clone(),
+            source: Box::new(source),
+        };
+    }
+    MexError::Request(source)
 }
 
 fn decode_reachout_timelock(data: Option<serde_json::Value>) -> Result<ReachoutTimelock, MexError> {
@@ -421,6 +553,200 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[tokio::test]
+    async fn execute_sends_the_mutation() {
+        use std::sync::Arc;
+        use wacore::iq::mex_operations::join_newsletter as op;
+        use wacore_binary::{NodeContentRef, builder::NodeBuilder};
+
+        let (client, transport) = crate::test_utils::create_iq_test_client().await;
+        let task = {
+            let client = Arc::clone(&client);
+            tokio::spawn(async move {
+                let request = crate::mex_operation!(op).request(op::Variables {
+                    newsletter_id: Some("123456789@newsletter".into()),
+                });
+                client.mex().execute(request).await
+            })
+        };
+        let sent = crate::test_utils::decode_sent_iq(&transport, 0).await;
+        let id = sent.attrs().optional_string("id").unwrap().into_owned();
+        let root = sent.get();
+        let query = root.get_optional_child("query").unwrap();
+        assert_eq!(
+            query.attrs().optional_string("query_id").unwrap(),
+            op::DOC_ID
+        );
+        let Some(NodeContentRef::Bytes(bytes)) = query.content.as_ref() else {
+            panic!("wire payload");
+        };
+        assert_eq!(
+            bytes.as_ref(),
+            br#"{"variables":{"newsletter_id":"123456789@newsletter"}}"#
+        );
+        crate::test_utils::answer_iq(
+            &client,
+            &id,
+            &NodeBuilder::new("iq")
+                .attr("id", id.as_str())
+                .attr("type", "result")
+                .children([NodeBuilder::new("result")
+                    .bytes(br#"{"data":{"ok":true}}"#.to_vec())
+                    .build()])
+                .build(),
+        )
+        .await;
+        assert_eq!(task.await.unwrap().unwrap().data, Some(json!({"ok": true})));
+    }
+
+    #[tokio::test]
+    async fn execute_accepts_an_omitted_optional_variable() {
+        use std::sync::Arc;
+        use wacore::iq::mex_operations::fetch_all_subgroups as op;
+        use wacore_binary::builder::NodeBuilder;
+
+        let (client, transport) = crate::test_utils::create_iq_test_client().await;
+        let task = {
+            let client = Arc::clone(&client);
+            tokio::spawn(async move {
+                client
+                    .mex()
+                    .execute(crate::mex_operation!(op).request(op::Variables {
+                        group_id: Some("123456789@g.us".into()),
+                        query_context: Some("INTERACTIVE".into()),
+                        sub_group_hint_id: None,
+                    }))
+                    .await
+            })
+        };
+        let sent = crate::test_utils::decode_sent_iq(&transport, 0).await;
+        let id = sent.attrs().optional_string("id").unwrap().into_owned();
+        crate::test_utils::answer_iq(
+            &client,
+            &id,
+            &NodeBuilder::new("iq")
+                .attr("id", id.as_str())
+                .attr("type", "result")
+                .children([NodeBuilder::new("result")
+                    .bytes(br#"{"data":{}}"#.to_vec())
+                    .build()])
+                .build(),
+        )
+        .await;
+        assert!(task.await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn username_only_maps_graphql_and_iq_404_to_absence() {
+        use std::{error::Error, sync::Arc};
+        use wacore_binary::builder::NodeBuilder;
+
+        for graphql in [true, false] {
+            for code in [404, 403, 500] {
+                let (client, transport) = crate::test_utils::create_iq_test_client().await;
+                let task = {
+                    let client = Arc::clone(&client);
+                    tokio::spawn(async move { client.mex().get_username().await })
+                };
+                let sent = crate::test_utils::decode_sent_iq(&transport, 0).await;
+                let id = sent.attrs().optional_string("id").unwrap().into_owned();
+                let child = if graphql {
+                    NodeBuilder::new("result")
+                        .bytes(serde_json::to_vec(&json!({
+                            "errors": [{"message": "denied", "extensions": {"error_code": code}}]
+                        })).unwrap())
+                        .build()
+                } else {
+                    NodeBuilder::new("error")
+                        .attr("code", code.to_string())
+                        .attr("text", "denied")
+                        .build()
+                };
+                crate::test_utils::answer_iq(
+                    &client,
+                    &id,
+                    &NodeBuilder::new("iq")
+                        .attr("id", id.as_str())
+                        .attr("type", if graphql { "result" } else { "error" })
+                        .children([child])
+                        .build(),
+                )
+                .await;
+                let result = task.await.unwrap();
+                if code == 404 {
+                    assert_eq!(result.unwrap(), None);
+                } else {
+                    let error = result.unwrap_err();
+                    let iq = error.source().unwrap().downcast_ref::<IqError>().unwrap();
+                    if graphql {
+                        assert!(
+                            matches!(error, MexError::GraphQl { code: actual, .. } if actual == code)
+                        );
+                        let fatal = iq
+                            .source()
+                            .unwrap()
+                            .downcast_ref::<MexFatalError>()
+                            .unwrap();
+                        assert_eq!(fatal.query, get_username::NAME);
+                        assert_eq!(fatal.code, code);
+                        assert_eq!(fatal.message, "denied");
+                    } else {
+                        assert!(
+                            matches!(iq, IqError::ServerError { code: actual, .. } if i32::from(*actual) == code)
+                        );
+                        assert!(matches!(error, MexError::Request(_)));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn graphql_and_json_parse_errors_keep_their_iq_source_chain() {
+        use std::error::Error;
+        use wacore::iq::spec::IqSpec;
+        use wacore_binary::builder::NodeBuilder;
+        let spec = MexQuerySpec::new(
+            crate::mex_operation!(get_username).doc(),
+            &get_username::Variables {},
+        )
+        .unwrap();
+        for (payload, graphql) in [
+            (
+                br#"{"errors":[{"message":"no username","extensions":{"error_code":404}}]}"#
+                    .as_slice(),
+                true,
+            ),
+            (b"invalid-json".as_slice(), false),
+        ] {
+            let node = NodeBuilder::new("iq")
+                .children([NodeBuilder::new("result").bytes(payload.to_vec()).build()])
+                .build();
+            let parse = spec.parse_response(&node.as_node_ref()).unwrap_err();
+            let error = classify_iq_error(IqError::ParseError(parse));
+            let iq = error.source().unwrap().downcast_ref::<IqError>().unwrap();
+            let IqError::ParseError(inner) = iq else {
+                panic!("parse source")
+            };
+            if graphql {
+                assert!(matches!(error, MexError::GraphQl { code: 404, .. }));
+                assert_eq!(
+                    inner.downcast_ref::<MexFatalError>().unwrap().query,
+                    get_username::NAME
+                );
+                assert!(iq.source().unwrap().is::<MexFatalError>());
+            } else {
+                assert!(matches!(error, MexError::Request(_)));
+                assert!(inner.downcast_ref::<serde_json::Error>().is_some());
+                assert!(iq.source().unwrap().is::<serde_json::Error>());
+            }
+        }
+        let error: MexError = serde_json::from_str::<serde_json::Value>("invalid-json")
+            .unwrap_err()
+            .into();
+        assert!(error.source().unwrap().is::<serde_json::Error>());
+    }
+
     #[test]
     fn test_mex_request_carries_doc() {
         const DOC: MexDoc = MexDoc {
@@ -437,37 +763,27 @@ mod tests {
         assert_eq!(request.doc.name, "WAWebMexTestQuery");
     }
 
-    /// The guard for the loosely-typed form of `mex_request!`, where the
-    /// compiler cannot see the variables at all: a `json!` payload is still
-    /// checked against the op's own `VARIABLE_KEYS`.
+    /// Raw payloads can opt into the same declared-key diagnostic. This does
+    /// not impose requiredness on construction or execution.
     #[test]
     fn missing_variables_names_what_a_payload_leaves_out() {
         use wacore::iq::mex_operations::fetch_all_newsletters_metadata as op;
 
-        let complete = MexRequest::new(
-            op::NAME,
-            op::DOC_ID,
-            op::VARIABLE_KEYS,
-            json!({ "fetch_status_metadata": false, "fetch_wamo_sub": false }),
-        );
+        let complete = crate::mex_operation!(op)
+            .raw_request(json!({ "fetch_status_metadata": false, "fetch_wamo_sub": false }));
         assert_eq!(
             complete.missing_variables().expect("serialize"),
             Vec::<&str>::new()
         );
 
-        let partial = MexRequest::new(
-            op::NAME,
-            op::DOC_ID,
-            op::VARIABLE_KEYS,
-            json!({ "fetch_wamo_sub": true }),
-        );
+        let partial = crate::mex_operation!(op).raw_request(json!({ "fetch_wamo_sub": true }));
         assert_eq!(
             partial.missing_variables().expect("serialize"),
             vec!["fetch_status_metadata"]
         );
 
         // A payload that is not an object binds nothing at all.
-        let bogus = MexRequest::new(op::NAME, op::DOC_ID, op::VARIABLE_KEYS, json!("nope"));
+        let bogus = crate::mex_operation!(op).raw_request(json!("nope"));
         assert_eq!(
             bogus.missing_variables().expect("serialize"),
             vec!["fetch_status_metadata", "fetch_wamo_sub"]
@@ -684,13 +1000,25 @@ mod tests {
     #[test]
     fn new_chat_capping_keeps_unknown_status_values() {
         let capping = decode_new_chat_message_capping(Some(json!({
-            "xwa2_message_capping_info": { "capping_status": "THIRD_WARNING" }
+            "xwa2_message_capping_info": {
+                "capping_status": "THIRD_WARNING",
+                "ote_status": "FUTURE_OTE",
+                "mv_status": "FUTURE_MV"
+            }
         })))
         .expect("capping payload");
 
         assert_eq!(
             capping.capping_status,
             Some(CappingStatus::Other("THIRD_WARNING".to_string()))
+        );
+        assert_eq!(
+            capping.ote_status,
+            Some(CappingOteStatus::Other("FUTURE_OTE".to_string()))
+        );
+        assert_eq!(
+            capping.mv_status,
+            Some(CappingMvStatus::Other("FUTURE_MV".to_string()))
         );
     }
 

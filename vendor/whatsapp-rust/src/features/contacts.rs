@@ -1,92 +1,24 @@
 //! Contact information feature.
 //!
-//! Profile picture types are defined in `wacore::iq::contacts`.
+//! For profile-picture lookup across domains, use [`Client::pictures`].
 //! Usync types are defined in `wacore::iq::usync`.
 
 use crate::client::Client;
 use crate::request::IqError;
 use log::debug;
 use std::collections::HashMap;
-use std::time::Duration;
 use thiserror::Error;
-use wacore::iq::contacts::ProfilePictureSpec;
 use wacore::iq::usync::{
     IsOnWhatsAppQueryType, IsOnWhatsAppSpec, IsOnWhatsAppUser, UserInfoSpec, UsernameLookupSpec,
 };
 use wacore_binary::{Jid, JidExt};
 
 // Re-export types from wacore
-pub use wacore::iq::contacts::{ProfilePicture, ProfilePictureLookup, ProfilePictureType};
 pub use wacore::iq::usync::{
     IsOnWhatsAppResult, USERNAME_MAX_LENGTH, USERNAME_MIN_LENGTH, UserInfo, UsernameLookup,
     UsernameLookupError, UsernameLookupUser, UsyncSubprotocolError,
 };
 pub use wacore::stanza::business::VerifiedName;
-
-/// Options for querying a profile picture with full protocol control.
-#[derive(Debug, Clone)]
-pub struct ProfilePictureLookupOptions<'a> {
-    pub jid: &'a Jid,
-    pub picture_type: ProfilePictureType,
-    pub existing_id: Option<&'a str>,
-    pub common_gid: Option<&'a Jid>,
-    pub invite: Option<&'a str>,
-    pub persona_id: Option<&'a str>,
-    pub timeout: Option<Duration>,
-}
-
-impl<'a> ProfilePictureLookupOptions<'a> {
-    pub fn new(jid: &'a Jid) -> Self {
-        Self {
-            jid,
-            picture_type: ProfilePictureType::Preview,
-            existing_id: None,
-            common_gid: None,
-            invite: None,
-            persona_id: None,
-            timeout: None,
-        }
-    }
-
-    pub fn preview(mut self, preview: bool) -> Self {
-        self.picture_type = if preview {
-            ProfilePictureType::Preview
-        } else {
-            ProfilePictureType::Full
-        };
-        self
-    }
-
-    pub fn picture_type(mut self, picture_type: ProfilePictureType) -> Self {
-        self.picture_type = picture_type;
-        self
-    }
-
-    pub fn existing_id(mut self, existing_id: Option<&'a str>) -> Self {
-        self.existing_id = existing_id;
-        self
-    }
-
-    pub fn common_gid(mut self, common_gid: Option<&'a Jid>) -> Self {
-        self.common_gid = common_gid;
-        self
-    }
-
-    pub fn invite(mut self, invite: Option<&'a str>) -> Self {
-        self.invite = invite;
-        self
-    }
-
-    pub fn persona_id(mut self, persona_id: Option<&'a str>) -> Self {
-        self.persona_id = persona_id;
-        self
-    }
-
-    pub fn timeout(mut self, timeout: Option<Duration>) -> Self {
-        self.timeout = timeout;
-        self
-    }
-}
 
 /// Error returned by contact-information operations (existence checks,
 /// profile pictures, user info).
@@ -126,11 +58,18 @@ fn forward_lid_pair(r: &IsOnWhatsAppResult) -> (&Jid, Option<&Jid>) {
 
 /// LID-primary result inverted to (PN, LID); None when not LID-primary.
 fn reverse_lid_pair(r: &IsOnWhatsAppResult) -> Option<(&Jid, Option<&Jid>)> {
-    if r.jid.is_lid() {
+    if r.jid.server.is_lid_family() {
         r.pn_jid.as_ref().map(|pn| (pn, Some(&r.jid)))
     } else {
         None
     }
+}
+
+fn valid_mapping_user(jid: &Jid) -> bool {
+    !jid.user.is_empty()
+        && jid.user != "0"
+        && jid.user.bytes().all(|byte| byte.is_ascii_digit())
+        && jid.integrator == 0
 }
 
 /// WhatsApp Web renders a username as `@handle` but never sends the `@`
@@ -143,6 +82,11 @@ fn display_to_bare_username(username: &str) -> &str {
 /// UserInfo entry -> (queried JID, LID mapping).
 fn user_info_lid_pair(entry: &UserInfo) -> (&Jid, Option<&Jid>) {
     (&entry.jid, entry.lid.as_ref())
+}
+
+fn user_info_reverse_lid_pair(entry: &UserInfo) -> Option<(&Jid, Option<&Jid>)> {
+    entry.jid.server.is_lid_family().then_some(())?;
+    entry.pn_jid.as_ref().map(|pn| (pn, Some(&entry.jid)))
 }
 
 pub struct Contacts<'a> {
@@ -166,7 +110,11 @@ impl<'a> Contacts<'a> {
             let Some(lid) = lid else {
                 continue;
             };
-            if !jid.is_pn() || !lid.is_lid() {
+            if !jid.server.is_pn_family()
+                || !lid.server.is_lid_family()
+                || !valid_mapping_user(jid)
+                || !valid_mapping_user(lid)
+            {
                 continue;
             }
             if let Err(err) = self
@@ -273,154 +221,6 @@ impl<'a> Contacts<'a> {
         Ok(results)
     }
 
-    /// Lookup a profile picture preserving detailed protocol outcomes:
-    /// `Found`, `Unchanged`, `NotFound`, `NotAuthorized`.
-    pub async fn lookup_profile_picture(
-        &self,
-        jid: &Jid,
-        preview: bool,
-        existing_id: Option<&str>,
-    ) -> Result<ProfilePictureLookup, ContactError> {
-        self.lookup_profile_picture_with_options(
-            ProfilePictureLookupOptions::new(jid)
-                .preview(preview)
-                .existing_id(existing_id),
-        )
-        .await
-    }
-
-    /// Lookup a profile picture with configurable picture, cache, group, invite, persona, and timeout options.
-    ///
-    /// A valid privacy token is loaded automatically from the client store when applicable.
-    pub async fn lookup_profile_picture_with_options(
-        &self,
-        options: ProfilePictureLookupOptions<'_>,
-    ) -> Result<ProfilePictureLookup, ContactError> {
-        let jid = options.jid;
-        // The system JID never answers this IQ; skip it.
-        if jid.is_psa() {
-            return Ok(ProfilePictureLookup::NotFound);
-        }
-
-        debug!(
-            "lookup_profile_picture: fetching {:?} picture for {} (existing_id={:?})",
-            options.picture_type, jid, options.existing_id
-        );
-
-        let spec = self.profile_picture_spec(&options).await;
-        match self.client.execute(spec).await {
-            Ok(lookup) => Ok(lookup),
-            // Server-level IQ error mappings (WA Web parseIqResponse / whatspec GetResponseError):
-            Err(IqError::ServerError { code: 404, .. }) => Ok(ProfilePictureLookup::NotFound),
-            Err(IqError::ServerError {
-                code: 401 | 403, ..
-            }) => Ok(ProfilePictureLookup::NotAuthorized),
-            Err(IqError::ServerError { code: 429, .. }) => Ok(ProfilePictureLookup::RateOverlimit),
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    /// Builds the `<picture>` request for `options`, including the privacy-token
-    /// versus `common_gid` fallback. Shared by the typed lookup and the legacy
-    /// getter so the two agree on the wire.
-    async fn profile_picture_spec(
-        &self,
-        options: &ProfilePictureLookupOptions<'_>,
-    ) -> ProfilePictureSpec {
-        let jid = options.jid;
-        let mut spec = ProfilePictureSpec::new(jid, options.picture_type);
-        if let Some(id) = options.existing_id {
-            spec = spec.with_existing_id(id);
-        }
-        if let Some(invite) = options.invite {
-            spec = spec.with_invite(invite);
-        }
-        if let Some(persona_id) = options.persona_id {
-            spec = spec.with_persona_id(persona_id);
-        }
-        if let Some(timeout) = options.timeout {
-            spec = spec.with_timeout(timeout);
-        }
-
-        // Skip own JID: server never responds when tctoken is sent for self
-        let is_own_jid = self.client.is_own_jid(jid);
-        let tc_token = if !jid.is_group()
-            && !jid.is_newsletter()
-            && !jid.is_bot()
-            && !jid.is_broadcast_list()
-            && !jid.is_status_broadcast()
-            && !is_own_jid
-            && self
-                .client
-                .ab_props
-                .is_enabled(wacore::iq::props::stale::PROFILE_PIC_PRIVACY_TOKEN)
-                .await
-        {
-            self.client.lookup_tc_token_for_jid(jid).await
-        } else {
-            None
-        };
-
-        // WhatsApp Web uses common_gid as a fallback only when no tctoken is present.
-        if let Some(token) = tc_token {
-            spec = spec.with_tc_token(token);
-        } else if let Some(common_gid) = options.common_gid {
-            spec = spec.with_common_gid(common_gid.clone());
-        }
-        spec
-    }
-
-    /// Fetch a profile picture URL for a given JID.
-    ///
-    /// Returns `Ok(Some(ProfilePicture))` if found, or `Ok(None)` if no picture is set,
-    /// unchanged, or unauthorized.
-    ///
-    /// For detailed outcome states (`Found`, `Unchanged`, `NotFound`, `NotAuthorized`),
-    /// prefer [`Self::lookup_profile_picture`].
-    pub async fn get_profile_picture(
-        &self,
-        jid: &Jid,
-        preview: bool,
-    ) -> Result<Option<ProfilePicture>, ContactError> {
-        self.get_profile_picture_with_timeout(jid, preview, None)
-            .await
-    }
-
-    /// Fetch a profile picture with an optional request timeout override.
-    ///
-    /// Returns `Ok(Some(ProfilePicture))` if found, or `Ok(None)` if no picture is set,
-    /// unchanged, or unauthorized.
-    ///
-    /// For detailed outcome states (`Found`, `Unchanged`, `NotFound`, `NotAuthorized`),
-    /// prefer [`Self::lookup_profile_picture`].
-    pub async fn get_profile_picture_with_timeout(
-        &self,
-        jid: &Jid,
-        preview: bool,
-        timeout: Option<Duration>,
-    ) -> Result<Option<ProfilePicture>, ContactError> {
-        // The system JID never answers this IQ; skip it to save the full timeout.
-        if jid.is_psa() {
-            return Ok(None);
-        }
-        // Executed directly rather than through `lookup_profile_picture_with_options`
-        // so a 429 keeps its server `<iq type="error">` (the `backoff` a caller must
-        // honour), which the typed outcome does not carry.
-        let options = ProfilePictureLookupOptions::new(jid)
-            .preview(preview)
-            .timeout(timeout);
-        let spec = self.profile_picture_spec(&options).await;
-        match self.client.execute(spec).await {
-            Ok(lookup) => Ok(lookup.into_found()),
-            // 404/401/403 = no profile picture (or not authorized to see it).
-            Err(IqError::ServerError {
-                code: 404 | 401 | 403,
-                ..
-            }) => Ok(None),
-            Err(e) => Err(e.into()),
-        }
-    }
-
     pub async fn get_user_info(
         &self,
         jids: &[Jid],
@@ -465,6 +265,8 @@ impl<'a> Contacts<'a> {
         let info = self.client.execute(spec).await?;
         self.persist_lid_mappings(info.values().map(user_info_lid_pair))
             .await;
+        self.persist_lid_mappings(info.values().filter_map(user_info_reverse_lid_pair))
+            .await;
         Ok(info)
     }
 
@@ -507,18 +309,204 @@ impl Client {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_profile_picture_struct() {
-        let pic = ProfilePicture {
-            id: "123456789".into(),
-            url: "https://example.com/pic.jpg".to_string(),
-            direct_path: Some("/v/pic.jpg".to_string()),
-            hash: None,
-        };
+    #[tokio::test]
+    async fn business_pn_is_learned_through_public_contact_lookups() {
+        use crate::test_utils::{answer_iq, create_iq_test_client, decode_sent_iq};
+        use wacore_binary::builder::NodeBuilder;
+        for (user_info, known_pair, hosted) in [
+            (false, false, false),
+            (true, false, false),
+            (false, true, false),
+            (true, true, false),
+            (false, false, true),
+            (true, false, true),
+            (false, true, true),
+            (true, true, true),
+        ] {
+            let (client, transport) = create_iq_test_client().await;
+            let lid = Jid::new(
+                "100000001",
+                if hosted {
+                    wacore_binary::Server::HostedLid
+                } else {
+                    wacore_binary::Server::Lid
+                },
+            );
+            let pn = Jid::new(
+                "12025550111",
+                if hosted {
+                    wacore_binary::Server::Hosted
+                } else {
+                    wacore_binary::Server::Pn
+                },
+            );
+            let wire_lid = if hosted {
+                lid.with_device(99)
+            } else {
+                lid.clone()
+            };
+            if known_pair {
+                client
+                    .add_lid_pn_mapping(
+                        "100000001",
+                        "12025550112",
+                        crate::lid_pn_cache::LearningSource::Other,
+                    )
+                    .await
+                    .unwrap();
+            }
+            let caller = client.clone();
+            let queried = if user_info {
+                lid.clone()
+            } else {
+                Jid::lid("100000001")
+            };
+            let returned = lid.clone();
+            let expected_pn = pn.clone();
+            let task = tokio::spawn(async move {
+                if user_info {
+                    let info = caller
+                        .contacts()
+                        .get_user_info(std::slice::from_ref(&queried))
+                        .await
+                        .unwrap();
+                    assert_eq!(info[&returned].pn_jid, Some(expected_pn));
+                } else {
+                    let results = caller.contacts().is_on_whatsapp(&[queried]).await.unwrap();
+                    assert_eq!(results[0].pn_jid, Some(expected_pn));
+                    assert!(results[0].is_registered);
+                }
+            });
+            let sent = decode_sent_iq(&transport, 0).await;
+            assert!(
+                sent.get()
+                    .get_optional_child("usync")
+                    .unwrap()
+                    .get_optional_child("query")
+                    .unwrap()
+                    .get_optional_child("business")
+                    .is_some()
+            );
+            let id = sent
+                .get()
+                .attrs()
+                .optional_string("id")
+                .unwrap()
+                .into_owned();
+            let response = NodeBuilder::new("iq")
+                .attr("type", "result")
+                .attr("id", &id)
+                .children([NodeBuilder::new("usync")
+                    .children([NodeBuilder::new("list")
+                        .children([NodeBuilder::new("user")
+                            .attr("jid", &wire_lid)
+                            .children([NodeBuilder::new("business")
+                                .attr(
+                                    "pn_jid",
+                                    if hosted {
+                                        "12025550111:99@hosted"
+                                    } else {
+                                        "12025550111:7@s.whatsapp.net"
+                                    },
+                                )
+                                .build()])
+                            .build()])
+                        .build()])
+                    .build()])
+                .build();
+            answer_iq(&client, &id, &response).await;
+            task.await.unwrap();
+            let by_lid = client.get_lid_pn_entry(&lid).await.unwrap().unwrap();
+            let by_pn = client.get_lid_pn_entry(&pn).await.unwrap().unwrap();
+            assert_eq!(by_lid.phone_number.as_ref(), "12025550111");
+            assert_eq!(by_pn.lid.as_ref(), "100000001");
+            assert_eq!(
+                by_lid.learning_source,
+                crate::lid_pn_cache::LearningSource::Usync
+            );
+            client.lid_pn_cache.clear().await;
+            assert_eq!(
+                client
+                    .get_lid_pn_entry(&lid)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .phone_number
+                    .as_ref(),
+                "12025550111"
+            );
+            let persisted = client
+                .persistence_manager
+                .backend()
+                .get_lid_mapping("100000001")
+                .await
+                .unwrap();
+            assert!(persisted.is_some());
+        }
+    }
 
-        assert_eq!(pic.id, "123456789");
-        assert_eq!(pic.url, "https://example.com/pic.jpg");
-        assert!(pic.direct_path.is_some());
+    #[tokio::test]
+    async fn public_contact_lookups_never_learn_malformed_returned_lids() {
+        use crate::test_utils::{answer_iq, create_iq_test_client, decode_sent_iq};
+        use wacore_binary::builder::NodeBuilder;
+        for (user_info, returned) in [
+            (false, "abc@lid"),
+            (true, "abc@lid"),
+            (false, "@lid"),
+            (true, "@lid"),
+            (false, "0@lid"),
+            (true, "0@lid"),
+        ] {
+            let (client, transport) = create_iq_test_client().await;
+            let caller = client.clone();
+            let task = tokio::spawn(async move {
+                if user_info {
+                    caller
+                        .contacts()
+                        .get_user_info(&[Jid::lid("100000001")])
+                        .await
+                        .unwrap();
+                } else {
+                    caller
+                        .contacts()
+                        .is_on_whatsapp(&[Jid::lid("100000001")])
+                        .await
+                        .unwrap();
+                }
+            });
+            let sent = decode_sent_iq(&transport, 0).await;
+            let id = sent
+                .get()
+                .attrs()
+                .optional_string("id")
+                .unwrap()
+                .into_owned();
+            let response = NodeBuilder::new("iq")
+                .attr("type", "result")
+                .attr("id", &id)
+                .children([NodeBuilder::new("usync")
+                    .children([NodeBuilder::new("list")
+                        .children([NodeBuilder::new("user")
+                            .attr("jid", returned)
+                            .attr("pn_jid", "12025550111@s.whatsapp.net")
+                            .children([NodeBuilder::new("business")
+                                .attr("pn_jid", "12025550111@s.whatsapp.net")
+                                .build()])
+                            .build()])
+                        .build()])
+                    .build()])
+                .build();
+            answer_iq(&client, &id, &response).await;
+            task.await.unwrap();
+            assert!(
+                client
+                    .get_lid_pn_entry(&Jid::pn("12025550111"))
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "user_info={user_info}, returned={returned}"
+            );
+        }
     }
 
     #[test]
@@ -537,33 +525,6 @@ mod tests {
 
     fn psa_jid() -> Jid {
         Jid::pn("0")
-    }
-
-    #[tokio::test]
-    async fn profile_picture_for_system_jid_short_circuits_without_iq() {
-        let client = crate::test_utils::create_test_client().await;
-
-        let result = client
-            .contacts()
-            .get_profile_picture(&psa_jid(), false)
-            .await;
-
-        assert!(matches!(result, Ok(None)));
-    }
-
-    #[tokio::test]
-    async fn profile_picture_for_regular_jid_still_hits_the_wire() {
-        let client = crate::test_utils::create_test_client().await;
-
-        // Disconnected client: reaching the send path is what produces this error,
-        // proving the short-circuit is scoped to the system JID.
-        let err = client
-            .contacts()
-            .get_profile_picture(&Jid::pn("12025550111"), false)
-            .await
-            .unwrap_err();
-
-        assert!(matches!(err, ContactError::Iq(IqError::NotConnected)));
     }
 
     #[tokio::test]

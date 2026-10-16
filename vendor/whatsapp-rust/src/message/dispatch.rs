@@ -13,12 +13,24 @@ fn delivery_receipt_burst_warning(
 }
 
 impl Client {
-    fn with_message_dispatch<R>(
+    fn with_message_dispatch(
         &self,
         info: &Arc<MessageInfo>,
         pdo: bool,
-        update: impl FnOnce(&mut DispatchClaim) -> R,
-    ) -> R {
+        mut update: impl FnMut(&mut DispatchClaim) -> bool,
+    ) -> bool {
+        self.with_message_dispatch_inner(info, pdo, &mut update)
+    }
+
+    // All callers return a claim decision. Erase only their stack callback,
+    // sharing the locked lookup without allocating or extending the guard.
+    #[inline(never)]
+    fn with_message_dispatch_inner(
+        &self,
+        info: &Arc<MessageInfo>,
+        pdo: bool,
+        update: &mut dyn FnMut(&mut DispatchClaim) -> bool,
+    ) -> bool {
         let key = Self::dispatch_key(info);
         self.dispatched_messages.with(|cache| {
             if cache.get(&key).is_some_and(|claim| {
@@ -83,11 +95,52 @@ impl Client {
         hook_committed: bool,
         publication: &mut PublicationGuard,
     ) -> bool {
+        self.admit_producer_dispatch(info, pdo, fingerprint, hook_committed, None, publication)
+    }
+
+    pub(crate) fn admit_producer_dispatch(
+        &self,
+        info: &Arc<MessageInfo>,
+        pdo: bool,
+        fingerprint: Option<DispatchFingerprint>,
+        hook_committed: bool,
+        producer: Option<DispatchKey>,
+        publication: &mut PublicationGuard,
+    ) -> bool {
         let Some(fingerprint) = fingerprint else {
             return false;
         };
         self.with_message_dispatch(info, pdo, |claim| {
-            claim.admit(fingerprint, pdo, hook_committed, publication)
+            claim.admit(fingerprint, pdo, hook_committed, producer, publication)
+        })
+    }
+
+    pub(super) fn completed_hook_publication(
+        &self,
+        info: &Arc<MessageInfo>,
+        fingerprint: &DispatchFingerprint,
+    ) -> bool {
+        self.with_message_dispatch(info, false, |claim| {
+            claim.payloads.iter().any(|payload| {
+                payload.fingerprint == *fingerprint
+                    && payload.hook_committed
+                    && payload.publication.load(Ordering::Acquire) == PUBLICATION_COMPLETE
+            })
+        })
+    }
+
+    pub(super) fn hook_publication_from_producer(
+        &self,
+        info: &Arc<MessageInfo>,
+        origin: raw_pending::StanzaOrigin,
+    ) -> bool {
+        let producer = Some(DispatchKey::new(origin));
+        self.with_message_dispatch(info, false, |claim| {
+            claim.payloads.iter().any(|payload| {
+                payload.producer == producer
+                    && payload.hook_committed
+                    && payload.publication.load(Ordering::Acquire) == PUBLICATION_COMPLETE
+            })
         })
     }
 
@@ -95,6 +148,7 @@ impl Client {
         self: &Arc<Self>,
         info: &Arc<MessageInfo>,
         message: &wa::Message,
+        producer: Option<DispatchKey>,
     ) -> ProbeOutcome {
         if !self.dispatch_gate_enabled()
             || !self.with_message_dispatch(info, false, |claim| claim.has_deliveries())
@@ -106,7 +160,7 @@ impl Client {
         // not suppress.
         let decrypted = if crate::features::message_edit::carries_secret_encrypted(message) {
             match self
-                .maybe_decrypt_secret_encrypted_message(message, info)
+                .materialize_secret_encrypted_message(message, info)
                 .await
             {
                 Some(inner) => Some(inner),
@@ -118,15 +172,23 @@ impl Client {
         let candidate = decrypted.as_ref().map_or(message, |inner| inner);
         let fingerprint = MessageDispatch::fingerprint(candidate);
         if self.with_message_dispatch(info, false, |claim| {
-            claim.state(&fingerprint).is_some_and(|state| {
-                state != MessageDispatch::Recovered || self.inbound_durability_hook.get().is_none()
-            })
+            let sibling = self.inbound_durability_hook.get().is_some()
+                && producer.is_some()
+                && claim.payloads.iter().any(|payload| {
+                    payload.fingerprint == fingerprint
+                        && payload.producer == producer
+                        && payload.state == MessageDispatch::Decrypted
+                        && payload.publication.load(Ordering::Acquire) == PUBLICATION_COMPLETE
+                });
+            !sibling
+                && claim.state(&fingerprint).is_some_and(|state| {
+                    state != MessageDispatch::Recovered
+                        || self.inbound_durability_hook.get().is_none()
+                })
         }) {
-            ProbeOutcome::Suppress
+            ProbeOutcome::Suppress { decrypted }
         } else {
-            ProbeOutcome::Proceed {
-                decrypted: decrypted.map(Box::new),
-            }
+            ProbeOutcome::Proceed { decrypted }
         }
     }
 
@@ -230,20 +292,97 @@ impl Client {
         info: &Arc<MessageInfo>,
         track_commit: bool,
     ) -> InboundCommitState {
-        self.dispatch_parsed_message_with_decrypted(msg, info, track_commit, None)
+        self.dispatch_shared_message_with_decrypted(Arc::new(msg), info, track_commit, None)
             .await
     }
 
-    /// Same as [`Self::dispatch_parsed_message`], but reuses a plaintext the
-    /// duplicate probe already materialized instead of resolving the parent
-    /// secret a second time.
-    pub(crate) async fn dispatch_parsed_message_with_decrypted(
+    /// Ordinary messages do not need this state machine: resolving a secret
+    /// envelope holds a decoded Message across storage/resolver awaits. Keep
+    /// that state off the inline receive future, allocating only for envelopes
+    /// and returning the final event handle rather than a large value.
+    async fn materialize_secret_encrypted_message(
         self: &Arc<Self>,
-        msg: wa::Message,
+        message: &wa::Message,
+        info: &Arc<MessageInfo>,
+    ) -> Option<Arc<wa::Message>> {
+        if !crate::features::message_edit::carries_secret_encrypted(message) {
+            return None;
+        }
+        Box::pin(async {
+            self.maybe_decrypt_secret_encrypted_message(message, info)
+                .await
+                .map(Arc::new)
+        })
+        .await
+    }
+
+    /// Dispatch an already-shared plaintext, reusing any envelope the duplicate
+    /// probe materialized instead of resolving the parent secret a second time.
+    pub(crate) async fn dispatch_shared_message_with_decrypted(
+        self: &Arc<Self>,
+        msg: Arc<wa::Message>,
         info: &Arc<MessageInfo>,
         track_commit: bool,
-        pre_decrypted: Option<wa::Message>,
+        pre_decrypted: Option<Arc<wa::Message>>,
     ) -> InboundCommitState {
+        self.dispatch_shared_message_with_carrier(
+            msg,
+            info,
+            track_commit,
+            pre_decrypted,
+            None,
+            (None, None),
+        )
+        .await
+    }
+
+    pub(super) async fn dispatch_shared_message_with_carrier(
+        self: &Arc<Self>,
+        msg: Arc<wa::Message>,
+        info: &Arc<MessageInfo>,
+        track_commit: bool,
+        pre_decrypted: Option<Arc<wa::Message>>,
+        carrier: Option<(Option<u32>, bytes::Bytes)>,
+        (origin, receipt): (
+            Option<raw_pending::DeliveryOrigin>,
+            Option<Arc<live_retention::ReceiptScope>>,
+        ),
+    ) -> InboundCommitState {
+        let item = self
+            .prepare_shared_inbound_message(msg, info, pre_decrypted)
+            .await;
+        // Newsletters were already transport-acked before the processing permit.
+        if info.source.chat.is_newsletter() {
+            self.core.event_bus.dispatch(Event::Messages(
+                wacore::types::events::MessageBatch::builder()
+                    .messages(Arc::from([item]))
+                    .origin(wacore::types::events::BatchOrigin::Live)
+                    .build(),
+            ));
+            return InboundCommitState::Durable;
+        }
+        self.commit_or_batch_pending(
+            raw_pending::PendingDelivery {
+                item,
+                carrier,
+                origin,
+                retention: None,
+                receipt,
+                storage_sender: None,
+                consumer_claimed: false,
+            },
+            track_commit,
+        )
+        .await
+    }
+
+    /// Prepare the consumer projection before entering the existing commit path.
+    pub(crate) async fn prepare_shared_inbound_message(
+        self: &Arc<Self>,
+        msg: Arc<wa::Message>,
+        info: &Arc<MessageInfo>,
+        pre_decrypted: Option<Arc<wa::Message>>,
+    ) -> wacore::types::events::InboundMessage {
         use wacore::proto_helpers::MessageExt;
         wacore::telemetry::recv("decrypted");
         self.stats.record_message_received();
@@ -258,10 +397,7 @@ impl Client {
         self.maybe_capture_inbound_msg_secret(&msg, info).await;
         let decrypted = match pre_decrypted {
             Some(inner) => Some(inner),
-            None => {
-                self.maybe_decrypt_secret_encrypted_message(&msg, info)
-                    .await
-            }
+            None => self.materialize_secret_encrypted_message(&msg, info).await,
         };
         // A decrypted comment surfaces as its inner body Message, which has no
         // slot for the parent post key; carry the threading link beside it.
@@ -273,44 +409,14 @@ impl Client {
         } else {
             None
         };
-        let dispatch_msg = Arc::new(decrypted.unwrap_or(msg));
+        let dispatch_msg = decrypted.unwrap_or(msg);
 
-        // Newsletters never enter the commit pipeline: the plaintext stanza
-        // was already transport-acked at enqueue and the server never
-        // redelivers it, so a hook failure (or a batcher reset) would lose
-        // the message for good instead of trading on redelivery. They also
-        // reach here without the processing permit, so enqueueing could
-        // straddle the drain→live transition.
-        if info.source.chat.is_newsletter() {
-            self.core.event_bus.dispatch(Event::Messages(
-                wacore::types::events::MessageBatch::builder()
-                    .messages(Arc::from([wacore::types::events::InboundMessage::builder(
-                    )
-                    .message(dispatch_msg)
-                    .info(Arc::clone(info))
-                    .maybe_ephemeral_expiration(ephemeral_expiration)
-                    .maybe_comment_target(comment_target)
-                    .build()]))
-                    .origin(wacore::types::events::BatchOrigin::Live)
-                    .build(),
-            ));
-            return InboundCommitState::Durable;
-        }
-
-        // Live traffic commits (and acks) as a batch of one; during the
-        // offline drain the message joins the accumulating commit batch and
-        // the event/ack fire only after its batch commits. Either way the
-        // hook (when registered) gates everything observable.
-        self.commit_or_batch_inbound(
-            wacore::types::events::InboundMessage::builder()
-                .message(dispatch_msg)
-                .info(Arc::clone(info))
-                .maybe_ephemeral_expiration(ephemeral_expiration)
-                .maybe_comment_target(comment_target)
-                .build(),
-            track_commit,
-        )
-        .await
+        wacore::types::events::InboundMessage::builder()
+            .message(dispatch_msg)
+            .info(Arc::clone(info))
+            .maybe_ephemeral_expiration(ephemeral_expiration)
+            .maybe_comment_target(comment_target)
+            .build()
     }
 
     /// Acknowledge a received message so the server drops it from the offline
@@ -318,6 +424,15 @@ impl Client {
     /// receipt for own-account self-fanouts), else a transport ack. status is
     /// acked by the `should_ack` gate, newsletters/empty ids need nothing here.
     pub(crate) fn ack_received_message(self: &Arc<Self>, info: &Arc<MessageInfo>) {
+        if self.inbound_durability_hook.get().is_some()
+            && self.inbound_commit_batch.live_retention.defer_receipt(info)
+        {
+            return;
+        }
+        self.ack_received_message_unscoped(info);
+    }
+
+    pub(super) fn ack_received_message_unscoped(self: &Arc<Self>, info: &Arc<MessageInfo>) {
         if info.id.is_empty() || info.source.chat.is_newsletter() {
             return;
         }
@@ -355,10 +470,9 @@ impl Client {
     /// [`crate::flush_scope::FlushGuard`], and `flush()` still waits because
     /// the guard rides the queue until the send completes.
     ///
-    /// Offline-drained messages are buffered instead and flushed as aggregate
-    /// `<receipt>` stanzas when the offline sync completes, collapsing a
-    /// reconnect backlog of N receipts into ~1 stanza per (chat, author)
-    /// (WA Web `sendAggregateOfflineReceipts`). Live messages stay 1:1.
+    /// Offline-drained messages are buffered until a durable drain flush.
+    /// Ordinary receipts aggregate per (chat, author) (WA Web
+    /// `sendAggregateOfflineReceipts`); peer receipts and live messages stay 1:1.
     fn spawn_delivery_receipt(self: &Arc<Self>, info: &Arc<MessageInfo>) {
         if info.is_offline && self.try_buffer_offline_receipt(info) {
             return;

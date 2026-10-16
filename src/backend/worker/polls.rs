@@ -50,25 +50,29 @@ fn creation_archive(content: &Content, secret: &[u8]) -> wa::Message {
     else {
         unreachable!()
     };
-    let poll = wa::message::PollCreationMessage {
-        name: Some(question.clone()),
-        options: options
+    let poll = {
+        let mut proto2 = wa::message::PollCreationMessage::default();
+        proto2.name = Some(question.clone());
+        proto2.options = options
             .iter()
-            .map(|name| wa::message::poll_creation_message::Option {
-                option_name: Some(name.clone()),
-                ..Default::default()
+            .map(|name| {
+                let mut proto = wa::message::poll_creation_message::Option::default();
+                proto.option_name = Some(name.clone());
+                proto
             })
-            .collect(),
-        selectable_options_count: Some(state.selectable as u32),
-        poll_content_type: Some(wa::message::PollContentType::TEXT),
-        ..Default::default()
+            .collect();
+        proto2.selectable_options_count = Some(state.selectable as u32);
+        proto2.poll_content_type = Some(wa::message::PollContentType::TEXT);
+        proto2
     };
-    let mut message = wa::Message {
-        message_context_info: MessageField::some(wa::MessageContextInfo {
-            message_secret: Some(secret.into()),
-            ..Default::default()
-        }),
-        ..Default::default()
+    let mut message = {
+        let mut proto2 = wa::Message::default();
+        proto2.message_context_info = MessageField::some({
+            let mut proto = wa::MessageContextInfo::default();
+            proto.message_secret = Some(secret.into());
+            proto
+        });
+        proto2
     };
     if state.selectable == 1 {
         message.poll_creation_message_v3 = MessageField::some(poll);
@@ -387,7 +391,7 @@ impl Worker {
                     .pn()
                     .ok_or(tr("Not connected to WhatsApp"))?
                     .to_non_ad_string();
-                let (sent, secret) = client
+                let (sent, _, secret) = client
                     .polls()
                     .create(
                         jid,
@@ -396,10 +400,11 @@ impl Worker {
                         draft.selectable() as u32,
                     )
                     .await
-                    .map_err(|_| tr("Could not send the poll. Please try again."))?;
+                    .map_err(|_| tr("Could not send the poll. Please try again."))?
+                    .into_parts();
                 Ok(super::super::CreatedPoll {
-                    id: sent.message_id,
-                    secret,
+                    id: sent.message_id.to_string(),
+                    secret: secret.into_bytes().to_vec(),
                     creator,
                     recipients,
                 })
@@ -533,9 +538,9 @@ impl Worker {
             let at = jiff::Timestamp::now().as_millisecond();
             let result = client
                 .polls()
-                .vote(jid, &id, &creator, &secret, &names)
+                .vote_raw(jid, &id, &creator, &secret, &names)
                 .await
-                .map(|sent| sent.message_id)
+                .map(|sent| sent.message_id.to_string())
                 .map_err(|_| tr("Could not send your vote. Please try again.").into());
             let _ = commands.send(Command::PollVoted {
                 chat,
@@ -685,7 +690,7 @@ impl Worker {
                     };
                     client
                         .polls()
-                        .decrypt_vote(ciphertext, &secret, &vote.poll, &creator, &voter)
+                        .decrypt_vote_raw(ciphertext, &secret, &vote.poll, &creator, &voter)
                         .await
                         .ok()
                         .and_then(|hashes| choices_for(&options, &hashes))
@@ -768,9 +773,10 @@ mod tests {
             let mut other = info.clone();
             other.id = "next-message".into();
             worker.ingest(
-                &Arc::new(wa::Message {
-                    conversation: Some("Hello".into()),
-                    ..Default::default()
+                &Arc::new({
+                    let mut proto = wa::Message::default();
+                    proto.conversation = Some("Hello".into());
+                    proto
                 }),
                 &other,
             );
@@ -858,38 +864,47 @@ mod tests {
 
         for updates in [
             Vec::new(),
-            vec![wa::PollUpdate {
-                poll_update_message_key: MessageField::some(wa::MessageKey {
-                    id: Some("unmatched-vote".into()),
-                    participant: Some("200@s.whatsapp.net".into()),
-                    ..Default::default()
-                }),
-                vote: MessageField::some(wa::message::PollVoteMessage {
-                    selected_options: vec![vec![0; 32]],
-                }),
-                ..Default::default()
+            vec![{
+                let mut proto2 = wa::PollUpdate::default();
+                proto2.poll_update_message_key = MessageField::some({
+                    let mut proto = wa::MessageKey::default();
+                    proto.id = Some("unmatched-vote".into());
+                    proto.participant = Some("200@s.whatsapp.net".into());
+                    proto
+                });
+                proto2.vote = MessageField::some({
+                    let mut proto = wa::message::PollVoteMessage::default();
+                    proto.selected_options = vec![vec![0; 32]];
+                    proto
+                });
+                proto2
             }],
         ] {
             worker.apply_history(
                 ParsedHistory {
-                    chats: vec![parse_conversation(wa::Conversation {
-                        id: chat.into(),
-                        messages: vec![wa::HistorySyncMsg {
-                            message: MessageField::some(wa::WebMessageInfo {
-                                key: MessageField::some(wa::MessageKey {
-                                    id: Some(row.id.clone()),
-                                    remote_jid: Some(chat.into()),
-                                    participant: Some(row.sender.clone()),
-                                    from_me: Some(false),
-                                }),
-                                message: MessageField::some(raw.clone()),
-                                message_timestamp: Some(row.timestamp as u64),
-                                poll_updates: updates,
-                                ..Default::default()
-                            }),
-                            ..Default::default()
-                        }],
-                        ..Default::default()
+                    chats: vec![parse_conversation({
+                        let mut proto4 = wa::Conversation::default();
+                        proto4.id = chat.into();
+                        proto4.messages = vec![{
+                            let mut proto3 = wa::HistorySyncMsg::default();
+                            proto3.message = MessageField::some({
+                                let mut proto2 = wa::WebMessageInfo::default();
+                                proto2.key = MessageField::some({
+                                    let mut proto = wa::MessageKey::default();
+                                    proto.id = Some(row.id.clone());
+                                    proto.remote_jid = Some(chat.into());
+                                    proto.participant = Some(row.sender.clone());
+                                    proto.from_me = Some(false);
+                                    proto
+                                });
+                                proto2.message = MessageField::some(raw.clone());
+                                proto2.message_timestamp = Some(row.timestamp as u64);
+                                proto2.poll_updates = updates;
+                                proto2
+                            });
+                            proto3
+                        }];
+                        proto4
                     })],
                     push_names: Vec::new(),
                     lids: Vec::new(),
@@ -957,45 +972,55 @@ mod tests {
         assert!(state.refresh_needed);
         worker.refresh_poll(chat.into(), "poll".into());
         let updates = (0..11)
-            .map(|index| wa::PollUpdate {
-                poll_update_message_key: MessageField::some(wa::MessageKey {
-                    id: Some(format!("history-{index}")),
-                    from_me: Some(index == 10),
-                    participant: Some(format!("{}@s.whatsapp.net", 200 + index)),
-                    ..Default::default()
-                }),
-                vote: MessageField::some(wa::message::PollVoteMessage {
-                    selected_options: vec![
+            .map(|index| {
+                let mut proto2 = wa::PollUpdate::default();
+                proto2.poll_update_message_key = MessageField::some({
+                    let mut proto = wa::MessageKey::default();
+                    proto.id = Some(format!("history-{index}"));
+                    proto.from_me = Some(index == 10);
+                    proto.participant = Some(format!("{}@s.whatsapp.net", 200 + index));
+                    proto
+                });
+                proto2.vote = MessageField::some({
+                    let mut proto = wa::message::PollVoteMessage::default();
+                    proto.selected_options = vec![
                         whatsapp_rust::wacore::poll::compute_option_hash(if index < 8 {
                             "Pizza"
                         } else {
                             "Pasta"
                         })
                         .to_vec(),
-                    ],
-                }),
-                sender_timestamp_ms: Some(1500),
-                ..Default::default()
+                    ];
+                    proto
+                });
+                proto2.sender_timestamp_ms = Some(1500);
+                proto2
             })
             .collect();
-        let parsed = parse_conversation(wa::Conversation {
-            id: chat.into(),
-            messages: vec![wa::HistorySyncMsg {
-                message: MessageField::some(wa::WebMessageInfo {
-                    key: MessageField::some(wa::MessageKey {
-                        id: Some("poll".into()),
-                        remote_jid: Some(chat.into()),
-                        participant: Some(row.sender.clone()),
-                        from_me: Some(false),
-                    }),
-                    message: MessageField::some(raw),
-                    message_timestamp: Some(100),
-                    poll_updates: updates,
-                    ..Default::default()
-                }),
-                msg_order_id: None,
-            }],
-            ..Default::default()
+        let parsed = parse_conversation({
+            let mut proto4 = wa::Conversation::default();
+            proto4.id = chat.into();
+            proto4.messages = vec![{
+                let mut proto3 = wa::HistorySyncMsg::default();
+                proto3.message = MessageField::some({
+                    let mut proto2 = wa::WebMessageInfo::default();
+                    proto2.key = MessageField::some({
+                        let mut proto = wa::MessageKey::default();
+                        proto.id = Some("poll".into());
+                        proto.remote_jid = Some(chat.into());
+                        proto.participant = Some(row.sender.clone());
+                        proto.from_me = Some(false);
+                        proto
+                    });
+                    proto2.message = MessageField::some(raw);
+                    proto2.message_timestamp = Some(100);
+                    proto2.poll_updates = updates;
+                    proto2
+                });
+                proto3.msg_order_id = None;
+                proto3
+            }];
+            proto4
         });
         worker.apply_history(
             ParsedHistory {
@@ -1039,7 +1064,7 @@ mod tests {
         let session_path = directory.path().join("session.db");
         let bot = Bot::builder()
             .with_backend(
-                whatsapp_rust::store::SqliteStore::new(session_path.to_str().unwrap())
+                whatsapp_rust::store::SqliteStore::open(session_path.to_str().unwrap())
                     .await
                     .unwrap(),
             )
@@ -1056,17 +1081,21 @@ mod tests {
             &hashes, &key, "poll", creator, voter,
         )
         .unwrap();
-        let update = wa::message::PollUpdateMessage {
-            poll_creation_message_key: MessageField::some(wa::MessageKey {
-                id: Some("poll".into()),
-                ..Default::default()
-            }),
-            vote: MessageField::some(wa::message::PollEncValue {
-                enc_payload: Some(payload),
-                enc_iv: Some(iv.to_vec()),
-            }),
-            sender_timestamp_ms: Some(20_000),
-            ..Default::default()
+        let update = {
+            let mut proto2 = wa::message::PollUpdateMessage::default();
+            proto2.poll_creation_message_key = MessageField::some({
+                let mut proto = wa::MessageKey::default();
+                proto.id = Some("poll".into());
+                proto
+            });
+            proto2.vote = MessageField::some({
+                let mut proto = wa::message::PollEncValue::default();
+                proto.enc_payload = Some(payload);
+                proto.enc_iv = Some(iv.to_vec());
+                proto
+            });
+            proto2.sender_timestamp_ms = Some(20_000);
+            proto2
         };
         worker.ingest_poll_vote("chat", "vote", voter, false, 20, &update);
         assert_eq!(worker.poll_decrypting, 0);
@@ -1120,19 +1149,22 @@ mod tests {
                 .unwrap();
         }
         worker.learn_lid("200", "300");
-        let update = wa::PollUpdate {
-            poll_update_message_key: MessageField::some(wa::MessageKey {
-                id: Some("5".into()),
-                participant: Some("200@lid".into()),
-                ..Default::default()
-            }),
-            vote: MessageField::some(wa::message::PollVoteMessage {
-                selected_options: vec![
-                    whatsapp_rust::wacore::poll::compute_option_hash("Pizza").to_vec(),
-                ],
-            }),
-            sender_timestamp_ms: Some(5),
-            ..Default::default()
+        let update = {
+            let mut proto2 = wa::PollUpdate::default();
+            proto2.poll_update_message_key = MessageField::some({
+                let mut proto = wa::MessageKey::default();
+                proto.id = Some("5".into());
+                proto.participant = Some("200@lid".into());
+                proto
+            });
+            proto2.vote = MessageField::some({
+                let mut proto = wa::message::PollVoteMessage::default();
+                proto.selected_options =
+                    vec![whatsapp_rust::wacore::poll::compute_option_hash("Pizza").to_vec()];
+                proto
+            });
+            proto2.sender_timestamp_ms = Some(5);
+            proto2
         };
         worker.history_poll_votes(&row, &[update]);
         worker.polish_poll(&mut row);

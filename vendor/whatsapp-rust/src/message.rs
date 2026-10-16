@@ -209,6 +209,14 @@ enum MigrationDecryptResult {
 pub(crate) struct PlaintextHandleOutcome {
     dispatched: bool,
     skdm_only: bool,
+    delivered: bool,
+}
+
+#[cfg(feature = "bench-harness")]
+impl PlaintextHandleOutcome {
+    pub(crate) fn flags(self) -> (bool, bool) {
+        (self.dispatched, self.skdm_only)
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -247,6 +255,7 @@ impl DispatchKey {
     /// Hashes an identity through the process key. Zero folds onto one so
     /// `Option<DispatchKey>` rides in 8 bytes: one extra colliding pair in
     /// 2^64, below the collision rate the identity already tolerates.
+    #[inline(never)]
     fn new(identity: impl std::hash::Hash) -> Self {
         use std::hash::BuildHasher;
         let digest = DISPATCH_IDENTITY.hash_one(identity);
@@ -274,6 +283,8 @@ pub(crate) type DispatchFingerprint = [u8; 16];
 struct DispatchPayload {
     fingerprint: DispatchFingerprint,
     state: MessageDispatch,
+    hook_committed: bool,
+    producer: Option<DispatchKey>,
     publication: Arc<AtomicU8>,
 }
 
@@ -299,11 +310,12 @@ pub(crate) struct PublicationGuard {
 }
 
 /// Duplicate-probe answer with the plaintext already resolved: dispatch must
-/// reuse it instead of resolving the parent secret a second time. Boxed: the
-/// mismatch path is rare and `wa::Message` is close to a kilobyte.
+/// reuse it instead of resolving the parent secret a second time. Carry the
+/// final event handle so the near-kilobyte message never moves through the
+/// receive/dispatch futures again.
 pub(crate) enum ProbeOutcome {
-    Suppress,
-    Proceed { decrypted: Option<Box<wa::Message>> },
+    Suppress { decrypted: Option<Arc<wa::Message>> },
+    Proceed { decrypted: Option<Arc<wa::Message>> },
 }
 
 impl PublicationGuard {
@@ -366,6 +378,7 @@ impl DispatchClaim {
         fingerprint: DispatchFingerprint,
         pdo: bool,
         hook_committed: bool,
+        producer: Option<DispatchKey>,
         publication: &mut PublicationGuard,
     ) -> bool {
         if let Some(payload) = self.payloads.iter_mut().find(|payload| {
@@ -391,7 +404,10 @@ impl DispatchClaim {
                 }
                 return true;
             }
-            // Ordinary multipart dispatches and hook replays still fan out.
+            payload.hook_committed |= hook_committed;
+            payload.producer = producer.or(payload.producer);
+            // Ordinary multipart dispatches still fan out. Retained-row cleanup
+            // replay separately checks completed hook publication before admission.
             // Keep a completed claim, but let a new publisher own a pending one.
             if payload.publication.load(Ordering::Acquire) != PUBLICATION_COMPLETE {
                 payload.publication = publication.owner();
@@ -401,6 +417,8 @@ impl DispatchClaim {
         if self.payloads.len() < MAX_DISPATCH_PAYLOADS {
             self.payloads.push(DispatchPayload {
                 fingerprint,
+                hook_committed,
+                producer,
                 state: if pdo {
                     MessageDispatch::Recovered
                 } else {
@@ -468,10 +486,43 @@ impl MessageDispatch {
         message: &wa::Message,
         scratch: &mut Vec<u8>,
     ) -> DispatchFingerprint {
-        use sha2::{Digest, Sha256};
         scratch.clear();
         waproto::codec::message_encode_into(message, scratch);
-        Self::truncate(Sha256::digest(scratch.as_slice()).into())
+        Self::fingerprint_encoded(scratch, message.sender_key_distribution_message.is_set())
+    }
+
+    /// SKDM is a protocol carrier, processed before dispatch admission: adding
+    /// it to a pairwise group resend must not publish the same user payload
+    /// again after PDO. Exclude only that top-level field, without changing the
+    /// event or persisted bytes. Context, wrappers and the legacy fast-ratchet
+    /// field remain significant; their recovery equivalence is not established.
+    /// Reuse the existing encoding rather than cloning Message or instantiating
+    /// another protobuf sink (the latter costs an entire encode tree).
+    #[inline(never)]
+    pub(crate) fn fingerprint_encoded(encoded: &[u8], has_skdm: bool) -> DispatchFingerprint {
+        use buffa::encoding::{Tag, WireType, skip_field_depth};
+        use sha2::{Digest, Sha256};
+        if !has_skdm {
+            return Self::truncate(Sha256::digest(encoded).into());
+        }
+        let mut digest = Sha256::new();
+        let mut remaining = encoded;
+        while !remaining.is_empty() {
+            let field = remaining;
+            let Ok(tag) = Tag::decode(&mut remaining) else {
+                return Self::truncate(Sha256::digest(encoded).into());
+            };
+            if skip_field_depth(tag, &mut remaining, buffa::RECURSION_LIMIT).is_err() {
+                // A malformed encoding cannot justify discarding bytes.
+                return Self::truncate(Sha256::digest(encoded).into());
+            }
+            if tag.field_number() != waproto::tags::message::SENDER_KEY_DISTRIBUTION_MESSAGE
+                || tag.wire_type() != WireType::LengthDelimited
+            {
+                digest.update(&field[..field.len() - remaining.len()]);
+            }
+        }
+        Self::truncate(digest.finalize().into())
     }
 
     /// The retained prefix of a full digest, for a caller that already hashed
@@ -531,6 +582,8 @@ impl InboundCommitTicket {
 
 pub(crate) enum InboundCommitState {
     Durable,
+    /// The row is stored, but the consumer hook has not accepted it yet.
+    Buffered,
     Deferred(Option<InboundCommitTicket>),
     Failed,
 }
@@ -539,7 +592,7 @@ pub(crate) enum InboundCommitState {
 /// handled after the per-sender session lock is released.
 struct DeferredPlaintext {
     enc_type: &'static str,
-    plaintext: Vec<u8>,
+    plaintext: bytes::Bytes,
     padding_version: u8,
     /// Which `<enc>` in the stanza produced this — [`EncPayload::enc_index`],
     /// carried through because the buffer drains after the decrypt loop.
@@ -681,7 +734,9 @@ pub(crate) use wacore::protocol::retry::RetryReason;
 pub(crate) mod commit_batch;
 mod dispatch;
 mod durability;
+mod live_retention;
 mod msg_secret;
+mod raw_pending;
 mod receive;
 mod retry;
 mod special;

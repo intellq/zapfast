@@ -16,7 +16,26 @@ use crate::client::Client;
 use crate::send::{SendError, SendResult};
 
 impl Client {
-    /// React to a DM, group, or status@broadcast message.
+    /// React using the message's chat/author scope. Newsletter reactions use
+    /// [`crate::features::Newsletter::send_reaction`]; explicit chat/key interop
+    /// is available through [`Client::send_reaction_raw`].
+    pub async fn send_reaction(
+        &self,
+        target: &crate::MessageRef<'_>,
+        emoji: &str,
+    ) -> Result<SendResult, SendError> {
+        // Status reactions have supported author fanout; broadcast lists do not.
+        if target.chat().is_broadcast_list() {
+            return Err(crate::MessageRefError::UnsupportedOrigin.into());
+        }
+        let mut key = self.message_ref_addon_key(target).await?;
+        if target.chat().is_status_broadcast() && key.participant.is_none() {
+            key.participant = Some(self.pn().ok_or(SendError::NotLoggedIn)?.to_non_ad_string());
+        }
+        self.send_reaction_raw(target.chat(), key, emoji).await
+    }
+
+    /// Explicit raw chat/key interop for DM, group, or status reactions.
     ///
     /// `target_key` references the message being reacted to. For groups and
     /// status it must carry `participant` (the original sender) so the receipt
@@ -32,7 +51,7 @@ impl Client {
     ///
     /// status@broadcast reactions fan out to the status author's devices; the
     /// author is read from `target_key.participant` by the send path.
-    pub async fn send_reaction(
+    pub async fn send_reaction_raw(
         &self,
         chat: impl Into<Jid>,
         target_key: wa::MessageKey,
@@ -111,13 +130,16 @@ impl Client {
             target_key.participant = Some(author.to_non_ad_string());
         }
 
-        let message = wa::Message {
-            enc_reaction_message: MessageField::some(wa::message::EncReactionMessage {
-                target_message_key: MessageField::some(target_key),
-                enc_payload: Some(enc_payload),
-                enc_iv: Some(iv.to_vec()),
-            }),
-            ..Default::default()
+        let message = {
+            let mut proto = wa::Message::default();
+            proto.enc_reaction_message = MessageField::some({
+                let mut proto = wa::message::EncReactionMessage::default();
+                proto.target_message_key = MessageField::some(target_key);
+                proto.enc_payload = Some(enc_payload);
+                proto.enc_iv = Some(iv.to_vec());
+                proto
+            });
+            proto
         };
         self.send_message(chat, message).await
     }

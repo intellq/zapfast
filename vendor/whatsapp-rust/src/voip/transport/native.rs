@@ -61,7 +61,7 @@ const MEDIA_CHANNEL_TYPE: ChannelType = ChannelType::PartialReliableRexmitUnorde
 /// The retransmit count [`MEDIA_CHANNEL_TYPE`] carries: never retransmit, abandon instead.
 const MEDIA_MAX_RETRANSMITS: u32 = 0;
 
-use wacore::voip::demux::{RelayPacketKind, classify_relay_packet};
+use wacore::voip::demux::{RelayPacketKind, classify_relay_packet, unwrap_group_forwarding_packet};
 
 /// Why the media stack stopped. The driver branches on the variant: a peer close ends the call the
 /// way hanging up does, anything else is a transport failure the call surfaces as a read error.
@@ -691,6 +691,119 @@ type DialedRelay = (
     async_channel::Receiver<RelayTransportEvent>,
 );
 
+/// How long a relay that answered first on its advertised port is held back for the web-client
+/// port, when both are being dialled.
+///
+/// The preference is a local hypothesis; see [`WEB_CLIENT_RELAY_PORT`] for the evidence and limits.
+/// WA Web does not use this preference window. The wait gives the second handshake time to finish;
+/// `connect` logs which port was kept and why so a real call can test the hypothesis.
+const WEB_CLIENT_PORT_GRACE: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// How far into the dial the grace may run. A relay that answers on its advertised port later than
+/// this is kept at once, and one that answers earlier is never held past it.
+///
+/// The grace must never turn a connected relay into a failed call, so a completed dial has to come
+/// back inside every deadline its callers put on it: `RELAY_CONNECT_TIMEOUT` here (12 s) and the
+/// call driver's relay reconnect (10 s), the smallest. This leaves two seconds under that one.
+const WEB_CLIENT_PORT_GRACE_CUTOFF: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// Why a relay dial kept the port it did. Logged with the port, because which port answered and
+/// which was kept are no longer the same question.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PortChoice {
+    /// Only one port was dialled: the relay advertised the web-client port itself.
+    OnlyCandidate,
+    /// The web-client port completed its handshake first.
+    WebClientFirst,
+    /// Both ports completed their handshakes; the web-client port was preferred.
+    BothAnsweredPreferredWebClient,
+    /// The advertised port failed, and the web-client port answered.
+    AdvertisedFailed,
+    /// The web-client port failed, and the advertised port answered.
+    WebClientFailed,
+    /// The advertised port answered and the web-client port did not within the grace.
+    GraceExpired,
+    /// The web-client port had not answered by [`WEB_CLIENT_PORT_GRACE_CUTOFF`], which cut the
+    /// grace short or left none at all.
+    CutoffReached,
+}
+
+impl PortChoice {
+    fn reason(self) -> &'static str {
+        match self {
+            Self::OnlyCandidate => "the only port dialled",
+            Self::WebClientFirst => "the web-client port answered first",
+            Self::BothAnsweredPreferredWebClient => {
+                "both ports answered; preferred the web-client port"
+            }
+            Self::AdvertisedFailed => "the advertised port failed",
+            Self::WebClientFailed => "the web-client port failed; kept the advertised port",
+            Self::GraceExpired => {
+                "the web-client port did not answer within the grace; kept the advertised port"
+            }
+            Self::CutoffReached => {
+                "the web-client port had not answered by the grace cutoff; kept the advertised port"
+            }
+        }
+    }
+}
+
+/// The line `connect` logs once a relay is up: the port kept, the port advertised, and why.
+fn connected_message(kept: SocketAddr, advertised: SocketAddr, choice: PortChoice) -> String {
+    format!(
+        "voip: relay media connected on {kept} (advertised {advertised}): {}",
+        choice.reason()
+    )
+}
+
+/// Races the dial of the advertised port against the dial of the web-client port, and keeps the
+/// web-client port whenever it answers within [`WEB_CLIENT_PORT_GRACE`] of the advertised one, but
+/// never waits past [`WEB_CLIENT_PORT_GRACE_CUTOFF`] from the start of the dial. Dropping the one
+/// not kept aborts it.
+async fn prefer_web_client_port<T, A, W>(
+    runtime: &dyn Runtime,
+    advertised: A,
+    web_client: W,
+) -> Result<(T, PortChoice)>
+where
+    A: Future<Output = Result<T>> + Unpin,
+    W: Future<Output = Result<T>> + Unpin,
+{
+    use futures::future::Either;
+    // Both dials start on this future's first poll, so the cutoff is measured from here.
+    let started = tokio::time::Instant::now();
+    match futures::future::select(advertised, web_client).await {
+        Either::Right((Ok(web_client), _advertised)) => {
+            Ok((web_client, PortChoice::WebClientFirst))
+        }
+        Either::Right((Err(web_error), advertised)) => advertised
+            .await
+            .map(|advertised| (advertised, PortChoice::WebClientFailed))
+            .map_err(|error| anyhow!("{error}; {web_error}")),
+        Either::Left((Err(advertised_error), web_client)) => web_client
+            .await
+            .map(|web_client| (web_client, PortChoice::AdvertisedFailed))
+            .map_err(|error| anyhow!("{error}; {advertised_error}")),
+        Either::Left((Ok(advertised), web_client)) => {
+            let left = WEB_CLIENT_PORT_GRACE_CUTOFF.saturating_sub(started.elapsed());
+            if left.is_zero() {
+                return Ok((advertised, PortChoice::CutoffReached));
+            }
+            // Dropping the channel not kept aborts its driver.
+            match wacore::runtime::timeout(runtime, WEB_CLIENT_PORT_GRACE.min(left), web_client)
+                .await
+            {
+                Ok(Ok(web_client)) => Ok((web_client, PortChoice::BothAnsweredPreferredWebClient)),
+                Ok(Err(_)) => Ok((advertised, PortChoice::WebClientFailed)),
+                Err(_) if left < WEB_CLIENT_PORT_GRACE => {
+                    Ok((advertised, PortChoice::CutoffReached))
+                }
+                Err(_) => Ok((advertised, PortChoice::GraceExpired)),
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl RelayTransportFactory for RelayMediaChannelFactory {
     async fn connect(
@@ -699,17 +812,15 @@ impl RelayTransportFactory for RelayMediaChannelFactory {
         Arc<dyn RelayTransport>,
         async_channel::Receiver<RelayTransportEvent>,
     )> {
-        // Race every candidate port (see `dial_candidates`) and keep whichever completes the
-        // handshake. `select_ok` discards the losers' errors and drops their futures, aborting those
-        // dials. Cost when the advertised port is the right one is a second UDP socket for the
-        // duration of the handshake; trying serially would instead add a full RELAY_CONNECT_TIMEOUT
-        // to every call on the other relay family.
+        // Race every candidate port (see `dial_candidates`). The losers' futures are dropped,
+        // aborting those dials. Cost when the advertised port is the right one is a second UDP
+        // socket for the duration of the handshake; trying serially would instead add a full
+        // RELAY_CONNECT_TIMEOUT to every call on the other relay family.
         let dialed = dial_candidates(self.addr);
-        // Whichever candidate wins is the only record of whether this relay honoured the port it
-        // advertised, and `select_ok` yields just the winner's output - so carry the address through
-        // rather than reconstruct it. Also tags each error with its address: `select_ok` propagates
-        // only the LAST error, which without this would name no endpoint at all.
-        let candidates: Vec<Pin<Box<dyn Future<Output = Result<DialedRelay>> + Send>>> = dialed
+        // Whichever candidate is kept is the only record of whether this relay honoured the port it
+        // advertised, so carry the address through rather than reconstruct it. Also tags each error
+        // with its address, which would otherwise name no endpoint at all.
+        let mut candidates: Vec<Pin<Box<dyn Future<Output = Result<DialedRelay>> + Send>>> = dialed
             .iter()
             .map(|&addr| {
                 let runtime = self.runtime.clone();
@@ -726,34 +837,36 @@ impl RelayTransportFactory for RelayMediaChannelFactory {
             .map(ToString::to_string)
             .collect::<Vec<_>>()
             .join(", ");
+        // With the web-client port raced beside the advertised one, the first to answer is not
+        // necessarily the one to keep; see `WEB_CLIENT_PORT_GRACE`.
+        let race: Pin<Box<dyn Future<Output = Result<(DialedRelay, PortChoice)>> + Send + '_>> =
+            match (candidates.pop(), candidates.pop()) {
+                (Some(web_client), Some(advertised)) if candidates.is_empty() => Box::pin(
+                    prefer_web_client_port(&*self.runtime, advertised, web_client),
+                ),
+                (last, previous) => Box::pin(async move {
+                    let all: Vec<_> = candidates.into_iter().chain(previous).chain(last).collect();
+                    futures::future::select_ok(all)
+                        .await
+                        .map(|(won, _)| (won, PortChoice::OnlyCandidate))
+                }),
+            };
         // Bound the UDP+DTLS+SCTP+DataChannel handshake: a relay whose UDP is reachable but whose
         // DTLS/SCTP wedges (black-holed endpoint) would otherwise park the caller forever with no
         // failure surfaced. Matches the old connect_and_allocate's 12s timeout.
-        let (winner, chan, events) = wacore::runtime::timeout(
-            &*self.runtime,
-            RELAY_CONNECT_TIMEOUT,
-            futures::future::select_ok(candidates),
-        )
-        .await
-        .map_err(|_| {
-            anyhow!(
-                "relay connect timed out after {RELAY_CONNECT_TIMEOUT:?} \
+        let ((kept, chan, events), choice) =
+            wacore::runtime::timeout(&*self.runtime, RELAY_CONNECT_TIMEOUT, race)
+                .await
+                .map_err(|_| {
+                    anyhow!(
+                        "relay connect timed out after {RELAY_CONNECT_TIMEOUT:?} \
                  (DTLS/SCTP didn't complete); tried {tried}"
-            )
-        })?
-        .map_err(|e| anyhow!("relay connect: {e}; tried {tried}"))?
-        .0;
-        // The advertised port and the port that answered diverge per host and per session, so this
-        // is the only place that fact is observable in production.
-        debug!(
-            "voip: relay media connected on {winner} (advertised {}){}",
-            self.addr,
-            if winner == self.addr {
-                ""
-            } else {
-                " - relay did NOT serve its advertised port"
-            }
-        );
+                    )
+                })?
+                .map_err(|e| anyhow!("relay connect: {e}; tried {tried}"))?;
+        // Which ports answered and which was kept diverge per host and per session, so this is the
+        // only place that is observable in production.
+        debug!("{}", connected_message(kept, self.addr, choice));
         Ok((Arc::new(chan) as Arc<dyn RelayTransport>, events))
     }
 }
@@ -777,6 +890,7 @@ async fn relay_driver(
     open: async_channel::Sender<Result<(), String>>,
 ) {
     let mut buf = vec![0u8; RELAY_DATAGRAM_BUF];
+    let mut tally = InboundTally::new(socket.peer_addr().ok());
     let mut announced = false;
     // Media discarded under backpressure since the last report. See `deliver`.
     let mut dropped_inbound = 0u32;
@@ -792,6 +906,7 @@ async fn relay_driver(
             }
         }
         while let Some(packet) = stack.poll_inbound() {
+            tally.count(&packet);
             if !deliver(&events, packet, &mut dropped_inbound).await {
                 return; // the call dropped its receiver
             }
@@ -841,6 +956,66 @@ async fn relay_driver(
             debug!("voip: relay media channel ended: {e}");
             finish(&events, &open, announced, dropped_inbound, e.into()).await;
             return;
+        }
+    }
+}
+
+/// What a relay channel received, by kind, counted as it leaves the DTLS/SCTP stack and before the
+/// engine decrypts any of it. The engine's `rtp_received` counts only packets that pass SRTP, so this
+/// is what tells "the relay sent nothing on this port" apart from "it sent packets the call could
+/// not use". Logged once, when the driver ends or is aborted, including a losing candidate's.
+struct InboundTally {
+    peer: Option<SocketAddr>,
+    stun: u64,
+    rtp: u64,
+    rtcp: u64,
+    other: u64,
+}
+
+impl InboundTally {
+    fn new(peer: Option<SocketAddr>) -> Self {
+        Self {
+            peer,
+            stun: 0,
+            rtp: 0,
+            rtcp: 0,
+            other: 0,
+        }
+    }
+
+    fn count(&mut self, packet: &[u8]) {
+        // Match the engine's demux before SRTP authentication, including group media.
+        let kind = unwrap_group_forwarding_packet(packet)
+            .map(|packet| classify_relay_packet(packet.payload))
+            .unwrap_or(RelayPacketKind::Other);
+        let slot = match kind {
+            RelayPacketKind::Stun => &mut self.stun,
+            RelayPacketKind::Rtp => &mut self.rtp,
+            RelayPacketKind::Rtcp => &mut self.rtcp,
+            RelayPacketKind::Other => &mut self.other,
+        };
+        *slot = slot.saturating_add(1);
+    }
+}
+
+impl Drop for InboundTally {
+    fn drop(&mut self) {
+        let Self {
+            stun,
+            rtp,
+            rtcp,
+            other,
+            ..
+        } = self;
+        match self.peer {
+            Some(peer) => debug!(
+                "voip: relay channel on {peer} received {rtp} RTP, {rtcp} RTCP, {stun} STUN and \
+                 {other} other packets before decryption"
+            ),
+            None => debug!(
+                "voip: relay channel received {rtp} RTP, {rtcp} RTCP, {stun} STUN and {other} \
+                 other packets before decryption"
+            ),
         }
     }
 }
@@ -952,6 +1127,247 @@ mod tests {
     fn dial_candidates_does_not_duplicate_the_web_client_port() {
         let advertised: SocketAddr = "170.78.54.98:3480".parse().unwrap();
         assert_eq!(dial_candidates(advertised), vec![advertised]);
+    }
+
+    /// A dial that answers after `ms`, as `answer`.
+    fn dial(
+        ms: u64,
+        answer: Result<&'static str>,
+    ) -> Pin<Box<dyn Future<Output = Result<&'static str>> + Send>> {
+        Box::pin(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+            answer
+        })
+    }
+
+    // This pins selection policy. Media routing still needs the same-host measurement described
+    // by `WEB_CLIENT_RELAY_PORT`.
+    #[tokio::test(start_paused = true)]
+    async fn a_relay_serving_both_ports_is_kept_on_the_web_client_port() {
+        let runtime = crate::runtime_impl::TokioRuntime;
+        let kept = prefer_web_client_port(
+            &runtime,
+            dial(80, Ok("advertised")),
+            dial(140, Ok("web client")),
+        )
+        .await
+        .expect("a relay");
+        assert_eq!(
+            kept,
+            ("web client", PortChoice::BothAnsweredPreferredWebClient)
+        );
+    }
+
+    /// Both handshakes completed, so the log must not claim the advertised port went unserved.
+    #[test]
+    fn the_log_says_both_ports_answered_when_the_web_client_port_was_preferred() {
+        let advertised: SocketAddr = "57.144.43.57:3478".parse().unwrap();
+        let kept: SocketAddr = "57.144.43.57:3480".parse().unwrap();
+        let line = connected_message(kept, advertised, PortChoice::BothAnsweredPreferredWebClient);
+        assert_eq!(
+            line,
+            "voip: relay media connected on 57.144.43.57:3480 (advertised 57.144.43.57:3478): \
+             both ports answered; preferred the web-client port"
+        );
+        assert!(!line.contains("NOT serve"), "{line}");
+        let line = connected_message(kept, advertised, PortChoice::AdvertisedFailed);
+        assert!(line.ends_with("the advertised port failed"), "{line}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_advertised_port_is_kept_when_the_web_client_port_does_not_answer() {
+        let runtime = crate::runtime_impl::TokioRuntime;
+        // Silent: answers long after the grace, as a host not serving it at all would never.
+        let kept = prefer_web_client_port(
+            &runtime,
+            dial(80, Ok("advertised")),
+            dial(60_000, Ok("web client")),
+        )
+        .await
+        .expect("a relay");
+        assert_eq!(kept, ("advertised", PortChoice::GraceExpired));
+        let kept = prefer_web_client_port(
+            &runtime,
+            dial(80, Ok("advertised")),
+            dial(200, Err(anyhow!("refused"))),
+        )
+        .await
+        .expect("a relay");
+        assert_eq!(kept, ("advertised", PortChoice::WebClientFailed));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn either_port_alone_is_enough_and_both_failing_names_both() {
+        let runtime = crate::runtime_impl::TokioRuntime;
+        let kept = prefer_web_client_port(
+            &runtime,
+            dial(10, Err(anyhow!("advertised: timed out"))),
+            dial(300, Ok("web client")),
+        )
+        .await
+        .expect("a relay");
+        assert_eq!(kept, ("web client", PortChoice::AdvertisedFailed));
+        let kept = prefer_web_client_port(
+            &runtime,
+            dial(90, Ok("advertised")),
+            dial(10, Ok("web client")),
+        )
+        .await
+        .expect("a relay");
+        assert_eq!(
+            kept,
+            ("web client", PortChoice::WebClientFirst),
+            "the web-client port answering first is kept at once"
+        );
+        let error = prefer_web_client_port::<&str, _, _>(
+            &runtime,
+            dial(10, Err(anyhow!("advertised: refused"))),
+            dial(20, Err(anyhow!("web client: refused"))),
+        )
+        .await
+        .expect_err("no relay");
+        let message = error.to_string();
+        assert!(
+            message.contains("advertised") && message.contains("web client"),
+            "{message}"
+        );
+    }
+
+    /// A packet that would fail its SRTP tag still counts as RTP before decryption.
+    #[test]
+    fn the_inbound_tally_counts_each_kind_before_decryption() {
+        let mut tally = InboundTally::new(None);
+        let mut rtp = [0u8; 12]; // payload type 120, never decrypted here
+        rtp[0] = 0x80;
+        rtp[1] = 0x78;
+        let mut rtcp = [0u8; 8]; // receiver report
+        rtcp[0] = 0x81;
+        rtcp[1] = 0xc9;
+        tally.count(&[0x00, 0x01, 0x00, 0x00]); // STUN Binding Request
+        tally.count(&rtp);
+        tally.count(&rtp);
+        tally.count(&rtcp);
+        tally.count(&[0x80]); // too short to classify
+        assert_eq!(
+            (tally.stun, tally.rtp, tally.rtcp, tally.other),
+            (1, 2, 1, 1)
+        );
+    }
+
+    #[test]
+    fn the_inbound_tally_unwraps_group_media_before_classifying() {
+        let mut tally = InboundTally::new(None);
+        for (format, header_len) in [(2, 8), (4, 12), (7, 18)] {
+            for payload_type in [120, 201] {
+                let mut packet = vec![0; header_len + 12];
+                packet[0] = 0x09;
+                packet[1] = format;
+                packet[header_len] = 0x80;
+                packet[header_len + 1] = payload_type;
+                tally.count(&packet);
+            }
+        }
+        assert_eq!(
+            (tally.stun, tally.rtp, tally.rtcp, tally.other),
+            (0, 3, 3, 0)
+        );
+    }
+
+    #[test]
+    fn the_inbound_tally_counts_malformed_group_envelopes_as_other() {
+        let mut tally = InboundTally::new(None);
+        for packet in [
+            &[0x09][..],
+            &[0x09, 3],
+            &[0x09, 2, 0, 0, 0, 0, 0, 0],
+            &[0x09, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x80, 120],
+            &[
+                0x09, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            ],
+        ] {
+            tally.count(packet);
+        }
+        assert_eq!(
+            (tally.stun, tally.rtp, tally.rtcp, tally.other),
+            (0, 0, 0, 5)
+        );
+    }
+
+    /// From review: the call driver gives a relay reconnect 10 s, and the factory's own deadline is
+    /// 12 s. An advertised port that answers at 9 s used to be returned at 9 s; the grace must not
+    /// hold it past either deadline, or a relay that was up ends the call.
+    #[tokio::test(start_paused = true)]
+    async fn a_late_answer_is_returned_inside_the_reconnect_deadline() {
+        let runtime = crate::runtime_impl::TokioRuntime;
+        let started = tokio::time::Instant::now();
+        let native = wacore::runtime::timeout(
+            &runtime,
+            RELAY_CONNECT_TIMEOUT,
+            prefer_web_client_port(
+                &runtime,
+                dial(9_000, Ok("advertised")),
+                dial(60_000, Ok("web client")),
+            ),
+        );
+        let result =
+            wacore::runtime::timeout(&runtime, std::time::Duration::from_secs(10), native).await;
+        let kept = result
+            .expect("inside the reconnect deadline")
+            .expect("inside the factory deadline")
+            .expect("a relay");
+        assert_eq!(kept, ("advertised", PortChoice::CutoffReached));
+        assert_eq!(
+            started.elapsed(),
+            std::time::Duration::from_secs(9),
+            "kept at once"
+        );
+    }
+
+    /// The factory's own deadline on its own: the advertised port answers at 11 s, inside the 12 s.
+    #[tokio::test(start_paused = true)]
+    async fn a_late_answer_is_returned_inside_the_connect_deadline() {
+        let runtime = crate::runtime_impl::TokioRuntime;
+        let kept = wacore::runtime::timeout(
+            &runtime,
+            RELAY_CONNECT_TIMEOUT,
+            prefer_web_client_port(
+                &runtime,
+                dial(11_000, Ok("advertised")),
+                dial(60_000, Ok("web client")),
+            ),
+        )
+        .await
+        .expect("inside the factory deadline")
+        .expect("a relay");
+        assert_eq!(kept, ("advertised", PortChoice::CutoffReached));
+    }
+
+    /// An answer shortly before the cutoff gets only what is left of the grace, so the dial still
+    /// comes back by the cutoff; the web-client port is still preferred if it answers by then.
+    #[tokio::test(start_paused = true)]
+    async fn the_grace_is_cut_short_at_the_cutoff() {
+        let runtime = crate::runtime_impl::TokioRuntime;
+        let started = tokio::time::Instant::now();
+        let kept = prefer_web_client_port(
+            &runtime,
+            dial(7_500, Ok("advertised")),
+            dial(60_000, Ok("web client")),
+        )
+        .await
+        .expect("a relay");
+        assert_eq!(kept, ("advertised", PortChoice::CutoffReached));
+        assert_eq!(started.elapsed(), WEB_CLIENT_PORT_GRACE_CUTOFF);
+        let kept = prefer_web_client_port(
+            &runtime,
+            dial(7_500, Ok("advertised")),
+            dial(7_900, Ok("web client")),
+        )
+        .await
+        .expect("a relay");
+        assert_eq!(
+            kept,
+            ("web client", PortChoice::BothAnsweredPreferredWebClient)
+        );
     }
 
     /// The channel type WA Web opens the media channel with has to decompose into the SCTP send

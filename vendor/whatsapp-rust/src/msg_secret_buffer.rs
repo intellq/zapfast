@@ -27,6 +27,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use portable_atomic::AtomicU64;
 use wacore::store::traits::MsgSecretEntry;
 
+/// Failures observed by the secret buffer since this client was constructed,
+/// including detached writes that failed before the final shutdown drain.
+/// Failed entries retain the existing warn-and-drop semantics, not retry.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct SecretFlushReport {
+    pub failed_batches: u64,
+    /// The first backend failure, preserving its source chain.
+    pub first_error: Option<Arc<crate::store::error::StoreError>>,
+}
+
 #[derive(Eq, Hash, PartialEq)]
 struct Key {
     chat: Arc<str>,
@@ -140,6 +151,7 @@ pub(crate) struct MsgSecretWriteBuffer {
     // the backend-owned batch later copies only Arc handles and inline bytes.
     pending: Mutex<Pending>,
     pending_limit: usize,
+    failures: Mutex<SecretFlushReport>,
     /// Registered while holding `pending`, so a removal notification cannot
     /// race between a full-capacity check and the producer starting to wait.
     capacity_available: event_listener::Event,
@@ -161,7 +173,7 @@ pub(crate) struct MsgSecretWriteBuffer {
     /// ownership: it holds a Weak, and the Sender above lives here, so dropping
     /// the buffer closes the channel and ends the worker.
     worker_started: AtomicBool,
-    backend: Arc<dyn crate::store::traits::Backend>,
+    backend: crate::store::release::BackendLease,
     runtime: Arc<dyn wacore::runtime::Runtime>,
     /// Batches written so far; test observability for the coalescing claim.
     #[cfg(test)]
@@ -172,14 +184,14 @@ pub(crate) struct MsgSecretWriteBuffer {
 
 impl MsgSecretWriteBuffer {
     pub(crate) fn new(
-        backend: Arc<dyn crate::store::traits::Backend>,
+        backend: crate::store::release::BackendLease,
         runtime: Arc<dyn wacore::runtime::Runtime>,
     ) -> Arc<Self> {
         Self::with_pending_limit(backend, runtime, MAX_PENDING_MSG_SECRETS)
     }
 
     fn with_pending_limit(
-        backend: Arc<dyn crate::store::traits::Backend>,
+        backend: crate::store::release::BackendLease,
         runtime: Arc<dyn wacore::runtime::Runtime>,
         pending_limit: usize,
     ) -> Arc<Self> {
@@ -191,6 +203,7 @@ impl MsgSecretWriteBuffer {
         Arc::new(Self {
             pending: Mutex::new(HashMap::with_hasher(RandomState::new())),
             pending_limit,
+            failures: Mutex::new(SecretFlushReport::default()),
             capacity_available: event_listener::Event::new(),
             sealed: AtomicBool::new(false),
             write_lock: async_lock::Mutex::new(()),
@@ -316,9 +329,23 @@ impl MsgSecretWriteBuffer {
         self.wake_tx.close();
     }
 
-    /// Buffered-first read. Returns `(secret, message_ts)` like
-    /// `get_msg_secret_with_ts`.
+    /// Byte-only projection for the crypto paths that do not use parent time.
     pub(crate) fn lookup(&self, chat: &str, sender: &str, msg_id: &str) -> Option<(Vec<u8>, i64)> {
+        self.lookup_stored(chat, sender, msg_id).map(|stored| {
+            (
+                stored.secret.into_bytes().to_vec(),
+                stored.message_ts.unwrap_or(0),
+            )
+        })
+    }
+
+    /// Buffered-first read with the same validated shape as the backend.
+    pub(crate) fn lookup_stored(
+        &self,
+        chat: &str,
+        sender: &str,
+        msg_id: &str,
+    ) -> Option<wacore::store::traits::StoredMessageSecret> {
         let pending = self.pending.lock().unwrap_or_else(|p| p.into_inner());
         pending
             .get(&KeyRef {
@@ -326,7 +353,12 @@ impl MsgSecretWriteBuffer {
                 sender,
                 msg_id,
             })
-            .map(|e| (e.secret.to_vec(), e.message_ts))
+            .map(|e| {
+                wacore::store::traits::StoredMessageSecret::new(
+                    wacore::store::traits::MessageSecret::from_bytes(e.secret),
+                    Some(e.message_ts),
+                )
+            })
     }
 
     /// Signal the drain worker, starting it on first use.
@@ -384,6 +416,11 @@ impl MsgSecretWriteBuffer {
         if let Err(e) = self.backend.put_msg_secrets(owned).await {
             // Same semantics as the previously awaited write: warn + drop.
             log::warn!("failed to persist messageSecrets: {e:?}");
+            let mut failures = self.failures.lock().unwrap_or_else(|p| p.into_inner());
+            failures.failed_batches = failures.failed_batches.saturating_add(1);
+            if failures.first_error.is_none() {
+                failures.first_error = Some(Arc::new(e));
+            }
         }
         self.flushed_batches.fetch_add(1, Ordering::Relaxed);
         self.finish_batch(&mut batch);
@@ -393,8 +430,12 @@ impl MsgSecretWriteBuffer {
     /// Drain everything pending before returning. For graceful shutdown: the
     /// detached drain task is not awaited anywhere, so disconnect calls this
     /// to make sure a just-captured secret is not lost on a clean exit.
-    pub(crate) async fn flush(&self) {
+    pub(crate) async fn flush(&self) -> SecretFlushReport {
         while self.flush_pending_once().await {}
+        self.failures
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 
     /// Remove the flushed entries, but only where the pending value is still
@@ -474,13 +515,16 @@ mod tests {
 
     async fn buffer() -> Arc<MsgSecretWriteBuffer> {
         let backend = crate::test_utils::create_test_backend().await;
-        MsgSecretWriteBuffer::new(backend, Arc::new(crate::runtime_impl::TokioRuntime))
+        MsgSecretWriteBuffer::new(
+            crate::store::release::BackendLease::new(backend),
+            Arc::new(crate::runtime_impl::TokioRuntime),
+        )
     }
 
     async fn buffer_with_pending_limit(pending_limit: usize) -> Arc<MsgSecretWriteBuffer> {
         let backend = crate::test_utils::create_test_backend().await;
         MsgSecretWriteBuffer::with_pending_limit(
-            backend,
+            crate::store::release::BackendLease::new(backend),
             Arc::new(crate::runtime_impl::TokioRuntime),
             pending_limit,
         )
@@ -989,6 +1033,56 @@ mod tests {
 
     /// The production flush drains everything synchronously, covering the
     /// graceful-shutdown path where the detached drain is never awaited.
+    #[tokio::test]
+    async fn failed_secret_writes_remain_observable_after_buffer_empties() {
+        use crate::store::error::StoreError;
+        use whatsapp_rust_sqlite_storage::{SqliteDatabase, SqliteDatabaseConfig};
+        let fail = Arc::new(AtomicBool::new(false));
+        let barrier_fail = fail.clone();
+        // Same named shared-memory URI supported by create_test_backend.
+        let database_url = format!(
+            "file:secret-write-failure-{}?mode=memory&cache=shared",
+            std::process::id()
+        );
+        let database = SqliteDatabase::open(
+            &database_url,
+            SqliteDatabaseConfig::default().with_commit_barrier(Arc::new(move || {
+                let fail = barrier_fail.clone();
+                Box::pin(async move {
+                    if fail.load(Ordering::Acquire) {
+                        Err(StoreError::Io(std::io::Error::other(
+                            "synthetic secret write failure",
+                        )))
+                    } else {
+                        Ok(())
+                    }
+                })
+            })),
+        )
+        .await
+        .unwrap();
+        let buffer = MsgSecretWriteBuffer::new(
+            crate::store::release::BackendLease::new(Arc::new(database.store(1))),
+            Arc::new(crate::runtime_impl::TokioRuntime),
+        );
+        buffer
+            .queue_one(entry("100@g.us", "15550000001@s.whatsapp.net", "FAIL", 7))
+            .await;
+        fail.store(true, Ordering::Release);
+        buffer.wait_flushed().await; // detached worker drops the failed batch
+        assert_eq!(buffer.pending_len(), 0);
+        buffer.seal();
+        let report = buffer.flush().await;
+        assert_eq!(report.failed_batches, 1);
+        let error = report.first_error.unwrap();
+        assert!(std::error::Error::source(error.as_ref()).is_some());
+        assert_eq!(
+            buffer.flush().await.failed_batches,
+            1,
+            "an empty final drain must not erase an earlier failure"
+        );
+    }
+
     #[tokio::test]
     async fn explicit_flush_drains_everything() {
         let buf = buffer().await;

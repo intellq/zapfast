@@ -16,7 +16,8 @@ use wacore::iq::mex_operations::{
     fetch_newsletter_followers, join_newsletter, leave_newsletter, update_newsletter,
     update_newsletter_user_setting,
 };
-use wacore::iq::newsletter::NEWSLETTER_XMLNS;
+use wacore::iq::newsletter::{MyAddOnsSpec, NEWSLETTER_XMLNS};
+pub use wacore::iq::newsletter::{NewsletterMyAddOns, NewsletterMyPollVote, NewsletterMyReaction};
 use wacore::request::InfoQuery;
 use wacore::types::message::{EditAttribute, PollType};
 use wacore_binary::Jid;
@@ -29,19 +30,28 @@ use waproto::whatsapp as wa;
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum NewsletterError {
+    /// Invalid or missing target identifiers, rejected before network work.
+    #[error("{0}")]
+    MessageRef(#[from] crate::MessageRefError),
     /// A MEX (GraphQL) query/mutation failed or returned malformed data.
     #[error("{0}")]
     Mex(#[from] MexError),
-    /// An IQ (message history, live updates) failed.
+    /// An IQ (message history, live updates, add-ons) failed, including parsing its response.
     #[error("{0}")]
     Iq(#[from] IqError),
     /// Connection/transport failure sending a plaintext stanza (edit/revoke).
     #[error("{0}")]
     Client(#[from] ClientError),
+    /// Picture data was empty; use the dedicated removal operation instead.
+    #[error("picture data cannot be empty; use remove_picture instead")]
+    EmptyPicture,
     /// The request was malformed (e.g. a non-newsletter JID, an empty target
     /// message id, or a missing element in the server response).
     #[error("invalid newsletter request: {0}")]
     InvalidRequest(String),
+    /// No newsletter exists behind this JID.
+    #[error("newsletter not found: {0}")]
+    NotFound(Jid),
     /// Catch-all for internal failures with no dedicated variant.
     #[error("{0}")]
     Internal(#[from] anyhow::Error),
@@ -213,6 +223,8 @@ pub enum NewsletterQuestionType {
 pub enum NewsletterVerification {
     Verified,
     Unverified,
+    /// A value this library does not model, as the server spelled it.
+    Other(String),
 }
 
 /// Newsletter state.
@@ -222,6 +234,9 @@ pub enum NewsletterState {
     Active,
     Suspended,
     Geosuspended,
+    /// A state this library does not model, as the server spelled it: a
+    /// deleted channel, for one, reads `DELETED`.
+    Other(String),
 }
 
 /// The viewer's role in a newsletter.
@@ -235,7 +250,8 @@ pub enum NewsletterRole {
 }
 
 /// Metadata for a newsletter (channel).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, bon::Builder)]
+#[non_exhaustive]
 pub struct NewsletterMetadata {
     pub jid: Jid,
     pub name: String,
@@ -261,7 +277,8 @@ pub struct NewsletterMetadata {
 ///
 /// `id` is the profile's own identifier, not a JID: the server hands it back as
 /// an opaque string and WA Web never parses it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, bon::Builder)]
+#[non_exhaustive]
 pub struct NewsletterAdminProfile {
     pub id: Option<String>,
     pub name: String,
@@ -270,7 +287,8 @@ pub struct NewsletterAdminProfile {
 }
 
 /// Admin-side information about a newsletter.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, bon::Builder)]
+#[non_exhaustive]
 pub struct NewsletterAdminInfo {
     /// How many admins the newsletter has. The server only answers this for
     /// admins and owners, so it is absent for everyone else.
@@ -282,7 +300,8 @@ pub struct NewsletterAdminInfo {
 }
 
 /// A follower (subscriber) of a newsletter.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, bon::Builder)]
+#[non_exhaustive]
 pub struct NewsletterFollower {
     /// The follower's identity JID — a LID on accounts that have migrated.
     pub jid: Jid,
@@ -300,7 +319,8 @@ pub struct NewsletterFollower {
 }
 
 /// A reaction count on a newsletter message.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, bon::Builder)]
+#[non_exhaustive]
 pub struct NewsletterReactionCount {
     pub code: String,
     pub count: u64,
@@ -311,7 +331,7 @@ pub struct NewsletterReactionCount {
 /// Channel polls are counted server-side, so unlike a DM or group vote (which
 /// arrives encrypted, see [`wacore::poll`]) there is nothing to decrypt here:
 /// the server hands over the totals directly, keyed by option hash.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, bon::Builder)]
 #[non_exhaustive]
 pub struct NewsletterPollVote {
     /// SHA-256 of the option name, the same digest
@@ -326,15 +346,14 @@ pub struct NewsletterPollVote {
 /// A message from a newsletter's history.
 ///
 /// `#[non_exhaustive]` because the server keeps adding children to
-/// `<message>`: construct it from a parsed response rather than by struct
-/// literal, so the next counter WhatsApp ships is an added field and not a
-/// break.
-#[derive(Debug, Clone)]
+/// `<message>`. Use parsed responses in production; [`Self::builder`] also
+/// supports host mocks without exhaustive struct literals.
+#[derive(Debug, Clone, bon::Builder)]
 #[non_exhaustive]
 pub struct NewsletterMessage {
     /// Wire message id (the stanza `id`). This is what edit_message / revoke_message
-    /// key on (NOT `server_id`). Empty if the server omitted it.
-    pub message_id: String,
+    /// key on (NOT `server_id`). `None` if the server omitted it.
+    pub message_id: Option<crate::MessageId>,
     /// Server-assigned message ID (monotonic, used for pagination cursors).
     pub server_id: u64,
     /// Message timestamp (Unix seconds).
@@ -342,6 +361,10 @@ pub struct NewsletterMessage {
     /// Message type: `text`, `media` or `poll`. An edit or a revocation is not
     /// a type of its own, see [`edit`](Self::edit).
     pub message_type: NewsletterMessageType,
+    /// The `type` attribute exactly as the server sent it, `None` when it was
+    /// absent. [`message_type`](Self::message_type) reads an absent attribute
+    /// as `Text`; this is how to tell the two apart, or to pass the token on.
+    pub message_type_raw: Option<String>,
     /// The `edit` attribute: [`EditAttribute::AdminEdit`] (`3`) for an edited
     /// message, [`EditAttribute::AdminRevoke`] (`8`) for a revoked one.
     /// [`EditAttribute::Empty`] when the attribute is absent, which is the
@@ -361,8 +384,10 @@ pub struct NewsletterMessage {
     /// [`NewsletterMediaType::Other`].
     pub media_type: Option<NewsletterMediaType>,
     /// Reaction counts on this message.
+    #[builder(default)]
     pub reactions: Vec<NewsletterReactionCount>,
     /// Per-option vote tallies, for a `poll` message.
+    #[builder(default)]
     pub votes: Vec<NewsletterPollVote>,
     /// How many times the message was forwarded.
     ///
@@ -391,8 +416,12 @@ pub struct NewsletterMessage {
     ///
     /// Read only when [`message_type`](Self::message_type) is
     /// [`NewsletterMessageType::Poll`], the same scoping WA Web applies, so a
-    /// `polltype` on anything else is ignored rather than recorded.
+    /// `polltype` on anything else is not read as a stage here. The token
+    /// itself is in [`poll_type_raw`](Self::poll_type_raw).
     pub poll_type: Option<PollType>,
+    /// `<meta polltype>` exactly as the server sent it, whatever the message
+    /// type and whether or not [`PollType`] has a variant for it.
+    pub poll_type_raw: Option<String>,
     /// `<meta contenttype>`.
     pub content_type: Option<String>,
     /// `<meta questiontype>`: `question` for a channel question, `reply` for an
@@ -414,6 +443,18 @@ pub struct NewsletterMessage {
     pub rcat: Option<Vec<u8>>,
 }
 
+impl NewsletterMessage {
+    /// Borrow the channel while copying only the short id, not the message
+    /// body. History requires a server id; an omitted client id stays absent.
+    pub fn message_ref<'a>(
+        &self,
+        chat: &'a Jid,
+    ) -> Result<crate::NewsletterMessageRef<'a>, crate::MessageRefError> {
+        crate::NewsletterMessageRef::new(chat, self.message_id.clone(), Some(self.server_id.into()))
+            .map(|r| r.with_from_me(self.is_sender))
+    }
+}
+
 /// Feature handle for newsletter (channel) operations.
 pub struct Newsletter<'a> {
     client: &'a Client,
@@ -429,7 +470,7 @@ impl<'a> Newsletter<'a> {
         let response = self
             .client
             .mex()
-            .query(mex_request!(fetch_all_newsletters_metadata {
+            .execute(mex_request!(fetch_all_newsletters_metadata {
                 // Both gate response blocks this client does not parse. WA Web
                 // reads the same two feature flags and sends whatever they say,
                 // so `false` is a value the server sees from it every day.
@@ -438,40 +479,24 @@ impl<'a> Newsletter<'a> {
             }))
             .await?;
 
-        let data = response
-            .data
-            .ok_or_else(|| NewsletterError::InvalidRequest("missing data".into()))?;
-        let newsletters = data["xwa2_newsletter_subscribed"]
-            .as_array()
-            .ok_or_else(|| {
-                NewsletterError::InvalidRequest("missing xwa2_newsletter_subscribed array".into())
-            })?;
-
-        newsletters.iter().map(parse_newsletter_metadata).collect()
+        parse_subscribed_newsletters(response.data)
     }
 
     /// Fetch metadata for a newsletter by its JID.
+    ///
+    /// Fails with [`NewsletterError::NotFound`] when no channel exists behind
+    /// `jid`.
     pub async fn get_metadata(&self, jid: &Jid) -> Result<NewsletterMetadata, NewsletterError> {
         let response = self
             .client
             .mex()
-            .query(mex_request!(
+            .execute(mex_request!(
                 fetch_newsletter,
                 newsletter_variables(&jid.to_string(), "JID")
             ))
             .await?;
 
-        let data = response
-            .data
-            .ok_or_else(|| NewsletterError::InvalidRequest("missing data".into()))?;
-        let newsletter = &data["xwa2_newsletter"];
-        if newsletter.is_null() {
-            return Err(NewsletterError::InvalidRequest(format!(
-                "newsletter not found: {}",
-                jid
-            )));
-        }
-        parse_newsletter_metadata(newsletter)
+        parse_fetched_newsletter(response.data, jid)
     }
 
     /// Create a new newsletter.
@@ -485,7 +510,7 @@ impl<'a> Newsletter<'a> {
         let response = self
             .client
             .mex()
-            .mutate(mex_request!(create_newsletter {
+            .execute(mex_request!(create_newsletter {
                 input: Some(create_newsletter::Input {
                     name: Some(name.to_string()),
                     description: description.map(str::to_string),
@@ -513,7 +538,7 @@ impl<'a> Newsletter<'a> {
         let response = self
             .client
             .mex()
-            .mutate(mex_request!(join_newsletter {
+            .execute(mex_request!(join_newsletter {
                 newsletter_id: Some(jid.to_string()),
             }))
             .await?;
@@ -536,7 +561,7 @@ impl<'a> Newsletter<'a> {
         let response = self
             .client
             .mex()
-            .mutate(mex_request!(leave_newsletter {
+            .execute(mex_request!(leave_newsletter {
                 newsletter_id: Some(jid.to_string()),
             }))
             .await?;
@@ -563,7 +588,7 @@ impl<'a> Newsletter<'a> {
         let response = self
             .client
             .mex()
-            .mutate(mex_request!(update_newsletter {
+            .execute(mex_request!(update_newsletter {
                 newsletter_id: Some(jid.to_string()),
                 updates: Some(update_newsletter::Updates {
                     name: name.map(str::to_string),
@@ -583,11 +608,18 @@ impl<'a> Newsletter<'a> {
     /// Carried by the same mutation as [`Newsletter::update`] — WA Web edits the
     /// picture through `updates.picture`, base64-encoded — so the response is the
     /// newsletter's refreshed metadata.
+    ///
+    /// Empty data returns [`NewsletterError::EmptyPicture`] before sending anything.
+    /// Use [`Newsletter::remove_picture`] to remove the picture explicitly.
+    /// Only non-emptiness is checked; JPEG contents are not validated or transformed.
     pub async fn set_picture(
         &self,
         jid: &Jid,
         jpeg: &[u8],
     ) -> Result<NewsletterMetadata, NewsletterError> {
+        if jpeg.is_empty() {
+            return Err(NewsletterError::EmptyPicture);
+        }
         self.update_picture(jid, Some(jpeg)).await
     }
 
@@ -604,7 +636,7 @@ impl<'a> Newsletter<'a> {
         let response = self
             .client
             .mex()
-            .mutate(mex_request!(
+            .execute(mex_request!(
                 update_newsletter,
                 picture_update_variables(jid, jpeg)
             ))
@@ -619,7 +651,7 @@ impl<'a> Newsletter<'a> {
         let response = self
             .client
             .mex()
-            .mutate(mex_request!(delete_newsletter, delete_variables(jid)))
+            .execute(mex_request!(delete_newsletter, delete_variables(jid)))
             .await?;
 
         take_data_field(response.data, "xwa2_newsletter_delete_v2")?;
@@ -635,7 +667,7 @@ impl<'a> Newsletter<'a> {
         let response = self
             .client
             .mex()
-            .mutate(mex_request!(
+            .execute(mex_request!(
                 change_newsletter_owner,
                 change_owner_variables(jid, &user)
             ))
@@ -653,7 +685,7 @@ impl<'a> Newsletter<'a> {
         let response = self
             .client
             .mex()
-            .mutate(mex_request!(
+            .execute(mex_request!(
                 demote_newsletter_admin,
                 demote_admin_variables(jid, &user)
             ))
@@ -682,7 +714,7 @@ impl<'a> Newsletter<'a> {
         let response = self
             .client
             .mex()
-            .query(mex_request!(
+            .execute(mex_request!(
                 fetch_newsletter_admin_info,
                 admin_info_variables(jid)
             ))
@@ -704,7 +736,7 @@ impl<'a> Newsletter<'a> {
         let response = self
             .client
             .mex()
-            .query(mex_request!(
+            .execute(mex_request!(
                 fetch_newsletter_followers,
                 followers_variables(jid, count)
             ))
@@ -740,7 +772,7 @@ impl<'a> Newsletter<'a> {
         let response = self
             .client
             .mex()
-            .mutate(mex_request!(
+            .execute(mex_request!(
                 update_newsletter_user_setting,
                 mute_user_setting_variables(jid, mute_type, muted)
             ))
@@ -765,7 +797,7 @@ impl<'a> Newsletter<'a> {
         let response = self
             .client
             .mex()
-            .query(mex_request!(
+            .execute(mex_request!(
                 fetch_newsletter,
                 newsletter_variables(invite_code, "INVITE")
             ))
@@ -786,13 +818,10 @@ impl<'a> Newsletter<'a> {
 
     // ─── Live updates ───────────────────────────────────────────────────
 
-    /// Subscribe to live reaction-count updates for a newsletter.
+    /// Subscribe to live counter updates for a newsletter: reactions, forwards
+    /// and poll tallies per message, delivered as
+    /// [`wacore::types::events::Event::NewsletterLiveUpdate`].
     ///
-    /// The pinned and latest notif IR confirm the notification type and
-    /// handler, but do not expose structured `<live_updates>` fields. This API
-    /// therefore makes no claim about history counters or poll tallies in live
-    /// notifications until a sanitized capture or bundle evidence establishes
-    /// those children.
     /// Returns the subscription duration in seconds, after which it has to be
     /// renewed. The server sets this; 90 seconds is what it answered in a real
     /// session, and the 300 below is only the fallback for a response that
@@ -822,21 +851,109 @@ impl<'a> Newsletter<'a> {
         Ok(duration)
     }
 
-    /// Send a reaction to a newsletter message.
+    /// React using only the target's server content id. Returns the NEW
+    /// operation stanza id for ACK correlation, not a delivery guarantee.
+    pub async fn send_reaction(
+        &self,
+        target: &crate::NewsletterMessageRef<'_>,
+        reaction: &str,
+    ) -> Result<crate::StanzaId, NewsletterError> {
+        let server_id = target.require_server_id()?;
+        self.send_reaction_raw(target.chat(), server_id.get(), reaction)
+            .await
+    }
+
+    /// Replace a poll selection using only the poll's server content id.
+    pub async fn send_poll_vote(
+        &self,
+        target: &crate::NewsletterMessageRef<'_>,
+        option_hashes: &[[u8; 32]],
+    ) -> Result<crate::StanzaId, NewsletterError> {
+        let server_id = target.require_server_id()?;
+        self.send_poll_vote_raw(target.chat(), server_id.get(), option_hashes)
+            .await
+    }
+
+    /// Edit using only the target's client content id, never its server id.
+    /// The legacy chat/string overload remains an explicit raw escape.
+    pub async fn edit_message(
+        &self,
+        target: &crate::NewsletterMessageRef<'_>,
+        new_content: wa::Message,
+    ) -> Result<(), NewsletterError> {
+        let id = target.require_message_id()?;
+        self.edit_message_raw(target.chat(), id.as_str(), new_content)
+            .await
+    }
+
+    /// Revoke using only the target's client content id, never its server id.
+    pub async fn revoke_message(
+        &self,
+        target: &crate::NewsletterMessageRef<'_>,
+    ) -> Result<(), NewsletterError> {
+        let id = target.require_message_id()?;
+        self.revoke_message_raw(target.chat(), id.as_str()).await
+    }
+
+    /// Explicit raw channel/server-content-id interop for reactions.
     ///
     /// `server_id` is the server-assigned ID of the message to react to.
     /// `reaction` is the emoji code (e.g., "👍", "❤️"), or empty to remove.
-    pub async fn send_reaction(
+    ///
+    /// Returns the stanza id. Match it against the `id` of the server's ack,
+    /// which arrives as [`wacore::types::events::Event::ServerAck`].
+    pub async fn send_reaction_raw(
         &self,
         jid: &Jid,
         server_id: u64,
         reaction: &str,
-    ) -> Result<(), NewsletterError> {
-        self.client
+    ) -> Result<crate::StanzaId, NewsletterError> {
+        let id = self
+            .client
             .send_server_reaction(jid, server_id, reaction)
             .await
             .map_err(NewsletterError::from_anyhow)?;
-        Ok(())
+        Ok(crate::StanzaId::new(id)?)
+    }
+
+    /// Explicit raw channel/server-content-id interop for poll selections.
+    ///
+    /// `server_id` is the poll's. `option_hashes` is the whole selection, one
+    /// [`wacore::poll::compute_option_hash`] per chosen option, the same key
+    /// [`NewsletterPollVote::option_hash`] tallies by. Hash the option name
+    /// exactly as the poll payload carries it: names hold variation selectors
+    /// and ZWJ sequences, and a retyped or normalized name hashes to an option
+    /// the server does not know.
+    ///
+    /// Every send replaces the previous selection on the server, so changing a
+    /// vote is a send with the new list and an empty slice removes it.
+    ///
+    /// Returns the stanza id. Match it against the `id` of the server's ack,
+    /// which arrives as [`wacore::types::events::Event::ServerAck`]; the ack
+    /// also names the poll's `server_id` on the wire, but that event does not
+    /// carry it.
+    pub async fn send_poll_vote_raw(
+        &self,
+        jid: &Jid,
+        server_id: u64,
+        option_hashes: &[[u8; 32]],
+    ) -> Result<crate::StanzaId, NewsletterError> {
+        if !jid.is_newsletter() {
+            return Err(NewsletterError::InvalidRequest(
+                "send_poll_vote is only valid for newsletter (channel) JIDs".into(),
+            ));
+        }
+        validate_poll_vote(option_hashes)?;
+        let id = self.client.generate_message_id();
+        self.client
+            .send_node(build_poll_vote_node(
+                jid,
+                id.as_str(),
+                server_id,
+                option_hashes,
+            ))
+            .await?;
+        Ok(crate::StanzaId::from_message_id(&id))
     }
 
     /// Edit a message in a newsletter (channel). Channels are plaintext (not E2E).
@@ -845,8 +962,8 @@ impl<'a> Newsletter<'a> {
     /// [`NewsletterMessage`] / the id returned when it was sent), NOT its
     /// `server_id` (edit/revoke key on the message id, unlike reactions which use
     /// `server_id`). `new_content` is the replacement body (e.g.
-    /// `wa::Message { conversation: Some(..), .. }`).
-    pub async fn edit_message(
+    /// `wa::Message::default().with_conversation("text")`).
+    pub async fn edit_message_raw(
         &self,
         jid: &Jid,
         message_id: impl Into<String>,
@@ -860,7 +977,7 @@ impl<'a> Newsletter<'a> {
         let id = message_id.into();
         if id.is_empty() {
             return Err(NewsletterError::InvalidRequest(
-                "newsletter edit needs a target message_id (NewsletterMessage.message_id is empty when the server omits the id)".into(),
+                "newsletter edit needs a target message_id (NewsletterMessage.message_id is None when the server omits the id)".into(),
             ));
         }
         let node = crate::send::build_newsletter_edit_node(
@@ -876,7 +993,7 @@ impl<'a> Newsletter<'a> {
     ///
     /// `message_id` is the target message's id (the `message_id` from
     /// [`NewsletterMessage`]), NOT its `server_id`.
-    pub async fn revoke_message(
+    pub async fn revoke_message_raw(
         &self,
         jid: &Jid,
         message_id: impl Into<String>,
@@ -889,7 +1006,7 @@ impl<'a> Newsletter<'a> {
         let id = message_id.into();
         if id.is_empty() {
             return Err(NewsletterError::InvalidRequest(
-                "newsletter revoke needs a target message_id (NewsletterMessage.message_id is empty when the server omits the id)".into(),
+                "newsletter revoke needs a target message_id (NewsletterMessage.message_id is None when the server omits the id)".into(),
             ));
         }
         let node =
@@ -915,6 +1032,82 @@ impl<'a> Newsletter<'a> {
             .await?;
         parse_newsletter_messages_response(response.get())
     }
+
+    /// Read this account's own reactions and poll votes on a newsletter's
+    /// recent messages.
+    ///
+    /// Only messages the account has an add-on on are returned, up to `limit`
+    /// of them. A malformed response returns [`NewsletterError::Iq`] wrapping
+    /// [`IqError::ParseError`], preserving the parser's cause. A non-newsletter
+    /// JID returns [`NewsletterError::InvalidRequest`] before sending anything.
+    pub async fn get_my_addons(
+        &self,
+        jid: &Jid,
+        limit: u32,
+    ) -> Result<Vec<NewsletterMyAddOns>, NewsletterError> {
+        if !jid.is_newsletter() {
+            return Err(NewsletterError::InvalidRequest(
+                "get_my_addons is only valid for newsletter (channel) JIDs".into(),
+            ));
+        }
+        self.client
+            .execute(MyAddOnsSpec::new(jid, limit))
+            .await
+            .map_err(NewsletterError::from)
+    }
+}
+
+/// The most `<vote>` children one vote may carry, from the
+/// `REPEATED_CHILD(<vote>, 0, 1000)` in WA Web's
+/// `WASmaxOutMessagePublishNewsletterPollVoteMixin`.
+const MAX_POLL_VOTE_OPTIONS: usize = 1000;
+
+/// Refuse a selection WA Web could never send. Its UI produces a set of at
+/// most [`MAX_POLL_VOTE_OPTIONS`] distinct options, and how the server answers
+/// anything else has not been observed, so neither is left for it to decide.
+fn validate_poll_vote(option_hashes: &[[u8; 32]]) -> Result<(), NewsletterError> {
+    if option_hashes.len() > MAX_POLL_VOTE_OPTIONS {
+        return Err(NewsletterError::InvalidRequest(format!(
+            "a poll vote carries at most {MAX_POLL_VOTE_OPTIONS} options, got {}",
+            option_hashes.len()
+        )));
+    }
+    let mut seen = std::collections::HashSet::with_capacity(option_hashes.len());
+    if option_hashes.iter().any(|hash| !seen.insert(hash)) {
+        return Err(NewsletterError::InvalidRequest(
+            "a poll vote names each option at most once".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Build a newsletter poll vote.
+///
+/// The reaction envelope of `send_server_reaction`, typed `poll`, with
+/// `server_id` naming the poll rather than a message of its own. `<meta>`
+/// comes before `<votes>` because that is the order WA Web sends; whether the
+/// server requires it is unknown. `<meta>` never carries `contenttype` on a
+/// vote: `WAWebNewsletterSendMessageQueryJob` does not pass one on that path.
+/// Nothing is encrypted, since a channel has no key.
+fn build_poll_vote_node(
+    jid: &Jid,
+    id: &str,
+    server_id: u64,
+    option_hashes: &[[u8; 32]],
+) -> wacore_binary::Node {
+    let votes = option_hashes
+        .iter()
+        .map(|hash| NodeBuilder::new("vote").bytes(hash.as_slice()).build());
+    NodeBuilder::new("message")
+        .attr("to", jid)
+        .attr("id", id)
+        .attr("server_id", server_id)
+        .attr("type", "poll")
+        .children([
+            NodeBuilder::new("meta").attr("polltype", "vote").build(),
+            NodeBuilder::new("votes").children(votes).build(),
+        ])
+        .build()
 }
 
 /// Build the history IQ.
@@ -987,6 +1180,30 @@ fn parse_newsletter_role(raw: &str) -> Option<NewsletterRole> {
     }
 }
 
+/// The server spells the channel state upper case (`ACTIVE`, `DELETED`); the
+/// comparison ignores case for the same reason [`parse_newsletter_role`] does.
+fn parse_newsletter_state(raw: &str) -> NewsletterState {
+    if raw.eq_ignore_ascii_case("active") {
+        NewsletterState::Active
+    } else if raw.eq_ignore_ascii_case("suspended") {
+        NewsletterState::Suspended
+    } else if raw.eq_ignore_ascii_case("geosuspended") {
+        NewsletterState::Geosuspended
+    } else {
+        NewsletterState::Other(raw.to_string())
+    }
+}
+
+fn parse_newsletter_verification(raw: &str) -> NewsletterVerification {
+    if raw.eq_ignore_ascii_case("verified") {
+        NewsletterVerification::Verified
+    } else if raw.eq_ignore_ascii_case("unverified") {
+        NewsletterVerification::Unverified
+    } else {
+        NewsletterVerification::Other(raw.to_string())
+    }
+}
+
 /// A profile exists only once it carries a name; WA Web drops a nameless one.
 fn parse_admin_profile(value: &serde_json::Value) -> Option<NewsletterAdminProfile> {
     let name = value["name"].as_str()?;
@@ -1055,6 +1272,53 @@ fn parse_json_u64(value: &serde_json::Value) -> Option<u64> {
         .or_else(|| value.as_str().and_then(|s| s.parse().ok()))
 }
 
+/// A node that stands for no newsletter. The server answers a JID with no
+/// channel behind it with a node whose `id` is null (`state` `NON_EXISTING`),
+/// not with `null`; WA Web's `parseMexNewsletterResponse` keys on `id` too.
+fn is_absent_newsletter(value: &serde_json::Value) -> bool {
+    value.is_null() || value["id"].is_null()
+}
+
+fn parse_fetched_newsletter(
+    data: Option<serde_json::Value>,
+    jid: &Jid,
+) -> Result<NewsletterMetadata, NewsletterError> {
+    let data = data.ok_or_else(|| NewsletterError::InvalidRequest("missing data".into()))?;
+    let newsletter = data
+        .get("xwa2_newsletter")
+        .ok_or_else(|| NewsletterError::InvalidRequest("missing xwa2_newsletter".into()))?;
+    if is_absent_newsletter(newsletter) {
+        return Err(NewsletterError::NotFound(jid.clone()));
+    }
+    parse_newsletter_metadata(newsletter)
+}
+
+/// WA Web drops an absent entry and keeps the rest, so one bad entry does
+/// not cost the caller every other channel.
+fn parse_subscribed_newsletters(
+    data: Option<serde_json::Value>,
+) -> Result<Vec<NewsletterMetadata>, NewsletterError> {
+    let data = data.ok_or_else(|| NewsletterError::InvalidRequest("missing data".into()))?;
+    let newsletters = data["xwa2_newsletter_subscribed"]
+        .as_array()
+        .ok_or_else(|| {
+            NewsletterError::InvalidRequest("missing xwa2_newsletter_subscribed array".into())
+        })?;
+
+    let skipped = newsletters
+        .iter()
+        .filter(|node| is_absent_newsletter(node))
+        .count();
+    if skipped > 0 {
+        log::warn!("Skipping {skipped} subscribed newsletter entries without an id");
+    }
+    newsletters
+        .iter()
+        .filter(|node| !is_absent_newsletter(node))
+        .map(parse_newsletter_metadata)
+        .collect()
+}
+
 fn parse_newsletter_metadata(
     value: &serde_json::Value,
 ) -> Result<NewsletterMetadata, NewsletterError> {
@@ -1078,16 +1342,14 @@ fn parse_newsletter_metadata(
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(0);
 
-    let verification = match thread["verification"].as_str() {
-        Some("VERIFIED") => NewsletterVerification::Verified,
-        _ => NewsletterVerification::Unverified,
-    };
+    let verification = thread["verification"].as_str().map_or(
+        NewsletterVerification::Unverified,
+        parse_newsletter_verification,
+    );
 
-    let state = match value["state"]["type"].as_str() {
-        Some("suspended") => NewsletterState::Suspended,
-        Some("geosuspended") => NewsletterState::Geosuspended,
-        _ => NewsletterState::Active,
-    };
+    let state = value["state"]["type"]
+        .as_str()
+        .map_or(NewsletterState::Active, parse_newsletter_state);
 
     let picture_url = thread["picture"]["direct_path"]
         .as_str()
@@ -1174,9 +1436,8 @@ pub(crate) fn parse_reaction_counts(node: &NodeRef<'_>) -> Vec<NewsletterReactio
 ///
 /// Not gated on the message's `type`: history responses can carry `<votes>`
 /// on a poll envelope whose type is missing or is not yet known, so gating
-/// here would make the parser brittle as the wire grows. Live notifications
-/// are deliberately not parsed by this helper: their child shape is not
-/// established by the available notif IR evidence.
+/// here would make the parser brittle as the wire grows. Live updates carry
+/// `<votes>` in the same shape and are read by this helper too.
 ///
 /// A `<vote>` whose content is not a 32-byte digest is skipped rather than
 /// truncated or padded — the hash is the only handle on which option was
@@ -1282,10 +1543,14 @@ fn parse_newsletter_messages_response(
 
         // The wire `id` (string) is what edit/revoke key on; keep it alongside
         // server_id (which is used for pagination/reactions).
+        // History can still be addressed by server_id without a usable client
+        // id. Project the legacy empty sentinel to absence rather than losing
+        // the entire page; explicit IDs supplied to operations still validate.
         let message_id = msg_node
             .get_attr("id")
-            .map(|v| v.as_str().into_owned())
-            .unwrap_or_default();
+            .filter(|v| !v.as_str().is_empty())
+            .map(|v| crate::MessageId::new(v.as_str()))
+            .transpose()?;
 
         let timestamp = msg_node
             .get_attr("t")
@@ -1293,11 +1558,10 @@ fn parse_newsletter_messages_response(
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(0);
 
-        let message_type = msg_node
-            .get_attr("type")
-            .map(|v| v.as_str())
-            .map(|s| NewsletterMessageType::from(s.as_ref()))
-            .unwrap_or(NewsletterMessageType::Text);
+        let message_type_raw = msg_node.get_attr("type").map(|v| v.as_str().into_owned());
+        let message_type = message_type_raw
+            .as_deref()
+            .map_or(NewsletterMessageType::Text, NewsletterMessageType::from);
 
         let edit = msg_node
             .get_attr("edit")
@@ -1334,6 +1598,7 @@ fn parse_newsletter_messages_response(
             server_id,
             timestamp,
             message_type,
+            message_type_raw,
             edit,
             is_sender,
             message,
@@ -1346,6 +1611,7 @@ fn parse_newsletter_messages_response(
             original_timestamp: meta.original_timestamp,
             last_edit_timestamp_ms: meta.last_edit_timestamp_ms,
             poll_type: meta.poll_type,
+            poll_type_raw: meta.poll_type_raw,
             content_type: meta.content_type,
             question_type: meta.question_type,
             message_association_type: meta.message_association_type,
@@ -1371,6 +1637,7 @@ struct MessageMeta {
     original_timestamp: Option<u64>,
     last_edit_timestamp_ms: Option<u64>,
     poll_type: Option<PollType>,
+    poll_type_raw: Option<String>,
     content_type: Option<String>,
     question_type: Option<NewsletterQuestionType>,
     message_association_type: Option<NewsletterMessageAssociationType>,
@@ -1383,6 +1650,7 @@ fn parse_message_meta(msg_node: &NodeRef<'_>, message_type: &NewsletterMessageTy
         return MessageMeta::default();
     };
     let mut attrs = meta_node.attrs();
+    let poll_type_raw = attrs.optional_string("polltype").map(|s| s.into_owned());
 
     MessageMeta {
         // Seconds, while `msg_edit_t` right below is milliseconds. The two
@@ -1392,12 +1660,13 @@ fn parse_message_meta(msg_node: &NodeRef<'_>, message_type: &NewsletterMessageTy
         // WA Web scopes `polltype` to poll envelopes, so a value on any other
         // type is not the poll stage and is not recorded as one.
         poll_type: if *message_type == NewsletterMessageType::Poll {
-            attrs
-                .optional_string("polltype")
-                .and_then(|s| PollType::try_from(s.as_ref()).ok())
+            poll_type_raw
+                .as_deref()
+                .and_then(|s| PollType::try_from(s).ok())
         } else {
             None
         },
+        poll_type_raw,
         content_type: attrs.optional_string("contenttype").map(|s| s.into_owned()),
         question_type: attrs
             .optional_string("questiontype")
@@ -1619,6 +1888,315 @@ mod tests {
 
     fn newsletter_jid() -> Jid {
         "120363000000000001@newsletter".parse().expect("jid")
+    }
+
+    mod metadata_state {
+        use super::*;
+
+        fn metadata_with(state: Option<&str>, verification: Option<&str>) -> NewsletterMetadata {
+            let mut node = json!({
+                "id": "120363000000000001@newsletter",
+                "thread_metadata": { "name": { "text": "x" } }
+            });
+            if let Some(state) = state {
+                node["state"] = json!({ "type": state });
+            }
+            if let Some(verification) = verification {
+                node["thread_metadata"]["verification"] = json!(verification);
+            }
+            parse_newsletter_metadata(&node).expect("metadata")
+        }
+
+        #[test]
+        fn state_is_read_in_the_servers_spelling() {
+            assert_eq!(
+                metadata_with(Some("ACTIVE"), None).state,
+                NewsletterState::Active
+            );
+            assert_eq!(
+                metadata_with(Some("SUSPENDED"), None).state,
+                NewsletterState::Suspended
+            );
+            assert_eq!(
+                metadata_with(Some("GEOSUSPENDED"), None).state,
+                NewsletterState::Geosuspended
+            );
+        }
+
+        #[test]
+        fn state_ignores_case() {
+            assert_eq!(
+                metadata_with(Some("suspended"), None).state,
+                NewsletterState::Suspended
+            );
+            assert_eq!(
+                metadata_with(Some("GeoSuspended"), None).state,
+                NewsletterState::Geosuspended
+            );
+        }
+
+        /// `DELETED` is what the delete mutation answers with; reading it as
+        /// `Active` would tell the caller a deleted channel is live.
+        #[test]
+        fn unknown_state_keeps_the_servers_token() {
+            assert_eq!(
+                metadata_with(Some("DELETED"), None).state,
+                NewsletterState::Other("DELETED".into())
+            );
+        }
+
+        #[test]
+        fn absent_state_is_active() {
+            assert_eq!(metadata_with(None, None).state, NewsletterState::Active);
+        }
+
+        #[test]
+        fn verification_ignores_case_and_keeps_unknown_tokens() {
+            assert_eq!(
+                metadata_with(None, Some("VERIFIED")).verification,
+                NewsletterVerification::Verified
+            );
+            assert_eq!(
+                metadata_with(None, Some("verified")).verification,
+                NewsletterVerification::Verified
+            );
+            assert_eq!(
+                metadata_with(None, Some("UNVERIFIED")).verification,
+                NewsletterVerification::Unverified
+            );
+            assert_eq!(
+                metadata_with(None, Some("PENDING_REVIEW")).verification,
+                NewsletterVerification::Other("PENDING_REVIEW".into())
+            );
+            assert_eq!(
+                metadata_with(None, None).verification,
+                NewsletterVerification::Unverified
+            );
+        }
+    }
+
+    mod missing_newsletter {
+        use super::*;
+
+        /// What the server answers the metadata query with for a well-formed
+        /// JID that has no channel behind it: a node, not `null`.
+        fn non_existing_node() -> serde_json::Value {
+            json!({
+                "id": null,
+                "state": { "type": "NON_EXISTING" },
+                "thread_metadata": null,
+                "viewer_metadata": null
+            })
+        }
+
+        fn channel_node() -> serde_json::Value {
+            json!({
+                "id": "120363000000000001@newsletter",
+                "state": { "type": "ACTIVE" },
+                "thread_metadata": { "name": { "text": "x" } }
+            })
+        }
+
+        fn fetched(node: serde_json::Value) -> Option<serde_json::Value> {
+            Some(json!({ "xwa2_newsletter": node }))
+        }
+
+        fn subscribed(nodes: Vec<serde_json::Value>) -> Option<serde_json::Value> {
+            Some(json!({ "xwa2_newsletter_subscribed": nodes }))
+        }
+
+        #[test]
+        fn a_non_existing_answer_is_not_found() {
+            let result = parse_fetched_newsletter(fetched(non_existing_node()), &newsletter_jid());
+            assert!(matches!(
+                result,
+                Err(NewsletterError::NotFound(jid)) if jid == newsletter_jid()
+            ));
+        }
+
+        #[test]
+        fn a_null_answer_is_not_found() {
+            let result = parse_fetched_newsletter(fetched(json!(null)), &newsletter_jid());
+            assert!(matches!(
+                result,
+                Err(NewsletterError::NotFound(jid)) if jid == newsletter_jid()
+            ));
+        }
+
+        #[test]
+        fn a_channel_is_still_read() {
+            let metadata = parse_fetched_newsletter(fetched(channel_node()), &newsletter_jid())
+                .expect("metadata");
+            assert_eq!(metadata.jid, newsletter_jid());
+            assert_eq!(metadata.state, NewsletterState::Active);
+        }
+
+        #[test]
+        fn a_missing_data_block_is_still_a_malformed_answer() {
+            assert!(matches!(
+                parse_fetched_newsletter(None, &newsletter_jid()),
+                Err(NewsletterError::InvalidRequest(_))
+            ));
+            // An explicit `null` is an absent channel; an omitted field is not.
+            assert!(matches!(
+                parse_fetched_newsletter(Some(json!({})), &newsletter_jid()),
+                Err(NewsletterError::InvalidRequest(_))
+            ));
+            assert!(matches!(
+                parse_subscribed_newsletters(None),
+                Err(NewsletterError::InvalidRequest(_))
+            ));
+            assert!(matches!(
+                parse_subscribed_newsletters(Some(json!({}))),
+                Err(NewsletterError::InvalidRequest(_))
+            ));
+        }
+
+        /// WA Web drops such an entry and keeps the rest of the list.
+        #[test]
+        fn the_list_skips_an_entry_without_an_id() {
+            let mut without_id = channel_node();
+            without_id.as_object_mut().expect("object").remove("id");
+            let list = parse_subscribed_newsletters(subscribed(vec![
+                channel_node(),
+                without_id,
+                non_existing_node(),
+            ]))
+            .expect("list");
+            assert_eq!(list.len(), 1);
+            assert_eq!(list[0].jid, newsletter_jid());
+        }
+
+        #[test]
+        fn the_list_skips_a_null_entry() {
+            let list = parse_subscribed_newsletters(subscribed(vec![channel_node(), json!(null)]))
+                .expect("list");
+            assert_eq!(list.len(), 1);
+            assert_eq!(list[0].jid, newsletter_jid());
+        }
+
+        /// An id that is there but is not a JID is a malformed answer, not an
+        /// absent channel; it has never been observed.
+        #[test]
+        fn an_entry_with_an_unparseable_id_still_fails_the_list() {
+            let mut bad_id = channel_node();
+            bad_id["id"] = json!("not a jid");
+            assert!(matches!(
+                parse_subscribed_newsletters(subscribed(vec![channel_node(), bad_id])),
+                Err(NewsletterError::InvalidRequest(_))
+            ));
+        }
+    }
+
+    mod my_addons {
+        use super::*;
+
+        fn response_for(jid: &Jid, id: &str) -> wacore_binary::Node {
+            NodeBuilder::new("iq")
+                .attr("type", "result")
+                .attr("id", id)
+                .children([NodeBuilder::new("my_addons")
+                    .children([NodeBuilder::new("messages")
+                        .attr("jid", jid.clone())
+                        .children([NodeBuilder::new("message")
+                            .attr("server_id", 777u64)
+                            .children([NodeBuilder::new("votes").attr("t", 5u64).build()])
+                            .build()])
+                        .build()])
+                    .build()])
+                .build()
+        }
+
+        #[tokio::test]
+        async fn get_my_addons_sends_the_query_and_reads_the_answer() {
+            let (client, transport) = crate::test_utils::create_iq_test_client().await;
+            let jid = newsletter_jid();
+
+            let request = {
+                let client = client.clone();
+                let jid = jid.clone();
+                tokio::spawn(async move { client.newsletter().get_my_addons(&jid, 20).await })
+            };
+
+            let sent = crate::test_utils::decode_sent_iq(&transport, 0).await;
+            let sent = sent.get();
+            let my_addons = sent
+                .get_optional_child("my_addons")
+                .expect("my_addons query");
+            assert_eq!(my_addons.attrs().optional_jid("jid"), Some(jid.clone()));
+            let id = sent
+                .attrs()
+                .optional_string("id")
+                .expect("iq id")
+                .into_owned();
+
+            let response = response_for(&jid, &id);
+            crate::test_utils::answer_iq(&client, &id, &response).await;
+
+            let addons = request.await.expect("task").expect("answered");
+            assert_eq!(addons.len(), 1);
+            assert_eq!(addons[0].server_id, 777);
+        }
+
+        #[tokio::test]
+        async fn a_malformed_answer_preserves_the_iq_parse_cause() {
+            use crate::ErrorChainExt;
+            use std::error::Error;
+            let (client, transport) = crate::test_utils::create_iq_test_client().await;
+            let jid = newsletter_jid();
+
+            let request = {
+                let client = client.clone();
+                let jid = jid.clone();
+                tokio::spawn(async move { client.newsletter().get_my_addons(&jid, 20).await })
+            };
+
+            let sent = crate::test_utils::decode_sent_iq(&transport, 0).await;
+            let id = sent
+                .get()
+                .attrs()
+                .optional_string("id")
+                .expect("iq id")
+                .into_owned();
+            let without_my_addons = NodeBuilder::new("iq")
+                .attr("type", "result")
+                .attr("id", id.as_str())
+                .build();
+            crate::test_utils::answer_iq(&client, &id, &without_my_addons).await;
+
+            let error = request
+                .await
+                .expect("task")
+                .expect_err("malformed response");
+            let NewsletterError::Iq(IqError::ParseError(parse)) = &error else {
+                panic!("expected IQ parse error, got {error:?}");
+            };
+            let iq_source = error
+                .source()
+                .expect("IQ cause")
+                .downcast_ref::<IqError>()
+                .expect("typed IQ cause");
+            let parser_source = iq_source.source().expect("parser cause");
+            let stored_parser: &(dyn Error + 'static) = parse.as_ref();
+            assert!(std::ptr::addr_eq(parser_source, stored_parser));
+            assert_eq!(error.server_rejection(), None);
+            assert_eq!(error.http_status(), None);
+            assert!(!error.is_timeout());
+            assert!(!error.is_transport_unavailable());
+            assert!(error.store_failure().is_none());
+        }
+
+        #[tokio::test]
+        async fn get_my_addons_refuses_a_non_newsletter_jid() {
+            let (client, transport) = crate::test_utils::create_iq_test_client().await;
+            let group: Jid = "120363000000000002@g.us".parse().expect("jid");
+
+            assert!(matches!(
+                client.newsletter().get_my_addons(&group, 20).await,
+                Err(NewsletterError::InvalidRequest(_))
+            ));
+            assert_eq!(transport.sent_count(), 0);
+        }
     }
 
     /// The two halves of the history request are load-bearing in opposite
@@ -2170,6 +2748,67 @@ mod tests {
         assert_eq!(msgs[0].message_type, NewsletterMessageType::Media);
     }
 
+    #[test]
+    fn review_parsed_history_reference_preserves_known_ownership() {
+        let chat = newsletter_jid();
+        for is_sender in [false, true] {
+            let response = history_response(vec![
+                NodeBuilder::new("message")
+                    .attr("id", "HISTORY_CLIENT_CONTENT")
+                    .attr("server_id", u64::MAX)
+                    .attr("t", "123")
+                    .attr("is_sender", if is_sender { "true" } else { "false" })
+                    .build(),
+            ]);
+            let messages = parse_newsletter_messages_response(&response.as_node_ref()).unwrap();
+            assert_eq!(messages.len(), 1);
+            let target = messages[0].message_ref(&chat).unwrap();
+            assert_eq!(target.from_me(), Some(is_sender));
+            assert_eq!(
+                target.message_id().unwrap().as_str(),
+                "HISTORY_CLIENT_CONTENT"
+            );
+            assert_eq!(target.server_id().unwrap().get(), u64::MAX);
+            assert!(std::ptr::eq(target.chat(), &chat));
+        }
+    }
+
+    #[test]
+    fn history_client_id_absence_is_not_an_empty_id() {
+        let chat = newsletter_jid();
+        let absent = history_response(vec![
+            NodeBuilder::new("message").attr("server_id", 0u64).build(),
+        ]);
+        let messages = parse_newsletter_messages_response(&absent.as_node_ref()).unwrap();
+        assert_eq!(messages[0].message_id, None);
+        let reference = messages[0].message_ref(&chat).unwrap();
+        assert!(reference.message_id().is_none());
+        assert_eq!(reference.server_id().unwrap().get(), 0);
+        assert_eq!(
+            reference.require_message_id(),
+            Err(crate::MessageRefError::MissingMessageId)
+        );
+        let empty = history_response(vec![
+            NodeBuilder::new("message")
+                .attr("server_id", 1u64)
+                .attr("id", "")
+                .build(),
+        ]);
+        let messages = parse_newsletter_messages_response(&empty.as_node_ref()).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].message_id, None);
+        let reference = messages[0].message_ref(&chat).unwrap();
+        assert_eq!(reference.server_id().unwrap().get(), 1);
+        assert_eq!(
+            reference.require_message_id(),
+            Err(crate::MessageRefError::MissingMessageId)
+        );
+        assert_eq!(
+            crate::MessageId::new(""),
+            Err(crate::MessageRefError::EmptyMessageId)
+        );
+    }
+
     /// Wrap message nodes in the `<iq><messages>` envelope the server answers
     /// a history request with.
     fn history_response(messages: Vec<wacore_binary::Node>) -> wacore_binary::Node {
@@ -2430,6 +3069,70 @@ mod tests {
 
         let msg = &parse_newsletter_messages_response(&response.as_node_ref()).unwrap()[0];
         assert_eq!(msg.poll_type, None);
+        assert_eq!(msg.poll_type_raw.as_deref(), Some("creation"));
+    }
+
+    mod raw_tokens {
+        use super::*;
+
+        fn parse_one(message: NodeBuilder) -> NewsletterMessage {
+            let response = history_response(vec![message.attr("server_id", "8").build()]);
+            parse_newsletter_messages_response(&response.as_node_ref())
+                .unwrap()
+                .remove(0)
+        }
+
+        fn with_polltype(message: NodeBuilder, polltype: &str) -> NodeBuilder {
+            message.children([NodeBuilder::new("meta").attr("polltype", polltype).build()])
+        }
+
+        #[test]
+        fn a_known_poll_stage_keeps_its_token() {
+            let msg = parse_one(with_polltype(
+                NodeBuilder::new("message").attr("type", "poll"),
+                "creation",
+            ));
+            assert_eq!(msg.message_type, NewsletterMessageType::Poll);
+            assert_eq!(msg.message_type_raw.as_deref(), Some("poll"));
+            assert_eq!(msg.poll_type, Some(PollType::Creation));
+            assert_eq!(msg.poll_type_raw.as_deref(), Some("creation"));
+        }
+
+        /// The typed field still defaults to `Text`; the raw one tells the
+        /// caller the server sent no `type` at all.
+        #[test]
+        fn an_absent_type_is_absent_in_the_raw_token() {
+            let msg = parse_one(NodeBuilder::new("message"));
+            assert_eq!(msg.message_type, NewsletterMessageType::Text);
+            assert_eq!(msg.message_type_raw, None);
+        }
+
+        #[test]
+        fn an_unknown_poll_stage_keeps_its_token() {
+            let msg = parse_one(with_polltype(
+                NodeBuilder::new("message").attr("type", "poll"),
+                "future_stage",
+            ));
+            assert_eq!(msg.poll_type, None);
+            assert_eq!(msg.poll_type_raw.as_deref(), Some("future_stage"));
+        }
+
+        #[test]
+        fn a_message_without_polltype_has_no_raw_token() {
+            let msg = parse_one(NodeBuilder::new("message").attr("type", "poll"));
+            assert_eq!(msg.poll_type, None);
+            assert_eq!(msg.poll_type_raw, None);
+        }
+
+        #[test]
+        fn an_unknown_type_keeps_its_token_in_both_fields() {
+            let msg = parse_one(NodeBuilder::new("message").attr("type", "hologram"));
+            assert_eq!(
+                msg.message_type,
+                NewsletterMessageType::Other("hologram".into())
+            );
+            assert_eq!(msg.message_type_raw.as_deref(), Some("hologram"));
+        }
     }
 
     /// A `<vote>` whose content is not a 32-byte digest, or whose required
@@ -2805,5 +3508,229 @@ mod tests {
             msg.poll_type, None,
             "the poll stage is read for poll envelopes only"
         );
+    }
+
+    /// Option hashes of a real channel poll, with the name each was taken
+    /// over. The names carry a variation selector and a ZWJ sequence, the
+    /// bytes a retyped name loses.
+    const JUST_THIS: &str = "🫠 Just this.";
+    const JUST_THIS_HASH: &str = "107f7671b96fcff7c2524b29a031dfb5c0c6ea19c9cba6e47de723e5c6983c83";
+    const GOOD_MORNING: &str = "☀️ GOOD MORNING EVERYONE LET'S GO!!!";
+    const GOOD_MORNING_HASH: &str =
+        "2e090fda1d75dab720e00f72f5b06d88020d56c637d25a5d64529b51faeb6acf";
+    const MONDAYS: &str = "😶‍🌫️ Mondays should be illegal.";
+    const MONDAYS_HASH: &str = "ea53ff01672231aa49905b2a74164330b2a006d6f731d1227171fd92d3779322";
+
+    fn option_hash(hex_digest: &str) -> [u8; 32] {
+        hex::decode(hex_digest)
+            .expect("hex")
+            .try_into()
+            .expect("32 bytes")
+    }
+
+    fn vote_bytes(node: &wacore_binary::Node) -> Vec<Vec<u8>> {
+        let votes = node.get_optional_child("votes").expect("votes child");
+        votes
+            .children()
+            .unwrap_or_default()
+            .iter()
+            .map(|vote| {
+                assert_eq!(vote.tag, "vote");
+                assert!(vote.attrs.is_empty(), "a sent <vote> carries no attrs");
+                match vote.content.as_ref() {
+                    Some(NodeContent::Bytes(bytes)) => bytes.clone(),
+                    other => panic!("a <vote> holds the raw digest, got {other:?}"),
+                }
+            })
+            .collect()
+    }
+
+    /// The hash a vote sends is `compute_option_hash` over the option name,
+    /// byte for byte: these are the digests the server tallied and acked.
+    #[test]
+    fn poll_vote_hashes_are_the_option_name_digests() {
+        for (name, digest) in [
+            (JUST_THIS, JUST_THIS_HASH),
+            (GOOD_MORNING, GOOD_MORNING_HASH),
+            (MONDAYS, MONDAYS_HASH),
+        ] {
+            assert_eq!(
+                wacore::poll::compute_option_hash(name),
+                option_hash(digest),
+                "{name}"
+            );
+        }
+    }
+
+    /// The shape WA Web sent for one option: a plaintext `<message
+    /// type="poll">` whose `server_id` is the poll's, `<meta polltype="vote">`
+    /// with no `contenttype`, then `<votes>` with one bare `<vote>` digest.
+    #[test]
+    fn poll_vote_node_matches_the_wa_web_stanza() {
+        let jid = newsletter_jid();
+        let node = build_poll_vote_node(
+            &jid,
+            "3EB0000000000000000001",
+            777,
+            &[option_hash(JUST_THIS_HASH)],
+        );
+
+        assert_eq!(node.tag, "message");
+        let mut attrs = node.attrs();
+        assert_eq!(attrs.jid("to"), jid);
+        assert_eq!(
+            attrs.optional_string("id").unwrap(),
+            "3EB0000000000000000001"
+        );
+        assert_eq!(attrs.optional_u64("server_id"), Some(777));
+        assert_eq!(attrs.optional_string("type").unwrap(), "poll");
+        assert_eq!(
+            node.attrs.len(),
+            4,
+            "no attribute beyond the four WA Web sends"
+        );
+
+        let tags: Vec<_> = node
+            .children()
+            .expect("children")
+            .iter()
+            .map(|child| child.tag.as_ref())
+            .collect();
+        assert_eq!(
+            tags,
+            ["meta", "votes"],
+            "meta precedes votes, as WA Web sends it"
+        );
+
+        let meta = node.get_optional_child("meta").expect("meta child");
+        assert_eq!(meta.attrs().optional_string("polltype").unwrap(), "vote");
+        assert_eq!(meta.attrs.len(), 1, "a vote's meta carries no contenttype");
+        assert!(meta.content.is_none());
+
+        assert_eq!(vote_bytes(&node), [option_hash(JUST_THIS_HASH).to_vec()]);
+    }
+
+    /// A multi-select vote is one stanza with a `<vote>` per option, in the
+    /// order the caller gave them.
+    #[test]
+    fn poll_vote_node_sends_every_option_in_the_given_order() {
+        for order in [
+            [GOOD_MORNING_HASH, MONDAYS_HASH],
+            [MONDAYS_HASH, GOOD_MORNING_HASH],
+        ] {
+            let hashes = order.map(option_hash);
+            let node = build_poll_vote_node(&newsletter_jid(), "3EB0", 777, &hashes);
+            assert_eq!(
+                vote_bytes(&node),
+                hashes.iter().map(|hash| hash.to_vec()).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    /// Removing a vote is the same stanza with an empty `<votes>`: there is no
+    /// separate revoke type or attribute.
+    #[test]
+    fn an_empty_poll_vote_removes_the_vote() {
+        let node = build_poll_vote_node(&newsletter_jid(), "3EB0", 777, &[]);
+
+        assert_eq!(node.attrs().optional_string("type").unwrap(), "poll");
+        assert!(
+            node.get_optional_child("meta").is_some(),
+            "meta stays on a removal"
+        );
+        assert!(vote_bytes(&node).is_empty());
+    }
+
+    #[test]
+    fn a_poll_vote_is_refused_past_the_option_cap_or_with_a_repeat() {
+        let distinct: Vec<[u8; 32]> = (0..=MAX_POLL_VOTE_OPTIONS)
+            .map(|i| wacore::poll::compute_option_hash(&i.to_string()))
+            .collect();
+
+        assert!(validate_poll_vote(&[]).is_ok());
+        assert!(validate_poll_vote(&distinct[..MAX_POLL_VOTE_OPTIONS]).is_ok());
+        assert!(matches!(
+            validate_poll_vote(&distinct),
+            Err(NewsletterError::InvalidRequest(_))
+        ));
+
+        let repeated = [
+            option_hash(GOOD_MORNING_HASH),
+            option_hash(MONDAYS_HASH),
+            option_hash(GOOD_MORNING_HASH),
+        ];
+        assert!(matches!(
+            validate_poll_vote(&repeated),
+            Err(NewsletterError::InvalidRequest(_))
+        ));
+    }
+
+    /// The id handed back is the one on the wire, since it is the caller's
+    /// only way to match the server's ack to this vote.
+    #[tokio::test]
+    async fn send_poll_vote_returns_the_id_it_sent() {
+        let (client, transport) = crate::test_utils::create_iq_test_client().await;
+        let jid = newsletter_jid();
+
+        let id = client
+            .newsletter()
+            .send_poll_vote_raw(&jid, 777, &[option_hash(JUST_THIS_HASH)])
+            .await
+            .expect("vote is sent");
+
+        let sent = crate::test_utils::decode_sent_iq(&transport, 0).await;
+        let sent = sent.get();
+        assert_eq!(sent.tag.as_ref(), "message");
+        let mut attrs = sent.attrs();
+        assert_eq!(attrs.optional_string("id").unwrap(), id.as_str());
+        assert_eq!(attrs.optional_u64("server_id"), Some(777));
+        assert_eq!(attrs.jid("to"), jid);
+    }
+
+    /// Same contract as the vote: the reaction's ack is matched by this id.
+    #[tokio::test]
+    async fn send_reaction_returns_the_id_it_sent() {
+        let (client, transport) = crate::test_utils::create_iq_test_client().await;
+        let jid = newsletter_jid();
+
+        let id = client
+            .newsletter()
+            .send_reaction_raw(&jid, 777, "👍")
+            .await
+            .expect("reaction is sent");
+
+        let sent = crate::test_utils::decode_sent_iq(&transport, 0).await;
+        let sent = sent.get();
+        assert_eq!(sent.tag.as_ref(), "message");
+        let mut attrs = sent.attrs();
+        assert_eq!(attrs.optional_string("id").unwrap(), id.as_str());
+        assert_eq!(attrs.optional_string("type").unwrap(), "reaction");
+        assert_eq!(attrs.optional_u64("server_id"), Some(777));
+        assert_eq!(attrs.jid("to"), jid);
+    }
+
+    /// A refused vote puts nothing on the wire.
+    #[tokio::test]
+    async fn send_poll_vote_refuses_a_non_newsletter_jid_or_a_bad_selection() {
+        let (client, transport) = crate::test_utils::create_iq_test_client().await;
+        let group: Jid = "120363000000000002@g.us".parse().expect("jid");
+        let hash = option_hash(JUST_THIS_HASH);
+
+        let not_a_channel = client
+            .newsletter()
+            .send_poll_vote_raw(&group, 777, &[hash])
+            .await;
+        assert!(matches!(
+            not_a_channel,
+            Err(NewsletterError::InvalidRequest(_))
+        ));
+
+        let repeated = client
+            .newsletter()
+            .send_poll_vote_raw(&newsletter_jid(), 777, &[hash, hash])
+            .await;
+        assert!(matches!(repeated, Err(NewsletterError::InvalidRequest(_))));
+
+        assert_eq!(transport.sent_count(), 0);
     }
 }

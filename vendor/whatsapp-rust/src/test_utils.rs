@@ -194,10 +194,7 @@ pub struct MockHttpClient;
 #[async_trait::async_trait]
 impl HttpClient for MockHttpClient {
     async fn execute(&self, _request: HttpRequest) -> Result<HttpResponse, anyhow::Error> {
-        Ok(HttpResponse {
-            status_code: 200,
-            body: Vec::new(),
-        })
+        Ok(HttpResponse::new(200, Vec::new()))
     }
 }
 
@@ -315,6 +312,35 @@ pub async fn create_test_client_with_config(
     http_client: Arc<dyn HttpClient>,
     cache_config: crate::cache_config::CacheConfig,
 ) -> Arc<Client> {
+    create_test_client_with_config_and_runtime(
+        name,
+        http_client,
+        cache_config,
+        Arc::new(TokioRuntime),
+    )
+    .await
+}
+
+#[cfg(test)]
+pub(crate) async fn create_test_client_with_runtime(
+    name: &str,
+    runtime: Arc<dyn wacore::runtime::Runtime>,
+) -> Arc<Client> {
+    create_test_client_with_config_and_runtime(
+        name,
+        Arc::new(MockHttpClient),
+        crate::cache_config::CacheConfig::default(),
+        runtime,
+    )
+    .await
+}
+
+async fn create_test_client_with_config_and_runtime(
+    name: &str,
+    http_client: Arc<dyn HttpClient>,
+    cache_config: crate::cache_config::CacheConfig,
+    runtime: Arc<dyn wacore::runtime::Runtime>,
+) -> Arc<Client> {
     use portable_atomic::AtomicU64;
     use std::sync::atomic::Ordering;
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -328,12 +354,12 @@ pub async fn create_test_client_with_config(
     );
 
     let backend = Arc::new(
-        SqliteStore::new(&db_name)
+        SqliteStore::open(&db_name)
             .await
             .expect("test backend should initialize"),
     ) as Arc<dyn Backend>;
 
-    create_test_client_from_backend(backend, http_client, cache_config).await
+    create_test_client_from_backend(backend, http_client, cache_config, runtime).await
 }
 
 pub async fn create_test_client_with_backend(backend: Arc<dyn Backend>) -> Arc<Client> {
@@ -341,6 +367,7 @@ pub async fn create_test_client_with_backend(backend: Arc<dyn Backend>) -> Arc<C
         backend,
         Arc::new(MockHttpClient),
         crate::cache_config::CacheConfig::default(),
+        Arc::new(TokioRuntime),
     )
     .await
 }
@@ -349,6 +376,7 @@ async fn create_test_client_from_backend(
     backend: Arc<dyn Backend>,
     http_client: Arc<dyn HttpClient>,
     cache_config: crate::cache_config::CacheConfig,
+    runtime: Arc<dyn wacore::runtime::Runtime>,
 ) -> Arc<Client> {
     let pm = Arc::new(
         PersistenceManager::new(backend)
@@ -356,15 +384,16 @@ async fn create_test_client_from_backend(
             .expect("persistence manager should initialize"),
     );
 
-    let (client, _rx) = Client::new_with_cache_config(
-        Arc::new(TokioRuntime),
-        pm,
-        Arc::new(MockTransportFactory::new()),
-        http_client,
-        None,
-        cache_config,
-    )
-    .await;
+    let (client, _rx) = Client::builder()
+        .with_runtime_arc(runtime)
+        .with_persistence_manager(pm)
+        .with_transport_factory_arc(Arc::new(MockTransportFactory::new()))
+        .with_http_client_arc(http_client)
+        .with_cache_config(cache_config)
+        .build()
+        .await
+        .expect("test client should build")
+        .into_parts();
 
     // Tests exercise live-path semantics by default (a fresh client starts in
     // drain mode: 1-permit semaphore, inbound commits batch instead of
@@ -388,14 +417,15 @@ pub(crate) async fn create_test_client_with_transport_factory(
             .expect("persistence manager should initialize"),
     );
 
-    let (client, _rx) = Client::new(
-        Arc::new(TokioRuntime),
-        pm,
-        transport_factory,
-        Arc::new(MockHttpClient),
-        None,
-    )
-    .await;
+    let (client, _rx) = Client::builder()
+        .with_runtime_arc(Arc::new(TokioRuntime))
+        .with_persistence_manager(pm)
+        .with_transport_factory_arc(transport_factory)
+        .with_http_client_arc(Arc::new(MockHttpClient))
+        .build()
+        .await
+        .expect("test client should build")
+        .into_parts();
 
     client.enter_live_mode_for_tests();
 
@@ -448,7 +478,7 @@ pub async fn create_test_backend() -> Arc<dyn Backend> {
     );
 
     Arc::new(
-        SqliteStore::new(&db_name)
+        SqliteStore::open(&db_name)
             .await
             .expect("test backend should initialize"),
     ) as Arc<dyn Backend>
@@ -462,10 +492,21 @@ pub(crate) async fn create_iq_test_client() -> (
     Arc<Client>,
     Arc<crate::transport::mock::CapturingMockTransport>,
 ) {
+    create_iq_test_client_with_backend(create_test_backend().await).await
+}
+
+/// The same connected, Noise-framed fixture with a caller-owned backend for
+/// persistence/reload and fault-injection tests.
+#[cfg(test)]
+pub(crate) async fn create_iq_test_client_with_backend(
+    backend: Arc<dyn Backend>,
+) -> (
+    Arc<Client>,
+    Arc<crate::transport::mock::CapturingMockTransport>,
+) {
     use crate::transport::mock::CapturingMockTransportFactory;
     use wacore::handshake::NoiseCipher;
 
-    let backend = create_test_backend().await;
     let pm = Arc::new(
         PersistenceManager::new(backend)
             .await
@@ -473,14 +514,15 @@ pub(crate) async fn create_iq_test_client() -> (
     );
     let factory = CapturingMockTransportFactory::new();
     let transport = factory.transport();
-    let (client, _sync_rx) = Client::new(
-        Arc::new(TokioRuntime),
-        pm,
-        Arc::new(factory),
-        Arc::new(MockHttpClient),
-        None,
-    )
-    .await;
+    let (client, _sync_rx) = Client::builder()
+        .with_runtime_arc(Arc::new(TokioRuntime))
+        .with_persistence_manager(pm)
+        .with_transport_factory_arc(Arc::new(factory))
+        .with_http_client_arc(Arc::new(MockHttpClient))
+        .build()
+        .await
+        .expect("test client should build")
+        .into_parts();
 
     // Wired to the client's own observers like the real socket is, so per-frame
     // bookkeeping and sent-frame forwarding are part of what tests observe.
@@ -517,9 +559,12 @@ pub mod log_capture {
     /// so [`Session::records_for`] would report it as silent — add it before
     /// asserting on it.
     const CAPTURED_TARGETS: &[&str] = &[
+        "MessageQueue",
         "Client/Keepalive",
         "whatsapp_rust::client::lifecycle",
+        "whatsapp_rust::history_sync",
         "whatsapp_rust::message::receive",
+        "whatsapp_rust::handlers::ib",
     ];
 
     #[derive(Default)]

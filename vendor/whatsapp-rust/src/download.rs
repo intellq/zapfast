@@ -1,16 +1,21 @@
 use crate::client::Client;
 use crate::http::{
     HTTP_STATUS_GONE, HTTP_STATUS_NOT_FOUND, HTTP_STATUS_OK, HTTP_STATUS_REDIRECTION_START,
-    HttpClient, HttpStatusError,
+    HTTP_STATUS_UNAUTHORIZED, HttpClient, HttpStatusError,
 };
 use crate::mediaconn::{MEDIA_AUTH_REFRESH_RETRY_ATTEMPTS, MediaConn, is_media_auth_error};
 use anyhow::{Result, anyhow};
 use std::sync::Arc;
 use wacore::runtime::Runtime;
+use wacore::sync_marker::MaybeSend;
+
+mod budget;
+use budget::{BudgetPolicyCause, DownloadBudget};
+pub use budget::{DownloadLimits, DownloadPolicyError, MediaByteDomain};
 
 pub use wacore::download::{
-    DEFAULT_MEDIA_HOSTS, DownloadUtils, DownloadWriter, Downloadable, MediaDecryption,
-    MediaDecryptionError, MediaHost, MediaRoute, MediaType,
+    DEFAULT_MEDIA_HOSTS, DownloadPreparationError, DownloadUtils, DownloadWriter, Downloadable,
+    MediaDecryption, MediaDecryptionError, MediaHost, MediaRoute, MediaType,
 };
 
 /// Cap on the speculative capacity pre-allocated for the in-memory download
@@ -22,29 +27,32 @@ const DOWNLOAD_PREALLOC_CAP: u64 = 64 * 1024 * 1024;
 
 impl From<&MediaConn> for MediaRoute {
     fn from(conn: &MediaConn) -> Self {
-        MediaRoute::authenticated(
+        MediaRoute::new(
             conn.hosts
                 .iter()
                 .map(|h| MediaHost::new(h.hostname.clone()))
                 .collect(),
-            conn.auth.clone(),
         )
     }
 }
 
-/// `Downloadable` built from raw CDN fields, for re-downloading media without
-/// the original message in hand.
+/// Validated, owned CDN metadata for re-downloading media without its message.
+///
+/// Use [`Self::encrypted`] or [`Self::plaintext`]. Both copy their input slices
+/// and validate them before returning. Fields are private so callers cannot
+/// invalidate those guarantees; [`Downloadable`] supplies read-only access.
 pub struct DownloadParams {
-    pub direct_path: String,
-    pub media_key: Option<Vec<u8>>,
-    pub file_sha256: Vec<u8>,
-    pub file_enc_sha256: Option<Vec<u8>>,
-    pub file_length: u64,
-    pub media_type: MediaType,
+    direct_path: String,
+    media_key: Option<Vec<u8>>,
+    file_sha256: Vec<u8>,
+    file_enc_sha256: Option<Vec<u8>>,
+    file_length: u64,
+    media_type: MediaType,
 }
 
 impl DownloadParams {
-    /// Params for encrypted media. Slices are copied into the owned struct.
+    /// Encrypted metadata with a 32-byte key and two SHA-256 digests.
+    /// Explicitly plaintext media types are rejected locally.
     pub fn encrypted(
         direct_path: impl Into<String>,
         media_key: &[u8],
@@ -52,15 +60,52 @@ impl DownloadParams {
         file_enc_sha256: &[u8],
         file_length: u64,
         media_type: MediaType,
-    ) -> Self {
-        Self {
+    ) -> std::result::Result<Self, DownloadPreparationError> {
+        if !media_type.is_encrypted() {
+            return Err(DownloadPreparationError::RequiresPlaintext);
+        }
+        if media_key.len() != 32 {
+            return Err(DownloadPreparationError::InvalidMediaKeyLength);
+        }
+        if file_sha256.len() != 32 {
+            return Err(DownloadPreparationError::InvalidPlaintextHashLength);
+        }
+        if file_enc_sha256.len() != 32 {
+            return Err(DownloadPreparationError::InvalidEncryptedHashLength);
+        }
+        Ok(Self {
             direct_path: direct_path.into(),
             media_key: Some(media_key.to_vec()),
             file_sha256: file_sha256.to_vec(),
             file_enc_sha256: Some(file_enc_sha256.to_vec()),
             file_length,
             media_type,
+        })
+    }
+
+    /// Plaintext metadata with a SHA-256 digest and no cryptographic key.
+    /// Ordinary image/video types can describe newsletter media; MusicArtwork
+    /// requires encryption, while NewsletterMusicArtwork is plaintext.
+    pub fn plaintext(
+        direct_path: impl Into<String>,
+        file_sha256: &[u8],
+        file_length: u64,
+        media_type: MediaType,
+    ) -> std::result::Result<Self, DownloadPreparationError> {
+        if media_type == MediaType::MusicArtwork {
+            return Err(DownloadPreparationError::RequiresEncryption);
         }
+        if file_sha256.len() != 32 {
+            return Err(DownloadPreparationError::InvalidPlaintextHashLength);
+        }
+        Ok(Self {
+            direct_path: direct_path.into(),
+            media_key: None,
+            file_sha256: file_sha256.to_vec(),
+            file_enc_sha256: None,
+            file_length,
+            media_type,
+        })
     }
 }
 
@@ -89,6 +134,7 @@ impl Downloadable for DownloadParams {
 /// fields consumers construct or match in MediaDecryption / DownloadRequest.
 #[derive(Default)]
 struct ExpectedMediaHashes {
+    budget: Option<DownloadBudget>,
     encrypted: Option<Vec<u8>>,
     plaintext: Option<Vec<u8>>,
 }
@@ -97,6 +143,7 @@ impl ExpectedMediaHashes {
     fn from_downloadable(downloadable: &dyn Downloadable) -> Self {
         if downloadable.is_encrypted() {
             Self {
+                budget: None,
                 encrypted: downloadable.file_enc_sha256().map(<[u8]>::to_vec),
                 plaintext: downloadable.file_sha256().map(<[u8]>::to_vec),
             }
@@ -108,53 +155,285 @@ impl ExpectedMediaHashes {
 
 /// Why a media download failed, for callers that have no session to refresh.
 ///
-/// [`Client`] downloads keep returning [`anyhow::Error`]: a refresh is tried
-/// before the error escapes, so the distinction has already been acted on.
-#[derive(Debug, thiserror::Error)]
+/// [`Client`] downloads return [`ClientDownloadError`], which also represents
+/// session acquisition/refresh failures. This downloader never asks for a session.
+///
+/// `Display` and `Debug` omit opaque cause text, which may contain signed URLs.
+/// Inspect [`std::error::Error::source`] explicitly to recover the original cause.
+#[derive(thiserror::Error)]
 #[non_exhaustive]
 pub enum MediaDownloadError {
+    /// The application byte policy cannot be satisfied. No host retry is attempted.
+    #[error("{0}")]
+    ResourcePolicy(#[from] DownloadPolicyError),
     /// The CDN rejected the reference itself (401/403/404/410). The direct path
     /// or its token is expired or revoked; another host cannot serve it either.
-    #[error("the CDN rejected the media reference: {0}")]
+    #[error("the CDN rejected the media reference: {:?}", MediaErrorDiagnostic(.0.as_ref()))]
     ReferenceRejected(#[source] anyhow::Error),
     /// Every host in the route failed for a reason other than the reference:
     /// transport failure, unexpected status, or a body that failed to verify.
-    #[error("every media host failed: {0}")]
+    #[error("every media host failed: {:?}", MediaErrorDiagnostic(.0.as_ref()))]
     HostsUnreachable(#[source] anyhow::Error),
+    /// The local destination could not be truncated, written or rewound.
+    /// This is terminal: switching CDN hosts cannot repair the sink.
+    #[error("local media writer failed: {:?}", MediaErrorDiagnostic(.0.as_ref()))]
+    WriterIo(#[source] anyhow::Error),
     /// The route named no hosts, so nothing was ever contacted.
     #[error("the media route names no hosts")]
     NoHosts,
     /// No host was contacted and none could be: the reference is too incomplete
     /// to build a URL from, so the fix is the metadata, not the network.
-    #[error("{0}")]
+    #[error("{:?}", MediaErrorDiagnostic(.0.as_ref()))]
     Other(#[from] anyhow::Error),
+    /// Cleanup failed; `failure` preserves the original classification and source
+    /// chain, while `cleanup` explains why the sink may retain unverified bytes.
+    #[error("{failure}; failed to clear the writer: {:?}", .cleanup.kind())]
+    WriterCleanup {
+        #[source]
+        failure: Box<MediaDownloadError>,
+        cleanup: std::io::Error,
+    },
+}
+
+/// Final failure of a [`Client`] download, after any applicable refresh and host
+/// failover. Local sink failures stop immediately. Unlike [`MediaDownloadError`],
+/// this includes the session operation needed to obtain a CDN route.
+///
+/// Like [`MediaDownloadError`], both diagnostic formats redact opaque causes;
+/// the original errors remain accessible through the standard source chain.
+#[derive(thiserror::Error)]
+#[non_exhaustive]
+pub enum ClientDownloadError {
+    /// The application byte policy cannot be satisfied. No host retry is attempted.
+    #[error("{0}")]
+    ResourcePolicy(#[from] DownloadPolicyError),
+    /// The reference is still rejected after any applicable refresh. Static
+    /// URLs have no refreshable route, so their first rejection is final.
+    #[error("the CDN rejected the media reference: {:?}", MediaErrorDiagnostic(.0.as_ref()))]
+    ReferenceRejected(#[source] anyhow::Error),
+    /// Every host failed (transport, status, or integrity); the last cause is
+    /// retained, including its HTTP status or decryption error when available.
+    #[error("every media host failed: {:?}", MediaErrorDiagnostic(.0.as_ref()))]
+    HostsUnreachable(#[source] anyhow::Error),
+    /// The local destination could not be truncated, written or rewound.
+    /// No further host or media-session refresh is attempted for this failure.
+    #[error("local media writer failed: {:?}", MediaErrorDiagnostic(.0.as_ref()))]
+    WriterIo(#[source] anyhow::Error),
+    /// The obtained route has no hosts. No HTTP request was executed.
+    #[error("the media route names no hosts")]
+    NoHosts,
+    /// A forced refresh after rejection yielded no hosts. The prior rejection
+    /// remains the source: unlike `NoHosts`, an HTTP exchange already occurred.
+    #[error("the refreshed media route names no hosts after CDN rejection: {:?}", MediaErrorDiagnostic(.0.as_ref()))]
+    NoHostsAfterRefresh(#[source] anyhow::Error),
+    /// Metadata could not be turned into a request.
+    #[error("could not prepare the media reference: {:?}", MediaErrorDiagnostic(.0.as_ref()))]
+    Preparation(#[source] anyhow::Error),
+    /// Failed to obtain a session route, or refresh it after a CDN rejection.
+    /// The IQ error retains rejection metadata, timeout and transport causes.
+    #[error("failed to obtain media session (forced refresh: {force_refresh}): {:?}", MediaErrorDiagnostic(.source))]
+    MediaSession {
+        force_refresh: bool,
+        #[source]
+        source: crate::request::IqError,
+    },
+    /// Failure cleanup was attempted but failed. Follow `failure` (also the
+    /// standard source chain) for the download cause, and inspect `cleanup` for
+    /// the sink error. The destination must not be treated as verified media.
+    #[error("{failure}; failed to clear the writer: {:?}", .cleanup.kind())]
+    WriterCleanup {
+        #[source]
+        failure: Box<ClientDownloadError>,
+        cleanup: std::io::Error,
+    },
+}
+
+// Opaque adapter errors may repeat signed URLs in any source or context. Keep
+// those causes intact for callers, but only format typed facts in diagnostics.
+pub(crate) struct MediaErrorDiagnostic<'a>(pub &'a (dyn std::error::Error + 'static));
+
+impl std::fmt::Debug for MediaErrorDiagnostic<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use crate::error::ErrorChainExt;
+        use crate::request::IqError;
+        let io_kind = ErrorChainExt::sources(self.0)
+            .find_map(|e| e.downcast_ref::<std::io::Error>())
+            .map(std::io::Error::kind);
+        let media_validation =
+            ErrorChainExt::sources(self.0).any(|e| e.is::<MediaDecryptionError>());
+        let iq_kind = ErrorChainExt::sources(self.0)
+            .find_map(|e| e.downcast_ref::<IqError>())
+            .map(|e| match e {
+                IqError::Timeout => "timeout",
+                IqError::NotConnected => "not_connected",
+                IqError::Socket(_) => "socket",
+                IqError::EncryptSend(_) => "encrypt_send",
+                IqError::ClientState(_) => "client_state",
+                IqError::Disconnected(_) => "disconnected",
+                IqError::ServerError { .. } => "server_rejection",
+                IqError::UnexpectedResponseType { .. } => "unexpected_response_type",
+                IqError::InternalChannelClosed => "channel_closed",
+                IqError::Unclassified(_) => "unclassified",
+                IqError::DuplicateRequestId(_) => "duplicate_request_id",
+                IqError::EncodeError(_) => "encode",
+                IqError::ParseError(_) => "parse",
+            });
+        let iq_code = self.0.server_rejection().map(|rejection| rejection.code);
+        let preparation = ErrorChainExt::sources(self.0)
+            .find_map(|e| e.downcast_ref::<DownloadPreparationError>());
+        f.debug_struct("MediaFailure")
+            .field("preparation", &preparation)
+            .field("iq_kind", &iq_kind)
+            .field("iq_code", &iq_code)
+            .field("http_status", &self.0.http_status())
+            .field("io_kind", &io_kind)
+            .field("media_validation", &media_validation)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for MediaDownloadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ResourcePolicy(e) => f.debug_tuple("ResourcePolicy").field(e).finish(),
+            Self::ReferenceRejected(e) => f
+                .debug_tuple("ReferenceRejected")
+                .field(&MediaErrorDiagnostic(e.as_ref()))
+                .finish(),
+            Self::HostsUnreachable(e) => f
+                .debug_tuple("HostsUnreachable")
+                .field(&MediaErrorDiagnostic(e.as_ref()))
+                .finish(),
+            Self::WriterIo(e) => f
+                .debug_tuple("WriterIo")
+                .field(&MediaErrorDiagnostic(e.as_ref()))
+                .finish(),
+            Self::Other(e) => f
+                .debug_tuple("Other")
+                .field(&MediaErrorDiagnostic(e.as_ref()))
+                .finish(),
+            Self::NoHosts => f.write_str("NoHosts"),
+            Self::WriterCleanup { failure, cleanup } => f
+                .debug_struct("WriterCleanup")
+                .field("failure", failure)
+                .field("cleanup_kind", &cleanup.kind())
+                .finish(),
+        }
+    }
+}
+
+impl std::fmt::Debug for ClientDownloadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ResourcePolicy(e) => f.debug_tuple("ResourcePolicy").field(e).finish(),
+            Self::ReferenceRejected(e) => f
+                .debug_tuple("ReferenceRejected")
+                .field(&MediaErrorDiagnostic(e.as_ref()))
+                .finish(),
+            Self::HostsUnreachable(e) => f
+                .debug_tuple("HostsUnreachable")
+                .field(&MediaErrorDiagnostic(e.as_ref()))
+                .finish(),
+            Self::WriterIo(e) => f
+                .debug_tuple("WriterIo")
+                .field(&MediaErrorDiagnostic(e.as_ref()))
+                .finish(),
+            Self::NoHostsAfterRefresh(e) => f
+                .debug_tuple("NoHostsAfterRefresh")
+                .field(&MediaErrorDiagnostic(e.as_ref()))
+                .finish(),
+            Self::Preparation(e) => f
+                .debug_tuple("Preparation")
+                .field(&MediaErrorDiagnostic(e.as_ref()))
+                .finish(),
+            Self::NoHosts => f.write_str("NoHosts"),
+            Self::MediaSession {
+                force_refresh,
+                source,
+            } => f
+                .debug_struct("MediaSession")
+                .field("force_refresh", force_refresh)
+                .field("source", &MediaErrorDiagnostic(source))
+                .finish(),
+            Self::WriterCleanup { failure, cleanup } => f
+                .debug_struct("WriterCleanup")
+                .field("failure", failure)
+                .field("cleanup_kind", &cleanup.kind())
+                .finish(),
+        }
+    }
+}
+
+impl From<DownloadRequestError> for ClientDownloadError {
+    fn from(err: DownloadRequestError) -> Self {
+        match err {
+            DownloadRequestError::ResourcePolicy(e) => Self::ResourcePolicy(e),
+            DownloadRequestError::Auth(e) | DownloadRequestError::NotFound(e) => {
+                Self::ReferenceRejected(e)
+            }
+            DownloadRequestError::Other(e) => Self::HostsUnreachable(e),
+            DownloadRequestError::WriterIo(e) => Self::WriterIo(e),
+            DownloadRequestError::Prepare(e) => Self::Preparation(e),
+            DownloadRequestError::NoHosts => Self::NoHosts,
+            DownloadRequestError::NoHostsAfterRefresh(e) => Self::NoHostsAfterRefresh(e),
+            DownloadRequestError::Session {
+                force_refresh,
+                source,
+            } => Self::MediaSession {
+                force_refresh,
+                source,
+            },
+            DownloadRequestError::Cleanup { failure, cleanup } => Self::WriterCleanup {
+                failure: Box::new((*failure).into()),
+                cleanup,
+            },
+        }
+    }
 }
 
 impl From<DownloadRequestError> for MediaDownloadError {
     fn from(err: DownloadRequestError) -> Self {
         match err {
+            DownloadRequestError::ResourcePolicy(e) => Self::ResourcePolicy(e),
             DownloadRequestError::Auth(e) | DownloadRequestError::NotFound(e) => {
                 Self::ReferenceRejected(e)
             }
             DownloadRequestError::Other(e) => Self::HostsUnreachable(e),
+            DownloadRequestError::WriterIo(e) => Self::WriterIo(e),
             DownloadRequestError::Prepare(e) => Self::Other(e),
             DownloadRequestError::NoHosts => Self::NoHosts,
+            DownloadRequestError::Session { source, .. } => Self::Other(source.into()),
+            DownloadRequestError::NoHostsAfterRefresh(e) => Self::Other(e),
+            DownloadRequestError::Cleanup { failure, cleanup } => Self::WriterCleanup {
+                failure: Box::new((*failure).into()),
+                cleanup,
+            },
         }
     }
 }
 
 #[derive(Debug)]
 enum DownloadRequestError {
+    ResourcePolicy(DownloadPolicyError),
     Auth(anyhow::Error),
-    /// 404/410 — media URL expired or not found. Needs fresh auth + URL re-derivation.
-    /// Matches WA Web's `MediaNotFoundError` handling.
+    /// 404/410: the media reference expired or was not found.
     NotFound(anyhow::Error),
     Other(anyhow::Error),
+    WriterIo(anyhow::Error),
     /// The request list could not be built, so no host was ever contacted and
     /// no host ever could be: the reference itself is incomplete.
     Prepare(anyhow::Error),
     /// No request was ever executed: the route carried no hosts.
     NoHosts,
+    NoHostsAfterRefresh(anyhow::Error),
+    Session {
+        force_refresh: bool,
+        source: crate::request::IqError,
+    },
+    Cleanup {
+        failure: Box<DownloadRequestError>,
+        cleanup: std::io::Error,
+    },
 }
 
 impl DownloadRequestError {
@@ -201,19 +480,87 @@ impl DownloadRequestError {
         Self::Other(err.into())
     }
 
+    fn writer_io(error: std::io::Error) -> Self {
+        Self::WriterIo(error.into())
+    }
+
+    fn streamed(error: anyhow::Error) -> Self {
+        let tagged = error
+            .downcast_ref::<std::io::Error>()
+            .and_then(std::io::Error::get_ref)
+            .is_some_and(|cause| cause.is::<WriterIoCause>());
+        if !tagged {
+            if let Some(policy) = error.chain().find_map(|e| {
+                e.downcast_ref::<BudgetPolicyCause>().or_else(|| {
+                    e.downcast_ref::<std::io::Error>()?
+                        .get_ref()?
+                        .downcast_ref::<BudgetPolicyCause>()
+                })
+            }) {
+                return Self::ResourcePolicy(policy.0);
+            }
+            return Self::Other(error);
+        }
+        // Strip the private origin tag: direct downcasts must expose the same
+        // original OS code and message as buffered writer failures.
+        match error.downcast::<std::io::Error>() {
+            Ok(error) => {
+                let kind = error.kind();
+                match error
+                    .into_inner()
+                    .map(|inner| inner.downcast::<WriterIoCause>())
+                {
+                    Some(Ok(cause)) => Self::writer_io(cause.0),
+                    // Defensive fallbacks retain available causes without a
+                    // panic; the immutable tag check above excludes them.
+                    Some(Err(cause)) => Self::writer_io(std::io::Error::new(kind, cause)),
+                    None => Self::writer_io(kind.into()),
+                }
+            }
+            Err(error) => Self::WriterIo(error),
+        }
+    }
+
     fn is_auth(&self) -> bool {
         matches!(self, Self::Auth(_))
     }
 
-    /// Returns true for 404/410 (expired URL) — should trigger auth refresh like auth errors.
     fn is_not_found(&self) -> bool {
         matches!(self, Self::NotFound(_))
     }
 
+    /// A download's signed reference can expire independently of upload auth.
+    /// WA Web treats 403/404/410 as terminal download errors; refreshing hosts
+    /// cannot re-sign that reference. Retain our bounded 401 recovery only.
+    fn should_refresh_route(&self) -> bool {
+        matches!(self, Self::Auth(error) if error.downcast_ref::<HttpStatusError>()
+            .is_some_and(|status| status.status == HTTP_STATUS_UNAUTHORIZED))
+    }
+
+    fn no_hosts(previous_rejection: Option<anyhow::Error>) -> Self {
+        match previous_rejection {
+            Some(cause) => Self::NoHostsAfterRefresh(cause),
+            None => Self::NoHosts,
+        }
+    }
+
     fn into_anyhow(self) -> anyhow::Error {
         match self {
-            Self::Auth(err) | Self::NotFound(err) | Self::Other(err) | Self::Prepare(err) => err,
+            Self::ResourcePolicy(e) => e.into(),
+            Self::Auth(err)
+            | Self::NotFound(err)
+            | Self::Other(err)
+            | Self::WriterIo(err)
+            | Self::Prepare(err) => err,
             Self::NoHosts => anyhow!("Failed to download from all available media hosts"),
+            Self::Session { source, .. } => source.into(),
+            Self::NoHostsAfterRefresh(e) => ClientDownloadError::NoHostsAfterRefresh(e).into(),
+            Self::Cleanup { failure, cleanup } => {
+                anyhow::Error::new(ClientDownloadError::WriterCleanup {
+                    failure: Box::new((*failure).into()),
+                    cleanup,
+                })
+            }
         }
     }
 }
@@ -280,7 +627,9 @@ async fn download_media_with_retry<
 ) -> std::result::Result<Vec<u8>, DownloadRequestError>
 where
     PrepareRequests: FnMut(bool) -> PrepareRequestsFut,
-    PrepareRequestsFut: Future<Output = Result<Vec<wacore::download::DownloadRequest>>>,
+    PrepareRequestsFut: Future<
+        Output = std::result::Result<Vec<wacore::download::DownloadRequest>, DownloadRequestError>,
+    >,
     InvalidateMediaConn: FnMut() -> InvalidateMediaConnFut,
     InvalidateMediaConnFut: Future<Output = ()>,
     ExecuteRequest: FnMut(wacore::download::DownloadRequest) -> ExecuteRequestFut,
@@ -288,39 +637,43 @@ where
 {
     let mut force_refresh = false;
     let mut last_err: Option<anyhow::Error> = None;
+    let mut last_rejection = None;
 
     for attempt in 0..=max_refresh_attempts {
-        let requests = prepare_requests(force_refresh)
-            .await
-            .map_err(DownloadRequestError::Prepare)?;
-        let mut retry_with_fresh_auth = false;
+        let requests = prepare_requests(force_refresh).await?;
+        if requests.is_empty() {
+            return Err(DownloadRequestError::no_hosts(last_rejection));
+        }
+        let mut retry_with_fresh_route = false;
 
         for request in requests {
             match execute_request(request.clone()).await {
                 Ok(data) => return Ok(data),
-                Err(err)
-                    if (err.is_auth() || err.is_not_found()) && attempt < max_refresh_attempts =>
-                {
-                    // Auth error or 404/410 (expired URL): refresh media conn and re-derive URLs.
+                Err(
+                    err @ (DownloadRequestError::WriterIo(_)
+                    | DownloadRequestError::ResourcePolicy(_)),
+                ) => return Err(err),
+                Err(err) if err.should_refresh_route() && attempt < max_refresh_attempts => {
+                    // An empty refreshed route is not the same as never making
+                    // a request: retain the rejection that triggered this refresh.
+                    last_rejection = Some(err.into_anyhow());
                     invalidate_media_conn().await;
                     force_refresh = true;
-                    retry_with_fresh_auth = true;
+                    retry_with_fresh_route = true;
                     break;
                 }
                 Err(err) if err.is_auth() || err.is_not_found() => return Err(err),
                 Err(err) => {
                     let err = err.into_anyhow();
-                    log::warn!(
-                        "Failed to download from URL {}: {:?}. Trying next host.",
-                        request.url,
-                        err
-                    );
+                    // Transport error text can include the signed URL too.
+                    // Preserve the cause for callers without printing it here.
+                    log_download_retry(&request, &err);
                     last_err = Some(err);
                 }
             }
         }
 
-        if !retry_with_fresh_auth {
+        if !retry_with_fresh_route {
             break;
         }
     }
@@ -348,9 +701,11 @@ async fn download_to_writer_with_retry<
     mut execute_request: ExecuteRequest,
 ) -> std::result::Result<W, DownloadRequestError>
 where
-    W: DownloadWriter + Send + 'static,
+    W: DownloadWriter + MaybeSend + 'static,
     PrepareRequests: FnMut(bool) -> PrepareRequestsFut,
-    PrepareRequestsFut: Future<Output = Result<Vec<wacore::download::DownloadRequest>>>,
+    PrepareRequestsFut: Future<
+        Output = std::result::Result<Vec<wacore::download::DownloadRequest>, DownloadRequestError>,
+    >,
     InvalidateMediaConn: FnMut() -> InvalidateMediaConnFut,
     InvalidateMediaConnFut: Future<Output = ()>,
     ExecuteRequest: FnMut(wacore::download::DownloadRequest, W) -> ExecuteRequestFut,
@@ -358,16 +713,20 @@ where
 {
     let mut force_refresh = false;
     let mut last_err: Option<anyhow::Error> = None;
+    let mut last_rejection = None;
 
     for attempt in 0..=max_refresh_attempts {
         let requests = match prepare_requests(force_refresh).await {
             Ok(requests) => requests,
             Err(err) => {
-                discard_failed_write(runtime, writer).await;
-                return Err(DownloadRequestError::Prepare(err));
+                return Err(discard_failed_write(runtime, writer, err).await);
             }
         };
-        let mut retry_with_fresh_auth = false;
+        if requests.is_empty() {
+            let failure = DownloadRequestError::no_hosts(last_rejection);
+            return Err(discard_failed_write(runtime, writer, failure).await);
+        }
+        let mut retry_with_fresh_route = false;
 
         for request in requests {
             let (next_writer, result) = match execute_request(request.clone(), writer).await {
@@ -380,40 +739,40 @@ where
 
             match result {
                 Ok(()) => return Ok(writer),
-                Err(err)
-                    if (err.is_auth() || err.is_not_found()) && attempt < max_refresh_attempts =>
-                {
+                Err(
+                    err @ (DownloadRequestError::WriterIo(_)
+                    | DownloadRequestError::ResourcePolicy(_)),
+                ) => {
+                    return Err(discard_failed_write(runtime, writer, err).await);
+                }
+                Err(err) if err.should_refresh_route() && attempt < max_refresh_attempts => {
+                    last_rejection = Some(err.into_anyhow());
                     invalidate_media_conn().await;
                     force_refresh = true;
-                    retry_with_fresh_auth = true;
+                    retry_with_fresh_route = true;
                     break;
                 }
                 Err(err) if err.is_auth() || err.is_not_found() => {
-                    discard_failed_write(runtime, writer).await;
-                    return Err(err);
+                    return Err(discard_failed_write(runtime, writer, err).await);
                 }
                 Err(err) => {
                     let err = err.into_anyhow();
-                    log::warn!(
-                        "Failed to stream-download from URL {}: {:?}. Trying next host.",
-                        request.url,
-                        err
-                    );
+                    log_download_retry(&request, &err);
                     last_err = Some(err);
                 }
             }
         }
 
-        if !retry_with_fresh_auth {
+        if !retry_with_fresh_route {
             break;
         }
     }
 
-    discard_failed_write(runtime, writer).await;
-    match last_err {
-        Some(err) => Err(DownloadRequestError::Other(err)),
-        None => Err(DownloadRequestError::NoHosts),
-    }
+    let failure = match last_err {
+        Some(err) => DownloadRequestError::Other(err),
+        None => DownloadRequestError::NoHosts,
+    };
+    Err(discard_failed_write(runtime, writer, failure).await)
 }
 
 /// Fetch one prepared request into memory, decrypting as it goes when the HTTP
@@ -432,6 +791,10 @@ async fn execute_request_into_memory(
             Ok((_, Err(e))) => Err(e),
             Err(e) => Err(DownloadRequestError::other(e)),
         }
+    } else if hashes.budget.is_some() {
+        Err(DownloadRequestError::ResourcePolicy(
+            DownloadPolicyError::StreamingRequired,
+        ))
     } else {
         buffered_download_to_vec(http_client, runtime, request, hashes).await
     }
@@ -444,6 +807,15 @@ fn download_capacity(downloadable: &dyn Downloadable) -> usize {
         .file_length()
         .unwrap_or(0)
         .min(DOWNLOAD_PREALLOC_CAP) as usize
+}
+
+struct CancelDownloadOnDrop(Option<DownloadBudget>);
+impl Drop for CancelDownloadOnDrop {
+    fn drop(&mut self) {
+        if let Some(budget) = &self.0 {
+            budget.cancel();
+        }
+    }
 }
 
 /// Downloads media from the CDN with no connected [`Client`] behind it.
@@ -463,6 +835,16 @@ pub struct MediaDownloader {
 /// counterpart is [`MEDIA_AUTH_REFRESH_RETRY_ATTEMPTS`], which the `Client`
 /// paths pass.
 const NO_MEDIA_CONN_REFRESH: usize = 0;
+
+fn client_refresh_budget(downloadable: &dyn Downloadable) -> usize {
+    // Rebuilding a static URL cannot change it; refreshing a session would be
+    // wasted work and can mask the CDN rejection with a disconnected-IQ error.
+    if downloadable.static_url().is_some() {
+        NO_MEDIA_CONN_REFRESH
+    } else {
+        MEDIA_AUTH_REFRESH_RETRY_ATTEMPTS
+    }
+}
 
 impl MediaDownloader {
     pub fn new(
@@ -487,7 +869,7 @@ impl MediaDownloader {
     }
 
     /// Mirrors [`Client::download`], minus the media-conn refresh: there is no
-    /// session to derive fresh auth from, so a rejected reference is terminal.
+    /// session to refresh hosts from, so a rejected reference is terminal.
     #[cfg_attr(
         feature = "tracing",
         tracing::instrument(
@@ -500,18 +882,32 @@ impl MediaDownloader {
     pub async fn download(
         &self,
         downloadable: &dyn Downloadable,
+        limits: DownloadLimits,
     ) -> std::result::Result<Vec<u8>, MediaDownloadError> {
-        let capacity = download_capacity(downloadable);
+        if limits.is_bounded() && !self.http_client.supports_streaming() {
+            return Err(DownloadPolicyError::StreamingRequired.into());
+        }
+        let budget = limits.is_bounded().then(|| DownloadBudget::new(limits));
+        let _cancel = CancelDownloadOnDrop(budget.clone());
+        let budget = &budget;
+
+        let capacity = limits.plaintext_capacity(download_capacity(downloadable) as u64) as usize;
         download_media_with_retry(
             NO_MEDIA_CONN_REFRESH,
-            |_force| async { DownloadUtils::prepare_download_requests(downloadable, &self.route) },
+            |_force| async {
+                DownloadUtils::prepare_download_requests(downloadable, &self.route)
+                    .map_err(DownloadRequestError::Prepare)
+            },
             || async {},
             |request| async move {
                 execute_request_into_memory(
                     &self.http_client,
                     &self.runtime,
                     &request,
-                    ExpectedMediaHashes::from_downloadable(downloadable),
+                    ExpectedMediaHashes {
+                        budget: budget.clone(),
+                        ..ExpectedMediaHashes::from_downloadable(downloadable)
+                    },
                     capacity,
                 )
                 .await
@@ -521,8 +917,8 @@ impl MediaDownloader {
         .map_err(MediaDownloadError::from)
     }
 
-    /// Mirrors [`Client::download_to_writer`], including its writer contract:
-    /// exactly the media on success, empty on failure.
+    /// Mirrors [`Client::download_to_writer`], including authenticated success
+    /// and best-effort failure cleanup. A failed cleanup is reported separately.
     #[cfg_attr(
         feature = "tracing",
         tracing::instrument(
@@ -532,23 +928,46 @@ impl MediaDownloader {
             err(Debug)
         )
     )]
-    pub async fn download_to_writer<W: DownloadWriter + Send + 'static>(
+    ///
+    /// Writers must be `Send` on native targets, where processing runs on the
+    /// blocking pool. On wasm32, local writers are processed inline.
+    pub async fn download_to_writer<W: DownloadWriter + MaybeSend + 'static>(
         &self,
         downloadable: &dyn Downloadable,
         writer: W,
+        limits: DownloadLimits,
     ) -> std::result::Result<W, MediaDownloadError> {
+        if limits.is_bounded() && !self.http_client.supports_streaming() {
+            return Err(discard_failed_write(
+                &self.runtime,
+                writer,
+                DownloadRequestError::ResourcePolicy(DownloadPolicyError::StreamingRequired),
+            )
+            .await
+            .into());
+        }
+        let budget = limits.is_bounded().then(|| DownloadBudget::new(limits));
+        let _cancel = CancelDownloadOnDrop(budget.clone());
+        let budget = &budget;
+
         download_to_writer_with_retry(
             NO_MEDIA_CONN_REFRESH,
             &self.runtime,
             writer,
-            |_force| async { DownloadUtils::prepare_download_requests(downloadable, &self.route) },
+            |_force| async {
+                DownloadUtils::prepare_download_requests(downloadable, &self.route)
+                    .map_err(DownloadRequestError::Prepare)
+            },
             || async {},
             |request, writer| async move {
                 streaming_download_and_decrypt(
                     &self.http_client,
                     &self.runtime,
                     &request,
-                    ExpectedMediaHashes::from_downloadable(downloadable),
+                    ExpectedMediaHashes {
+                        budget: budget.clone(),
+                        ..ExpectedMediaHashes::from_downloadable(downloadable)
+                    },
                     writer,
                 )
                 .await
@@ -562,6 +981,12 @@ impl MediaDownloader {
 impl Client {
     /// Downloads and decrypts media from WhatsApp's CDN into memory.
     ///
+    /// The canonical buffered entry for both message types and [`DownloadParams`].
+    /// Pass `Default::default()` for the default transfer behavior, or
+    /// [`DownloadLimits::new`] for application byte budgets on this download.
+    /// Returns a [`ClientDownloadError`] only after applicable refresh/failover;
+    /// static URLs need no session and cannot benefit from refreshing one.
+    ///
     /// Only needed when you need the plaintext bytes (processing, transcoding,
     /// re-upload). To forward existing media unchanged, reuse the original
     /// message's CDN fields directly, no round-trip required.
@@ -569,15 +994,26 @@ impl Client {
         feature = "tracing",
         tracing::instrument(name = "wa.media.download", level = "debug", skip_all, err(Debug))
     )]
-    pub async fn download(&self, downloadable: &dyn Downloadable) -> Result<Vec<u8>> {
+    pub async fn download(
+        &self,
+        downloadable: &dyn Downloadable,
+        limits: DownloadLimits,
+    ) -> std::result::Result<Vec<u8>, ClientDownloadError> {
+        if limits.is_bounded() && !self.http_client.supports_streaming() {
+            return Err(DownloadPolicyError::StreamingRequired.into());
+        }
+        let budget = limits.is_bounded().then(|| DownloadBudget::new(limits));
+        let _cancel = CancelDownloadOnDrop(budget.clone());
+        let budget = &budget;
+
         // Each attempt owns a fresh buffer, so failed hosts cannot leave a stale
         // tail behind a shorter retry. Streaming clients decrypt directly into a
         // pre-sized output. Buffered clients already paid for a complete response
         // Vec, so authenticate and decrypt that allocation in place instead of
         // keeping a second file-sized output alive beside it.
-        let capacity = download_capacity(downloadable);
+        let capacity = limits.plaintext_capacity(download_capacity(downloadable) as u64) as usize;
         download_media_with_retry(
-            MEDIA_AUTH_REFRESH_RETRY_ATTEMPTS,
+            client_refresh_budget(downloadable),
             |force| self.prepare_requests(downloadable, force),
             || async { self.invalidate_media_conn().await },
             |request| async move {
@@ -585,14 +1021,17 @@ impl Client {
                     &self.http_client,
                     &self.runtime,
                     &request,
-                    ExpectedMediaHashes::from_downloadable(downloadable),
+                    ExpectedMediaHashes {
+                        budget: budget.clone(),
+                        ..ExpectedMediaHashes::from_downloadable(downloadable)
+                    },
                     capacity,
                 )
                 .await
             },
         )
         .await
-        .map_err(DownloadRequestError::into_anyhow)
+        .map_err(ClientDownloadError::from)
     }
 
     /// Fetch a first-party sticker pack's metadata and sticker list from the CDN.
@@ -602,57 +1041,69 @@ impl Client {
     /// only affects localized pack names; `"en"` mirrors whatsmeow's default.
     #[cfg_attr(
         feature = "tracing",
-        tracing::instrument(
-            name = "wa.media.fetch_sticker_pack",
-            level = "debug",
-            skip_all,
-            err(Debug)
-        )
+        tracing::instrument(name = "wa.media.fetch_sticker_pack", level = "debug", skip_all,)
     )]
     pub async fn fetch_sticker_pack(
         &self,
         pack_id: &str,
         locale: &str,
     ) -> Result<wacore::sticker_pack::StickerPack> {
-        let url = wacore::sticker_pack::sticker_pack_data_url(pack_id, locale);
-        let response = self
-            .http_client
-            .execute(crate::http::HttpRequest::get(&url))
-            .await
-            .map_err(|e| anyhow!("sticker pack request failed: {e}"))?;
-        if response.status_code != HTTP_STATUS_OK {
-            let status = response.status_code;
-            return Err(HttpStatusError { status }
-                .into_error(format!("sticker pack endpoint returned status {status}")));
+        async {
+            let url = wacore::sticker_pack::sticker_pack_data_url(pack_id, locale);
+            let response = self
+                .http_client
+                .execute(crate::http::HttpRequest::get(&url))
+                .await
+                .map_err(|e| e.context("sticker pack request failed"))?;
+            if response.status_code != HTTP_STATUS_OK {
+                let status = response.status_code;
+                return Err(HttpStatusError { status }
+                    .into_error(format!("sticker pack endpoint returned status {status}")));
+            }
+            wacore::sticker_pack::parse_sticker_pack_response(&response.body)
         }
-        wacore::sticker_pack::parse_sticker_pack_response(&response.body)
-    }
-
-    /// Downloads and decrypts media from raw parameters without needing the original message.
-    #[cfg_attr(feature = "tracing", tracing::instrument(name = "wa.media.download_from_params", level = "debug", skip_all, fields(kind = ?params.media_type), err(Debug)))]
-    pub async fn download_from_params(&self, params: &DownloadParams) -> Result<Vec<u8>> {
-        self.download(params).await
+        .await
+        .inspect_err(|_error| {
+            #[cfg(feature = "tracing")]
+            tracing::error!(
+                error = ?MediaErrorDiagnostic(_error.as_ref()),
+                "sticker pack fetch failed"
+            );
+        })
     }
 
     async fn prepare_requests(
         &self,
         downloadable: &dyn Downloadable,
         force_refresh: bool,
-    ) -> Result<Vec<wacore::download::DownloadRequest>> {
+    ) -> std::result::Result<Vec<wacore::download::DownloadRequest>, DownloadRequestError> {
+        DownloadUtils::validate_download_metadata(downloadable)
+            .map_err(|error| DownloadRequestError::Prepare(error.into()))?;
         // A static URL is fetched verbatim, so the media-conn IQ would be a round
         // trip whose answer is discarded before a byte of it is read.
-        let route = if downloadable.static_url().is_some() {
-            MediaRoute::unauthenticated(Vec::new())
-        } else {
-            MediaRoute::from(&self.refresh_media_conn(force_refresh).await?)
-        };
+        let route =
+            if downloadable.static_url().is_some() {
+                MediaRoute::new(Vec::new())
+            } else {
+                MediaRoute::from(&self.refresh_media_conn(force_refresh).await.map_err(
+                    |source| DownloadRequestError::Session {
+                        force_refresh,
+                        source,
+                    },
+                )?)
+            };
         DownloadUtils::prepare_download_requests(downloadable, &route)
+            .map_err(DownloadRequestError::Prepare)
     }
 
-    /// Downloads and decrypts media with streaming (constant memory usage).
+    /// Downloads authenticated media into a truncatable writer. The canonical
+    /// writer entry for both message types and [`DownloadParams`]. Pass parameters
+    /// directly as `client.download_to_writer(&params, writer, limits).await`.
+    /// The [`DownloadLimits`] contract also applies to writer downloads.
     ///
-    /// The entire HTTP download, decryption, and file write happen in a single
-    /// blocking thread. The writer is seeked back to position 0 before returning.
+    /// With a streaming HTTP adapter, download, decryption and writes happen in
+    /// a single blocking task. Without streaming, the HTTP response is buffered
+    /// before in-place decryption and writing. Success rewinds to position 0.
     ///
     /// On success the writer holds exactly the decrypted media and nothing else.
     /// Every attempt starts by emptying it, so neither content the caller left
@@ -661,12 +1112,13 @@ impl Client {
     /// and why this does not take a plain `Write + Seek`.
     ///
     /// On failure the writer is emptied too, on a best-effort basis: a sink that
-    /// refuses to empty is logged rather than replacing the download's own error,
-    /// and a writer lost to a panicking executor cannot be reached to be cleaned
-    /// at all. Both leave unverified bytes only in a sink the caller reaches
-    /// through a handle it kept, since this otherwise consumes the writer.
+    /// refuses to empty produces [`ClientDownloadError::WriterCleanup`], retaining
+    /// both errors. Cancellation or an executor panic cannot guarantee cleanup
+    /// or a returned error. A separately retained handle may then expose
+    /// unverified bytes; do not publish/read the sink before successful completion.
     ///
-    /// Memory usage: ~40KB regardless of file size (8KB read buffer + decrypt state).
+    /// Streaming uses bounded read/crypto state (~40KB, excluding the sink).
+    /// A non-streaming adapter necessarily buffers the full response.
     #[cfg_attr(
         feature = "tracing",
         tracing::instrument(
@@ -676,13 +1128,30 @@ impl Client {
             err(Debug)
         )
     )]
-    pub async fn download_to_writer<W: DownloadWriter + Send + 'static>(
+    ///
+    /// Writers must be `Send` on native targets, where processing runs on the
+    /// blocking pool. On wasm32, local writers are processed inline.
+    pub async fn download_to_writer<W: DownloadWriter + MaybeSend + 'static>(
         &self,
         downloadable: &dyn Downloadable,
         writer: W,
-    ) -> Result<W> {
+        limits: DownloadLimits,
+    ) -> std::result::Result<W, ClientDownloadError> {
+        if limits.is_bounded() && !self.http_client.supports_streaming() {
+            return Err(discard_failed_write(
+                &self.runtime,
+                writer,
+                DownloadRequestError::ResourcePolicy(DownloadPolicyError::StreamingRequired),
+            )
+            .await
+            .into());
+        }
+        let budget = limits.is_bounded().then(|| DownloadBudget::new(limits));
+        let _cancel = CancelDownloadOnDrop(budget.clone());
+        let budget = &budget;
+
         download_to_writer_with_retry(
-            MEDIA_AUTH_REFRESH_RETRY_ATTEMPTS,
+            client_refresh_budget(downloadable),
             &self.runtime,
             writer,
             |force| self.prepare_requests(downloadable, force),
@@ -692,25 +1161,48 @@ impl Client {
                     &self.http_client,
                     &self.runtime,
                     &request,
-                    ExpectedMediaHashes::from_downloadable(downloadable),
+                    ExpectedMediaHashes {
+                        budget: budget.clone(),
+                        ..ExpectedMediaHashes::from_downloadable(downloadable)
+                    },
                     writer,
                 )
                 .await
             },
         )
         .await
-        .map_err(DownloadRequestError::into_anyhow)
+        .map_err(ClientDownloadError::from)
+    }
+}
+
+// Crypto helpers return anyhow errors for both reader and writer I/O. Mark
+// only the sink boundary so a network read error (even the same ErrorKind) is
+// never mistaken for a local destination failure. The original I/O error is
+// retained as a source; bytes are forwarded without buffering or copying.
+#[derive(Debug, thiserror::Error)]
+#[error("writer I/O failed: {0}")]
+struct WriterIoCause(#[source] std::io::Error);
+
+struct WriterIoOrigin<'a, W>(&'a mut W);
+
+fn tag_writer_io(error: std::io::Error) -> std::io::Error {
+    std::io::Error::new(error.kind(), WriterIoCause(error))
+}
+
+impl<W: std::io::Write> std::io::Write for WriterIoOrigin<'_, W> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        match self.0.write(bytes) {
+            Ok(0) if !bytes.is_empty() => Err(tag_writer_io(std::io::ErrorKind::WriteZero.into())),
+            result => result.map_err(tag_writer_io),
+        }
     }
 
-    /// Streaming variant of `download_from_params` that writes to a writer
-    /// instead of buffering in memory.
-    #[cfg_attr(feature = "tracing", tracing::instrument(name = "wa.media.download_from_params_to_writer", level = "debug", skip_all, fields(kind = ?params.media_type), err(Debug)))]
-    pub async fn download_from_params_to_writer<W: DownloadWriter + Send + 'static>(
-        &self,
-        params: &DownloadParams,
-        writer: W,
-    ) -> Result<W> {
-        self.download_to_writer(params, writer).await
+    fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        self.0.write_all(bytes).map_err(tag_writer_io)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.flush().map_err(tag_writer_io)
     }
 }
 
@@ -736,7 +1228,7 @@ fn clear_writer<W: DownloadWriter>(writer: &mut W) -> std::io::Result<()> {
 fn finish_verified_write<W: DownloadWriter>(
     writer: &mut W,
 ) -> std::result::Result<(), DownloadRequestError> {
-    writer.rewind().map_err(DownloadRequestError::other)
+    writer.rewind().map_err(DownloadRequestError::writer_io)
 }
 
 /// Empty a writer whose download is not coming back.
@@ -745,29 +1237,25 @@ fn finish_verified_write<W: DownloadWriter>(
 /// third-party [`DownloadWriter`] — and this is the async retry future, which
 /// shares its runtime with the read loop.
 ///
-/// Cleanup is best-effort: the caller is owed the failure that caused this, not
-/// an I/O error raised while tidying up after it. A sink that refuses to empty
-/// is logged, because the bytes it kept are unauthenticated and the caller has
-/// no other way to learn they are there.
-async fn discard_failed_write<W: DownloadWriter + Send + 'static>(
+/// Retain both failures if cleanup itself is rejected by the sink. The original
+/// classification remains available instead of being overwritten by an I/O error.
+async fn discard_failed_write<W: DownloadWriter + MaybeSend + 'static>(
     runtime: &Arc<dyn Runtime>,
-    writer: W,
-) {
-    let mut writer = writer;
-    wacore::runtime::blocking(&**runtime, move || {
-        if let Err(e) = clear_writer(&mut writer) {
-            log::warn!(
-                "Failed to empty the writer after a failed media download: {e}. \
-                 It may still hold unverified bytes."
-            );
-        }
-    })
-    .await
+    mut writer: W,
+    failure: DownloadRequestError,
+) -> DownloadRequestError {
+    match wacore::runtime::blocking(&**runtime, move || clear_writer(&mut writer)).await {
+        Ok(()) => failure,
+        Err(cleanup) => DownloadRequestError::Cleanup {
+            failure: Box::new(failure),
+            cleanup,
+        },
+    }
 }
 
 /// Download + decrypt to a writer. Uses streaming when available,
 /// falls back to buffered otherwise. Returns writer for retry.
-async fn streaming_download_and_decrypt<W: DownloadWriter + Send + 'static>(
+async fn streaming_download_and_decrypt<W: DownloadWriter + MaybeSend + 'static>(
     http_client: &Arc<dyn HttpClient>,
     runtime: &Arc<dyn Runtime>,
     request: &wacore::download::DownloadRequest,
@@ -775,6 +1263,14 @@ async fn streaming_download_and_decrypt<W: DownloadWriter + Send + 'static>(
     writer: W,
 ) -> Result<(W, std::result::Result<(), DownloadRequestError>)> {
     if !http_client.supports_streaming() {
+        if hashes.budget.is_some() {
+            return Ok((
+                writer,
+                Err(DownloadRequestError::ResourcePolicy(
+                    DownloadPolicyError::StreamingRequired,
+                )),
+            ));
+        }
         return buffered_download_and_decrypt(http_client, runtime, request, hashes, writer).await;
     }
 
@@ -785,11 +1281,28 @@ async fn streaming_download_and_decrypt<W: DownloadWriter + Send + 'static>(
     Ok(wacore::runtime::blocking(&**runtime, move || {
         let mut writer = writer;
 
-        if let Err(e) = clear_writer(&mut writer) {
-            return (writer, Err(DownloadRequestError::other(e)));
-        }
-
         let result = (|| -> std::result::Result<(), DownloadRequestError> {
+            if let Some(budget) = &hashes.budget {
+                budget
+                    .check_cancelled()
+                    .map_err(DownloadRequestError::ResourcePolicy)?;
+            }
+            // Clearing has two I/O boundaries; cancellation during truncate must
+            // stop before seek, even when the blocking operation itself succeeds.
+            writer
+                .truncate(0)
+                .map_err(DownloadRequestError::writer_io)?;
+            if let Some(budget) = &hashes.budget {
+                budget
+                    .check_cancelled()
+                    .map_err(DownloadRequestError::ResourcePolicy)?;
+            }
+            writer.rewind().map_err(DownloadRequestError::writer_io)?;
+            if let Some(budget) = &hashes.budget {
+                budget
+                    .check_cancelled()
+                    .map_err(DownloadRequestError::ResourcePolicy)?;
+            }
             let http_request = crate::http::HttpRequest::get(url);
             let resp = http_client
                 .execute_streaming(http_request)
@@ -797,30 +1310,40 @@ async fn streaming_download_and_decrypt<W: DownloadWriter + Send + 'static>(
 
             validate_download_status(resp.status_code)?;
 
+            let budget = hashes
+                .budget
+                .clone()
+                .unwrap_or_else(|| DownloadBudget::new(DownloadLimits::unlimited()));
+            let reader = budget.reader(resp.body);
+            let mut limited_writer = budget.writer(WriterIoOrigin(&mut writer));
             match &decryption {
                 MediaDecryption::Encrypted {
                     media_key,
                     media_type,
                 } => {
                     DownloadUtils::decrypt_stream_to_writer_with_hashes(
-                        resp.body,
+                        reader,
                         media_key,
                         *media_type,
                         hashes.encrypted.as_deref(),
                         hashes.plaintext.as_deref(),
-                        &mut writer,
+                        &mut limited_writer,
                     )
-                    .map_err(DownloadRequestError::other)?;
+                    .map_err(DownloadRequestError::streamed)?;
                 }
                 MediaDecryption::Plaintext { file_sha256 } => {
                     DownloadUtils::copy_and_validate_plaintext_to_writer(
-                        resp.body,
+                        reader,
                         file_sha256,
-                        &mut writer,
+                        &mut limited_writer,
                     )
-                    .map_err(DownloadRequestError::other)?;
+                    .map_err(DownloadRequestError::streamed)?;
                 }
             }
+            drop(limited_writer);
+            budget
+                .check_cancelled()
+                .map_err(DownloadRequestError::ResourcePolicy)?;
             finish_verified_write(&mut writer)
         })();
 
@@ -830,7 +1353,7 @@ async fn streaming_download_and_decrypt<W: DownloadWriter + Send + 'static>(
 }
 
 /// Buffered fallback when streaming is not available.
-async fn buffered_download_and_decrypt<W: DownloadWriter + Send + 'static>(
+async fn buffered_download_and_decrypt<W: DownloadWriter + MaybeSend + 'static>(
     http_client: &Arc<dyn HttpClient>,
     runtime: &Arc<dyn Runtime>,
     request: &wacore::download::DownloadRequest,
@@ -849,16 +1372,31 @@ async fn buffered_download_and_decrypt<W: DownloadWriter + Send + 'static>(
         let mut writer = writer;
         let result = (|| {
             decrypt_or_validate_buffered_body(&mut body, &decryption, &hashes)?;
-            clear_writer(&mut writer).map_err(DownloadRequestError::other)?;
+            clear_writer(&mut writer).map_err(DownloadRequestError::writer_io)?;
             writer
                 .write_all(&body)
-                .map_err(DownloadRequestError::other)?;
+                .map_err(DownloadRequestError::writer_io)?;
             finish_verified_write(&mut writer)
         })();
 
         (writer, result)
     })
     .await)
+}
+
+// Log only typed classifications: backend error strings may contain signed URLs.
+fn log_download_retry(request: &wacore::download::DownloadRequest, error: &anyhow::Error) {
+    let io_kind = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<std::io::Error>())
+        .map(std::io::Error::kind);
+    let media_validation = error
+        .chain()
+        .any(|cause| cause.is::<MediaDecryptionError>());
+    log::warn!(
+        "Failed to download {request:?} (HTTP status {:?}, I/O kind {io_kind:?}, media validation failure {media_validation}). Trying next host.",
+        crate::error::ErrorChainExt::http_status(&**error)
+    );
 }
 
 async fn buffered_download_body(
@@ -902,6 +1440,248 @@ mod tests {
     use std::sync::Arc;
     use wacore::time::Instant;
     use waproto::whatsapp as wa;
+
+    #[cfg(feature = "tracing")]
+    mod diagnostics {
+        use super::*;
+        use std::error::Error;
+        use tracing::instrument::WithSubscriber;
+
+        const TOKEN: &str = "synthetic-auth-token-do-not-log";
+        const CONTEXT: &str = "synthetic-backend-context-do-not-log";
+
+        #[derive(Debug)]
+        struct BackendFailure {
+            url: String,
+            status: HttpStatusError,
+        }
+        impl std::fmt::Display for BackendFailure {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "transport rejected signed URL {}", self.url)
+            }
+        }
+        impl Error for BackendFailure {
+            fn source(&self) -> Option<&(dyn Error + 'static)> {
+                Some(&self.status)
+            }
+        }
+
+        struct FailingHttp;
+        impl FailingHttp {
+            fn error(url: String) -> anyhow::Error {
+                anyhow::Error::new(BackendFailure {
+                    url: format!("{url}&auth={TOKEN}"),
+                    status: HttpStatusError { status: 503 },
+                })
+                .context(CONTEXT)
+            }
+        }
+        #[async_trait::async_trait]
+        impl HttpClient for FailingHttp {
+            async fn execute(
+                &self,
+                request: crate::http::HttpRequest,
+            ) -> Result<crate::http::HttpResponse> {
+                Err(Self::error(request.url))
+            }
+            fn execute_upload(
+                &self,
+                request: crate::http::HttpRequest,
+                _body: Box<dyn std::io::Read + Send>,
+                _len: u64,
+            ) -> Result<crate::http::HttpResponse> {
+                Err(Self::error(request.url))
+            }
+        }
+
+        #[derive(Clone, Default)]
+        struct Capture(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl Write for Capture {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        async fn capture_failure<E: Error + 'static>(future: impl Future<Output = E>, span: &str) {
+            let capture = Capture::default();
+            let writer = capture.clone();
+            let subscriber = tracing_subscriber::fmt()
+                .with_ansi(false)
+                .without_time()
+                .with_max_level(tracing::Level::TRACE)
+                .with_writer(move || writer.clone())
+                .finish();
+            let error = future.with_subscriber(subscriber).await;
+            assert_eq!(error.http_status(), Some(503));
+            let backend = error
+                .sources()
+                .find_map(|e| e.downcast_ref::<BackendFailure>())
+                .unwrap();
+            assert!(backend.url.contains(TOKEN));
+            let output = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+            assert!(output.contains(span), "missing span: {output}");
+            assert!(output.contains("503"), "missing HTTP status: {output}");
+            for secret in [TOKEN, CONTEXT, "https://", "auth="] {
+                assert!(!output.contains(secret), "leaked {secret}: {output}");
+            }
+        }
+
+        #[tokio::test]
+        async fn public_media_entries_redact_tracing_and_preserve_sources() {
+            let client = crate::test_utils::create_test_client_with_http(
+                "media-diagnostics",
+                Arc::new(FailingHttp),
+            )
+            .await;
+            *client.media_conn.write().await = Some(media_conn(TOKEN, &["cdn.example.com"]));
+            let route = MediaDownloader::new(
+                Arc::new(FailingHttp),
+                Arc::new(crate::TokioRuntime),
+                MediaRoute::from(&media_conn(TOKEN, &["cdn.example.com"])),
+            );
+            let (mut params, _) = encrypted_params(b"diagnostic media");
+            params.direct_path = format!("/media?signature={TOKEN}");
+            capture_failure(
+                async {
+                    route
+                        .download(&params, Default::default())
+                        .await
+                        .unwrap_err()
+                },
+                "wa.media.download_via_route",
+            )
+            .await;
+            capture_failure(
+                async {
+                    route
+                        .download_to_writer(&params, Cursor::new(Vec::new()), Default::default())
+                        .await
+                        .unwrap_err()
+                },
+                "wa.media.download_via_route_to_writer",
+            )
+            .await;
+            capture_failure(
+                async {
+                    client
+                        .download(&params, Default::default())
+                        .await
+                        .unwrap_err()
+                },
+                "wa.media.download",
+            )
+            .await;
+            capture_failure(
+                async {
+                    client
+                        .download_to_writer(&params, Cursor::new(Vec::new()), Default::default())
+                        .await
+                        .unwrap_err()
+                },
+                "wa.media.download_to_writer",
+            )
+            .await;
+            // anyhow itself does not implement Error. A transparent typed wrapper
+            // lets this same assertion traverse the public source chain.
+            #[derive(Debug)]
+            struct Returned(anyhow::Error);
+            impl std::fmt::Display for Returned {
+                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl Error for Returned {
+                fn source(&self) -> Option<&(dyn Error + 'static)> {
+                    Some(self.0.as_ref())
+                }
+            }
+            capture_failure(
+                async {
+                    Returned(
+                        client
+                            .upload(
+                                b"media".to_vec(),
+                                MediaType::Image,
+                                crate::upload::UploadOptions::default(),
+                            )
+                            .await
+                            .unwrap_err(),
+                    )
+                },
+                "wa.media.upload",
+            )
+            .await;
+            let mut encrypted = Vec::new();
+            let info = wacore::upload::encrypt_media_streaming(
+                &mut Cursor::new(b"media"),
+                &mut encrypted,
+                MediaType::Image,
+            )
+            .unwrap();
+            capture_failure(
+                async {
+                    Returned(
+                        client
+                            .upload_stream(bytes::Bytes::from(encrypted), info, MediaType::Image)
+                            .await
+                            .unwrap_err(),
+                    )
+                },
+                "wa.media.upload_stream",
+            )
+            .await;
+            capture_failure(
+                async { Returned(client.fetch_sticker_pack("test", "en").await.unwrap_err()) },
+                "wa.media.fetch_sticker_pack",
+            )
+            .await;
+        }
+
+        #[test]
+        fn download_error_debug_redacts_nested_causes_and_cleanup() {
+            let cause = || FailingHttp::error(format!("https://cdn.example.com/?auth={TOKEN}"));
+            let cleanup = || std::io::Error::other(CONTEXT);
+            let errors: Vec<Box<dyn Error>> = vec![
+                Box::new(MediaDownloadError::ReferenceRejected(cause())),
+                Box::new(MediaDownloadError::HostsUnreachable(cause())),
+                Box::new(MediaDownloadError::WriterIo(cause())),
+                Box::new(MediaDownloadError::Other(cause())),
+                Box::new(MediaDownloadError::WriterCleanup {
+                    failure: Box::new(MediaDownloadError::HostsUnreachable(cause())),
+                    cleanup: cleanup(),
+                }),
+                Box::new(ClientDownloadError::ReferenceRejected(cause())),
+                Box::new(ClientDownloadError::HostsUnreachable(cause())),
+                Box::new(ClientDownloadError::WriterIo(cause())),
+                Box::new(ClientDownloadError::NoHostsAfterRefresh(cause())),
+                Box::new(ClientDownloadError::Preparation(cause())),
+                Box::new(ClientDownloadError::MediaSession {
+                    force_refresh: true,
+                    source: crate::request::IqError::ParseError(cause()),
+                }),
+                Box::new(ClientDownloadError::WriterCleanup {
+                    failure: Box::new(ClientDownloadError::HostsUnreachable(cause())),
+                    cleanup: cleanup(),
+                }),
+            ];
+            for error in errors {
+                for rendered in [
+                    format!("{error}"),
+                    format!("{error:?}"),
+                    format!("{error:#?}"),
+                ] {
+                    assert!(rendered.contains("503"), "{rendered}");
+                    assert!(!rendered.contains(TOKEN), "{rendered}");
+                    assert!(!rendered.contains(CONTEXT), "{rendered}");
+                }
+                assert!(ErrorChainExt::sources(error.as_ref()).any(|e| e.is::<BackendFailure>()));
+            }
+        }
+    }
 
     struct PlaintextDownloadable {
         direct_path: String,
@@ -986,6 +1766,70 @@ mod tests {
     }
 
     #[cfg(feature = "ureq-client")]
+    #[tokio::test]
+    async fn media_server_receives_existing_query_and_separate_token() {
+        use std::io::Read;
+        use std::net::TcpListener;
+        use std::time::Duration;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut received = Vec::new();
+            let mut buf = [0; 1024];
+            while !received.windows(4).any(|w| w == b"\r\n\r\n") {
+                let count = stream.read(&mut buf).unwrap();
+                assert_ne!(count, 0);
+                received.extend_from_slice(&buf[..count]);
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .unwrap();
+            String::from_utf8(received).unwrap()
+        });
+        let media = PlaintextDownloadable {
+            direct_path: "/mms/a%2Fb?x=one%26two&plus=%2B#fragment".into(),
+            file_sha256: vec![3; 32],
+        };
+        let mut requests = DownloadUtils::prepare_download_requests(
+            &media,
+            &MediaRoute::new(vec![MediaHost::new(address.to_string())]),
+        )
+        .unwrap();
+        let mut request = requests.remove(0);
+        // The loopback fixture serves HTTP; keep the generated authority, path
+        // and query unchanged. Production route construction still requires HTTPS.
+        request.url = request.url.replacen("https://", "http://", 1);
+        let client = ureq_client().await;
+        assert_eq!(
+            buffered_download_body(&client.http_client, &request)
+                .await
+                .unwrap(),
+            b"ok"
+        );
+        let received = server.join().unwrap();
+        let target = received
+            .lines()
+            .next()
+            .unwrap()
+            .split_whitespace()
+            .nth(1)
+            .unwrap();
+        let uri: http::Uri = target.parse().unwrap();
+        assert_eq!(uri.path(), "/mms/a%2Fb");
+        let query = uri.query().unwrap();
+        let fields = query.split('&').collect::<Vec<_>>();
+        assert_eq!(&fields[..2], &["x=one%26two", "plus=%2B"]);
+        assert_eq!(fields.len(), 3);
+        assert!(fields[2].starts_with("token="));
+        assert!(!target.contains('#'));
+    }
+
+    #[cfg(feature = "ureq-client")]
     fn spawn_cdn_status_server(status: u16, reason: &'static str) -> String {
         spawn_cdn_server(status, reason, b"denied".to_vec())
     }
@@ -1033,7 +1877,7 @@ mod tests {
             let err = result.expect_err("a non-2xx CDN response must fail the download");
             assert!(
                 err.is_auth(),
-                "{status} must classify as an auth error so the media conn is refreshed, got {err:?}"
+                "{status} must retain its auth classification, got {err:?}"
             );
         }
     }
@@ -1049,21 +1893,21 @@ mod tests {
                 .expect_err("a non-2xx CDN response must fail the download");
             assert!(
                 err.is_not_found(),
-                "{status} must classify as expired so the URL is re-derived, got {err:?}"
+                "{status} must classify as an expired reference, got {err:?}"
             );
         }
     }
 
-    /// The chain the two tests above only prove one link of: a real CDN 403 must
+    /// The chain the two tests above only prove one link of: a real CDN 401 must
     /// reach `invalidate_media_conn()` and let the forced-refresh attempt
-    /// succeed. Before the fix the 403 arrived as an opaque transport error, so
+    /// succeed. Before the fix the 401 arrived as an opaque transport error, so
     /// this loop rotated hosts on the same dead auth token and never refreshed.
     #[cfg(feature = "ureq-client")]
     #[tokio::test]
-    async fn stale_auth_403_invalidates_the_media_conn_and_the_retry_recovers() {
+    async fn stale_auth_401_invalidates_the_media_conn_and_the_retry_recovers() {
         let body = b"download me".to_vec();
         let file_sha256 = plaintext_sha256(&body);
-        let stale_host = spawn_cdn_status_server(403, "Forbidden");
+        let stale_host = spawn_cdn_status_server(401, "Unauthorized");
         let fresh_host = spawn_cdn_server(200, "OK", body.clone());
         let client = ureq_client().await;
         let invalidations = Arc::new(Mutex::new(0usize));
@@ -1126,7 +1970,7 @@ mod tests {
         assert_eq!(
             *invalidations.lock().await,
             1,
-            "a 403 must invalidate the cached media conn"
+            "a 401 must invalidate the cached media conn"
         );
         assert_eq!(
             *attempts.lock().await,
@@ -1155,24 +1999,17 @@ mod tests {
             (410, "Gone"),
             (429, "Too Many Requests"),
         ] {
-            // Each server answers once. 403 and 410 make the loop refresh the
-            // media conn and try again, so the retry needs a host of its own —
-            // still refusing, which is the case where the caller finally sees
-            // the error.
+            // These refusals are terminal: no refreshed route is requested.
             let first = spawn_cdn_status_server(status, reason);
-            let refreshed = spawn_cdn_status_server(status, reason);
             let client = ureq_client().await;
 
-            // Ends in `into_anyhow`, exactly as `Client::download` does — that
-            // conversion is where the classification used to be lost.
+            // Use the same final conversion as Client::download, retaining
+            // both its domain classification and the original HTTP status.
             let err = download_media_with_retry(
                 MEDIA_AUTH_REFRESH_RETRY_ATTEMPTS,
                 move |force| {
-                    let url = if force {
-                        refreshed.clone()
-                    } else {
-                        first.clone()
-                    };
+                    assert!(!force, "a terminal CDN refusal must not refresh hosts");
+                    let url = first.clone();
                     async move { Ok(vec![plaintext_request(url)]) }
                 },
                 || async {},
@@ -1196,10 +2033,10 @@ mod tests {
                 },
             )
             .await
-            .map_err(DownloadRequestError::into_anyhow)
+            .map_err(ClientDownloadError::from)
             .expect_err("a non-2xx CDN response must fail the download");
 
-            let cause: &(dyn std::error::Error + 'static) = err.as_ref();
+            let cause: &(dyn std::error::Error + 'static) = &err;
             assert_eq!(
                 cause.http_status(),
                 Some(status),
@@ -1251,10 +2088,10 @@ mod tests {
             },
         )
         .await
-        .map_err(DownloadRequestError::into_anyhow)
+        .map_err(ClientDownloadError::from)
         .expect_err("a refused connection must fail the download");
 
-        let cause: &(dyn std::error::Error + 'static) = err.as_ref();
+        let cause: &(dyn std::error::Error + 'static) = &err;
         assert_eq!(
             cause.http_status(),
             None,
@@ -1280,6 +2117,7 @@ mod tests {
                 media_type: MediaType::Video,
             },
             &ExpectedMediaHashes {
+                budget: None,
                 encrypted: Some(enc.file_enc_sha256.to_vec()),
                 plaintext: Some(enc.file_sha256.to_vec()),
             },
@@ -1387,6 +2225,7 @@ mod tests {
                             downloadable,
                             &MediaRoute::from(&media_conn),
                         )
+                        .map_err(DownloadRequestError::Prepare)
                     }
                 }
             },
@@ -1408,7 +2247,7 @@ mod tests {
                     let url = request.url.clone();
                     async move {
                         seen_urls.lock().await.push(url.clone());
-                        if url.contains("stale-auth") {
+                        if url.contains("cdn1.example.com") {
                             Err(DownloadRequestError::auth(401))
                         } else {
                             Ok(body)
@@ -1418,7 +2257,7 @@ mod tests {
             },
         )
         .await
-        .expect("download should succeed after refreshing media auth");
+        .expect("download should succeed after refreshing media hosts");
 
         assert_eq!(downloaded, body);
         assert_eq!(*refresh_calls.lock().await, vec![false, true]);
@@ -1426,8 +2265,9 @@ mod tests {
 
         let seen_urls = seen_urls.lock().await.clone();
         assert_eq!(seen_urls.len(), 2);
-        assert!(seen_urls[0].contains("auth=stale-auth"));
-        assert!(seen_urls[1].contains("auth=fresh-auth"));
+        assert!(seen_urls[0].contains("cdn1.example.com"));
+        assert!(seen_urls.iter().all(|url| !url.contains("auth=")));
+        assert!(seen_urls[1].contains("cdn2.example.com"));
     }
 
     // A generic (non-auth, non-404) error on one host must fall through to the
@@ -1462,6 +2302,7 @@ mod tests {
                             downloadable,
                             &MediaRoute::from(&conn),
                         )
+                        .map_err(DownloadRequestError::Prepare)
                     }
                 }
             },
@@ -1530,6 +2371,7 @@ mod tests {
                             downloadable,
                             &MediaRoute::from(&conn),
                         )
+                        .map_err(DownloadRequestError::Prepare)
                     }
                 }
             },
@@ -1598,6 +2440,7 @@ mod tests {
                             downloadable,
                             &MediaRoute::from(&media_conn),
                         )
+                        .map_err(DownloadRequestError::Prepare)
                     }
                 }
             },
@@ -1620,8 +2463,8 @@ mod tests {
                     async move {
                         seen_urls.lock().await.push(url.clone());
                         writer.seek(SeekFrom::Start(0))?;
-                        if url.contains("stale-auth") {
-                            Ok((writer, Err(DownloadRequestError::auth(403))))
+                        if url.contains("cdn1.example.com") {
+                            Ok((writer, Err(DownloadRequestError::auth(401))))
                         } else {
                             writer.write_all(&body)?;
                             writer.seek(SeekFrom::Start(0))?;
@@ -1632,7 +2475,7 @@ mod tests {
             },
         )
         .await
-        .expect("streaming download should succeed after refreshing media auth");
+        .expect("streaming download should succeed after refreshing media hosts");
 
         assert_eq!(writer.into_inner(), body);
         assert_eq!(*refresh_calls.lock().await, vec![false, true]);
@@ -1640,8 +2483,9 @@ mod tests {
 
         let seen_urls = seen_urls.lock().await.clone();
         assert_eq!(seen_urls.len(), 2);
-        assert!(seen_urls[0].contains("auth=stale-auth"));
-        assert!(seen_urls[1].contains("auth=fresh-auth"));
+        assert!(seen_urls[0].contains("cdn1.example.com"));
+        assert!(seen_urls.iter().all(|url| !url.contains("auth=")));
+        assert!(seen_urls[1].contains("cdn2.example.com"));
     }
 
     // ── Session-less downloads ──────────────────────────────────────────────
@@ -1711,7 +2555,7 @@ mod tests {
         ) -> Result<crate::http::HttpResponse> {
             self.record(&request.url);
             let (status_code, body) = self.respond(&request.url);
-            Ok(crate::http::HttpResponse { status_code, body })
+            Ok(crate::http::HttpResponse::new(status_code, body))
         }
 
         // Implemented so `download_to_writer` exercises the streaming branch
@@ -1726,10 +2570,10 @@ mod tests {
         ) -> Result<wacore::net::StreamingHttpResponse> {
             self.record(&request.url);
             let (status_code, body) = self.respond(&request.url);
-            Ok(wacore::net::StreamingHttpResponse {
+            Ok(wacore::net::StreamingHttpResponse::new(
                 status_code,
-                body: Box::new(Cursor::new(body)),
-            })
+                Box::new(Cursor::new(body)),
+            ))
         }
     }
 
@@ -1737,7 +2581,7 @@ mod tests {
         MediaDownloader::new(
             http,
             Arc::new(crate::TokioRuntime),
-            MediaRoute::unauthenticated(hosts.iter().copied().map(MediaHost::new).collect()),
+            MediaRoute::new(hosts.iter().copied().map(MediaHost::new).collect()),
         )
     }
 
@@ -1751,8 +2595,544 @@ mod tests {
             &enc.file_enc_sha256,
             data.len() as u64,
             MediaType::Image,
-        );
+        )
+        .unwrap();
         (params, enc.data_to_upload)
+    }
+
+    #[tokio::test]
+    async fn bounded_downloads_count_actual_bytes_and_stop_host_failover() {
+        let data = vec![0x53; 24 * 1024 + 13];
+        let (mut params, encrypted) = encrypted_params(&data);
+        for declared in [0, 1, u64::MAX] {
+            params.file_length = declared;
+            for (wire, plain, domain) in [
+                (
+                    encrypted.len() as u64 - 1,
+                    data.len() as u64,
+                    MediaByteDomain::Wire,
+                ),
+                (
+                    encrypted.len() as u64,
+                    data.len() as u64 - 1,
+                    MediaByteDomain::Plaintext,
+                ),
+            ] {
+                let http = RoutedHttpClient::streaming(Vec::new(), (200, encrypted.clone()));
+                let dl = downloader(http.clone(), &["first.example", "second.example"]);
+                let error = dl
+                    .download(&params, DownloadLimits::new(wire, plain))
+                    .await
+                    .unwrap_err();
+                assert!(
+                    matches!(error, MediaDownloadError::ResourcePolicy(DownloadPolicyError::LimitExceeded { domain: actual, .. }) if actual == domain)
+                );
+                assert_eq!(http.urls().len(), 1);
+            }
+            let http = RoutedHttpClient::streaming(Vec::new(), (200, encrypted.clone()));
+            let dl = downloader(http, &["cdn.example"]);
+            let out = dl
+                .download(
+                    &params,
+                    DownloadLimits::new(encrypted.len() as u64, data.len() as u64),
+                )
+                .await
+                .unwrap();
+            assert_eq!(out, data);
+        }
+    }
+
+    #[tokio::test]
+    async fn wire_budget_also_bounds_speculative_output_capacity() {
+        use sha2::{Digest, Sha256};
+        let data = b"small media";
+        let params =
+            DownloadParams::plaintext("/small", &Sha256::digest(data), u64::MAX, MediaType::Image)
+                .unwrap();
+        let http = RoutedHttpClient::streaming(Vec::new(), (200, data.to_vec()));
+        let dl = downloader(http, &["cdn.example"]);
+        let output = dl
+            .download(&params, DownloadLimits::new(data.len() as u64, u64::MAX))
+            .await
+            .unwrap();
+        assert_eq!(output, data);
+        assert!(
+            output.capacity() <= data.len(),
+            "a bogus declared size must not reserve more output than the wire budget can produce"
+        );
+    }
+
+    #[tokio::test]
+    async fn bounded_buffered_adapter_is_rejected_before_http() {
+        let (params, encrypted) = encrypted_params(b"bounded");
+        let http = RoutedHttpClient::new(Vec::new(), (200, encrypted));
+        let dl = downloader(http.clone(), &["cdn.example"]);
+        assert!(matches!(
+            dl.download(&params, DownloadLimits::new(100, 100)).await,
+            Err(MediaDownloadError::ResourcePolicy(
+                DownloadPolicyError::StreamingRequired
+            ))
+        ));
+        assert!(http.urls().is_empty());
+        let mut sink = SharedWriter::new();
+        sink.write_all(b"stale output").unwrap();
+        let error = dl
+            .download_to_writer(&params, sink.clone(), DownloadLimits::new(100, 100))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            MediaDownloadError::ResourcePolicy(DownloadPolicyError::StreamingRequired)
+        ));
+        assert!(sink.contents().is_empty());
+        assert!(http.urls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn bounded_writer_failure_cleans_unverified_output() {
+        let data = vec![8; 24 * 1024];
+        let (params, encrypted) = encrypted_params(&data);
+        let http = RoutedHttpClient::streaming(Vec::new(), (200, encrypted.clone()));
+        let dl = downloader(http.clone(), &["first.example", "second.example"]);
+        let sink = SharedWriter::new();
+        let error = dl
+            .download_to_writer(
+                &params,
+                sink.clone(),
+                DownloadLimits::new(encrypted.len() as u64, 8192),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            MediaDownloadError::ResourcePolicy(DownloadPolicyError::LimitExceeded {
+                domain: MediaByteDomain::Plaintext,
+                ..
+            })
+        ));
+        assert!(sink.contents().is_empty());
+        assert_eq!(http.urls().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn bounded_plaintext_and_absent_lengths_still_verify_integrity() {
+        use sha2::{Digest, Sha256};
+        let data = b"synthetic plaintext";
+        let params =
+            DownloadParams::plaintext("/plain", &Sha256::digest(data), 0, MediaType::Image)
+                .unwrap();
+        let http = RoutedHttpClient::streaming(Vec::new(), (200, data.to_vec()));
+        let dl = downloader(http, &["cdn.example"]);
+        let out = dl
+            .download_to_writer(
+                &params,
+                Cursor::new(vec![9; 100]),
+                DownloadLimits::new(data.len() as u64, data.len() as u64),
+            )
+            .await
+            .unwrap();
+        assert_eq!(out.into_inner(), data);
+
+        let encrypted = wacore::upload::encrypt_media(data, MediaType::MusicArtwork).unwrap();
+        let mut metadata = wa::EmbeddedMusic::default();
+        metadata.artwork_direct_path = Some("/artwork".into());
+        metadata.artwork_media_key = Some(encrypted.media_key.to_vec());
+        metadata.artwork_sha256 = Some(encrypted.file_sha256.to_vec());
+        metadata.artwork_enc_sha256 = Some(encrypted.file_enc_sha256.to_vec());
+        assert_eq!(metadata.file_length(), None);
+        let limits = DownloadLimits::new(encrypted.data_to_upload.len() as u64, data.len() as u64);
+        let http = RoutedHttpClient::streaming(Vec::new(), (200, encrypted.data_to_upload.clone()));
+        let dl = downloader(http, &["cdn.example"]);
+        assert_eq!(dl.download(&metadata, limits).await.unwrap(), data);
+        metadata.artwork_sha256.as_mut().unwrap()[0] ^= 1;
+        let error = dl.download(&metadata, limits).await.unwrap_err();
+        assert!(error.sources().any(|cause| matches!(
+            cause.downcast_ref::<MediaDecryptionError>(),
+            Some(MediaDecryptionError::PlaintextSha256Mismatch)
+        )));
+    }
+
+    #[tokio::test]
+    async fn failed_attempts_cannot_reset_the_wire_budget() {
+        let data = vec![3; 8192];
+        let (params, encrypted) = encrypted_params(&data);
+        let mut damaged = encrypted.clone();
+        *damaged.last_mut().unwrap() ^= 1;
+        let http = RoutedHttpClient::streaming(
+            vec![("first.example", 200, damaged)],
+            (200, encrypted.clone()),
+        );
+        let dl = downloader(http.clone(), &["first.example", "second.example"]);
+        let error = dl
+            .download(
+                &params,
+                DownloadLimits::new(encrypted.len() as u64, u64::MAX),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            MediaDownloadError::ResourcePolicy(DownloadPolicyError::LimitExceeded {
+                domain: MediaByteDomain::Wire,
+                ..
+            })
+        ));
+        assert_eq!(http.urls().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn adapter_policy_errors_keep_transport_origin_and_host_failover() {
+        use std::io::Read;
+        struct AdapterReader;
+        impl Read for AdapterReader {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other(DownloadPolicyError::LimitExceeded {
+                    domain: MediaByteDomain::Wire,
+                    limit: 1,
+                }))
+            }
+        }
+        struct AdapterHttp {
+            body: Vec<u8>,
+            calls: std::sync::Mutex<usize>,
+            recover: bool,
+        }
+        #[async_trait::async_trait]
+        impl HttpClient for AdapterHttp {
+            async fn execute(
+                &self,
+                _: crate::http::HttpRequest,
+            ) -> Result<crate::http::HttpResponse> {
+                unreachable!("streaming fixture")
+            }
+            fn supports_streaming(&self) -> bool {
+                true
+            }
+            fn execute_streaming(
+                &self,
+                _: crate::http::HttpRequest,
+            ) -> Result<wacore::net::StreamingHttpResponse> {
+                let mut calls = self.calls.lock().unwrap();
+                *calls += 1;
+                let reader: Box<dyn Read + Send> = if *calls > 1 && self.recover {
+                    Box::new(Cursor::new(self.body.clone()))
+                } else {
+                    Box::new(AdapterReader)
+                };
+                Ok(wacore::net::StreamingHttpResponse::new(200, reader))
+            }
+        }
+        for limits in [DownloadLimits::default(), DownloadLimits::new(100, 100)] {
+            for recover in [false, true] {
+                let data = b"adapter retry";
+                let (params, encrypted) = encrypted_params(data);
+                let http = Arc::new(AdapterHttp {
+                    body: encrypted,
+                    calls: std::sync::Mutex::new(0),
+                    recover,
+                });
+                let dl = MediaDownloader::new(
+                    http.clone(),
+                    Arc::new(crate::TokioRuntime),
+                    MediaRoute::new(vec![
+                        MediaHost::new("first.example"),
+                        MediaHost::new("second.example"),
+                    ]),
+                );
+                let result = dl.download(&params, limits).await;
+                if recover {
+                    assert_eq!(result.unwrap(), data);
+                } else {
+                    assert!(matches!(
+                        result,
+                        Err(MediaDownloadError::HostsUnreachable(_))
+                    ));
+                }
+                assert_eq!(*http.calls.lock().unwrap(), 2);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn zero_progress_writer_is_terminal_and_keeps_write_zero_cause() {
+        #[derive(Debug)]
+        struct NoProgress(SharedWriter);
+        impl Write for NoProgress {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Ok(0)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl Seek for NoProgress {
+            fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+                self.0.seek(pos)
+            }
+        }
+        impl DownloadWriter for NoProgress {
+            fn truncate(&mut self, len: u64) -> std::io::Result<()> {
+                self.0.truncate(len)
+            }
+        }
+        for limits in [DownloadLimits::default(), DownloadLimits::new(100, 100)] {
+            let (params, encrypted) = encrypted_params(b"zero progress");
+            let http = RoutedHttpClient::streaming(Vec::new(), (200, encrypted));
+            let dl = downloader(http.clone(), &["first.example", "second.example"]);
+            let error = dl
+                .download_to_writer(&params, NoProgress(SharedWriter::new()), limits)
+                .await
+                .unwrap_err();
+            let MediaDownloadError::WriterIo(source) = error else {
+                panic!("zero progress must remain a local sink failure");
+            };
+            assert_eq!(
+                source.downcast_ref::<std::io::Error>().unwrap().kind(),
+                std::io::ErrorKind::WriteZero
+            );
+            assert_eq!(
+                http.urls().len(),
+                1,
+                "a sink failure must not retry another host"
+            );
+        }
+    }
+
+    #[test]
+    fn sink_policy_error_still_has_writer_origin() {
+        struct PolicySink;
+        impl Write for PolicySink {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other(DownloadPolicyError::Cancelled))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let error = WriterIoOrigin(&mut PolicySink)
+            .write_all(b"media")
+            .unwrap_err();
+        let DownloadRequestError::WriterIo(source) = DownloadRequestError::streamed(error.into())
+        else {
+            panic!("a sink's policy error must remain a writer failure");
+        };
+        assert_eq!(
+            source
+                .downcast_ref::<std::io::Error>()
+                .unwrap()
+                .get_ref()
+                .unwrap()
+                .downcast_ref::<DownloadPolicyError>(),
+            Some(&DownloadPolicyError::Cancelled)
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_writer_io_stops_at_next_boundary() {
+        struct CancelOnWrite {
+            sink: SharedWriter,
+            budget: DownloadBudget,
+            seeks: usize,
+            cancel_on_truncate: bool,
+        }
+        impl Write for CancelOnWrite {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                let result = self.sink.write(bytes);
+                if !self.cancel_on_truncate {
+                    self.budget.cancel();
+                }
+                result
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                self.sink.flush()
+            }
+        }
+        impl Seek for CancelOnWrite {
+            fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+                self.seeks += 1;
+                self.sink.seek(pos)
+            }
+        }
+        impl DownloadWriter for CancelOnWrite {
+            fn truncate(&mut self, len: u64) -> std::io::Result<()> {
+                let result = self.sink.truncate(len);
+                if self.cancel_on_truncate {
+                    self.budget.cancel();
+                }
+                result
+            }
+        }
+        for cancel_on_truncate in [true, false] {
+            let (params, encrypted) = encrypted_params(b"final chunk");
+            let request =
+                DownloadUtils::prepare_download_requests(&params, &MediaRoute::default_hosts())
+                    .unwrap()
+                    .remove(0);
+            let http = RoutedHttpClient::streaming(Vec::new(), (200, encrypted));
+            let http_client: Arc<dyn HttpClient> = http.clone();
+            let runtime: Arc<dyn Runtime> = Arc::new(crate::TokioRuntime);
+            let budget = DownloadBudget::new(DownloadLimits::new(100, 100));
+            let writer = CancelOnWrite {
+                sink: SharedWriter::new(),
+                budget: budget.clone(),
+                seeks: 0,
+                cancel_on_truncate,
+            };
+            let (writer, result) = streaming_download_and_decrypt(
+                &http_client,
+                &runtime,
+                &request,
+                ExpectedMediaHashes {
+                    budget: Some(budget),
+                    ..ExpectedMediaHashes::from_downloadable(&params)
+                },
+                writer,
+            )
+            .await
+            .unwrap();
+            assert!(matches!(
+                result,
+                Err(DownloadRequestError::ResourcePolicy(
+                    DownloadPolicyError::Cancelled
+                ))
+            ));
+            let expected = usize::from(!cancel_on_truncate);
+            assert_eq!(
+                writer.seeks, expected,
+                "no seek may start after cancellation"
+            );
+            assert_eq!(
+                http.urls().len(),
+                expected,
+                "cancellation during clearing must prevent HTTP"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_queued_download_preserves_sink_and_does_not_start_http() {
+        let (params, encrypted) = encrypted_params(b"cancelled before start");
+        let request =
+            DownloadUtils::prepare_download_requests(&params, &MediaRoute::default_hosts())
+                .unwrap()
+                .remove(0);
+        let http = RoutedHttpClient::streaming(Vec::new(), (200, encrypted));
+        let http_client: Arc<dyn HttpClient> = http.clone();
+        let runtime: Arc<dyn Runtime> = Arc::new(crate::TokioRuntime);
+        let budget = DownloadBudget::new(DownloadLimits::new(100, 100));
+        budget.cancel();
+        let mut writer = SharedWriter::new();
+        writer.write_all(b"original output").unwrap();
+        let (writer, result) = streaming_download_and_decrypt(
+            &http_client,
+            &runtime,
+            &request,
+            ExpectedMediaHashes {
+                budget: Some(budget),
+                ..ExpectedMediaHashes::from_downloadable(&params)
+            },
+            writer,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            result,
+            Err(DownloadRequestError::ResourcePolicy(
+                DownloadPolicyError::Cancelled
+            ))
+        ));
+        assert_eq!(writer.contents(), b"original output");
+        assert!(http.urls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn dropping_bounded_future_stops_writes_after_blocked_read_returns() {
+        use std::io::Read;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        struct GatedBody {
+            bytes: Cursor<Vec<u8>>,
+            reads: usize,
+            started: mpsc::Sender<()>,
+            resume: mpsc::Receiver<()>,
+            finished: mpsc::Sender<()>,
+        }
+        impl Read for GatedBody {
+            fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+                self.reads += 1;
+                if self.reads == 2 {
+                    self.started.send(()).unwrap();
+                    self.resume.recv_timeout(Duration::from_secs(5)).unwrap();
+                }
+                self.bytes.read(out)
+            }
+        }
+        impl Drop for GatedBody {
+            fn drop(&mut self) {
+                let _ = self.finished.send(());
+            }
+        }
+        struct GatedHttp(std::sync::Mutex<Option<GatedBody>>);
+        #[async_trait::async_trait]
+        impl HttpClient for GatedHttp {
+            async fn execute(
+                &self,
+                _: crate::http::HttpRequest,
+            ) -> Result<crate::http::HttpResponse> {
+                unreachable!("bounded downloads must stream")
+            }
+            fn supports_streaming(&self) -> bool {
+                true
+            }
+            fn execute_streaming(
+                &self,
+                _: crate::http::HttpRequest,
+            ) -> Result<wacore::net::StreamingHttpResponse> {
+                Ok(wacore::net::StreamingHttpResponse::new(
+                    200,
+                    Box::new(self.0.lock().unwrap().take().unwrap()),
+                ))
+            }
+        }
+        let (params, encrypted) = encrypted_params(&vec![7; 32 * 1024]);
+        let (started_tx, started_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let http = Arc::new(GatedHttp(std::sync::Mutex::new(Some(GatedBody {
+            bytes: Cursor::new(encrypted),
+            reads: 0,
+            started: started_tx,
+            resume: resume_rx,
+            finished: finished_tx,
+        }))));
+        let dl = MediaDownloader::with_default_hosts(http, Arc::new(crate::TokioRuntime));
+        let sink = SharedWriter::new();
+        let writer = sink.clone();
+        let task = tokio::spawn(async move {
+            dl.download_to_writer(&params, writer, DownloadLimits::new(65536, 65536))
+                .await
+        });
+        tokio::task::spawn_blocking(move || {
+            started_rx.recv_timeout(Duration::from_secs(5)).unwrap()
+        })
+        .await
+        .unwrap();
+        let before = sink.contents().len();
+        assert!(before > 0, "first chunk reaches the unverified sink");
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        resume_tx.send(()).unwrap();
+        tokio::task::spawn_blocking(move || {
+            finished_rx.recv_timeout(Duration::from_secs(5)).unwrap()
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            sink.contents().len(),
+            before,
+            "cancelled blocking work must stop publishing chunks"
+        );
     }
 
     async fn reject_declared_hash_mismatch(streaming: bool, to_writer: bool) {
@@ -1776,11 +3156,13 @@ mod tests {
                 } else {
                     RoutedHttpClient::new(Vec::new(), (200, encrypted))
                 };
-                let dl = downloader(http, &["cdn.example.com"]);
+                let dl = downloader(http.clone(), &["cdn.example.com"]);
                 let error = if to_writer {
                     let sink = SharedWriter::new();
                     sink.with(|w| w.write_all(b"old destination contents").unwrap());
-                    let result = dl.download_to_writer(&params, sink.clone()).await;
+                    let result = dl
+                        .download_to_writer(&params, sink.clone(), Default::default())
+                        .await;
                     assert!(
                         result.is_err(),
                         "valid HMAC must not excuse a declared hash mismatch: streaming={streaming}, encrypted_hash={corrupt_encrypted_hash}, malformed={malformed_length}"
@@ -1791,11 +3173,16 @@ mod tests {
                     );
                     result.unwrap_err()
                 } else {
-                    dl.download(&params)
+                    dl.download(&params, Default::default())
                         .await
                         .expect_err("valid HMAC must not excuse a declared hash mismatch")
                 };
-                assert!(matches!(error, MediaDownloadError::HostsUnreachable(_)));
+                if malformed_length {
+                    assert!(matches!(error, MediaDownloadError::Other(_)));
+                    assert!(http.urls().is_empty());
+                } else {
+                    assert!(matches!(error, MediaDownloadError::HostsUnreachable(_)));
+                }
             }
         }
     }
@@ -1830,12 +3217,14 @@ mod tests {
                         MediaType::Image,
                     )
                     .unwrap();
-                    let mut message = waproto::whatsapp::message::ImageMessage {
-                        media_key: Some(enc.media_key.to_vec()),
-                        file_enc_sha256: Some(enc.file_enc_sha256.to_vec()),
-                        file_sha256: Some(enc.file_sha256.to_vec()),
-                        static_url: Some("https://cdn.example.com/p1-fixture".to_owned()),
-                        ..Default::default()
+                    let mut message = {
+                        let mut proto_fixture = waproto::whatsapp::message::ImageMessage::default();
+                        proto_fixture.media_key = Some(enc.media_key.to_vec());
+                        proto_fixture.file_enc_sha256 = Some(enc.file_enc_sha256.to_vec());
+                        proto_fixture.file_sha256 = Some(enc.file_sha256.to_vec());
+                        proto_fixture.static_url =
+                            Some("https://cdn.example.com/p1-fixture".to_owned());
+                        proto_fixture
                     };
                     if corrupt_encrypted_hash {
                         message.file_enc_sha256.as_mut().unwrap()[0] ^= 1;
@@ -1852,20 +3241,23 @@ mod tests {
                     let error = if to_writer {
                         let sink = SharedWriter::new();
                         let error = client
-                            .download_to_writer(&message, sink.clone())
+                            .download_to_writer(&message, sink.clone(), Default::default())
                             .await
                             .unwrap_err();
                         assert!(sink.contents().is_empty());
                         error
                     } else {
-                        let result = client.download(&message).await;
+                        let result = client.download(&message, Default::default()).await;
                         assert!(result.is_err());
                         result.unwrap_err()
+                    };
+                    let ClientDownloadError::HostsUnreachable(cause) = error else {
+                        panic!("expected final host failure, got {error:?}");
                     };
                     assert!(matches!(
                         (
                             corrupt_encrypted_hash,
-                            error.downcast_ref::<MediaDecryptionError>()
+                            cause.downcast_ref::<MediaDecryptionError>()
                         ),
                         (true, Some(MediaDecryptionError::EncryptedSha256Mismatch))
                             | (false, Some(MediaDecryptionError::PlaintextSha256Mismatch))
@@ -1902,12 +3294,12 @@ mod tests {
                     &["bad-host.example.com", "good-host.example.com"],
                 );
                 let actual = if to_writer {
-                    dl.download_to_writer(&params, Cursor::new(Vec::new()))
+                    dl.download_to_writer(&params, Cursor::new(Vec::new()), Default::default())
                         .await
                         .unwrap()
                         .into_inner()
                 } else {
-                    dl.download(&params).await.unwrap()
+                    dl.download(&params, Default::default()).await.unwrap()
                 };
                 assert_eq!(
                     actual, original,
@@ -1950,7 +3342,8 @@ mod tests {
             &good.file_enc_sha256,
             original.len() as u64,
             MediaType::Image,
-        );
+        )
+        .unwrap();
 
         // Far longer than the real media, and longer than one 8KB decrypt chunk,
         // so the plaintext is already in the writer when the MAC check fails.
@@ -1972,7 +3365,7 @@ mod tests {
                 http.clone(),
                 &["forging-host.example.com", "honest-host.example.com"],
             )
-            .download_to_writer(&params, Cursor::new(Vec::new()))
+            .download_to_writer(&params, Cursor::new(Vec::new()), Default::default())
             .await
             .expect("the honest host must still satisfy the download");
 
@@ -1998,7 +3391,7 @@ mod tests {
         let http = RoutedHttpClient::streaming(Vec::new(), (200, encrypted));
 
         let writer = downloader(http, &["cdn.example.com"])
-            .download_to_writer(&params, Cursor::new(vec![0xFF; 4096]))
+            .download_to_writer(&params, Cursor::new(vec![0xFF; 4096]), Default::default())
             .await
             .expect("download should succeed");
 
@@ -2029,7 +3422,7 @@ mod tests {
 
         let http = RoutedHttpClient::streaming(Vec::new(), (200, encrypted));
         downloader(http, &["cdn.example.com"])
-            .download_to_writer(&params, file)
+            .download_to_writer(&params, file, Default::default())
             .await
             .expect("download should succeed");
 
@@ -2096,13 +3489,14 @@ mod tests {
             reference.file_enc_sha256.as_deref().unwrap_or_default(),
             12,
             MediaType::Image,
-        );
+        )
+        .unwrap();
         let forged = forged_body(&vec![0x11; 32 * 1024], &media_key);
         let http = RoutedHttpClient::streaming(vec![("only-host", 200, forged)], (500, Vec::new()));
 
         let sink = SharedWriter::new();
         let err = downloader(http, &["only-host.example.com"])
-            .download_to_writer(&params, sink.clone())
+            .download_to_writer(&params, sink.clone(), Default::default())
             .await
             .expect_err("a forged body must not be reported as a download");
 
@@ -2126,7 +3520,7 @@ mod tests {
             http.clone(),
             &["bad-host.example.com", "good-host.example.com"],
         )
-        .download(&params)
+        .download(&params, Default::default())
         .await
         .expect("an injected host list is all a download needs");
 
@@ -2153,7 +3547,7 @@ mod tests {
         );
 
         let writer = downloader(http, &["cdn.example.com"])
-            .download_to_writer(&params, Cursor::new(Vec::new()))
+            .download_to_writer(&params, Cursor::new(Vec::new()), Default::default())
             .await
             .expect("the streaming path must work without a session too");
         assert_eq!(writer.into_inner(), original);
@@ -2162,7 +3556,7 @@ mod tests {
         // fallback covered as well.
         let buffered = RoutedHttpClient::new(Vec::new(), (200, encrypted));
         let writer = downloader(buffered, &["cdn.example.com"])
-            .download_to_writer(&params, Cursor::new(Vec::new()))
+            .download_to_writer(&params, Cursor::new(Vec::new()), Default::default())
             .await
             .expect("the buffered fallback must work too");
         assert_eq!(writer.into_inner(), original);
@@ -2170,6 +3564,49 @@ mod tests {
 
     // A reference too incomplete to build a URL from never contacts a host, so
     // it must not be reported as though every host had failed.
+    #[tokio::test]
+    async fn preparation_diagnostics_preserve_safe_reasons_without_reference_text() {
+        use wacore::download::DownloadPreparationError;
+        for (path, host, expected) in [
+            (
+                "/file?auth=synthetic-secret",
+                "cdn.example.com",
+                DownloadPreparationError::MissingEncryptedHash,
+            ),
+            (
+                "/file",
+                "cdn.example.com/synthetic-secret",
+                DownloadPreparationError::InvalidRouteHost,
+            ),
+            (
+                "https://other.example/file?auth=synthetic-secret",
+                "cdn.example.com",
+                DownloadPreparationError::OriginChanged,
+            ),
+        ] {
+            let (mut params, _) = encrypted_params(b"not fetched");
+            params.direct_path = path.into();
+            if expected == DownloadPreparationError::MissingEncryptedHash {
+                params.file_enc_sha256 = None;
+            }
+            let http = RoutedHttpClient::new(Vec::new(), (200, Vec::new()));
+            let error = downloader(http.clone(), &[host])
+                .download(&params, Default::default())
+                .await
+                .unwrap_err();
+            assert_eq!(
+                ErrorChainExt::sources(&error)
+                    .find_map(|e| e.downcast_ref::<DownloadPreparationError>()),
+                Some(&expected)
+            );
+            for rendered in [format!("{error}"), format!("{error:?}")] {
+                assert!(rendered.contains(&format!("{expected:?}")), "{rendered}");
+                assert!(!rendered.contains("synthetic-secret"), "{rendered}");
+            }
+            assert!(http.urls().is_empty());
+        }
+    }
+
     #[tokio::test]
     async fn media_downloader_separates_an_unbuildable_reference_from_a_dead_host() {
         let params = DownloadParams {
@@ -2183,7 +3620,7 @@ mod tests {
         let http = RoutedHttpClient::new(Vec::new(), (200, Vec::new()));
 
         let err = downloader(http.clone(), &["cdn1.example.com", "cdn2.example.com"])
-            .download(&params)
+            .download(&params, Default::default())
             .await
             .expect_err("an incomplete reference cannot succeed");
 
@@ -2192,7 +3629,9 @@ mod tests {
             "a reference that cannot build a URL is not a host failure, got {err:?}"
         );
         assert!(
-            err.to_string().contains("Missing file_enc_sha256"),
+            ErrorChainExt::sources(&err)
+                .skip(1)
+                .any(|cause| cause.to_string().contains("Missing file_enc_sha256")),
             "the cause must survive the classification, got: {err}"
         );
         assert!(http.urls().is_empty());
@@ -2204,7 +3643,7 @@ mod tests {
 
         let expired = RoutedHttpClient::new(Vec::new(), (410, b"gone".to_vec()));
         let err = downloader(expired.clone(), &["cdn1.example.com", "cdn2.example.com"])
-            .download(&params)
+            .download(&params, Default::default())
             .await
             .expect_err("an expired reference must not read as success");
         assert!(
@@ -2219,7 +3658,7 @@ mod tests {
 
         let dead = RoutedHttpClient::new(Vec::new(), (500, b"boom".to_vec()));
         let err = downloader(dead.clone(), &["cdn1.example.com", "cdn2.example.com"])
-            .download(&params)
+            .download(&params, Default::default())
             .await
             .expect_err("every host failing must not read as success");
         assert!(
@@ -2235,7 +3674,6 @@ mod tests {
             RoutedHttpClient::new(Vec::new(), (200, Vec::new())),
             Arc::new(crate::TokioRuntime),
         );
-        assert!(downloader.route().auth.is_none());
         assert_eq!(
             downloader
                 .route()
@@ -2253,7 +3691,7 @@ mod tests {
         let http = RoutedHttpClient::new(Vec::new(), (200, Vec::new()));
 
         let err = downloader(http.clone(), &[])
-            .download(&params)
+            .download(&params, Default::default())
             .await
             .expect_err("an empty route cannot succeed");
 
@@ -2264,6 +3702,51 @@ mod tests {
         assert!(http.urls().is_empty());
     }
 
+    #[tokio::test]
+    async fn metadata_validation_precedes_media_connection_lookup() {
+        let client =
+            crate::test_utils::create_test_client_with_name("invalid_metadata_no_iq").await;
+        for static_url in [None, Some("https://cdn.example/static".to_owned())] {
+            for encrypted_hash in [false, true] {
+                let mut message = {
+                    let mut proto_fixture = wa::message::ImageMessage::default();
+                    proto_fixture.direct_path = Some("/file".into());
+                    proto_fixture.static_url = static_url.clone();
+                    proto_fixture.media_key = Some(vec![1; 32]);
+                    proto_fixture.file_sha256 = Some(vec![2; 32]);
+                    proto_fixture.file_enc_sha256 = Some(vec![3; 32]);
+                    proto_fixture
+                };
+                let expected = if encrypted_hash {
+                    message.file_enc_sha256 = Some(vec![3; 31]);
+                    DownloadPreparationError::InvalidEncryptedHashLength
+                } else {
+                    message.file_sha256 = Some(Vec::new());
+                    DownloadPreparationError::InvalidPlaintextHashLength
+                };
+                let error = client.prepare_requests(&message, false).await.unwrap_err();
+                let DownloadRequestError::Prepare(source) = error else {
+                    panic!("metadata validation must precede the offline IQ path: {error:?}");
+                };
+                assert_eq!(
+                    source.downcast_ref::<DownloadPreparationError>(),
+                    Some(&expected)
+                );
+            }
+        }
+        // Missing optional hashes and a non-32-byte raw transport key remain
+        // valid for the static-URL path; the owned container has stricter keys.
+        let optional = {
+            let mut proto_fixture = wa::message::ImageMessage::default();
+            proto_fixture.static_url =
+                Some("https://cdn.example/static?signature=unchanged#part".into());
+            proto_fixture.media_key = Some(vec![1; 16]);
+            proto_fixture
+        };
+        let requests = client.prepare_requests(&optional, false).await.unwrap();
+        assert_eq!(requests[0].url, optional.static_url.as_deref().unwrap());
+    }
+
     // Regression: a `static_url` download used to fetch a media conn over the
     // wire and then throw it away, which also made the download impossible
     // offline. A disconnected client makes the discarded IQ observable.
@@ -2271,11 +3754,13 @@ mod tests {
     async fn static_url_download_asks_for_no_media_conn() {
         let client = crate::test_utils::create_test_client_with_name("static_url_no_iq").await;
 
-        let with_static_url = wa::message::ImageMessage {
-            static_url: Some("https://static.cdn.example.com/media/abc123".to_string()),
-            direct_path: Some("/v/t62.7118-24/unused".to_string()),
-            file_sha256: Some(vec![7u8; 32]),
-            ..Default::default()
+        let with_static_url = {
+            let mut proto_fixture = wa::message::ImageMessage::default();
+            proto_fixture.static_url =
+                Some("https://static.cdn.example.com/media/abc123".to_string());
+            proto_fixture.direct_path = Some("/v/t62.7118-24/unused".to_string());
+            proto_fixture.file_sha256 = Some(vec![7u8; 32]);
+            proto_fixture
         };
         let requests = client
             .prepare_requests(&with_static_url, false)
@@ -2289,19 +3774,859 @@ mod tests {
 
         // The same client still asks the server for hosts when there is no
         // static URL, which is what makes the assertion above meaningful.
-        let without_static_url = wa::message::ImageMessage {
-            direct_path: Some("/v/t62.7118-24/needs-hosts".to_string()),
-            file_sha256: Some(vec![7u8; 32]),
-            ..Default::default()
+        let without_static_url = {
+            let mut proto_fixture = wa::message::ImageMessage::default();
+            proto_fixture.direct_path = Some("/v/t62.7118-24/needs-hosts".to_string());
+            proto_fixture.file_sha256 = Some(vec![7u8; 32]);
+            proto_fixture
         };
         let err = client
             .prepare_requests(&without_static_url, false)
             .await
             .expect_err("host construction still needs a media conn");
-        assert!(
-            err.to_string().contains("not connected"),
-            "expected the media-conn IQ to be attempted, got: {err}"
+        assert!(matches!(
+            err,
+            DownloadRequestError::Session {
+                force_refresh: false,
+                source: crate::request::IqError::NotConnected,
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn client_params_and_messages_share_routes_and_outputs() {
+        let original = b"one canonical route";
+        let (params, encrypted) = encrypted_params(original);
+        let message = {
+            let mut proto_fixture = wa::message::ImageMessage::default();
+            proto_fixture.direct_path = Some(params.direct_path.clone());
+            proto_fixture.media_key = params.media_key.clone();
+            proto_fixture.file_sha256 = Some(params.file_sha256.clone());
+            proto_fixture.file_enc_sha256 = params.file_enc_sha256.clone();
+            proto_fixture.file_length = Some(params.file_length);
+            proto_fixture
+        };
+        for streaming in [false, true] {
+            let http = if streaming {
+                RoutedHttpClient::streaming(Vec::new(), (200, encrypted.clone()))
+            } else {
+                RoutedHttpClient::new(Vec::new(), (200, encrypted.clone()))
+            };
+            let client =
+                crate::test_utils::create_test_client_with_http("download-params", http.clone())
+                    .await;
+            *client.media_conn.write().await = Some(media_conn("auth", &["cdn.example.com"]));
+            assert_eq!(
+                client.download(&params, Default::default()).await.unwrap(),
+                original
+            );
+            assert_eq!(
+                client.download(&message, Default::default()).await.unwrap(),
+                original
+            );
+            assert_eq!(
+                client
+                    .download_to_writer(&params, Cursor::new(vec![0xFF; 1024]), Default::default())
+                    .await
+                    .unwrap()
+                    .into_inner(),
+                original
+            );
+            assert_eq!(
+                client
+                    .download_to_writer(&message, Cursor::new(Vec::new()), Default::default())
+                    .await
+                    .unwrap()
+                    .into_inner(),
+                original
+            );
+            let urls = http.urls();
+            assert_eq!(urls.len(), 4);
+            assert!(urls.iter().all(|url| url == &urls[0]));
+            assert!(!urls[0].contains("auth="));
+        }
+    }
+
+    #[tokio::test]
+    async fn client_static_rejection_is_final_without_invalidating_a_session() {
+        let message = {
+            let mut proto_fixture = wa::message::ImageMessage::default();
+            proto_fixture.static_url = Some("https://cdn.example.com/static".into());
+            proto_fixture.file_sha256 = Some(vec![0; 32]);
+            proto_fixture
+        };
+        for streaming in [false, true] {
+            let http = if streaming {
+                RoutedHttpClient::streaming(Vec::new(), (403, Vec::new()))
+            } else {
+                RoutedHttpClient::new(Vec::new(), (403, Vec::new()))
+            };
+            let client =
+                crate::test_utils::create_test_client_with_http("download-static", http.clone())
+                    .await;
+            *client.media_conn.write().await =
+                Some(media_conn("untouched", &["unused.example.com"]));
+            let errors = [
+                client
+                    .download(&message, Default::default())
+                    .await
+                    .unwrap_err(),
+                client
+                    .download_to_writer(&message, Cursor::new(Vec::new()), Default::default())
+                    .await
+                    .unwrap_err(),
+            ];
+            for error in errors {
+                assert!(matches!(error, ClientDownloadError::ReferenceRejected(_)));
+                let cause: &(dyn std::error::Error + 'static) = &error;
+                assert_eq!(cause.http_status(), Some(403));
+            }
+            assert_eq!(http.urls(), vec![message.static_url.clone().unwrap(); 2]);
+            assert_eq!(
+                client.media_conn.read().await.as_ref().unwrap().auth,
+                "untouched"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn client_distinguishes_preparation_route_and_session_failures() {
+        let (mut params, _) = encrypted_params(b"unrequested");
+        let http = RoutedHttpClient::new(Vec::new(), (401, Vec::new()));
+        let client =
+            crate::test_utils::create_test_client_with_http("download-errors", http.clone()).await;
+        for to_writer in [false, true] {
+            for case in 0..4 {
+                params.file_enc_sha256 = Some(vec![1; 32]);
+                *client.media_conn.write().await = match case {
+                    0 => Some(media_conn("auth", &[])),
+                    1 | 3 => Some(media_conn("auth", &["cdn.example.com"])),
+                    _ => None,
+                };
+                if case == 1 {
+                    params.file_enc_sha256 = None;
+                }
+                let sink = SharedWriter::new();
+                sink.with(|w| w.write_all(b"old contents").unwrap());
+                let error = if to_writer {
+                    let result = client
+                        .download_to_writer(&params, sink.clone(), Default::default())
+                        .await;
+                    assert!(sink.contents().is_empty());
+                    result.unwrap_err()
+                } else {
+                    client
+                        .download(&params, Default::default())
+                        .await
+                        .unwrap_err()
+                };
+                match case {
+                    0 => assert!(matches!(error, ClientDownloadError::NoHosts)),
+                    1 => assert!(matches!(error, ClientDownloadError::Preparation(_))),
+                    2 | 3 => {
+                        let ClientDownloadError::MediaSession {
+                            force_refresh,
+                            source,
+                        } = error
+                        else {
+                            panic!("expected session failure, got {error:?}");
+                        };
+                        assert_eq!(force_refresh, case == 3);
+                        assert!(matches!(source, crate::request::IqError::NotConnected));
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        }
+        // Only the cached rejected route reaches HTTP, once per API. Initial
+        // acquisition, malformed metadata and empty routes contact no hosts.
+        assert_eq!(http.urls().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn client_rejection_after_refresh_preserves_final_classification_and_status() {
+        let (params, _) = encrypted_params(b"revoked");
+        let http = RoutedHttpClient::new(Vec::new(), (401, Vec::new()));
+        let runtime: Arc<dyn Runtime> = Arc::new(crate::TokioRuntime);
+        let conn = media_conn("fresh-or-stale", &["cdn.example.com"]);
+        for to_writer in [false, true] {
+            let calls = std::sync::Mutex::new(Vec::new());
+            let invalidations = std::sync::atomic::AtomicUsize::new(0);
+            let prepare = |force| {
+                calls.lock().unwrap().push(force);
+                let requests =
+                    DownloadUtils::prepare_download_requests(&params, &MediaRoute::from(&conn))
+                        .map_err(DownloadRequestError::Prepare);
+                async move { requests }
+            };
+            let invalidate = || async {
+                invalidations.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            };
+            let error = if to_writer {
+                download_to_writer_with_retry(
+                    MEDIA_AUTH_REFRESH_RETRY_ATTEMPTS,
+                    &runtime,
+                    Cursor::new(Vec::new()),
+                    prepare,
+                    invalidate,
+                    |request, writer| {
+                        let http: Arc<dyn HttpClient> = http.clone();
+                        let runtime = runtime.clone();
+                        async move {
+                            streaming_download_and_decrypt(
+                                &http,
+                                &runtime,
+                                &request,
+                                ExpectedMediaHashes::default(),
+                                writer,
+                            )
+                            .await
+                        }
+                    },
+                )
+                .await
+                .unwrap_err()
+            } else {
+                download_media_with_retry(
+                    MEDIA_AUTH_REFRESH_RETRY_ATTEMPTS,
+                    prepare,
+                    invalidate,
+                    |request| {
+                        let http: Arc<dyn HttpClient> = http.clone();
+                        let runtime = runtime.clone();
+                        async move {
+                            execute_request_into_memory(
+                                &http,
+                                &runtime,
+                                &request,
+                                ExpectedMediaHashes::default(),
+                                0,
+                            )
+                            .await
+                        }
+                    },
+                )
+                .await
+                .unwrap_err()
+            };
+            let error = ClientDownloadError::from(error);
+            assert!(matches!(error, ClientDownloadError::ReferenceRejected(_)));
+            let cause: &(dyn std::error::Error + 'static) = &error;
+            assert_eq!(cause.http_status(), Some(401));
+            assert_eq!(*calls.lock().unwrap(), vec![false, true]);
+            assert_eq!(invalidations.load(std::sync::atomic::Ordering::Relaxed), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn client_empty_refreshed_route_keeps_the_prior_rejection_and_clears_writer() {
+        let (params, _) = encrypted_params(b"revoked");
+        let runtime: Arc<dyn Runtime> = Arc::new(crate::TokioRuntime);
+        let status = 401;
+        for streaming in [false, true] {
+            for to_writer in [false, true] {
+                let http = if streaming {
+                    RoutedHttpClient::streaming(Vec::new(), (status, Vec::new()))
+                } else {
+                    RoutedHttpClient::new(Vec::new(), (status, Vec::new()))
+                };
+                let calls = std::sync::Mutex::new(Vec::new());
+                let prepare = |force| {
+                    calls.lock().unwrap().push(force);
+                    let hosts = if force {
+                        Vec::new()
+                    } else {
+                        vec![MediaHost::new("cdn.example.com")]
+                    };
+                    let requests =
+                        DownloadUtils::prepare_download_requests(&params, &MediaRoute::new(hosts))
+                            .map_err(DownloadRequestError::Prepare);
+                    async move { requests }
+                };
+                let sink = SharedWriter::new();
+                sink.with(|w| w.write_all(b"old destination").unwrap());
+                let error = if to_writer {
+                    let result = download_to_writer_with_retry(
+                        MEDIA_AUTH_REFRESH_RETRY_ATTEMPTS,
+                        &runtime,
+                        sink.clone(),
+                        prepare,
+                        || async {},
+                        |request, writer| {
+                            let http: Arc<dyn HttpClient> = http.clone();
+                            let runtime = runtime.clone();
+                            async move {
+                                streaming_download_and_decrypt(
+                                    &http,
+                                    &runtime,
+                                    &request,
+                                    ExpectedMediaHashes::default(),
+                                    writer,
+                                )
+                                .await
+                            }
+                        },
+                    )
+                    .await;
+                    assert!(sink.contents().is_empty());
+                    result.unwrap_err()
+                } else {
+                    download_media_with_retry(
+                        MEDIA_AUTH_REFRESH_RETRY_ATTEMPTS,
+                        prepare,
+                        || async {},
+                        |request| {
+                            let http: Arc<dyn HttpClient> = http.clone();
+                            let runtime = runtime.clone();
+                            async move {
+                                execute_request_into_memory(
+                                    &http,
+                                    &runtime,
+                                    &request,
+                                    ExpectedMediaHashes::default(),
+                                    0,
+                                )
+                                .await
+                            }
+                        },
+                    )
+                    .await
+                    .unwrap_err()
+                };
+                let error = ClientDownloadError::from(error);
+                assert!(matches!(error, ClientDownloadError::NoHostsAfterRefresh(_)));
+                assert_eq!(error.http_status(), Some(status));
+                assert_eq!(http.urls().len(), 1);
+                assert_eq!(*calls.lock().unwrap(), vec![false, true]);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn client_session_rejection_keeps_iq_metadata_and_source_chain() {
+        use crate::test_utils::{answer_iq, create_iq_test_client, decode_sent_iq};
+        use wacore_binary::builder::NodeBuilder;
+        let (client, transport) = create_iq_test_client().await;
+        let task = tokio::spawn({
+            let client = client.clone();
+            async move {
+                let (params, _) = encrypted_params(b"never fetched");
+                client.download(&params, Default::default()).await
+            }
+        });
+        let sent = decode_sent_iq(&transport, 0).await;
+        assert!(sent.get().get_optional_child("media_conn").is_some());
+        let node = sent.get().to_owned();
+        let id = node.attrs().optional_string("id").unwrap().into_owned();
+        let response = NodeBuilder::new("iq")
+            .attr("type", "error")
+            .attr("id", &id)
+            .attr("from", "s.whatsapp.net")
+            .children([NodeBuilder::new("error")
+                .attr("code", "429")
+                .attr("text", "rate limited")
+                .attr("type", "wait")
+                .attr("backoff", "17")
+                .build()])
+            .build();
+        answer_iq(&client, &id, &response).await;
+        let error = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ClientDownloadError::MediaSession {
+                force_refresh: false,
+                ..
+            }
+        ));
+        let rejection = error.server_rejection().unwrap();
+        assert_eq!(rejection.code, 429);
+        assert_eq!(rejection.error_type, Some("wait"));
+        assert_eq!(rejection.backoff, Some(17));
+        for diagnostic in [format!("{error}"), format!("{error:?}")] {
+            assert!(diagnostic.contains("server_rejection"), "{diagnostic}");
+            assert!(diagnostic.contains("429"), "{diagnostic}");
+            assert!(!diagnostic.contains("rate limited"), "{diagnostic}");
+        }
+        let timeout = ClientDownloadError::MediaSession {
+            force_refresh: false,
+            source: crate::request::IqError::Timeout,
+        };
+        let diagnostic = format!("{timeout:?}");
+        assert!(diagnostic.contains("timeout"), "{diagnostic}");
+        assert!(diagnostic.contains("iq_code: None"), "{diagnostic}");
+        let ClientDownloadError::MediaSession {
+            source: crate::request::IqError::ServerError { response, .. },
+            ..
+        } = error
+        else {
+            panic!("expected IQ rejection source");
+        };
+        assert_eq!(
+            response
+                .get()
+                .get_optional_child("error")
+                .unwrap()
+                .attrs()
+                .optional_u64("backoff"),
+            Some(17)
         );
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum DestinationFault {
+        Truncate,
+        InitialRewind,
+        Write,
+        WriteZero,
+        FinalRewind,
+    }
+
+    #[derive(Debug)]
+    struct FaultingDestination {
+        sink: SharedWriter,
+        fault: DestinationFault,
+        refuse_cleanup: bool,
+        truncates: usize,
+        seeks: usize,
+        writes: usize,
+    }
+
+    impl Write for FaultingDestination {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.writes += 1;
+            match self.fault {
+                DestinationFault::Write if self.writes > 1 => {
+                    Err(std::io::Error::from_raw_os_error(28))
+                }
+                DestinationFault::Write => self.sink.write(&bytes[..bytes.len().min(1)]),
+                DestinationFault::WriteZero => Ok(0),
+                _ => self.sink.write(bytes),
+            }
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.sink.flush()
+        }
+    }
+    impl Seek for FaultingDestination {
+        fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+            self.seeks += 1;
+            if matches!(self.fault, DestinationFault::InitialRewind) && self.seeks == 1
+                || matches!(self.fault, DestinationFault::FinalRewind) && self.seeks == 2
+            {
+                return Err(std::io::Error::from_raw_os_error(28));
+            }
+            self.sink.seek(pos)
+        }
+    }
+    impl DownloadWriter for FaultingDestination {
+        fn truncate(&mut self, len: u64) -> std::io::Result<()> {
+            self.truncates += 1;
+            if self.truncates > 1 && self.refuse_cleanup {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "destination refuses cleanup",
+                ));
+            }
+            if matches!(self.fault, DestinationFault::Truncate) && self.truncates == 1 {
+                return Err(std::io::Error::from_raw_os_error(28));
+            }
+            self.sink.truncate(len)
+        }
+    }
+
+    #[tokio::test]
+    async fn local_destination_faults_are_terminal_and_preserve_io_and_cleanup_sources() {
+        for streaming in [false, true] {
+            for with_client in [false, true] {
+                for refuse_cleanup in [false, true] {
+                    for fault in [
+                        DestinationFault::Truncate,
+                        DestinationFault::InitialRewind,
+                        DestinationFault::Write,
+                        DestinationFault::WriteZero,
+                        DestinationFault::FinalRewind,
+                    ] {
+                        let (params, body) =
+                            encrypted_params(b"authenticated destination contents");
+                        let http = if streaming {
+                            RoutedHttpClient::streaming(Vec::new(), (200, body))
+                        } else {
+                            RoutedHttpClient::new(Vec::new(), (200, body))
+                        };
+                        let sink = SharedWriter::new();
+                        sink.with(|inner| *inner = Cursor::new(b"old destination".to_vec()));
+                        let writer = FaultingDestination {
+                            sink: sink.clone(),
+                            fault,
+                            refuse_cleanup,
+                            truncates: 0,
+                            seeks: 0,
+                            writes: 0,
+                        };
+                        let error: anyhow::Error = if with_client {
+                            let client = crate::test_utils::create_test_client_with_http(
+                                "destination-fault",
+                                http.clone(),
+                            )
+                            .await;
+                            *client.media_conn.write().await = Some(media_conn(
+                                "unchanged",
+                                &["first.example.com", "second.example.com"],
+                            ));
+                            let error = client
+                                .download_to_writer(&params, writer, Default::default())
+                                .await
+                                .unwrap_err();
+                            // A sink fault must not invalidate or fetch a media session.
+                            assert_eq!(
+                                client.media_conn.read().await.as_ref().unwrap().auth,
+                                "unchanged"
+                            );
+                            error.into()
+                        } else {
+                            downloader(http.clone(), &["first.example.com", "second.example.com"])
+                                .download_to_writer(&params, writer, Default::default())
+                                .await
+                                .unwrap_err()
+                                .into()
+                        };
+                        let (cause, cleanup) = if with_client {
+                            match error.downcast_ref::<ClientDownloadError>().unwrap() {
+                                ClientDownloadError::WriterIo(cause) => (cause, None),
+                                ClientDownloadError::WriterCleanup { failure, cleanup } => {
+                                    let ClientDownloadError::WriterIo(cause) = failure.as_ref()
+                                    else {
+                                        panic!("wrong primary classification: {error:?}");
+                                    };
+                                    (cause, Some(cleanup))
+                                }
+                                _ => panic!("wrong local destination classification: {error:?}"),
+                            }
+                        } else {
+                            match error.downcast_ref::<MediaDownloadError>().unwrap() {
+                                MediaDownloadError::WriterIo(cause) => (cause, None),
+                                MediaDownloadError::WriterCleanup { failure, cleanup } => {
+                                    let MediaDownloadError::WriterIo(cause) = failure.as_ref()
+                                    else {
+                                        panic!("wrong primary classification: {error:?}");
+                                    };
+                                    (cause, Some(cleanup))
+                                }
+                                _ => panic!("wrong local destination classification: {error:?}"),
+                            }
+                        };
+                        if matches!(fault, DestinationFault::WriteZero) {
+                            assert!(cause.chain().any(|source| {
+                                source
+                                    .downcast_ref::<std::io::Error>()
+                                    .is_some_and(|io| io.kind() == std::io::ErrorKind::WriteZero)
+                            }));
+                        } else {
+                            let io = cause.downcast_ref::<std::io::Error>().unwrap();
+                            assert_eq!(io.raw_os_error(), Some(28), "lost original I/O: {error:?}");
+                            assert_eq!(
+                                io.to_string(),
+                                std::io::Error::from_raw_os_error(28).to_string()
+                            );
+                        }
+                        assert_eq!(cleanup.is_some(), refuse_cleanup);
+                        if let Some(cleanup) = cleanup {
+                            assert_eq!(cleanup.kind(), std::io::ErrorKind::PermissionDenied);
+                            assert_eq!(cleanup.to_string(), "destination refuses cleanup");
+                        } else {
+                            assert!(sink.contents().is_empty());
+                            assert_eq!(sink.with(|inner| inner.position()), 0);
+                        }
+                        let expected_requests = usize::from(
+                            !streaming
+                                || !matches!(
+                                    fault,
+                                    DestinationFault::Truncate | DestinationFault::InitialRewind,
+                                ),
+                        );
+                        let urls = http.urls();
+                        assert_eq!(
+                            urls.len(),
+                            expected_requests,
+                            "{streaming}/{fault:?}: {urls:?}"
+                        );
+                        assert!(urls.iter().all(|url| url.contains("first.example.com")));
+                    }
+                }
+            }
+        }
+    }
+
+    struct FailingNetworkReader;
+    impl std::io::Read for FailingNetworkReader {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            // Same OS error as the destination fixture: classify by origin,
+            // never ErrorKind or a downcast to arbitrary std::io::Error.
+            Err(std::io::Error::from_raw_os_error(28))
+        }
+    }
+    struct ReadFailingHttp {
+        inner: Arc<RoutedHttpClient>,
+        all_hosts: bool,
+    }
+    #[async_trait::async_trait]
+    impl HttpClient for ReadFailingHttp {
+        async fn execute(
+            &self,
+            request: crate::http::HttpRequest,
+        ) -> Result<crate::http::HttpResponse> {
+            if self.all_hosts || request.url.contains("first.example.com") {
+                self.inner.record(&request.url);
+                return Err(std::io::Error::from_raw_os_error(28).into());
+            }
+            self.inner.execute(request).await
+        }
+        fn supports_streaming(&self) -> bool {
+            self.inner.supports_streaming()
+        }
+        fn execute_streaming(
+            &self,
+            request: crate::http::HttpRequest,
+        ) -> Result<wacore::net::StreamingHttpResponse> {
+            if self.all_hosts || request.url.contains("first.example.com") {
+                self.inner.record(&request.url);
+                return Ok(wacore::net::StreamingHttpResponse::new(
+                    200,
+                    Box::new(FailingNetworkReader),
+                ));
+            }
+            self.inner.execute_streaming(request)
+        }
+    }
+
+    #[tokio::test]
+    async fn http_read_io_still_fails_over_and_is_not_a_local_writer_failure() {
+        for streaming in [false, true] {
+            for to_writer in [false, true] {
+                for all_hosts in [false, true] {
+                    let original = b"network failover remains authenticated";
+                    let (params, body) = encrypted_params(original);
+                    let inner = if streaming {
+                        RoutedHttpClient::streaming(Vec::new(), (200, body))
+                    } else {
+                        RoutedHttpClient::new(Vec::new(), (200, body))
+                    };
+                    let client = crate::test_utils::create_test_client_with_http(
+                        "network-read-fault",
+                        Arc::new(ReadFailingHttp {
+                            inner: inner.clone(),
+                            all_hosts,
+                        }),
+                    )
+                    .await;
+                    *client.media_conn.write().await = Some(media_conn(
+                        "unchanged",
+                        &["first.example.com", "second.example.com"],
+                    ));
+                    let result = if to_writer {
+                        client
+                            .download_to_writer(
+                                &params,
+                                Cursor::new(Vec::new()),
+                                Default::default(),
+                            )
+                            .await
+                            .map(Cursor::into_inner)
+                    } else {
+                        client.download(&params, Default::default()).await
+                    };
+                    if all_hosts {
+                        let error = result.unwrap_err();
+                        let ClientDownloadError::HostsUnreachable(cause) = error else {
+                            panic!("network failure mislabeled: {error:?}");
+                        };
+                        assert_eq!(
+                            cause
+                                .downcast_ref::<std::io::Error>()
+                                .unwrap()
+                                .raw_os_error(),
+                            Some(28)
+                        );
+                    } else {
+                        assert_eq!(result.unwrap(), original);
+                    }
+                    assert_eq!(inner.urls().len(), 2);
+                    assert_eq!(
+                        client.media_conn.read().await.as_ref().unwrap().auth,
+                        "unchanged"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Allows the initial emptying, then refuses failure cleanup. Its separately
+    /// held handle makes the retained unverified bytes observable to the test.
+    #[derive(Debug)]
+    struct CleanupRefusingWriter {
+        sink: SharedWriter,
+        cleared: bool,
+    }
+
+    impl Write for CleanupRefusingWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.sink.write(buf)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.sink.flush()
+        }
+    }
+    impl Seek for CleanupRefusingWriter {
+        fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+            self.sink.seek(pos)
+        }
+    }
+    impl DownloadWriter for CleanupRefusingWriter {
+        fn truncate(&mut self, len: u64) -> std::io::Result<()> {
+            if self.cleared {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "fixture refuses cleanup",
+                ));
+            }
+            self.cleared = true;
+            self.sink.truncate(len)
+        }
+    }
+
+    fn assert_mac_cause(cause: &anyhow::Error) {
+        assert!(matches!(
+            cause.downcast_ref::<MediaDecryptionError>(),
+            Some(MediaDecryptionError::InvalidMac)
+        ));
+        assert_eq!(cause.chain().count(), 1);
+        let diagnostic = format!("{:?}", MediaErrorDiagnostic(cause.as_ref()));
+        assert!(
+            diagnostic.contains("media_validation: true"),
+            "{diagnostic}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mac_cause_survives_cleanup_for_both_http_modes() {
+        async fn check<W: DownloadWriter + MaybeSend + 'static>(
+            streaming: bool,
+            cleanup_fails: bool,
+            writer: W,
+            sink: SharedWriter,
+        ) {
+            let key = [0x79; 32];
+            let body = forged_body(&vec![0x11; 32 * 1024], &key);
+            let http: Arc<dyn HttpClient> = if streaming {
+                RoutedHttpClient::streaming(Vec::new(), (200, body))
+            } else {
+                RoutedHttpClient::new(Vec::new(), (200, body))
+            };
+            let runtime: Arc<dyn Runtime> = Arc::new(crate::TokioRuntime);
+            let request = wacore::download::DownloadRequest {
+                url: "https://cdn.example.com/forged".into(),
+                decryption: MediaDecryption::Encrypted {
+                    media_key: key.to_vec(),
+                    media_type: MediaType::Image,
+                },
+            };
+            let (writer, result) = streaming_download_and_decrypt(
+                &http,
+                &runtime,
+                &request,
+                ExpectedMediaHashes::default(),
+                writer,
+            )
+            .await
+            .unwrap();
+            let error = result.unwrap_err();
+            let DownloadRequestError::Other(cause) = &error else {
+                panic!("unexpected executor failure {error:?}")
+            };
+            assert_mac_cause(cause);
+            let error = discard_failed_write(&runtime, writer, error).await;
+            let failure = if cleanup_fails {
+                let DownloadRequestError::Cleanup { failure, cleanup } = error else {
+                    panic!("expected cleanup failure, got {error:?}");
+                };
+                assert_eq!(cleanup.kind(), std::io::ErrorKind::PermissionDenied);
+                assert!(!sink.contents().is_empty());
+                *failure
+            } else {
+                assert!(sink.contents().is_empty());
+                error
+            };
+            let DownloadRequestError::Other(cause) = failure else {
+                panic!("cleanup changed the integrity classification: {failure:?}");
+            };
+            assert_mac_cause(&cause);
+        }
+        for streaming in [true, false] {
+            let sink = SharedWriter::new();
+            sink.with(|w| w.write_all(b"old destination").unwrap());
+            check(streaming, false, sink.clone(), sink).await;
+            let sink = SharedWriter::new();
+            sink.with(|w| w.write_all(b"old destination").unwrap());
+            let writer = CleanupRefusingWriter {
+                sink: sink.clone(),
+                cleared: !streaming,
+            };
+            check(streaming, true, writer, sink).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn cleanup_failure_preserves_both_causes_and_never_claims_empty_output() {
+        let key = [0x79; 32];
+        let (mut params, _) = encrypted_params(b"unused");
+        params.media_key = Some(key.to_vec());
+        let body = forged_body(&vec![0x11; 32 * 1024], &key);
+        for with_client in [false, true] {
+            let http = RoutedHttpClient::streaming(Vec::new(), (200, body.clone()));
+            let sink = SharedWriter::new();
+            let writer = CleanupRefusingWriter {
+                sink: sink.clone(),
+                cleared: false,
+            };
+            if with_client {
+                let client =
+                    crate::test_utils::create_test_client_with_http("download-cleanup", http).await;
+                *client.media_conn.write().await = Some(media_conn("auth", &["cdn.example.com"]));
+                let error = client
+                    .download_to_writer(&params, writer, Default::default())
+                    .await
+                    .unwrap_err();
+                let ClientDownloadError::WriterCleanup { failure, cleanup } = error else {
+                    panic!("expected cleanup failure, got {error:?}")
+                };
+                let ClientDownloadError::HostsUnreachable(cause) = *failure else {
+                    panic!("cleanup replaced the download cause: {failure:?}");
+                };
+                assert_mac_cause(&cause);
+                assert_eq!(cleanup.kind(), std::io::ErrorKind::PermissionDenied);
+            } else {
+                let error = downloader(http, &["cdn.example.com"])
+                    .download_to_writer(&params, writer, Default::default())
+                    .await
+                    .unwrap_err();
+                let MediaDownloadError::WriterCleanup { failure, cleanup } = error else {
+                    panic!("expected cleanup failure, got {error:?}")
+                };
+                let MediaDownloadError::HostsUnreachable(cause) = *failure else {
+                    panic!("cleanup replaced the download cause: {failure:?}");
+                };
+                assert_mac_cause(&cause);
+                assert_eq!(cleanup.kind(), std::io::ErrorKind::PermissionDenied);
+            }
+            assert!(
+                !sink.contents().is_empty(),
+                "a refused cleanup really can leave unverified plaintext"
+            );
+        }
     }
 
     /// HTTP client that records the requested URL and returns a canned response.
@@ -2318,10 +4643,10 @@ mod tests {
             request: crate::http::HttpRequest,
         ) -> Result<crate::http::HttpResponse> {
             *self.seen_url.lock().await = Some(request.url);
-            Ok(crate::http::HttpResponse {
-                status_code: self.status,
-                body: self.body.clone(),
-            })
+            Ok(crate::http::HttpResponse::new(
+                self.status,
+                self.body.clone(),
+            ))
         }
     }
 
@@ -2372,5 +4697,132 @@ mod tests {
         // not only readable in the message.
         let cause: &(dyn std::error::Error + 'static) = err.as_ref();
         assert_eq!(cause.http_status(), Some(404), "got: {err:?}");
+    }
+    struct GatedExpiredHttp {
+        inner: Arc<RoutedHttpClient>,
+        entered: async_channel::Sender<()>,
+        release: async_channel::Receiver<()>,
+    }
+
+    #[async_trait::async_trait]
+    impl HttpClient for GatedExpiredHttp {
+        async fn execute(
+            &self,
+            request: crate::http::HttpRequest,
+        ) -> Result<crate::http::HttpResponse> {
+            if !request.url.contains("/mms/") {
+                self.entered.send(()).await.unwrap();
+                self.release.recv().await.unwrap();
+            }
+            self.inner.execute(request).await
+        }
+
+        fn supports_streaming(&self) -> bool {
+            self.inner.supports_streaming()
+        }
+
+        fn execute_streaming(
+            &self,
+            request: crate::http::HttpRequest,
+        ) -> Result<wacore::net::StreamingHttpResponse> {
+            self.entered.send_blocking(()).unwrap();
+            self.release.recv_blocking().unwrap();
+            self.inner.execute_streaming(request)
+        }
+    }
+
+    #[tokio::test]
+    async fn expired_download_burst_preserves_upload_connection() {
+        for streaming in [false, true] {
+            for status in [403, 404, 410] {
+                let routes = vec![(
+                    "/mms/",
+                    200,
+                    br#"{"url":"https://cdn.example.com/sent","direct_path":"/sent"}"#.to_vec(),
+                )];
+                let http = if streaming {
+                    RoutedHttpClient::streaming(routes, (status, Vec::new()))
+                } else {
+                    RoutedHttpClient::new(routes, (status, Vec::new()))
+                };
+                let (entered, arrivals) = async_channel::unbounded();
+                let (release, gate) = async_channel::unbounded();
+                let gated = Arc::new(GatedExpiredHttp {
+                    inner: http.clone(),
+                    entered,
+                    release: gate,
+                });
+                let client =
+                    crate::test_utils::create_test_client_with_http("expired-burst", gated).await;
+                *client.media_conn.write().await =
+                    Some(media_conn("upload-auth", &["cdn.example.com"]));
+                let (params, _) = encrypted_params(b"expired sticker");
+                let downloads = futures::future::join_all((0..4).map(|i| {
+                    let client = &client;
+                    let params = &params;
+                    async move {
+                        if i % 2 == 0 {
+                            client
+                                .download(params, Default::default())
+                                .await
+                                .map(|_| ())
+                        } else {
+                            client
+                                .download_to_writer(
+                                    params,
+                                    Cursor::new(Vec::new()),
+                                    Default::default(),
+                                )
+                                .await
+                                .map(|_| ())
+                        }
+                    }
+                }));
+                let mut downloads = std::pin::pin!(downloads);
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    for _ in 0..4 {
+                        tokio::select! {
+                            _ = &mut downloads => panic!("downloads must wait for the CDN gate"),
+                            arrival = arrivals.recv() => arrival.unwrap(),
+                        }
+                    }
+                })
+                .await
+                .expect("all four downloads reached the CDN gate");
+                for _ in 0..4 {
+                    release.try_send(()).unwrap();
+                }
+                // Downloads are released together before polling the upload. The
+                // baseline clears its auth and tries an IQ on this offline fixture.
+                let (errors, upload) = futures::join!(
+                    downloads,
+                    client.upload(
+                        b"send sticker".to_vec(),
+                        MediaType::Sticker,
+                        crate::upload::UploadOptions::default()
+                    )
+                );
+                for error in errors {
+                    let error = error.unwrap_err();
+                    let cause: &(dyn std::error::Error + 'static) = &error;
+                    assert_eq!(cause.http_status(), Some(status), "{error:?}");
+                }
+                assert_eq!(
+                    upload
+                        .expect("expired downloads must not clear upload auth")
+                        .direct_path,
+                    "/sent"
+                );
+                assert_eq!(
+                    client.media_conn.read().await.as_ref().unwrap().auth,
+                    "upload-auth"
+                );
+                assert_eq!(
+                    http.urls().len(),
+                    5,
+                    "four downloads and one upload, no CDN retry"
+                );
+            }
+        }
     }
 }

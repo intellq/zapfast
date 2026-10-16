@@ -330,7 +330,7 @@ async fn upload_media_with_retry_dyn<'a>(
     Err(last_error.unwrap_or_else(|| anyhow!("Failed to upload to all available media hosts")))
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[non_exhaustive]
 pub struct UploadResponse {
     pub url: String,
@@ -344,6 +344,24 @@ pub struct UploadResponse {
     /// Per-64-KiB HMAC table for progressive playback/seek (audio/video only);
     /// pass to `AudioMessage`/`VideoMessage.streaming_sidecar`.
     pub streaming_sidecar: Option<Vec<u8>>,
+}
+
+impl std::fmt::Debug for UploadResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UploadResponse")
+            .field("url", &"<redacted>")
+            .field("direct_path", &"<redacted>")
+            .field("media_key", &"<redacted>")
+            .field("file_enc_sha256", &self.file_enc_sha256)
+            .field("file_sha256", &self.file_sha256)
+            .field("file_length", &self.file_length)
+            .field("media_key_timestamp", &self.media_key_timestamp)
+            .field(
+                "streaming_sidecar_len",
+                &self.streaming_sidecar.as_ref().map(Vec::len),
+            )
+            .finish()
+    }
 }
 
 impl From<UploadResponse> for wacore::sticker_pack::MediaUploadInfo {
@@ -405,52 +423,62 @@ impl Client {
     ///
     /// Only needed for new or modified media. To forward existing media unchanged,
     /// reuse the original message's CDN fields directly, no round-trip required.
-    #[cfg_attr(feature = "tracing", tracing::instrument(name = "wa.media.upload", level = "debug", skip_all, fields(kind = ?media_type, len = data.len()), err(Debug)))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(name = "wa.media.upload", level = "debug", skip_all, fields(kind = ?media_type, len = data.len())))]
     pub async fn upload(
         &self,
         data: Vec<u8>,
         media_type: MediaType,
         options: UploadOptions,
     ) -> Result<UploadResponse> {
-        let file_length = data.len() as u64;
-        let media_key = options.media_key;
-        let sidecar = options.streaming_sidecar;
-        let enc = wacore::runtime::blocking(&*self.runtime, move || {
-            wacore::upload::encrypt_media_with_key_and_sidecar(
-                &data,
+        async {
+            let file_length = data.len() as u64;
+            let media_key = options.media_key;
+            let sidecar = options.streaming_sidecar;
+            let enc = wacore::runtime::blocking(&*self.runtime, move || {
+                wacore::upload::encrypt_media_with_key_and_sidecar(
+                    &data,
+                    media_type,
+                    media_key.as_ref(),
+                    sidecar,
+                )
+            })
+            .await?;
+
+            let ciphertext_len = enc.data_to_upload.len() as u64;
+            let crypto = UploadCrypto {
+                media_key: enc.media_key,
+                file_sha256: enc.file_sha256,
+                file_enc_sha256: enc.file_enc_sha256,
+                streaming_sidecar: enc.streaming_sidecar,
+            };
+            // Bytes so each retry/resume attempt slices with a refcount bump instead of
+            // copying the whole (multi-MB) ciphertext per attempt.
+            let ciphertext = bytes::Bytes::from(enc.data_to_upload);
+
+            upload_media_with_retry(
+                crypto,
                 media_type,
-                media_key.as_ref(),
-                sidecar,
+                file_length,
+                ciphertext_len,
+                wacore::time::now_secs(),
+                |force| async move { self.refresh_media_conn(force).await.map_err(Into::into) },
+                || async { self.invalidate_media_conn().await },
+                |request| async move { self.http_client.execute(request).await },
+                |request, offset, _remaining| {
+                    let body = ciphertext.slice(offset as usize..);
+                    async move { self.http_client.execute(request.with_body(body)).await }
+                },
             )
-        })
-        .await?;
-
-        let ciphertext_len = enc.data_to_upload.len() as u64;
-        let crypto = UploadCrypto {
-            media_key: enc.media_key,
-            file_sha256: enc.file_sha256,
-            file_enc_sha256: enc.file_enc_sha256,
-            streaming_sidecar: enc.streaming_sidecar,
-        };
-        // Bytes so each retry/resume attempt slices with a refcount bump instead of
-        // copying the whole (multi-MB) ciphertext per attempt.
-        let ciphertext = bytes::Bytes::from(enc.data_to_upload);
-
-        upload_media_with_retry(
-            crypto,
-            media_type,
-            file_length,
-            ciphertext_len,
-            wacore::time::now_secs(),
-            |force| async move { self.refresh_media_conn(force).await.map_err(Into::into) },
-            || async { self.invalidate_media_conn().await },
-            |request| async move { self.http_client.execute(request).await },
-            |request, offset, _remaining| {
-                let body = ciphertext.slice(offset as usize..);
-                async move { self.http_client.execute(request.with_body(body)).await }
-            },
-        )
+            .await
+        }
         .await
+        .inspect_err(|_error| {
+            #[cfg(feature = "tracing")]
+            tracing::error!(
+                error = ?crate::download::MediaErrorDiagnostic(_error.as_ref()),
+                "media upload failed"
+            );
+        })
     }
 
     /// Uploads already-encrypted media streamed from `source`, keeping memory
@@ -459,7 +487,7 @@ impl Client {
     /// storage of your choice, then pass that storage as `source` plus the
     /// returned [`wacore::upload::EncryptedMediaInfo`]. The caller owns where the
     /// ciphertext lives (temp file, memory, …); this method never touches disk.
-    #[cfg_attr(feature = "tracing", tracing::instrument(name = "wa.media.upload_stream", level = "debug", skip_all, fields(kind = ?media_type), err(Debug)))]
+    #[cfg_attr(feature = "tracing", tracing::instrument(name = "wa.media.upload_stream", level = "debug", skip_all, fields(kind = ?media_type)))]
     pub async fn upload_stream<S>(
         &self,
         source: S,
@@ -469,45 +497,78 @@ impl Client {
     where
         S: wacore::upload::UploadSource + 'static,
     {
-        let file_length = info.file_length;
-        let ciphertext_len = source.len();
-        let crypto = UploadCrypto {
-            media_key: info.media_key,
-            file_sha256: info.file_sha256,
-            file_enc_sha256: info.file_enc_sha256,
-            streaming_sidecar: info.streaming_sidecar,
-        };
-        let source = std::sync::Arc::new(source);
+        async {
+            let file_length = info.file_length;
+            let ciphertext_len = source.len();
+            let crypto = UploadCrypto {
+                media_key: info.media_key,
+                file_sha256: info.file_sha256,
+                file_enc_sha256: info.file_enc_sha256,
+                streaming_sidecar: info.streaming_sidecar,
+            };
+            let source = std::sync::Arc::new(source);
 
-        upload_media_with_retry(
-            crypto,
-            media_type,
-            file_length,
-            ciphertext_len,
-            wacore::time::now_secs(),
-            |force| async move { self.refresh_media_conn(force).await.map_err(Into::into) },
-            || async { self.invalidate_media_conn().await },
-            |request| async move { self.http_client.execute(request).await },
-            |request, offset, remaining| {
-                let source = std::sync::Arc::clone(&source);
-                let http = std::sync::Arc::clone(&self.http_client);
-                async move {
-                    // reader_from may open/seek a file, so run it in the blocking
-                    // task with execute_upload, not on the async worker.
-                    wacore::runtime::blocking(&*self.runtime, move || {
-                        let reader = source.reader_from(offset)?;
-                        http.execute_upload(request, reader, remaining)
-                    })
-                    .await
-                }
-            },
-        )
+            upload_media_with_retry(
+                crypto,
+                media_type,
+                file_length,
+                ciphertext_len,
+                wacore::time::now_secs(),
+                |force| async move { self.refresh_media_conn(force).await.map_err(Into::into) },
+                || async { self.invalidate_media_conn().await },
+                |request| async move { self.http_client.execute(request).await },
+                |request, offset, remaining| {
+                    let source = std::sync::Arc::clone(&source);
+                    let http = std::sync::Arc::clone(&self.http_client);
+                    async move {
+                        // reader_from may open/seek a file, so run it in the blocking
+                        // task with execute_upload, not on the async worker.
+                        wacore::runtime::blocking(&*self.runtime, move || {
+                            let reader = source.reader_from(offset)?;
+                            http.execute_upload(request, reader, remaining)
+                        })
+                        .await
+                    }
+                },
+            )
+            .await
+        }
         .await
+        .inspect_err(|_error| {
+            #[cfg(feature = "tracing")]
+            tracing::error!(
+                error = ?crate::download::MediaErrorDiagnostic(_error.as_ref()),
+                "media upload failed"
+            );
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn upload_response_debug_redacts_media_secrets() {
+        let response = UploadResponse {
+            url: "https://cdn.example.com/file?auth=synthetic-url-secret".into(),
+            direct_path: "/file?sig=synthetic-path-secret".into(),
+            media_key: [179; 32],
+            file_enc_sha256: [1; 32],
+            file_sha256: [2; 32],
+            file_length: 12345,
+            media_key_timestamp: 6789,
+            streaming_sidecar: Some(vec![17; 10]),
+        };
+        for rendered in [format!("{response:?}"), format!("{response:#?}")] {
+            assert!(!rendered.contains("synthetic-"), "{rendered}");
+            assert!(!rendered.contains("179"), "{rendered}");
+            assert!(rendered.contains("12345"), "{rendered}");
+            assert!(rendered.contains("6789"), "{rendered}");
+        }
+        let converted: wacore::sticker_pack::MediaUploadInfo = response.into();
+        assert_eq!(converted.media_key, [179; 32]);
+        assert_eq!(converted.file_length, 12345);
+    }
+
     use super::*;
     use crate::mediaconn::{MediaConn, MediaConnHost};
     use async_lock::Mutex;
@@ -537,10 +598,10 @@ mod tests {
     }
 
     fn ok_json(url: &str, direct_path: &str) -> HttpResponse {
-        HttpResponse {
-            status_code: 200,
-            body: format!(r#"{{"url":"{url}","direct_path":"{direct_path}"}}"#).into_bytes(),
-        }
+        HttpResponse::new(
+            200,
+            format!(r#"{{"url":"{url}","direct_path":"{direct_path}"}}"#).into_bytes(),
+        )
     }
 
     /// Resume check is skipped below the 5 MiB threshold, so a check call here
@@ -595,10 +656,7 @@ mod tests {
                     async move {
                         seen_urls.lock().await.push(request.url.clone());
                         if request.url.contains("stale-auth") {
-                            Ok(HttpResponse {
-                                status_code: 401,
-                                body: b"expired".to_vec(),
-                            })
+                            Ok(HttpResponse::new(401, b"expired".to_vec()))
                         } else {
                             Ok(ok_json(
                                 "https://cdn2.example.com/file",
@@ -653,10 +711,7 @@ mod tests {
                     async move {
                         seen_urls.lock().await.push(request.url.clone());
                         if request.url.contains("cdn1.example.com") {
-                            Ok(HttpResponse {
-                                status_code: 500,
-                                body: b"try another host".to_vec(),
-                            })
+                            Ok(HttpResponse::new(500, b"try another host".to_vec()))
                         } else {
                             Ok(ok_json(
                                 "https://cdn2.example.com/file",
@@ -707,10 +762,7 @@ mod tests {
             || async {},
             unreachable_check,
             move |_request: HttpRequest, _offset, _remaining| async move {
-                Ok(HttpResponse {
-                    status_code: 507,
-                    body: b"insufficient storage".to_vec(),
-                })
+                Ok(HttpResponse::new(507, b"insufficient storage".to_vec()))
             },
         )
         .await
@@ -756,10 +808,10 @@ mod tests {
             },
             || async {},
             move |_req| async move {
-                Ok(HttpResponse {
-                    status_code: 200,
-                    body: format!(r#"{{"resume":"{offset}"}}"#).into_bytes(),
-                })
+                Ok(HttpResponse::new(
+                    200,
+                    format!(r#"{{"resume":"{offset}"}}"#).into_bytes(),
+                ))
             },
             {
                 let captured = Arc::clone(&captured);

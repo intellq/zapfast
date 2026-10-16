@@ -236,7 +236,8 @@ impl Worker {
             CallResult::CANCELLED
             | CallResult::MISSED
             | CallResult::UNAVAILABLE
-            | CallResult::ABANDONED => {
+            | CallResult::ABANDONED
+            | _ => {
                 if from_me {
                     CallStatus::NoAnswer
                 } else {
@@ -353,6 +354,7 @@ pub(super) fn call_log_message_status(
         CallOutcome::ONGOING => CallStatus::Ongoing,
         CallOutcome::SILENCED_BY_DND => CallStatus::SilencedDnd,
         CallOutcome::SILENCED_UNKNOWN_CALLER => CallStatus::SilencedUnknown,
+        _ => CallStatus::Failed,
     }
 }
 
@@ -404,10 +406,11 @@ mod tests {
     const ME: &str = "15550001111@s.whatsapp.net";
 
     fn record(result: CallResult, start: i64) -> wa::CallLogRecord {
-        wa::CallLogRecord {
-            call_result: Some(result),
-            start_time: Some(start),
-            ..Default::default()
+        {
+            let mut proto = wa::CallLogRecord::default();
+            proto.call_result = Some(result);
+            proto.start_time = Some(start);
+            proto
         }
     }
 
@@ -508,9 +511,10 @@ mod tests {
         worker.me_pn = Some(ME.into());
         let mut placed = record(CallResult::CONNECTED, crate::util::now() - 600);
         placed.duration = Some(95);
-        placed.participants = vec![ParticipantInfo {
-            user_jid: Some(PEER.into()),
-            ..Default::default()
+        placed.participants = vec![{
+            let mut proto = ParticipantInfo::default();
+            proto.user_jid = Some(PEER.into());
+            proto
         }];
         worker.call_log_synced(&synced("out", ME, true, placed));
         let row = row(&worker, PEER, "out").expect("the call is in the peer's chat");
@@ -609,13 +613,15 @@ mod tests {
         in_group.call_creator_jid = Some(PEER.into());
         in_group.group_jid = Some(group.into());
         in_group.participants = vec![
-            ParticipantInfo {
-                user_jid: Some(PEER.into()),
-                ..Default::default()
+            {
+                let mut proto = ParticipantInfo::default();
+                proto.user_jid = Some(PEER.into());
+                proto
             },
-            ParticipantInfo {
-                user_jid: Some("4917600000002@s.whatsapp.net".into()),
-                ..Default::default()
+            {
+                let mut proto = ParticipantInfo::default();
+                proto.user_jid = Some("4917600000002@s.whatsapp.net".into());
+                proto
             },
         ];
         let mut upcoming = record(CallResult::UPCOMING, crate::util::now() + 3600);
@@ -642,15 +648,17 @@ mod tests {
     #[test]
     fn a_call_log_message_takes_its_direction_from_the_envelope() {
         use wa::message::call_log_message::CallOutcome;
-        let log = wa::message::CallLogMessage {
-            call_outcome: Some(CallOutcome::MISSED),
-            ..Default::default()
+        let log = {
+            let mut proto = wa::message::CallLogMessage::default();
+            proto.call_outcome = Some(CallOutcome::MISSED);
+            proto
         };
         assert_eq!(call_log_message_status(&log, false), CallStatus::Missed);
         assert_eq!(call_log_message_status(&log, true), CallStatus::NoAnswer);
-        let mut content = classify_base(&wa::Message {
-            call_log_messsage: MessageField::some(log),
-            ..Default::default()
+        let mut content = classify_base(&{
+            let mut proto = wa::Message::default();
+            proto.call_log_messsage = MessageField::some(log);
+            proto
         })
         .unwrap();
         content.set_call_direction(true);

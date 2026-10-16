@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.94"
 authors = ["João Lucas <jlucaso@hotmail.com>"]
 license = "MIT"
-repository = "https://github.com/jlucaso1/whatsapp-rust"
+repository = "https://github.com/oxidezap/whatsapp-rust"
 readme = "README.md"
 description = "Rust client for WhatsApp Web (copia do fork intellq, ver VENDORED.md)"
 autobenches = false
@@ -16,12 +16,12 @@ autotests = false
 "debug-snapshots" = ["wacore/debug-snapshots"]
 "legacy-session-interop" = ["wacore/legacy-session-interop"]
 "client-lifecycle" = []
-"plugins" = ["client-lifecycle", "dep:bon"]
+"plugins" = ["client-lifecycle"]
 "passkey" = []
 "tracing" = ["dep:tracing", "wacore/tracing"]
 "metrics" = ["wacore/metrics"]
 "tracing-pii" = ["wacore/tracing-pii", "wacore-binary/tracing-pii"]
-"bench-harness" = ["tokio-runtime", "tokio/rt-multi-thread"]
+"bench-harness" = ["tokio-runtime", "tokio/rt-multi-thread", "dep:wacore-noise", "wacore-noise/test-util"]
 "test-support" = ["voip-runtime", "tokio-runtime", "dep:wacore-noise", "wacore-noise/test-util"]
 "danger-skip-tls-verify" = ["whatsapp-rust-tokio-transport?/danger-skip-tls-verify"]
 "default" = ["sqlite-storage", "sqlite-storage-bundled", "tokio-transport", "tokio-runtime", "ureq-client", "tokio-native", "signal"]
@@ -45,24 +45,25 @@ autotests = false
 anyhow = { version = "1.0", default-features = false }
 async-channel = { version = "2.5.0", default-features = false, features = ["std"] }
 async-lock = { version = "3", default-features = false }
-async-trait = { version = "0.1.91" }
+async-trait = "0.1.91"
 base64 = { version = "0.23.1", default-features = false, features = ["alloc"] }
-bon = { version = "3.9.3", default-features = false, features = ["std"], optional = true }
+bon = { version = "3.9.3", default-features = false, features = ["std"] }
 buffa = { version = "0.9.2", default-features = false, features = ["json"] }
 bytes = { version = "1.12", default-features = false }
 chrono = { version = "0.4", default-features = false, features = ["now"] }
 event-listener = { version = "5", default-features = false }
 futures = { version = "0.3", default-features = false, features = ["alloc", "async-await", "std"] }
+flate2 = { version = "1.1.9", default-features = false, features = ["zlib-rs"] }
 hmac = { version = "0.13.0", default-features = false }
 sha2 = { version = "0.11.0", default-features = false }
-smallvec = { version = "1.15" }
+smallvec = { version = "1.15", features = ["union"] }
 hashbrown = { version = "0.17.1", default-features = false }
 hex = { version = "0.4", default-features = false, features = ["alloc"] }
-itoa = { version = "1" }
-log = { version = "0.4" }
+itoa = "1"
+log = "0.4"
 opus = { version = "0.4", optional = true }
 portable-atomic = { version = "1", default-features = false, features = ["fallback"] }
-rand = { version = "0.10" }
+rand = "0.10"
 rtc-datachannel = { version = "=0.21.0-beta.2", optional = true }
 rtc-dtls = { version = "=0.21.0-beta.2", optional = true, default-features = false, features = ["crypto-ring"] }
 rtc-sctp = { version = "=0.21.0-beta.2", optional = true }
@@ -70,17 +71,17 @@ rtc-shared = { version = "=0.21.0-beta.2", optional = true, default-features = f
 scopeguard = "1.2"
 serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = { version = "1.0", default-features = false, features = ["std"] }
-thiserror = { version = "2.0.19" }
+thiserror = "2.0.19"
 tokio = { version = "1.53.1", default-features = false, optional = true, features = ["macros", "rt", "sync", "time"] }
 tracing = { version = "0.1", default-features = false, features = ["attributes"], optional = true }
-wacore = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "f7468ae2920a2b0aedbd0848cf121de56a07f93c", default-features = false }
-wacore-binary = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "f7468ae2920a2b0aedbd0848cf121de56a07f93c", default-features = false }
-wacore-noise = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "f7468ae2920a2b0aedbd0848cf121de56a07f93c", optional = true }
-waproto = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "f7468ae2920a2b0aedbd0848cf121de56a07f93c" }
+wacore = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "5e72baf000aa4fb65ed89d1c955a54029a7f29a6", default-features = false }
+wacore-binary = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "5e72baf000aa4fb65ed89d1c955a54029a7f29a6", default-features = false }
+wacore-noise = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "5e72baf000aa4fb65ed89d1c955a54029a7f29a6", optional = true }
+waproto = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "5e72baf000aa4fb65ed89d1c955a54029a7f29a6" }
 zeroize = { version = "1.9", default-features = false, features = ["alloc"] }
-whatsapp-rust-sqlite-storage = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "f7468ae2920a2b0aedbd0848cf121de56a07f93c", optional = true, default-features = false }
-whatsapp-rust-tokio-transport = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "f7468ae2920a2b0aedbd0848cf121de56a07f93c", optional = true }
-whatsapp-rust-ureq-http-client = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "f7468ae2920a2b0aedbd0848cf121de56a07f93c", optional = true }
+whatsapp-rust-sqlite-storage = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "5e72baf000aa4fb65ed89d1c955a54029a7f29a6", optional = true, default-features = false }
+whatsapp-rust-tokio-transport = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "5e72baf000aa4fb65ed89d1c955a54029a7f29a6", optional = true }
+whatsapp-rust-ureq-http-client = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "5e72baf000aa4fb65ed89d1c955a54029a7f29a6", optional = true }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 getrandom = { version = "0.4", default-features = false, features = ["wasm_js"] }

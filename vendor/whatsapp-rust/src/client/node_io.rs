@@ -1,6 +1,6 @@
 //! Inbound node I/O: read loop, frame decryption, node routing, acks and stream errors.
 
-use super::lifecycle::ProtocolTerminalReason;
+use super::lifecycle::{ConflictKind, ProtocolTerminalReason};
 use super::*;
 use crate::client::{PhashWaiter, ResponseWaiter, StreamedResponse};
 use wacore::net::DisconnectReason;
@@ -270,11 +270,12 @@ impl Client {
                                     // Decrypt the frame synchronously (required for noise counter ordering)
                                     if let Some(node) = self.decrypt_frame(&noise_socket, encrypted_frame) {
                                         if self.processes_inline(node.get()) {
-                                            self.process_decrypted_node(node).await;
+                                            self.process_decrypted_node_scoped(node, &shutdown).await;
                                         } else {
                                             let client = self.clone();
+                                            let shutdown = shutdown.clone();
                                             self.runtime.spawn_detached(Box::pin(async move {
-                                                client.process_decrypted_node(node).await;
+                                                client.process_decrypted_node_scoped(node, &shutdown).await;
                                             }));
                                         }
                                     }
@@ -442,13 +443,27 @@ impl Client {
         }
     }
 
-    /// Process an already-decrypted node.
-    /// This can be spawned concurrently since it doesn't depend on noise protocol state.
-    /// The node is wrapped in Arc to avoid cloning when passing through handlers.
-    pub(crate) async fn process_decrypted_node(
+    #[cfg(test)]
+    pub(crate) fn process_decrypted_node(
         self: &Arc<Self>,
         node: wacore_binary::OwnedNodeRef,
+    ) -> impl Future<Output = ()> + '_ {
+        let shutdown = self.connection_shutdown_signal();
+        async move { self.process_decrypted_node_scoped(node, &shutdown).await }
+    }
+
+    /// Process an already-decrypted node under the read loop's original connection.
+    /// This can be spawned concurrently since it doesn't depend on noise protocol state.
+    /// The node is wrapped in Arc to avoid cloning when passing through handlers.
+    async fn process_decrypted_node_scoped(
+        self: &Arc<Self>,
+        node: wacore_binary::OwnedNodeRef,
+        shutdown: &wacore::runtime::ShutdownSignal,
     ) {
+        // A detached handler may first be polled after the next connection starts.
+        if shutdown.is_fired() {
+            return;
+        }
         // ACKs need shared ownership only for opt-in raw/node observers. The
         // usual response-waiter path borrows the node and can skip the Arc.
         if node.tag() == StanzaTag::Ack.as_str()
@@ -464,20 +479,61 @@ impl Client {
 
         // Wrap in Arc once - all handlers will share this same allocation
         let node_arc = Arc::new(node);
-        self.process_node(node_arc).await;
+        self.process_node_scoped(node_arc, shutdown, true).await;
     }
 
     /// Process a node wrapped in Arc. Handlers receive the Arc and can share/store it cheaply.
+    #[cfg(any(test, feature = "bench-harness", feature = "test-support"))]
+    pub(crate) async fn process_node(self: &Arc<Self>, node: Arc<wacore_binary::OwnedNodeRef>) {
+        let shutdown = self.connection_shutdown_signal();
+        self.process_node_scoped(node, &shutdown, false).await;
+    }
+
+    pub(crate) fn process_queued_group_notification(
+        self: &Arc<Self>,
+        node: Arc<wacore_binary::OwnedNodeRef>,
+        generation: u64,
+        shutdown: wacore::runtime::ShutdownSignal,
+    ) -> wacore::runtime::BoxFuture<'_, ()> {
+        Box::pin(async move {
+            if NotificationScope::new(generation, &shutdown).is_current(self) {
+                self.dispatch_node_scoped(
+                    node,
+                    &shutdown,
+                    Some(StanzaTag::Notification),
+                    generation,
+                )
+                .await;
+            }
+        })
+    }
+
+    fn queues_group_notification(&self, node: &wacore_binary::NodeRef<'_>) -> bool {
+        self.group_notification_durability_hook.get().is_some()
+            && node.tag == StanzaTag::Notification.as_str()
+            && node.attrs().optional_string("type").as_deref()
+                == Some(NotificationType::WGp2.as_str())
+            && node.attrs().optional_jid("from").is_some()
+    }
+
     #[cfg_attr(
         feature = "tracing",
         tracing::instrument(name = "wa.conn.node", level = "trace", skip_all, fields(tag = %node.get().tag.as_ref()))
     )]
-    pub(crate) async fn process_node(self: &Arc<Self>, node: Arc<wacore_binary::OwnedNodeRef>) {
+    async fn process_node_scoped(
+        self: &Arc<Self>,
+        node: Arc<wacore_binary::OwnedNodeRef>,
+        shutdown: &wacore::runtime::ShutdownSignal,
+        enqueue_group: bool,
+    ) {
+        let generation = self.connection_generation.load(Ordering::Acquire);
         use wacore::xml::DisplayableNodeRef;
         let nr = node.get();
         // Classified once; every gate below dispatches on the enum instead of
         // re-comparing the tag string.
         let tag = StanzaTag::try_from(nr.tag.as_ref()).ok();
+        let group_scope = (enqueue_group && self.queues_group_notification(nr))
+            .then(|| NotificationScope::new(generation, shutdown));
 
         // --- Offline Sync Tracking ---
         if tag == Some(StanzaTag::InfoBanner) {
@@ -581,9 +637,6 @@ impl Client {
             debug!(target: "Client/Recv","{}", DisplayableNodeRef(nr));
         }
 
-        // Prepare deferred ACK cancellation flag (sent after dispatch unless cancelled)
-        let mut cancelled = false;
-
         // Emit raw node before any early returns so all decoded stanzas
         // (including IQ responses and xmlstreamend) reach external observers
         if self.raw_node_forwarding_enabled() {
@@ -635,6 +688,39 @@ impl Client {
             return;
         }
 
+        if let Some(scope) = group_scope {
+            // Account for arrival and notify raw observers before enqueueing.
+            // Host storage may pause this group's worker, but must not delay
+            // offline pull-batch accounting or another group's admissions.
+            let mut cancelled = false;
+            scope
+                .run(
+                    self,
+                    crate::handlers::message::MessageHandler::handle_inline_scoped(
+                        Arc::clone(self),
+                        node,
+                        &mut cancelled,
+                        Some(scope),
+                    ),
+                )
+                .await;
+            return;
+        }
+        self.dispatch_node_scoped(node, shutdown, tag, generation)
+            .await;
+    }
+
+    async fn dispatch_node_scoped(
+        self: &Arc<Self>,
+        node: Arc<wacore_binary::OwnedNodeRef>,
+        shutdown: &wacore::runtime::ShutdownSignal,
+        tag: Option<StanzaTag>,
+        generation: u64,
+    ) {
+        use wacore::xml::DisplayableNodeRef;
+        let nr = node.get();
+        let mut cancelled = false;
+
         // Most messages do not need a transport <ack> from this generic gate.
         // Move those nodes into their chat lane instead of retaining a second
         // Arc in this dispatcher while decryption starts. Besides removing an
@@ -644,6 +730,21 @@ impl Client {
         // encoded, preserving the existing acknowledgement semantics.
         let should_ack = self.should_ack(nr);
         let deferred_ack_node = should_ack.then(|| Arc::clone(&node));
+
+        // A claimed group notification still owes an ACK, so persistence must
+        // precede both interceptors and the built-in group effects.
+        let group_capture_generation = if tag == Some(StanzaTag::Notification) {
+            match crate::handlers::notification::NotificationHandler::capture_group(
+                self, &node, shutdown, generation,
+            )
+            .await
+            {
+                Ok(generation) => generation,
+                Err(()) => return,
+            }
+        } else {
+            None
+        };
 
         // An interceptor runs before the built-in pipeline so a consumer can
         // act on a stanza this version does not model, instead of watching it
@@ -673,15 +774,40 @@ impl Client {
                     && nr.get_attr("from").is_some())
                 .then(|| Arc::clone(&node))
             });
-            if let Some(node) = ack {
+            if !shutdown.is_fired()
+                && let Some(node) = ack
+                && group_capture_generation.is_none_or(|generation| {
+                    self.connection_generation.load(Ordering::Acquire) == generation
+                })
+            {
                 self.maybe_deferred_ack(node).await;
             }
+            return;
+        }
+
+        if group_capture_generation.is_some_and(|generation| {
+            self.connection_generation.load(Ordering::Acquire) != generation
+        }) {
             return;
         }
 
         // Bypass async_trait's boxed future for the hot built-in handlers while
         // retaining router registration for direct router callers.
         match tag {
+            Some(StanzaTag::Iq) => {
+                Box::pin(crate::handlers::iq::IqHandler::handle_scoped(
+                    self, &node, shutdown,
+                ))
+                .await;
+            }
+            Some(StanzaTag::Notification) => {
+                cancelled |= !Box::pin(
+                    crate::handlers::notification::NotificationHandler::handle_scoped(
+                        self, node, shutdown, generation,
+                    ),
+                )
+                .await;
+            }
             Some(StanzaTag::Ack) => {
                 self.handle_ack_response_arc(&node);
             }
@@ -722,7 +848,13 @@ impl Client {
             }
         }
 
-        if !cancelled && let Some(node) = deferred_ack_node {
+        if !cancelled
+            && !shutdown.is_fired()
+            && group_capture_generation.is_none_or(|generation| {
+                self.connection_generation.load(Ordering::Acquire) == generation
+            })
+            && let Some(node) = deferred_ack_node
+        {
             self.maybe_deferred_ack(node).await;
         }
     }
@@ -762,6 +894,7 @@ impl Client {
                 | StanzaTag::InfoBanner,
             ) => true,
             Ok(StanzaTag::Status) => is_status_broadcast_stanza(node),
+            Ok(StanzaTag::Notification) => self.queues_group_notification(node),
             Ok(StanzaTag::Receipt) => {
                 !self.synchronous_ack
                     && !self.raw_node_forwarding_enabled()
@@ -857,7 +990,7 @@ impl Client {
     /// rather than raced against the disconnect, and sending them anyway would
     /// also hold the outbound flush open until its timeout.
     pub(crate) fn outbound_teardown_in_progress(&self) -> bool {
-        self.expected_disconnect.load(Ordering::Relaxed) || !self.is_connected()
+        self.expected_disconnect.load(Ordering::Relaxed) || !self.is_socket_connected()
     }
 
     /// How many queued acks one burst may take.
@@ -1014,7 +1147,7 @@ impl Client {
         if self.expected_disconnect.load(Ordering::Relaxed) {
             return Ok(());
         }
-        if !self.is_connected() {
+        if !self.is_socket_connected() {
             return Err(ClientError::NotConnected);
         }
         let buf = match self
@@ -1162,6 +1295,12 @@ impl Client {
         // window had every attempt rejected as retired.
         self.authenticated_generation
             .store(current_generation, Ordering::SeqCst);
+        // The keepalive `drive_connection_with_outcome` started is bound to the
+        // pre-login generation the increment above retired, so it exits at its
+        // next tick without pinging and this one takes over. Started once the
+        // generation is final, and from the read loop, which `<success>` never
+        // leaves, so the shutdown signal it subscribes is this connection's.
+        self.spawn_keepalive(current_generation);
         // Only now is there something worth waking for: released here and not at
         // `socket_ready_notifier`, which fires before login, so an IQ sent in
         // that gap is answered by nobody.
@@ -1195,7 +1334,11 @@ impl Client {
 
         let client_clone = self.clone();
         let task_generation = current_generation;
+        #[cfg(feature = "bench-harness")]
+        let startup_task = self.bench_startup.begin();
         self.runtime.spawn_detached(Box::pin(async move {
+            #[cfg(feature = "bench-harness")]
+            let _startup_task = startup_task;
             // Update LID if changed (moved here to avoid blocking the read loop
             // on Device snapshot + write lock).
             if let Some(lid) = lid_from_server {
@@ -1254,7 +1397,7 @@ impl Client {
             // Check connection before network operations.
             // During pairing, a 515 disconnect happens quickly after success,
             // so the socket may already be gone.
-            if !client_clone.is_connected() {
+            if !client_clone.is_socket_connected() {
                 debug!(
                     "Skipping post-login init: connection closed (likely pairing phase reconnect)"
                 );
@@ -1265,7 +1408,7 @@ impl Client {
             client_clone.send_unified_session().await;
 
             check_generation!();
-            if !client_clone.is_connected() {
+            if !client_clone.is_socket_connected() {
                 debug!("Skipping passive tasks: connection closed");
                 return;
             }
@@ -1286,9 +1429,13 @@ impl Client {
             check_generation!();
             let key_client = client_clone.clone();
             let key_generation = task_generation;
+            #[cfg(feature = "bench-harness")]
+            let key_startup = _startup_task.child();
             client_clone
                 .runtime
                 .spawn_detached(Box::pin(async move {
+                    #[cfg(feature = "bench-harness")]
+                    let _startup_task = key_startup;
                     // A newer connection may have taken over between spawn and now.
                     if key_client.connection_generation.load(Ordering::SeqCst) != key_generation {
                         return;
@@ -1327,7 +1474,7 @@ impl Client {
             // The server sends <ib><offline count="X"/></ib> AFTER we exit passive mode.
             // This matches WhatsApp Web's behavior: executePassiveTasks() -> sendPassiveModeProtocol("active")
             check_generation!();
-            if !client_clone.is_connected() {
+            if !client_clone.is_socket_connected() {
                 debug!("Skipping active IQ: connection closed");
                 return;
             }
@@ -1348,7 +1495,7 @@ impl Client {
 
             // Re-check connection and generation before sending presence
             check_generation!();
-            if !client_clone.is_connected() {
+            if !client_clone.is_socket_connected() {
                 debug!("Skipping presence: connection closed");
                 return;
             }
@@ -1356,13 +1503,17 @@ impl Client {
             // Background initialization queries (can run in parallel, non-blocking)
             let bg_client = client_clone.clone();
             let bg_generation = task_generation;
+            #[cfg(feature = "bench-harness")]
+            let bg_startup = _startup_task.child();
             client_clone.runtime.spawn_detached(Box::pin(async move {
+                #[cfg(feature = "bench-harness")]
+                let _startup_task = bg_startup;
                 // Check connection and generation before starting background queries
                 if bg_client.connection_generation.load(Ordering::SeqCst) != bg_generation {
                     debug!("Skipping background init queries: connection generation changed");
                     return;
                 }
-                if !bg_client.is_connected() {
+                if !bg_client.is_socket_connected() {
                     debug!("Skipping background init queries: connection closed");
                     return;
                 }
@@ -1476,6 +1627,8 @@ impl Client {
                     task_generation,
                     flag_set,
                     needs_pushname_from_sync,
+                    #[cfg(feature = "bench-harness")]
+                    &_startup_task,
                 ))
                 .await;
             } else {
@@ -1515,6 +1668,7 @@ impl Client {
         task_generation: u64,
         flag_set: bool,
         needs_pushname_from_sync: bool,
+        #[cfg(feature = "bench-harness")] startup_task: &bench_startup::StartupTask,
     ) {
         macro_rules! check_generation {
             () => {
@@ -1558,7 +1712,11 @@ impl Client {
         let timeout_generation = task_generation;
         let timeout_rt = self.runtime.clone();
         let timeout_settled = critical_sync_settled.clone();
+        #[cfg(feature = "bench-harness")]
+        let timeout_startup = startup_task.child();
         let critical_sync_timeout_handle = timeout_rt.spawn(Box::pin(async move {
+            #[cfg(feature = "bench-harness")]
+            let _startup_task = timeout_startup;
             timeout_client.runtime.sleep(Duration::from_secs(CRITICAL_SYNC_TIMEOUT_SECS)).await;
             // Check generation — if connection was replaced, this timeout is stale
             if timeout_client.connection_generation.load(Ordering::SeqCst)
@@ -1683,7 +1841,11 @@ impl Client {
         // Spawn remaining non-critical collections in background
         let sync_client = self.clone();
         let sync_generation = task_generation;
+        #[cfg(feature = "bench-harness")]
+        let sync_startup = startup_task.child();
         self.runtime.spawn_detached(Box::pin(async move {
+            #[cfg(feature = "bench-harness")]
+            let _startup_task = sync_startup;
             if sync_client.connection_generation.load(Ordering::SeqCst) != sync_generation {
                 debug!("App state sync cancelled: connection generation changed");
                 return;
@@ -2035,13 +2197,18 @@ impl Client {
         let mut should_disconnect = false;
 
         if !conflict_type.is_empty() {
-            self.record_protocol_terminal_reason(ProtocolTerminalReason::Conflict);
+            let kind = match conflict_type.as_str() {
+                "replaced" => ConflictKind::Replaced,
+                "device_removed" => ConflictKind::DeviceRemoved,
+                _ => ConflictKind::Unknown,
+            };
+            self.record_protocol_terminal_reason(ProtocolTerminalReason::Conflict(kind));
             info!(
                 "Got stream error indicating client was removed or replaced (conflict={}). Logging out.",
                 conflict_type
             );
             self.expected_disconnect.store(true, Ordering::Relaxed);
-            self.enable_auto_reconnect.store(false, Ordering::Relaxed);
+            self.stop_auto_reconnect_permanently();
 
             let event = if conflict_type == "replaced" {
                 Event::StreamReplaced(crate::types::events::StreamReplaced::builder().build())
@@ -2073,7 +2240,7 @@ impl Client {
                         );
                     }
                     self.expected_disconnect.store(true, Ordering::Relaxed);
-                    self.enable_auto_reconnect.store(false, Ordering::Relaxed);
+                    self.stop_auto_reconnect_permanently();
                     self.core.event_bus.dispatch(Event::LoggedOut(Box::new(
                         crate::types::events::LoggedOut::builder()
                             .on_connect(false)
@@ -2091,7 +2258,7 @@ impl Client {
                         );
                     }
                     self.expected_disconnect.store(true, Ordering::Relaxed);
-                    self.enable_auto_reconnect.store(false, Ordering::Relaxed);
+                    self.stop_auto_reconnect_permanently();
                     self.core.event_bus.dispatch(Event::LoggedOut(Box::new(
                         crate::types::events::LoggedOut::builder()
                             .on_connect(false)
@@ -2109,7 +2276,7 @@ impl Client {
                         );
                     }
                     self.expected_disconnect.store(true, Ordering::Relaxed);
-                    self.enable_auto_reconnect.store(false, Ordering::Relaxed);
+                    self.stop_auto_reconnect_permanently();
                     self.core.event_bus.dispatch(Event::StreamReplaced(
                         crate::types::events::StreamReplaced::builder().build(),
                     ));
@@ -2229,7 +2396,7 @@ impl Client {
         if reason.should_reconnect() {
             self.expected_disconnect.store(false, Ordering::Relaxed);
         } else {
-            self.enable_auto_reconnect.store(false, Ordering::Relaxed);
+            self.stop_auto_reconnect_permanently();
         }
         // Announced after the classification, not before it. This notify is what
         // wakes work parked in `await_connection`, and that work answers by
@@ -2298,11 +2465,24 @@ impl Client {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) async fn handle_iq(self: &Arc<Self>, node: &wacore_binary::NodeRef<'_>) -> bool {
+        let shutdown = self.connection_shutdown_signal();
+        self.handle_iq_scoped(node, &shutdown).await
+    }
+
     #[cfg_attr(
         feature = "tracing",
         tracing::instrument(name = "wa.conn.iq_in", level = "debug", skip_all)
     )]
-    pub(crate) async fn handle_iq(self: &Arc<Self>, node: &wacore_binary::NodeRef<'_>) -> bool {
+    pub(crate) async fn handle_iq_scoped(
+        self: &Arc<Self>,
+        node: &wacore_binary::NodeRef<'_>,
+        shutdown: &wacore::runtime::ShutdownSignal,
+    ) -> bool {
+        if shutdown.is_fired() {
+            return true;
+        }
         // Pong a server-initiated ping. The gate is shared with
         // `is_connection_critical`, which never offers one to an interceptor:
         // a claimed ping is a pong never sent, and the server drops the
@@ -2319,7 +2499,7 @@ impl Client {
             return true;
         }
 
-        if pair::handle_iq(self, node).await {
+        if pair::handle_iq_scoped(self, node, shutdown).await {
             return true;
         }
 
@@ -2333,6 +2513,40 @@ impl Client {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test(start_paused = true)]
+    async fn delayed_pair_device_handler_cannot_adopt_a_replacement_connection() {
+        use crate::test_utils::{TestEventCollector, create_iq_test_client, node_to_owned_ref};
+        use wacore_binary::builder::NodeBuilder;
+        let (client, _transport) = create_iq_test_client().await;
+        let collector = Arc::new(TestEventCollector::default());
+        client.subscribe_handler(collector.clone()).detach();
+        let node = NodeBuilder::new("iq")
+            .attrs([
+                ("from", "s.whatsapp.net"),
+                ("type", "set"),
+                ("id", "old-pair"),
+            ])
+            .children([NodeBuilder::new("pair-device")
+                .children([NodeBuilder::new("ref").bytes(b"2@old-ref".to_vec()).build()])
+                .build()])
+            .build();
+        let pending =
+            client.process_decrypted_node(Arc::try_unwrap(node_to_owned_ref(&node)).unwrap());
+        client.notify_connection_shutdown();
+        client.reset_connection_shutdown();
+        pending.await;
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            collector
+                .events()
+                .iter()
+                .all(|e| !matches!(&**e, Event::PairingQrCode(_)))
+        );
+        assert!(!client.shutdown_signal().is_fired());
+    }
+
     #[test]
     fn group_repair_deadline_includes_task_and_property_delay() {
         let ack = wacore::time::Instant::ZERO;
@@ -2446,7 +2660,7 @@ mod tests {
     /// fresh-pairing arm made it 8,224 B. The active IQ also needs a box when
     /// tracing expands its future. Neither belongs in the drain's resident
     /// storage. This bounds the spawned task, not the temporary boxed work.
-    /// Budget: rebaseline per [layout asserts](../../agent_docs/layout_asserts.md).
+    /// Budget: rebaseline per [layout asserts](../../agent_docs/testing.md).
     #[tokio::test]
     async fn the_post_login_task_does_not_carry_the_fresh_pairing_arm() {
         const MAX_POST_LOGIN_FUTURE_BYTES: usize = 2048;
@@ -2470,13 +2684,26 @@ mod tests {
             .expect("client build")
             .into_client();
 
+        // `<success>` also starts the connection's keepalive, which is resident
+        // for the whole connection whichever path spawns it, so it is not what
+        // this budget is about. Sized through the same entry point, so it is
+        // told apart by size rather than by spawn order.
+        let before = sizes.lock().expect("sizes mutex").len();
+        client.spawn_keepalive(0);
+        let keepalive_size = sizes.lock().expect("sizes mutex")[before];
+
         // Only what `<success>` spawns: construction and `start_services` have
         // already recorded theirs.
         let before = sizes.lock().expect("sizes mutex").len();
         let success = NodeBuilder::new("success").build();
         client.handle_success(&success.as_node_ref()).await;
 
-        let spawned = sizes.lock().expect("sizes mutex")[before..].to_vec();
+        let mut spawned = sizes.lock().expect("sizes mutex")[before..].to_vec();
+        let keepalive = spawned
+            .iter()
+            .position(|&size| size == keepalive_size)
+            .expect("<success> must start the logged-in connection's keepalive");
+        spawned.swap_remove(keepalive);
         assert!(
             !spawned.is_empty(),
             "<success> must spawn the post-login task"

@@ -103,58 +103,73 @@ mod tests {
     };
 
     fn text(text: &str) -> AIRichResponseSubMessage {
-        AIRichResponseSubMessage {
-            message_text: Some(text.into()),
-            ..Default::default()
+        {
+            let mut proto = AIRichResponseSubMessage::default();
+            proto.message_text = Some(text.into());
+            proto
         }
     }
 
     fn reply(parts: Vec<AIRichResponseSubMessage>) -> wa::Message {
-        wa::Message {
-            rich_response_message: MessageField::some(AIRichResponseMessage {
-                submessages: parts,
-                ..Default::default()
-            }),
+        {
+            let mut proto2 = wa::Message::default();
+            proto2.rich_response_message = MessageField::some({
+                let mut proto = AIRichResponseMessage::default();
+                proto.submessages = parts;
+                proto
+            });
             // Bot replies carry their bot metadata here.
-            message_context_info: MessageField::some(wa::MessageContextInfo::default()),
-            ..Default::default()
+            proto2.message_context_info = MessageField::some(wa::MessageContextInfo::default());
+            proto2
         }
     }
 
     #[test]
     fn a_rich_reply_reads_as_one_text_message() {
-        let code = AIRichResponseSubMessage {
-            code_metadata: MessageField::some(AIRichResponseCodeMetadata {
-                code_language: Some("rust".into()),
-                code_blocks: ["fn main() ", "{}", "\n"]
+        let code = {
+            let mut proto3 = AIRichResponseSubMessage::default();
+            proto3.code_metadata = MessageField::some({
+                let mut proto2 = AIRichResponseCodeMetadata::default();
+                proto2.code_language = Some("rust".into());
+                proto2.code_blocks = ["fn main() ", "{}", "\n"]
                     .into_iter()
-                    .map(|piece| AIRichResponseCodeBlock {
-                        code_content: Some(piece.into()),
-                        ..Default::default()
+                    .map(|piece| {
+                        let mut proto = AIRichResponseCodeBlock::default();
+                        proto.code_content = Some(piece.into());
+                        proto
                     })
-                    .collect(),
-            }),
-            ..Default::default()
+                    .collect();
+                proto2
+            });
+            proto3
         };
-        let table = AIRichResponseSubMessage {
-            table_metadata: MessageField::some(AIRichResponseTableMetadata {
-                title: Some("Planets".into()),
-                rows: vec![
-                    AIRichResponseTableRow {
-                        items: vec!["Name".into(), "Moons".into()],
-                        is_heading: Some(true),
+        let table = {
+            let mut proto3 = AIRichResponseSubMessage::default();
+            proto3.table_metadata = MessageField::some({
+                let mut proto2 = AIRichResponseTableMetadata::default();
+                proto2.title = Some("Planets".into());
+                proto2.rows = vec![
+                    {
+                        let mut proto = AIRichResponseTableRow::default();
+                        proto.items = vec!["Name".into(), "Moons".into()];
+                        proto.is_heading = Some(true);
+                        proto
                     },
-                    AIRichResponseTableRow {
-                        items: vec!["Mars".into(), "2".into()],
-                        is_heading: None,
+                    {
+                        let mut proto = AIRichResponseTableRow::default();
+                        proto.items = vec!["Mars".into(), "2".into()];
+                        proto.is_heading = None;
+                        proto
                     },
-                ],
-            }),
-            ..Default::default()
+                ];
+                proto2
+            });
+            proto3
         };
-        let map = AIRichResponseSubMessage {
-            map_metadata: MessageField::some(AIRichResponseMapMetadata::default()),
-            ..Default::default()
+        let map = {
+            let mut proto = AIRichResponseSubMessage::default();
+            proto.map_metadata = MessageField::some(AIRichResponseMapMetadata::default());
+            proto
         };
         let message = reply(vec![text("Here you go:\n"), code, table, map]);
         assert_eq!(
@@ -167,9 +182,10 @@ mod tests {
 
     #[test]
     fn a_reply_without_readable_parts_is_a_placeholder() {
-        let map = AIRichResponseSubMessage {
-            map_metadata: MessageField::some(AIRichResponseMapMetadata::default()),
-            ..Default::default()
+        let map = {
+            let mut proto = AIRichResponseSubMessage::default();
+            proto.map_metadata = MessageField::some(AIRichResponseMapMetadata::default());
+            proto
         };
         for message in [reply(Vec::new()), reply(vec![map, text("  ")])] {
             assert_eq!(
@@ -183,16 +199,19 @@ mod tests {
 
     #[test]
     fn a_reply_keeps_its_quote() {
-        let message = wa::Message {
-            rich_response_message: MessageField::some(AIRichResponseMessage {
-                submessages: vec![text("Answer")],
-                context_info: MessageField::some(wa::ContextInfo {
-                    stanza_id: Some("question".into()),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            }),
-            ..Default::default()
+        let message = {
+            let mut proto3 = wa::Message::default();
+            proto3.rich_response_message = MessageField::some({
+                let mut proto2 = AIRichResponseMessage::default();
+                proto2.submessages = vec![text("Answer")];
+                proto2.context_info = MessageField::some({
+                    let mut proto = wa::ContextInfo::default();
+                    proto.stanza_id = Some("question".into());
+                    proto
+                });
+                proto2
+            });
+            proto3
         };
         assert_eq!(
             context_of(&message).and_then(|context| context.stanza_id.as_deref()),
@@ -202,22 +221,28 @@ mod tests {
 
     #[test]
     fn an_invocation_shows_the_message_inside_it() {
-        let invocation = wa::Message {
-            bot_invoke_message: MessageField::some(wa::message::FutureProofMessage {
-                message: MessageField::some(wa::Message {
-                    extended_text_message: MessageField::some(wa::message::ExtendedTextMessage {
-                        text: Some("@Meta AI what is a moth?".into()),
-                        context_info: MessageField::some(wa::ContextInfo {
-                            mentioned_jid: vec!["fixture@bot".into()],
-                            ..Default::default()
-                        }),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                }),
-            }),
-            message_context_info: MessageField::some(wa::MessageContextInfo::default()),
-            ..Default::default()
+        let invocation = {
+            let mut proto5 = wa::Message::default();
+            proto5.bot_invoke_message = MessageField::some({
+                let mut proto4 = wa::message::FutureProofMessage::default();
+                proto4.message = MessageField::some({
+                    let mut proto3 = wa::Message::default();
+                    proto3.extended_text_message = MessageField::some({
+                        let mut proto2 = wa::message::ExtendedTextMessage::default();
+                        proto2.text = Some("@Meta AI what is a moth?".into());
+                        proto2.context_info = MessageField::some({
+                            let mut proto = wa::ContextInfo::default();
+                            proto.mentioned_jid = vec!["fixture@bot".into()];
+                            proto
+                        });
+                        proto2
+                    });
+                    proto3
+                });
+                proto4
+            });
+            proto5.message_context_info = MessageField::some(wa::MessageContextInfo::default());
+            proto5
         };
         assert_eq!(
             classify(&invocation),
@@ -228,27 +253,31 @@ mod tests {
 
     #[test]
     fn unknown_content_with_context_info_is_a_placeholder_and_metadata_alone_is_not() {
-        let unknown = wa::Message {
-            music_message: MessageField::some(wa::message::MusicMessage {
-                song_uri: Some("https://example.invalid/song".into()),
-                ..Default::default()
-            }),
-            message_context_info: MessageField::some(wa::MessageContextInfo::default()),
-            ..Default::default()
+        let unknown = {
+            let mut proto2 = wa::Message::default();
+            proto2.music_message = MessageField::some({
+                let mut proto = wa::message::MusicMessage::default();
+                proto.song_uri = Some("https://example.invalid/song".into());
+                proto
+            });
+            proto2.message_context_info = MessageField::some(wa::MessageContextInfo::default());
+            proto2
         };
         assert!(matches!(
             classify(&unknown),
             Some(Content::Unsupported { .. })
         ));
-        let metadata = wa::Message {
-            message_context_info: MessageField::some(wa::MessageContextInfo::default()),
-            ..Default::default()
+        let metadata = {
+            let mut proto = wa::Message::default();
+            proto.message_context_info = MessageField::some(wa::MessageContextInfo::default());
+            proto
         };
         assert_eq!(classify(&metadata), None);
-        let key_share = wa::Message {
-            sender_key_distribution_message: MessageField::some(Default::default()),
-            message_context_info: MessageField::some(wa::MessageContextInfo::default()),
-            ..Default::default()
+        let key_share = {
+            let mut proto = wa::Message::default();
+            proto.sender_key_distribution_message = MessageField::some(Default::default());
+            proto.message_context_info = MessageField::some(wa::MessageContextInfo::default());
+            proto
         };
         assert_eq!(classify(&key_share), None);
     }

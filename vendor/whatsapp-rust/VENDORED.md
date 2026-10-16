@@ -2,13 +2,12 @@
 
 Cópia do crate principal de
 [oxidezap/whatsapp-rust](https://github.com/oxidezap/whatsapp-rust) no commit
-`f7468ae` (o mesmo que o `Cargo.toml` fixa), ligada pelo `[patch]` do
+`5e72baf` (o mesmo que o `Cargo.toml` fixa), ligada pelo `[patch]` do
 `Cargo.toml` do ZapFast. O manifesto foi gerado sem o workspace: os campos
 herdados viraram os valores desse commit e os crates irmãos (`wacore`,
 `wacore-binary`, `wacore-noise`, `waproto` e os de armazenamento, transporte e
 HTTP) apontam para a fonte git do mesmo commit. Sem `benches`, `examples` nem
-`tests`. `README.md` e `agent_docs/call_test_support.md` vieram junto porque o
-código os inclui com `include_str!`.
+`tests`. `README.md` veio junto porque o código o inclui com `include_str!`.
 
 Mudança de comportamento (recibos retidos, opcional):
 

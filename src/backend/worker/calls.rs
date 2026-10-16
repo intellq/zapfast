@@ -71,7 +71,11 @@ impl CallRuntime {
         let (tx, events) = async_channel::bounded(64);
         self.events = events;
         tokio::spawn(async move {
-            let media = handle.events();
+            let Some(mut media) = handle.take_events() else {
+                handle.wait_ended().await;
+                let _ = tx.send(CallRuntimeEvent::Ended).await;
+                return;
+            };
             loop {
                 tokio::select! {
                     event = media.recv() => match event {

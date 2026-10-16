@@ -12,6 +12,8 @@ use crate::send::{SendError, SendResult};
 
 pub use wacore::poll::PollVoteCiphertext;
 
+super::creation::creation_types!(CreatedPoll, PollRef, poll_ref);
+
 /// Errors from poll operations (creation, voting, and vote decryption).
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -23,6 +25,10 @@ pub enum PollError {
     /// quiz index, selectable count out of range).
     #[error("invalid poll: {0}")]
     InvalidPoll(String),
+    #[error("{0}")]
+    InvalidSecret(#[from] crate::InvalidMessageSecret),
+    #[error("{0}")]
+    Reference(#[from] crate::MessageRefError),
     /// The client is not logged in, so the voter identity can't be resolved.
     #[error("client is not logged in")]
     NotLoggedIn,
@@ -46,14 +52,26 @@ impl<'a> Polls<'a> {
         Self { client }
     }
 
-    /// Caller needs the returned `message_secret` to decrypt votes.
+    /// Create an E2E poll. Use the returned `poll_ref()` for voting or
+    /// `secret()` for explicit crypto/persistence interop.
+    ///
+    /// ```no_run
+    /// # use whatsapp_rust::{Client, Jid};
+    /// # async fn example(client: &Client, chat: &Jid) -> whatsapp_rust::anyhow::Result<()> {
+    /// let options = ["Yes".to_owned(), "No".to_owned()];
+    /// let created = client.polls().create(chat, "Question", &options, 1).await?;
+    /// let target = created.poll_ref()?;
+    /// client.polls().vote(&target, &["Yes".to_owned()]).await?;
+    /// // Do not log created.send_result(): its protobuf contains the secret.
+    /// # Ok(()) }
+    /// ```
     pub async fn create(
         &self,
         to: impl Into<Jid>,
         name: &str,
         options: &[String],
         selectable_count: u32,
-    ) -> Result<(SendResult, Vec<u8>), PollError> {
+    ) -> Result<CreatedPoll, PollError> {
         let to = &to.into();
         self.create_inner(to, name, options, selectable_count, None)
             .await
@@ -63,14 +81,15 @@ impl<'a> Polls<'a> {
     ///
     /// `correct_index` is the 0-based index into `options` of the right answer.
     /// Quizzes are inherently single-select (WA Web forces `selectableOptionsCount=1`),
-    /// so the count is fixed at 1. Returns the `message_secret` needed to decrypt votes.
+    /// so the count is fixed at 1. Returns [`CreatedPoll`]; use its `poll_ref()`
+    /// for voting or [`CreatedPoll::secret`] for explicit decryption interop.
     pub async fn create_quiz(
         &self,
         to: impl Into<Jid>,
         name: &str,
         options: &[String],
         correct_index: usize,
-    ) -> Result<(SendResult, Vec<u8>), PollError> {
+    ) -> Result<CreatedPoll, PollError> {
         let to = &to.into();
         self.create_inner(to, name, options, 1, Some(correct_index))
             .await
@@ -83,49 +102,48 @@ impl<'a> Polls<'a> {
         options: &[String],
         selectable_count: u32,
         correct_index: Option<usize>,
-    ) -> Result<(SendResult, Vec<u8>), PollError> {
+    ) -> Result<CreatedPoll, PollError> {
         let poll_msg = build_poll_creation_message(name, options, selectable_count, correct_index)?;
 
         // WA Web: v3 for single-select, v1 for multi-select (GeneratePollCreationMessageProto.js:39-41)
         let mut message = if selectable_count == 1 {
-            wa::Message {
-                poll_creation_message_v3: buffa::MessageField::some(poll_msg),
-                ..Default::default()
+            {
+                let mut proto = wa::Message::default();
+                proto.poll_creation_message_v3 = buffa::MessageField::some(poll_msg);
+                proto
             }
         } else {
-            wa::Message {
-                poll_creation_message: buffa::MessageField::some(poll_msg),
-                ..Default::default()
+            {
+                let mut proto = wa::Message::default();
+                proto.poll_creation_message = buffa::MessageField::some(poll_msg);
+                proto
             }
         };
 
         // WA Web generates a 32-byte random secret at poll creation time
         // (SendPollCreationMsgAction.js:158). Voters need this to derive their encryption key.
-        let message_secret: Vec<u8> = {
-            use rand::Rng;
-            let mut secret = vec![0u8; 32];
-            rand::rng().fill_bytes(&mut secret);
-            secret
-        };
+        let message_secret = super::creation::generate_message_secret();
 
-        message.message_context_info = buffa::MessageField::some(wa::MessageContextInfo {
-            message_secret: Some(message_secret.clone()),
-            ..Default::default()
+        message.message_context_info = buffa::MessageField::some({
+            let mut proto = wa::MessageContextInfo::default();
+            proto.message_secret = Some(message_secret.as_bytes().to_vec());
+            proto
         });
 
-        let result = self.client.send_message(to, message).await?;
-        Ok((result, message_secret))
+        let (result, creator) = self.client.send_creation_message(to, message).await?;
+        Ok(CreatedPoll::new(result, creator, message_secret))
     }
 
+    /// Vote using one reference carrying the creation's addressing and secret.
     pub async fn vote(
         &self,
-        chat_jid: impl Into<Jid>,
-        poll_msg_id: &str,
-        poll_creator_jid: &Jid,
-        message_secret: &[u8],
+        target: &PollRef<'_>,
         option_names: &[String],
     ) -> Result<SendResult, PollError> {
-        let chat_jid = &chat_jid.into();
+        let chat_jid = target.message().chat();
+        let poll_msg_id = target.message().id().as_str();
+        let poll_creator_jid = target.creator();
+        let message_secret = target.secret().as_bytes();
         let my_jid = self.client.pn().ok_or(PollError::NotLoggedIn)?;
         let my_base = my_jid.to_non_ad();
 
@@ -149,35 +167,106 @@ impl<'a> Polls<'a> {
         )
         .map_err(PollError::Crypto)?;
 
-        let from_me = my_base.is_same_user_as(poll_creator_jid);
+        let from_me = target.message().from_me();
 
-        let poll_update = wa::message::PollUpdateMessage {
-            poll_creation_message_key: buffa::MessageField::some(wa::MessageKey {
-                remote_jid: Some(chat_jid.to_string()),
-                from_me: Some(from_me),
-                id: Some(poll_msg_id.to_string()),
-                participant: if chat_jid.is_group() {
-                    Some(poll_creator_jid.to_string())
+        let poll_update = {
+            let mut proto = wa::message::PollUpdateMessage::default();
+            proto.poll_creation_message_key = buffa::MessageField::some({
+                let mut proto = wa::MessageKey::default();
+                proto.remote_jid = Some(chat_jid.to_string());
+                proto.from_me = Some(from_me);
+                proto.id = Some(poll_msg_id.to_string());
+                proto.participant = if chat_jid.is_group() {
+                    // Addressing belongs to the message reference; the exact
+                    // captured creator above remains the crypto namespace.
+                    Some(
+                        target
+                            .message()
+                            .sender()
+                            .unwrap_or(poll_creator_jid)
+                            .to_string(),
+                    )
                 } else {
                     None
-                },
-            }),
-            vote: buffa::MessageField::some(wa::message::PollEncValue {
-                enc_payload: Some(enc_payload),
-                enc_iv: Some(iv.to_vec()),
-            }),
-            // WA Web's GeneratePollVoteMessageProto never sets metadata; a Some(empty)
+                };
+                proto
+            });
+            proto.vote = buffa::MessageField::some({
+                let mut proto = wa::message::PollEncValue::default();
+                proto.enc_payload = Some(enc_payload);
+                proto.enc_iv = Some(iv.to_vec());
+                proto
+            }); // WA Web's GeneratePollVoteMessageProto never sets metadata; a Some(empty)
             // submessage emits a stray `1A 00` (tag 3) on the wire. Omit it.
-            metadata: buffa::MessageField::none(),
-            sender_timestamp_ms: Some(wacore::time::now_millis()),
+
+            proto.metadata = buffa::MessageField::none();
+            proto.sender_timestamp_ms = Some(wacore::time::now_millis());
+            proto
         };
 
-        let message = wa::Message {
-            poll_update_message: buffa::MessageField::some(poll_update),
-            ..Default::default()
+        let message = {
+            let mut proto = wa::Message::default();
+            proto.poll_update_message = buffa::MessageField::some(poll_update);
+            proto
         };
 
         Ok(self.client.send_message(chat_jid, message).await?)
+    }
+
+    /// Explicit raw addressing interop. Validates the secret and message ID
+    /// before encryption. Prefer `vote` for metadata from received/created polls.
+    pub async fn vote_raw(
+        &self,
+        chat_jid: impl Into<Jid>,
+        poll_msg_id: &str,
+        poll_creator_jid: &Jid,
+        message_secret: &[u8],
+        option_names: &[String],
+    ) -> Result<SendResult, PollError> {
+        let chat = chat_jid.into();
+        let secret = crate::MessageSecret::try_from(message_secret)?;
+        let own = self.client.pn().ok_or(PollError::NotLoggedIn)?.to_non_ad();
+        let message = crate::MessageRef::new(
+            &chat,
+            crate::MessageId::new(poll_msg_id)?,
+            Some(poll_creator_jid),
+            own.is_same_user_as(poll_creator_jid)
+                || self
+                    .client
+                    .lid()
+                    .is_some_and(|lid| lid.is_same_user_as(poll_creator_jid)),
+        )?;
+        self.vote(
+            &PollRef::new(message, poll_creator_jid, &secret)?,
+            option_names,
+        )
+        .await
+    }
+
+    /// Decrypt with the same creation reference used by [`Self::vote`].
+    /// Creator/voter PN/LID aliases use the same resolution as [`Self::decrypt_vote_raw`].
+    ///
+    /// ```no_run
+    /// # use whatsapp_rust::{Client, Jid, PollRef, PollVoteCiphertext, PollError};
+    /// # async fn decrypt(client: &Client, target: &PollRef<'_>, voter: &Jid,
+    /// #     ciphertext: PollVoteCiphertext<'_>) -> Result<(), PollError> {
+    /// let option_hashes = client.polls().decrypt_vote(ciphertext, target, voter).await?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn decrypt_vote(
+        &self,
+        ciphertext: PollVoteCiphertext<'_>,
+        target: &PollRef<'_>,
+        voter_jid: &Jid,
+    ) -> Result<Vec<Vec<u8>>, PollError> {
+        self.decrypt_vote_raw(
+            ciphertext,
+            target.secret().as_bytes(),
+            target.message().id().as_str(),
+            target.creator(),
+            voter_jid,
+        )
+        .await
     }
 
     /// The voter (self) JID keys the vote's HKDF/AAD, so it must use the poll
@@ -205,10 +294,12 @@ impl<'a> Polls<'a> {
         }
     }
 
-    /// Selected option hashes (32 bytes each). Tries known creator and voter
+    /// Explicit byte/ID interoperability for selected option hashes (32 bytes each).
+    /// Prefer [`Self::decrypt_vote`] when a [`PollRef`] is available.
+    /// Tries known creator and voter
     /// aliases independently, so votes authored across the LID migration open
     /// even when the two supplied identities use different namespaces.
-    pub async fn decrypt_vote(
+    pub async fn decrypt_vote_raw(
         &self,
         ciphertext: PollVoteCiphertext<'_>,
         message_secret: &[u8],
@@ -435,11 +526,13 @@ fn build_poll_creation_message(
                     options.len()
                 ))
             })?;
-            let answer = wa::message::poll_creation_message::Option {
-                option_name: Some(correct.clone()),
-                // optionHash is the lowercase hex of SHA-256(name), matching WA Web's
+            let answer = {
+                let mut proto_ = wa::message::poll_creation_message::Option::default();
+                proto_.option_name = Some(correct.clone()); // optionHash is the lowercase hex of SHA-256(name), matching WA Web's
                 // createOptionHashHexFromString (the proto field is a string, not bytes).
-                option_hash: Some(hex::encode(poll::compute_option_hash(correct))),
+
+                proto_.option_hash = Some(hex::encode(poll::compute_option_hash(correct)));
+                proto_
             };
             (
                 Some(wa::message::PollType::QUIZ),
@@ -451,25 +544,28 @@ fn build_poll_creation_message(
 
     let poll_options: Vec<wa::message::poll_creation_message::Option> = options
         .iter()
-        .map(|name| wa::message::poll_creation_message::Option {
-            option_name: Some(name.clone()),
-            option_hash: None,
+        .map(|name| {
+            let mut proto = wa::message::poll_creation_message::Option::default();
+            proto.option_name = Some(name.clone());
+            proto.option_hash = None;
+            proto
         })
         .collect();
 
-    Ok(wa::message::PollCreationMessage {
-        enc_key: None,
-        name: Some(name.to_string()),
-        options: poll_options,
-        selectable_options_count: Some(selectable_count),
-        context_info: buffa::MessageField::none(),
-        // WA Web's GeneratePollCreationMessageProto always sets pollContentType
+    Ok({
+        let mut proto = wa::message::PollCreationMessage::default();
+        proto.enc_key = None;
+        proto.name = Some(name.to_string());
+        proto.options = poll_options;
+        proto.selectable_options_count = Some(selectable_count);
+        proto.context_info = buffa::MessageField::none(); // WA Web's GeneratePollCreationMessageProto always sets pollContentType
         // (TEXT=1 for a normal poll); omitting it drops a field the real client
         // always emits.
-        poll_content_type: Some(wa::message::PollContentType::TEXT),
-        poll_type,
-        correct_answer,
-        ..Default::default()
+
+        proto.poll_content_type = Some(wa::message::PollContentType::TEXT);
+        proto.poll_type = poll_type;
+        proto.correct_answer = correct_answer;
+        proto
     })
 }
 
@@ -607,7 +703,7 @@ mod tests {
         // Consumer feeds LID JIDs; primary (LID) fails, fallback swaps to PN.
         let out = client
             .polls()
-            .decrypt_vote(
+            .decrypt_vote_raw(
                 PollVoteCiphertext {
                     enc_payload: &enc,
                     enc_iv: &iv,
@@ -641,7 +737,7 @@ mod tests {
 
         let res = client
             .polls()
-            .decrypt_vote(
+            .decrypt_vote_raw(
                 PollVoteCiphertext {
                     enc_payload: &enc,
                     enc_iv: &iv,
@@ -692,7 +788,7 @@ mod tests {
                     for supplied_voter in &voters {
                         let actual = client
                             .polls()
-                            .decrypt_vote(
+                            .decrypt_vote_raw(
                                 ciphertext,
                                 &secret,
                                 "P1-MATRIX",
@@ -765,14 +861,14 @@ mod tests {
             };
             let actual = client
                 .polls()
-                .decrypt_vote(ciphertext, &secret, "P1-ONE-MAPPING", &creator, &voter)
+                .decrypt_vote_raw(ciphertext, &secret, "P1-ONE-MAPPING", &creator, &voter)
                 .await
                 .expect("only the identity that needs converting must be mapped");
             assert_eq!(actual, hashes);
             assert!(
                 client
                     .polls()
-                    .decrypt_vote(ciphertext, &[0xFF; 32], "P1-ONE-MAPPING", &creator, &voter,)
+                    .decrypt_vote_raw(ciphertext, &[0xFF; 32], "P1-ONE-MAPPING", &creator, &voter,)
                     .await
                     .is_err(),
                 "known aliases must not bypass authentication"

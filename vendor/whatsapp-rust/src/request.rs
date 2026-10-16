@@ -259,23 +259,15 @@ impl Client {
         self.get_request_utils().generate_request_id()
     }
 
-    /// Generates a unique message ID that conforms to the WhatsApp protocol format.
+    /// Generate a content identifier in the WhatsApp protocol format.
     ///
-    /// This is an advanced function that allows library users to generate message IDs
-    /// that are compatible with the WhatsApp protocol. The generated ID includes
-    /// timestamp, user JID, and random components to ensure uniqueness.
-    ///
-    /// # Advanced Use Case
-    ///
-    /// This function is intended for advanced users who need to build custom protocol
-    /// interactions or manage message IDs manually. Most users should use higher-level
-    /// methods like `send_message` which handle ID generation automatically.
-    ///
-    /// # Returns
-    ///
-    /// A string containing the generated message ID in the format expected by WhatsApp.
-    pub fn generate_message_id(&self) -> String {
-        self.generate_message_id_at(wacore::time::now_secs_u64())
+    /// [`Client::send`] generates an ID automatically. Use this method when
+    /// the ID must be known before constructing a [`crate::SendRequest`], then
+    /// pass it to [`crate::SendOptions::with_message_id`]. An edit or revoke
+    /// retains its target's content ID and uses a separate [`crate::StanzaId`].
+    pub fn generate_message_id(&self) -> crate::MessageId {
+        crate::MessageId::try_from(self.generate_message_id_at(wacore::time::now_secs_u64()))
+            .expect("generated message IDs are nonempty")
     }
 
     /// Same as [`Self::generate_message_id`], but against a caller-supplied
@@ -344,6 +336,18 @@ impl Client {
     /// # Ok(())
     /// # }
     /// ```
+    pub async fn send_iq(
+        &self,
+        query: InfoQuery<'_>,
+    ) -> Result<Arc<wacore_binary::OwnedNodeRef>, IqError> {
+        self.send_iq_inner(query, true).await
+    }
+
+    // Typed execution defers only the outcome counter until its parser finishes;
+    // tracing, wire observers and the measured exchange remain shared with raw IQs.
+    // A rejection can be a normal typed outcome (e.g. a missing picture); only
+    // the caller knows whether it warrants a warning or error. Keep its diagnostic
+    // at DEBUG here, independently of the subscriber's span filtering.
     #[cfg_attr(
         feature = "tracing",
         tracing::instrument(
@@ -356,15 +360,16 @@ impl Client {
                 lid = tracing::field::Empty,
                 pn = tracing::field::Empty
             ),
-            err(Debug)
+            err(Debug, level = "debug")
         )
     )]
-    pub async fn send_iq(
+    async fn send_iq_inner(
         &self,
         query: InfoQuery<'_>,
+        record_outcome: bool,
     ) -> Result<Arc<wacore_binary::OwnedNodeRef>, IqError> {
         #[cfg(feature = "tracing")]
-        self.record_identity_on_span(&tracing::Span::current());
+        self.record_identity_on_current_span("wa.iq", module_path!());
 
         let iq_timeout = query.timeout.unwrap_or(DEFAULT_IQ_TIMEOUT);
         let req_id = query
@@ -380,6 +385,7 @@ impl Client {
             iq_timeout,
             Box::pin(async { self.send_node(node).await }),
             None,
+            record_outcome,
         )
         .await
     }
@@ -401,7 +407,7 @@ impl Client {
     /// wait. See [`IqOnSent`] for why a caller would want one.
     #[cfg_attr(
         feature = "tracing",
-        tracing::instrument(name = "wa.iq.node", level = "debug", skip_all, err(Debug))
+        tracing::instrument(name = "wa.iq.node", level = "debug", skip_all, fields(lid = tracing::field::Empty, pn = tracing::field::Empty), err(Debug, level = "debug"))
     )]
     pub(crate) async fn send_iq_node_then(
         &self,
@@ -410,7 +416,7 @@ impl Client {
         on_sent: Option<IqOnSent<'_>>,
     ) -> Result<Arc<wacore_binary::OwnedNodeRef>, IqError> {
         #[cfg(feature = "tracing")]
-        self.record_identity_on_span(&tracing::Span::current());
+        self.record_identity_on_current_span("wa.iq.node", module_path!());
 
         if node.tag.as_ref() != IQ_TAG {
             return Err(IqError::ParseError(anyhow::anyhow!(
@@ -432,6 +438,7 @@ impl Client {
             timeout.unwrap_or(DEFAULT_IQ_TIMEOUT),
             Box::pin(async { self.send_node(node).await }),
             on_sent,
+            true,
         )
         .await
     }
@@ -471,9 +478,32 @@ impl Client {
             Err(e) => return Err(IqError::EncodeError(e)),
         };
 
-        let response = self.execute_prepared(req_id, prepared).await?;
-        spec.parse_response(response.get())
-            .map_err(IqError::ParseError)
+        let result = self
+            .execute_prepared(req_id, prepared)
+            .await
+            .and_then(|response| {
+                spec.parse_response(response.get()).map_err(|error| {
+                    // A spec can report a typed rejection embedded in a result IQ.
+                    // Attach its original response without changing ordinary parse errors.
+                    match error.downcast_ref::<wacore::request::IqError>() {
+                        Some(wacore::request::IqError::ServerError {
+                            code,
+                            text,
+                            error_type,
+                            backoff,
+                        }) => IqError::ServerError {
+                            code: *code,
+                            text: text.clone(),
+                            error_type: error_type.clone(),
+                            backoff: *backoff,
+                            response: response.clone().into(),
+                        },
+                        _ => IqError::ParseError(error),
+                    }
+                })
+            });
+        record_iq_outcome(&result);
+        result
     }
 
     /// [`Client::execute`] for a spec whose response is consumed as it is
@@ -575,17 +605,18 @@ impl Client {
                     DEFAULT_IQ_TIMEOUT,
                     Box::pin(async { self.send_raw_bytes(buf).await }),
                     None,
+                    false,
                 )
                 .await
             }
             PreparedIq::Query(iq) => {
                 let mut iq = *iq;
                 // Reuse the id already generated for the fast-path attempt so
-                // send_iq doesn't mint a second one.
+                // the shared send path doesn't mint a second one.
                 if iq.id.is_none() {
                     iq.id = Some(req_id);
                 }
-                self.send_iq(iq).await
+                self.send_iq_inner(iq, false).await
             }
         }
     }
@@ -604,6 +635,7 @@ impl Client {
         timeout: Duration,
         send_fn: IqSendFuture<'_>,
         on_sent: Option<IqOnSent<'_>>,
+        record_outcome: bool,
     ) -> Result<Arc<wacore_binary::OwnedNodeRef>, IqError> {
         let (tx, rx) = futures::channel::oneshot::channel();
         let result = self
@@ -625,7 +657,9 @@ impl Client {
                     Err(e) => Err(IqError::from_response(e, &response_node)),
                 }
             });
-        record_iq_outcome(&result);
+        if record_outcome {
+            record_iq_outcome(&result);
+        }
         result
     }
 
@@ -756,6 +790,24 @@ mod tests {
     use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex};
     use wacore_binary::builder::NodeBuilder;
+
+    #[tokio::test]
+    async fn generated_message_id_retains_the_wire_format() {
+        let client = crate::test_utils::create_test_client().await;
+        let first: crate::MessageId = client.generate_message_id();
+        let second = client.generate_message_id();
+        assert_eq!(first.as_str().len(), 22);
+        assert!(first.as_str().starts_with("3EB0"));
+        assert!(
+            first
+                .as_str()
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'A'..=b'F').contains(&byte))
+        );
+        assert_ne!(first, second);
+        let options = crate::SendOptions::default().with_message_id(first.clone());
+        assert_eq!(options.message_id.as_ref(), Some(&first));
+    }
 
     #[tokio::test]
     async fn send_iq_node_rejects_non_iq_stanzas() {
@@ -1147,3 +1199,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, feature = "tracing"))]
+pub(crate) mod tracing_tests;

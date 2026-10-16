@@ -7,115 +7,148 @@
 // `tracing` + `tracing-pii` paths combine. Raise it (compile-time only).
 #![recursion_limit = "512"]
 
-// Process-wide allocation counter shared by empirical unit-test guards. It sees
-// every thread, so measurements go through `min_allocs`, which retries until a
-// window lands quiet rather than trusting any single one.
+// Test-only allocation instrumentation. Process totals remain available for
+// diagnostics; scoped guards attribute allocations to the calling thread.
 #[cfg(test)]
 #[allow(clippy::disallowed_types)]
 pub(crate) mod test_alloc {
     use std::alloc::{GlobalAlloc, Layout, System};
-    use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
+    use std::cell::{Cell, RefCell};
+    use std::collections::BTreeMap;
+    use std::ptr;
+    use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     pub(crate) static ALLOCS: AtomicU64 = AtomicU64::new(0);
-    /// Bytes currently live, as a wrapping signed counter: allocation adds, free
-    /// subtracts, so a *delta* over a window is what that window still holds even
-    /// though the absolute value is meaningless (the process was already running
-    /// when counting started). Wrapping arithmetic keeps a window that frees more
-    /// than it allocates from being a panic in debug.
+    /// Process-wide requested live bytes, for isolated diagnostic runs only.
+    /// Concurrent frees can make a window's delta understate its retained bytes.
     pub(crate) static LIVE_BYTES: AtomicI64 = AtomicI64::new(0);
 
-    /// Size of the largest single block requested since it was last reset.
-    /// Separate from `ALLOCS` because the two answer different questions: a
-    /// count catches work that should not happen at all, this catches one
-    /// allocation that should not be *that big* — a boxed future sized for
-    /// every arm of a dispatch, say, which costs one allocation either way.
-    pub(crate) static MAX_BLOCK: AtomicUsize = AtomicUsize::new(0);
+    #[derive(Default)]
+    struct Measurement {
+        live: AtomicI64,
+        allocs: AtomicU64,
+        max: AtomicUsize,
+        peak: AtomicI64,
+    }
 
-    struct CountingAlloc;
+    thread_local! {
+        static ACTIVE: RefCell<Option<Arc<Measurement>>> = const { RefCell::new(None) };
+        // Destructor-free: registry cleanup must still work during TLS teardown.
+        static IN_REGISTRY: Cell<bool> = const { Cell::new(false) };
+    }
 
-    unsafe impl GlobalAlloc for CountingAlloc {
-        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-            ALLOCS.fetch_add(1, Ordering::Relaxed);
-            LIVE_BYTES.fetch_add(layout.size() as i64, Ordering::Relaxed);
-            MAX_BLOCK.fetch_max(layout.size(), Ordering::Relaxed);
-            unsafe { System.alloc(layout) }
-        }
+    // A scope must be dropped on the thread whose ACTIVE entry it owns.
+    struct Scope(Arc<Measurement>, std::marker::PhantomData<*const ()>);
 
-        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-            LIVE_BYTES.fetch_sub(layout.size() as i64, Ordering::Relaxed);
-            unsafe { System.dealloc(ptr, layout) }
-        }
-
-        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-            ALLOCS.fetch_add(1, Ordering::Relaxed);
-            LIVE_BYTES.fetch_add(new_size as i64 - layout.size() as i64, Ordering::Relaxed);
-            MAX_BLOCK.fetch_max(new_size, Ordering::Relaxed);
-            unsafe { System.realloc(ptr, layout, new_size) }
+    impl Scope {
+        fn enter() -> Self {
+            ACTIVE
+                .with(|active| assert!(active.borrow().is_none(), "nested allocation measurement"));
+            let state = Arc::new(Measurement::default());
+            ACTIVE.with(|active| *active.borrow_mut() = Some(state.clone()));
+            Self(state, std::marker::PhantomData)
         }
     }
 
-    /// The quietest (live bytes, allocations) delta observed while running `op`,
-    /// retrying until one sample is within `expected` on both counts.
-    ///
-    /// Same contract and the same reason as [`min_allocs`]: both counters are
-    /// process-wide, so a sibling test thread allocating inside the window
-    /// inflates that window. Retrying until the window lands quiet makes ambient
-    /// traffic cost iterations instead of a false failure, and a real regression
-    /// never reaches `expected`, so the caller's assertion still fires with what
-    /// was actually observed.
-    pub(crate) fn min_live<T>(expected: (i64, u64), mut op: impl FnMut() -> T) -> (i64, u64) {
-        const BUDGET: u32 = 10_000;
-
-        let mut best = (i64::MAX, u64::MAX);
-        for _ in 0..BUDGET {
-            let (bytes_before, allocs_before) = (
-                LIVE_BYTES.load(Ordering::Relaxed),
-                ALLOCS.load(Ordering::Relaxed),
-            );
-            let held = std::hint::black_box(op());
-            let (bytes, allocs) = (
-                LIVE_BYTES
-                    .load(Ordering::Relaxed)
-                    .wrapping_sub(bytes_before),
-                ALLOCS.load(Ordering::Relaxed) - allocs_before,
-            );
-            // Dropped outside the window: what it frees is not this window's.
-            drop(held);
-            let sample = (bytes, allocs);
-            if sample.0 <= expected.0 && sample.1 <= expected.1 {
-                return sample;
-            }
-            // Always one real window, never minima stitched from two: ambient
-            // traffic inflates both counters together, so the sample with the
-            // fewest allocations is the quietest one this window saw.
-            if (sample.1, sample.0) < (best.1, best.0) {
-                best = sample;
-            }
+    impl Drop for Scope {
+        fn drop(&mut self) {
+            ACTIVE.with(|active| active.borrow_mut().take());
         }
-        best
+    }
+
+    struct CountingAlloc;
+
+    // Only scoped blocks are registered. BTreeMap's own allocations bypass the
+    // registry via destructor-free TLS, avoiding allocator recursion/deadlock.
+    // Entries keep the measurement alive after scope/thread exit, and removing
+    // one on any thread debits only its owner. User layouts/pointers stay intact.
+    static OWNERS: Mutex<BTreeMap<usize, Arc<Measurement>>> = Mutex::new(BTreeMap::new());
+    static HAS_OWNED_BLOCKS: AtomicBool = AtomicBool::new(false);
+
+    fn with_registry(op: impl FnOnce(&mut BTreeMap<usize, Arc<Measurement>>)) {
+        if IN_REGISTRY.try_with(|active| active.replace(true)) != Ok(false) {
+            return;
+        }
+        // No user code runs under this lock; never propagate poisoning through
+        // GlobalAlloc, whose methods must not unwind.
+        let mut owners = OWNERS.lock().unwrap_or_else(|error| error.into_inner());
+        op(&mut owners);
+        // Publish before releasing the lock or returning an allocated pointer.
+        // Any thread that can free an owned block must observe its registration.
+        HAS_OWNED_BLOCKS.store(!owners.is_empty(), Ordering::Release);
+        drop(owners);
+        IN_REGISTRY.with(|active| active.set(false));
+    }
+
+    unsafe impl GlobalAlloc for CountingAlloc {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            let block = unsafe { System.alloc(layout) };
+            if block.is_null() {
+                return block;
+            }
+            ALLOCS.fetch_add(1, Ordering::Relaxed);
+            LIVE_BYTES.fetch_add(layout.size() as i64, Ordering::Relaxed);
+            let owner = ACTIVE
+                .try_with(|active| active.try_borrow().ok().and_then(|owner| owner.clone()))
+                .ok()
+                .flatten();
+            if let Some(state) = owner {
+                with_registry(|owners| {
+                    let live = state
+                        .live
+                        .fetch_add(layout.size() as i64, Ordering::Relaxed)
+                        + layout.size() as i64;
+                    state.peak.fetch_max(live, Ordering::Relaxed);
+                    state.allocs.fetch_add(1, Ordering::Relaxed);
+                    state.max.fetch_max(layout.size(), Ordering::Relaxed);
+                    owners.insert(block.addr(), state);
+                });
+            }
+            block
+        }
+
+        unsafe fn dealloc(&self, block: *mut u8, layout: Layout) {
+            if HAS_OWNED_BLOCKS.load(Ordering::Acquire) {
+                with_registry(|owners| {
+                    if let Some(owner) = owners.remove(&block.addr()) {
+                        owner
+                            .live
+                            .fetch_sub(layout.size() as i64, Ordering::Relaxed);
+                    }
+                });
+            }
+            LIVE_BYTES.fetch_sub(layout.size() as i64, Ordering::Relaxed);
+            unsafe { System.dealloc(block, layout) };
+        }
+
+        unsafe fn realloc(&self, block: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            let Ok(new_layout) = Layout::from_size_align(new_size, layout.align()) else {
+                return ptr::null_mut();
+            };
+            // Attribute the replacement to the current scope, even if the old
+            // block predates it. On failure the old block and owner stay intact.
+            let replacement = unsafe { self.alloc(new_layout) };
+            if !replacement.is_null() {
+                unsafe {
+                    ptr::copy_nonoverlapping(block, replacement, layout.size().min(new_size));
+                    self.dealloc(block, layout);
+                }
+            }
+            replacement
+        }
     }
 
     #[global_allocator]
     static GLOBAL: CountingAlloc = CountingAlloc;
 
-    /// Smallest allocation delta observed while running `op`, retrying until it
-    /// reaches `expected`.
-    ///
-    /// `ALLOCS` counts every allocation in the process, so a sibling test thread
-    /// allocating inside the window inflates that window's delta. A fixed
-    /// iteration count only hopes one of its windows lands quiet, which is a
-    /// flake under a loaded CI runner; retrying until the delta reaches
-    /// `expected` makes ambient traffic cost iterations instead of a false
-    /// failure. A real regression never reaches `expected`, so the caller's
-    /// assertion still fires — with the count actually observed.
+    /// Smallest process-wide allocation count over a synchronous call to `op`.
+    /// Retries up to 100,000 times to exclude ambient allocations. Other threads
+    /// can inflate this count but frees cannot reduce it. This counts successful
+    /// allocations/reallocations, not retained bytes or allocator overhead.
     pub(crate) fn min_allocs<T>(expected: u64, mut op: impl FnMut() -> T) -> u64 {
-        // Bounded so a genuine regression fails instead of spinning forever.
-        // The happy path exits on its first quiet window, so a budget this
-        // large is free unless something is actually wrong.
-        const BUDGET: u32 = 100_000;
-
         let mut min = u64::MAX;
-        for _ in 0..BUDGET {
+        for _ in 0..100_000 {
             let before = ALLOCS.load(Ordering::Relaxed);
             let value = std::hint::black_box(op());
             let after = ALLOCS.load(Ordering::Relaxed);
@@ -128,22 +161,98 @@ pub(crate) mod test_alloc {
         min
     }
 
-    /// Smallest "largest single block" observed while running `op`, retrying
-    /// until it reaches `expected`.
-    ///
-    /// Same discipline and the same reason as [`min_allocs`]: `MAX_BLOCK` is
-    /// process-wide, so a sibling test thread's large allocation lands in this
-    /// window's maximum. Taking the minimum across windows makes that cost
-    /// iterations rather than a false failure, while a block the measured code
-    /// really does allocate is in *every* window and survives the minimum.
-    pub(crate) fn min_max_block<T>(expected: usize, mut op: impl FnMut() -> T) -> usize {
-        const BUDGET: u32 = 10_000;
+    #[derive(Clone, Copy, Debug, Default)]
+    pub(crate) struct HeapSample {
+        pub retained: i64,
+        pub peak: i64,
+        pub allocations: u64,
+    }
 
+    pub(crate) fn current_heap_sample() -> HeapSample {
+        ACTIVE.with(|active| {
+            let active = active.borrow();
+            let state = active.as_ref().expect("allocation scope is active");
+            HeapSample {
+                retained: state.live.load(Ordering::Relaxed),
+                peak: state.peak.load(Ordering::Relaxed),
+                allocations: state.allocs.load(Ordering::Relaxed),
+            }
+        })
+    }
+
+    /// Requested heap attributed to this synchronous thread scope, including
+    /// freed transient buffers in the peak. Excludes allocator overhead and
+    /// spawned async workers; their charges require separate lifetime tests.
+    pub(crate) fn heap_sample<T>(op: impl FnOnce() -> T) -> (HeapSample, T) {
+        let scope = Scope::enter();
+        let held = std::hint::black_box(op());
+        let sample = current_heap_sample();
+        drop(scope);
+        (sample, held)
+    }
+
+    #[test]
+    fn heap_sample_includes_freed_transient_buffers() {
+        let (sample, held) = heap_sample(|| {
+            let transient = vec![0_u8; 4096];
+            let held = vec![0_u8; 1024];
+            std::hint::black_box(&transient);
+            drop(transient);
+            held
+        });
+        assert_eq!(sample.retained, 1024);
+        assert_eq!(sample.peak, 5120);
+        assert_eq!(sample.allocations, 2);
+        drop(held);
+    }
+
+    fn live_sample<T>(op: impl FnOnce() -> T) -> ((i64, u64), T) {
+        let scope = Scope::enter();
+        let held = std::hint::black_box(op());
+        let sample = (
+            scope.0.live.load(Ordering::Relaxed),
+            scope.0.allocs.load(Ordering::Relaxed),
+        );
+        drop(scope);
+        (sample, held)
+    }
+
+    /// Requested bytes still live and successful allocation/reallocation count
+    /// owned by a synchronous call to `op` on this thread, before its return value
+    /// is dropped. Frees on any thread debit only the block's originating scope;
+    /// preexisting blocks cannot reduce this measurement. Realloc assigns the
+    /// entire replacement block to the scope executing realloc.
+    ///
+    /// Other threads' allocations and work deferred past the call are excluded.
+    /// This is not process heap/RSS or a measurement of spawned async tasks.
+    /// Retries up to 10,000 times for warm-up; returns one actual sample, ordered
+    /// by allocation count then bytes, if none meets both limits. No nesting.
+    pub(crate) fn min_live<T>(expected: (i64, u64), mut op: impl FnMut() -> T) -> (i64, u64) {
+        let mut best = (i64::MAX, u64::MAX);
+        for _ in 0..10_000 {
+            let (sample, held) = live_sample(&mut op);
+            drop(held);
+            if sample.0 <= expected.0 && sample.1 <= expected.1 {
+                return sample;
+            }
+            if (sample.1, sample.0) < (best.1, best.0) {
+                best = sample;
+            }
+        }
+        best
+    }
+
+    /// Smallest largest requested block allocated/reallocated by a synchronous
+    /// call to `op` on this thread, including blocks freed before return. Other
+    /// threads cannot reset or inflate its maximum. Excludes spawned work and
+    /// allocator overhead. Retries up to 10,000 times for warm-up. No nesting.
+    pub(crate) fn min_max_block<T>(expected: usize, mut op: impl FnMut() -> T) -> usize {
         let mut min = usize::MAX;
-        for _ in 0..BUDGET {
-            MAX_BLOCK.store(0, Ordering::Relaxed);
+        for _ in 0..10_000 {
+            let scope = Scope::enter();
             let value = std::hint::black_box(op());
-            let observed = MAX_BLOCK.load(Ordering::Relaxed);
+            let observed = scope.0.max.load(Ordering::Relaxed);
+            drop(scope);
             drop(value);
             min = min.min(observed);
             if min <= expected {
@@ -151,6 +260,157 @@ pub(crate) mod test_alloc {
             }
         }
         min
+    }
+
+    #[test]
+    fn unrelated_frees_cannot_hide_retained_bytes() {
+        let phase = AtomicUsize::new(0);
+        std::thread::scope(|threads| {
+            threads.spawn(|| {
+                let preexisting = std::hint::black_box(vec![0u8; 4096]);
+                phase.store(1, Ordering::Release);
+                while phase.load(Ordering::Acquire) != 2 {
+                    std::thread::yield_now();
+                }
+                drop(preexisting);
+                phase.store(3, Ordering::Release);
+            });
+            while phase.load(Ordering::Acquire) != 1 {
+                std::thread::yield_now();
+            }
+            // The handshake itself must not allocate: channel parking can
+            // initialize thread-local state inside the measurement window.
+            let (sample, retained) = live_sample(|| {
+                let retained = std::hint::black_box(vec![0u8; 2048]);
+                phase.store(2, Ordering::Release);
+                while phase.load(Ordering::Acquire) != 3 {
+                    std::thread::yield_now();
+                }
+                retained
+            });
+            drop(retained);
+            assert_eq!(sample, (2048, 1));
+            assert!(sample.0 > 1024);
+        });
+    }
+
+    #[test]
+    fn min_live_retries_until_both_limits_hold_in_one_sample() {
+        let mut attempts = 0;
+        let sample = min_live((1024, 1), || {
+            attempts += 1;
+            match attempts {
+                1 => Some(vec![0u8; 2048]), // Only the allocation count fits.
+                2 => {
+                    let transient = std::hint::black_box((vec![0u8; 32], vec![0u8; 32]));
+                    drop(transient); // Only the retained-byte count fits.
+                    None
+                }
+                3 => Some(vec![0u8; 1024]),
+                _ => panic!("the third sample meets both limits"),
+            }
+        });
+        assert_eq!(attempts, 3);
+        assert_eq!(sample, (1024, 1));
+    }
+
+    #[test]
+    fn concurrent_measurements_keep_their_maxima() {
+        use std::sync::Barrier;
+        let allocated = Barrier::new(2);
+        let measured = Barrier::new(2);
+        std::thread::scope(|threads| {
+            let first = threads.spawn(|| {
+                min_max_block(4096, || {
+                    let block = std::hint::black_box(vec![0u8; 4096]);
+                    drop(block);
+                    allocated.wait();
+                    measured.wait();
+                })
+            });
+            allocated.wait();
+            let second = min_max_block(128, || std::hint::black_box(vec![0u8; 128]));
+            measured.wait();
+            assert_eq!(first.join().unwrap(), 4096);
+            assert_eq!(second, 128);
+        });
+    }
+
+    #[test]
+    fn owned_blocks_can_be_freed_on_another_thread() {
+        let scope = Scope::enter();
+        let value = std::hint::black_box(vec![0u8; 2048]);
+        let state = scope.0.clone();
+        drop(scope);
+        assert_eq!(state.live.load(Ordering::Relaxed), 2048);
+        std::thread::spawn(move || drop(value)).join().unwrap();
+        assert_eq!(state.live.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn preexisting_frees_and_reallocations_have_distinct_ownership() {
+        let mut old = Some(vec![0u8; 4096]);
+        assert_eq!(min_live((0, 0), || drop(old.take())), (0, 0));
+        let mut old = Some(vec![0u8; 4096]);
+        let sample = min_live((8192, 1), || {
+            let mut value = old.take().unwrap();
+            value.reserve_exact(4096);
+            value
+        });
+        assert_eq!(sample, (8192, 1));
+        assert_eq!(min_live((0, 1), || drop(vec![0u8; 2048])), (0, 1));
+    }
+
+    #[test]
+    fn scope_is_restored_after_unwind_and_thread_exit() {
+        let result = std::panic::catch_unwind(|| {
+            let _scope = Scope::enter();
+            panic!("test scope cleanup");
+        });
+        assert!(result.is_err());
+        assert_eq!(min_live((32, 1), || vec![0u8; 32]), (32, 1));
+        struct AllocateOnExit;
+        impl Drop for AllocateOnExit {
+            fn drop(&mut self) {
+                drop(std::hint::black_box(vec![0u8; 128]));
+            }
+        }
+        thread_local! {
+            static ON_EXIT: AllocateOnExit = const { AllocateOnExit };
+        }
+        let value = std::thread::spawn(|| {
+            ON_EXIT.with(|_| ());
+            let _scope = Scope::enter();
+            vec![0u8; 64]
+        })
+        .join()
+        .unwrap();
+        drop(value);
+    }
+
+    #[test]
+    fn allocator_preserves_alignment_zeroing_and_realloc_contents() {
+        unsafe {
+            let layout = Layout::from_size_align(256, 4096).unwrap();
+            let block = std::alloc::alloc_zeroed(layout);
+            assert!(!block.is_null());
+            assert_eq!(block as usize % 4096, 0);
+            assert!(
+                std::slice::from_raw_parts(block, 256)
+                    .iter()
+                    .all(|&b| b == 0)
+            );
+            block.write_bytes(42, 256);
+            let grown = std::alloc::realloc(block, layout, 8192);
+            assert!(!grown.is_null());
+            assert_eq!(grown as usize % 4096, 0);
+            assert!(
+                std::slice::from_raw_parts(grown, 256)
+                    .iter()
+                    .all(|&b| b == 42)
+            );
+            std::alloc::dealloc(grown, Layout::from_size_align(8192, 4096).unwrap());
+        }
     }
 }
 
@@ -163,8 +423,13 @@ pub(crate) mod test_alloc {
 pub use wacore::appstate::patch_decode::WAPatchName;
 pub use wacore::appstate::schemas;
 pub use wacore::client_profile::ClientProfile;
+pub use wacore::store::traits::StoredMessageSecret;
 /// Optional metrics emission (the `metrics` feature). No-op when the feature is off.
 pub use wacore::telemetry;
+pub use wacore::types::message_ref::{
+    MessageId, MessageRef, MessageRefError, NewsletterMessageRef, ServerMessageId, StanzaId,
+};
+pub use wacore::types::message_secret::{InvalidMessageSecret, MessageSecret};
 pub use wacore::{
     iq::privacy as privacy_settings, proto_helpers, sticker_pack, store::traits, webp,
 };
@@ -215,7 +480,6 @@ pub(crate) mod flush_scope;
 /// Shared base error for transport/connection concerns; the per-domain error
 /// types embed it.
 pub use client::ClientError;
-pub use client::NodeFilter;
 pub use client::interceptor::{Interception, InterceptorHandle, StanzaInterceptor};
 pub use client::{
     AllocSnapshot, CollectionStats, HttpResourceReport, MemoryReport, ResourceReport,
@@ -224,17 +488,21 @@ pub use client::{
 };
 pub use client::{CallError, Voip};
 pub use client::{
-    Client, ClientBuild, ClientBuilder, ClientBuilderError, Connection, DecryptedPayloadLease,
-    EncDecryptFailedLease, RawNodeLease, SentFrameLease,
+    Client, ClientBuild, ClientBuilder, ClientBuilderError, ClientOptions, Connection,
+    DecryptedPayloadLease, EncDecryptFailedLease, RawNodeLease, SentFrameLease,
 };
 #[cfg(feature = "client-lifecycle")]
 #[cfg_attr(docsrs, doc(cfg(feature = "client-lifecycle")))]
 pub use client::{ClientLifecycle, ConnectionScope, ConnectionScopeState};
 pub use client::{
-    ConnectError, ConnectStage, ProtocolTerminalReason, Reachability, RunCompletionReason,
-    SignalMaintenanceError,
+    ConflictKind, ConnectError, ConnectStage, DeregistrationOutcome, DeregistrationSkipReason,
+    DrainOutcome, LogoutReport, ProtocolTerminalReason, Reachability, RunCompletionReason,
+    SecretFlushReport, ShutdownReport, SignalMaintenanceError,
 };
-pub use types::durability_hook::InboundDurabilityHook;
+pub use client::{NodeFilter, NodeWaiter};
+pub use types::connect_admission::ConnectAdmission;
+pub use types::durability_hook::{HistorySyncCaptureHook, InboundDurabilityHook};
+pub use types::group_notification_durability::GroupNotificationDurabilityHook;
 pub use types::history_sync_admission::{
     HistorySyncAdmission, HistorySyncDecision, HistorySyncMetadata,
 };
@@ -246,9 +514,11 @@ pub mod handlers;
 pub use handlers::chatstate::ChatStateEvent;
 pub mod handshake;
 pub mod jid_utils;
-pub mod keepalive;
+// Worker modules contain only inherent Client operations, not host types.
+// Those operations remain public through Client rather than an empty module.
+mod keepalive;
 pub mod mediaconn;
-pub mod message;
+mod message;
 pub(crate) mod msg_secret_buffer;
 pub mod pair;
 pub mod pair_code;
@@ -285,7 +555,10 @@ pub mod runtime_impl;
 pub use runtime_impl::TokioRuntime;
 pub use wacore::runtime::Runtime;
 pub mod send;
-pub use send::{EditOptions, PinDuration, RevokeType, SendError, SendOptions, SendResult};
+pub use send::{
+    EditOptions, EditRequest, PinDuration, RevokeType, SendError, SendOptions, SendRequest,
+    SendResult,
+};
 pub use wacore::send::StanzaType;
 pub mod media;
 pub mod session;
@@ -301,18 +574,19 @@ pub use upload::UploadOptions;
 
 pub mod pdo;
 pub mod prekeys;
-pub mod receipt;
-pub mod retry;
-pub mod unified_session;
+mod receipt;
+mod retry;
+pub(crate) mod unified_session;
 
 pub mod appstate_sync;
-pub mod history_sync;
+mod history_sync;
 pub mod usync;
 
 /// Declared syncd action names for log gating (generated, no `Schema` records).
 pub(crate) mod appstate_known_verbs;
 
 pub mod features;
+pub use features::PushNameOutcome;
 pub use features::{
     AppStateError, AppStateResyncMode, AppStateResyncReport, AppStateSettings,
     BUSINESS_PROFILE_MAX_WEBSITES, Blocking, BlockingError, BlocklistEntry, BotDefault, BotList,
@@ -320,40 +594,50 @@ pub use features::{
     BotThemeMode, Bots, Business, BusinessCategory, BusinessError, BusinessHourMode, BusinessHours,
     BusinessHoursConfig, BusinessHoursUpdate, BusinessProfile, BusinessProfileUpdate,
     BusinessProfileUpdateError, CappingMvStatus, CappingOteStatus, CappingStatus, Catalog,
-    CatalogOptions, ChatActions, ChatStateError, ChatStateType, Chatstate, Collection,
-    CollectionOptions, Collections, Comments, Community, CommunityError, CommunitySubgroup,
-    ContactError, Contacts, CoverPhotoUpload, CreateCommunityOptions, CreateCommunityResult,
-    CreateGroupResult, CreateSubgroupOptions, DayOfWeek, EncType, EncryptedEdit,
-    EventCreationParams, EventResponseType, Events, GroupAppealStatus, GroupCreateOptions,
-    GroupDescription, GroupEphemeralSettings, GroupError, GroupHierarchy, GroupJoinError,
-    GroupMessageReporter, GroupMetadata, GroupMetadataResult, GroupOverview, GroupOverviewResult,
-    GroupParticipant, GroupParticipantDetails, GroupParticipantOptions, GroupPictureEntry,
-    GroupProfilePicture, GroupProfilePictureOutcome, GroupSubject, GroupType, Groups,
-    GrowthLockInfo, ImporterAddress, InviteInfoError, IsOnWhatsAppResult, JoinGroupResult, Labels,
+    CatalogOptions, ChatActions, ChatActivity, ChatStateError, Chatstate, Collection,
+    CollectionOptions, Collections, Comments, Community, CommunityConfigurationStep,
+    CommunityError, CommunitySubgroup, ContactError, Contacts, CoverPhotoUpload,
+    CreateCommunityOptions, CreateCommunityResult, CreateGroupResult, CreateSubgroupOptions,
+    DayOfWeek, EncType, EncryptedEdit, EventCreationParams, EventResponseType, Events,
+    GroupAppealStatus, GroupCreateOptions, GroupDescription, GroupEphemeralSettings, GroupError,
+    GroupHierarchy, GroupHistoryAddResult, GroupHistoryRetryToken, GroupHistoryShareOutcome,
+    GroupHistorySkipReason, GroupJoinError, GroupLookupResult, GroupMessageReporter, GroupMetadata,
+    GroupMetadataResult, GroupOverview, GroupOverviewResult, GroupParticipant,
+    GroupParticipantDetails, GroupParticipantOptions, GroupPictureEntry, GroupProfilePicture,
+    GroupProfilePictureOutcome, GroupSubject, Groups, GrowthLockInfo, HistorySharePreparation,
+    ImporterAddress, InviteInfoError, IsOnWhatsAppResult, JoinGroupResult, Labels,
     LinkSubgroupOptions, LinkSubgroupsResult, MediaRetryResult, MediaReupload, MediaReuploadError,
-    MediaReuploadRequest, MemberAddMode, MemberLinkMode, MemberShareHistoryMode,
-    MembershipApprovalMode, MembershipRequest, MessageEditError, MessageRetransmission, Mex,
-    MexError, MexErrorExtensions, MexFatalError, MexGraphQLError, MexRequest, MexResponse,
-    NackReason, NewChatMessageCapping, Newsletter, NewsletterAdminInfo, NewsletterAdminProfile,
-    NewsletterError, NewsletterFollower, NewsletterMediaType, NewsletterMessage,
-    NewsletterMessageAssociationType, NewsletterMessageType, NewsletterMetadata,
-    NewsletterPollVote, NewsletterQuestionType, NewsletterReactionCount, NewsletterRole,
-    NewsletterState, NewsletterVerification, Order, OrderPriceDetails, OrderProduct, OwnUsername,
-    ParticipantChangeResponse, ParticipantType, PictureType, PollError, PollOptionResult,
-    PollVoteCiphertext, Polls, Presence, PresenceError, PresencePolicy, PresenceStatus,
-    PreviousDescription, Price, Product, ProductAvailability, ProductImage, ProductVideo, Profile,
-    ProfileError, ProfilePicture, ProfilePictureLookup, ProfilePictureLookupOptions, QuickReplies,
+    MediaReuploadPhase, MediaReuploadRequest, MemberAddMode, MemberLinkMode,
+    MemberShareHistoryMode, MembershipApprovalMode, MembershipRequest, MessageEditError,
+    MessageRetransmission, Mex, MexError, MexErrorExtensions, MexFatalError, MexGraphQLError,
+    MexRequest, MexResponse, NackReason, NewChatMessageCapping, Newsletter, NewsletterAdminInfo,
+    NewsletterAdminProfile, NewsletterError, NewsletterFollower, NewsletterMediaType,
+    NewsletterMessage, NewsletterMessageAssociationType, NewsletterMessageType, NewsletterMetadata,
+    NewsletterMyAddOns, NewsletterMyPollVote, NewsletterMyReaction, NewsletterPollVote,
+    NewsletterQuestionType, NewsletterReactionCount, NewsletterRole, NewsletterState,
+    NewsletterVerification, Order, OrderPriceDetails, OrderProduct, OwnUsername,
+    ParticipantChangeResponse, ParticipantType, PictureType, Pictures, PollError, PollOptionResult,
+    PollVoteCiphertext, Polls, PreparedGroupHistoryShare, Presence, PresenceError, PresencePolicy,
+    PresenceStatus, PreviousDescription, Price, Product, ProductAvailability, ProductImage,
+    ProductVideo, Profile, ProfileError, ProfilePicture, ProfilePictureLookup, QuickReplies,
     ReachoutTimelock, ReportedGroupMessage, ReportedGroupMessages, RetryReason, RetryRequestError,
     RetryRequestOptions, RetryRequestOutcome, SalePrice, SecretEncKind, SecretEncrypted,
     SetProfilePictureResponse, Signal, SignalError, SignalSessionInfo, SignalSessionMigration,
     StanzaRejection, StanzaResponseError, Status, StatusPrivacySetting, StatusSendOptions,
-    SubgroupKind, SubgroupVisibility, SyncActionMessageRange, TcToken, TcTokenError,
-    USERNAME_MAX_LENGTH, USERNAME_MIN_LENGTH, UnlinkSubgroupsResult, UserInfo, UsernameLookup,
-    UsernameLookupError, UsernameLookupUser, UsyncSubprotocolError, VariantProperty, VerifiedName,
-    group_type, message_key, message_range,
+    SubgroupFailure, SubgroupKind, SubgroupVisibility, SyncActionMessageRange, TcToken,
+    TcTokenError, USERNAME_MAX_LENGTH, USERNAME_MIN_LENGTH, UnlinkSubgroupsResult, UserInfo,
+    UsernameLookup, UsernameLookupError, UsernameLookupUser, UsyncSubprotocolError,
+    VariantProperty, VerifiedName, message_range,
 };
+pub use features::{CreatedEvent, CreatedPoll, EventRef, MexDoc, MexOperation, PollRef};
+
+pub use features::{ProfilePictureRequest, ProfilePictureTarget, ProfilePictureType};
 
 pub mod bot;
+pub use bot::{
+    BotRunOutcome, BotShutdownReport, CallbackEventHandler, EventDelivery, EventDeliveryStats,
+};
+pub use store::StoreRelease;
 pub mod lid_pn_cache;
 #[cfg(feature = "signal")]
 pub mod shutdown;
@@ -367,15 +651,20 @@ pub mod version;
 /// `use whatsapp_rust::prelude::*;`.
 pub mod prelude {
     pub use crate::bot::{Bot, BotBuilder, BotHandle, EventDelivery, MessageContext};
+    pub use crate::bot::{
+        BotRunOutcome, BotShutdownReport, CallbackEventHandler, EventDeliveryStats,
+    };
     pub use crate::client::{
-        Client, ClientBuilder, ClientBuilderError, ClientError, Connection, DecryptedPayloadLease,
-        EncDecryptFailedLease, RawNodeLease, SentFrameLease,
+        Client, ClientBuilder, ClientBuilderError, ClientError, ClientOptions, Connection,
+        DecryptedPayloadLease, EncDecryptFailedLease, RawNodeLease, SentFrameLease,
     };
     #[cfg(feature = "client-lifecycle")]
     #[cfg_attr(docsrs, doc(cfg(feature = "client-lifecycle")))]
     pub use crate::client::{ClientLifecycle, ConnectionScope, ConnectionScopeState};
     pub use crate::client::{
-        ConnectError, ConnectStage, ProtocolTerminalReason, RunCompletionReason,
+        ConflictKind, ConnectError, ConnectStage, DeregistrationOutcome, DeregistrationSkipReason,
+        DrainOutcome, LogoutReport, ProtocolTerminalReason, RunCompletionReason, SecretFlushReport,
+        ShutdownReport,
     };
     #[cfg(feature = "plugins")]
     #[cfg_attr(docsrs, doc(cfg(feature = "plugins")))]
@@ -390,9 +679,12 @@ pub mod prelude {
     pub use crate::request::{IqError, RejectionStanza};
     #[cfg(all(feature = "tokio-runtime", not(target_arch = "wasm32")))]
     pub use crate::runtime_impl::TokioRuntime;
-    pub use crate::send::{EditOptions, SendError, SendOptions, SendResult};
+    pub use crate::send::{
+        EditOptions, EditRequest, SendError, SendOptions, SendRequest, SendResult,
+    };
     #[cfg(feature = "signal")]
     pub use crate::shutdown::shutdown_signal;
+    pub use crate::store::StoreRelease;
     #[cfg(feature = "sqlite-storage")]
     pub use crate::store::{SqliteStore, StoredDeviceSummary};
     pub use crate::types::events::{
@@ -400,7 +692,13 @@ pub mod prelude {
         EventKind, InboundMessage, MessageBatch, Subscription,
     };
     pub use crate::types::message::MessageInfo;
-    pub use crate::{Jid, Server};
+    pub use crate::{
+        CreatedEvent, CreatedPoll, EventRef, InvalidMessageSecret, Jid, MessageSecret, PollRef,
+        Server, StoredMessageSecret,
+    };
+    pub use crate::{
+        MessageId, MessageRef, MessageRefError, NewsletterMessageRef, ServerMessageId, StanzaId,
+    };
     pub use wacore::proto_helpers::{MessageBuilderExt, MessageExt};
     /// Optional sub-message wrapper in `wa::Message` literals.
     pub use waproto::buffa::MessageField;

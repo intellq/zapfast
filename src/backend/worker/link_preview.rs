@@ -67,9 +67,10 @@ pub(super) fn request(link: String, commands: mpsc::UnboundedSender<Command>) {
 /// Carries a preview in a text message, which then goes as extended text.
 pub(super) fn attach(message: &mut wa::Message, card: &LinkCard) {
     if let Some(text) = message.conversation.take() {
-        message.extended_text_message = MessageField::some(wa::message::ExtendedTextMessage {
-            text: Some(text),
-            ..Default::default()
+        message.extended_text_message = MessageField::some({
+            let mut proto = wa::message::ExtendedTextMessage::default();
+            proto.text = Some(text);
+            proto
         });
     }
     let Some(extended) = message.extended_text_message.as_option_mut() else {

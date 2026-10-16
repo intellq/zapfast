@@ -7,6 +7,8 @@ pub(crate) use app_state::{
 };
 #[cfg(test)]
 pub(crate) use app_state::{SyncHolder, batched_sync_outcome_tests::batch_result};
+#[cfg(any(feature = "bench-harness", test))]
+mod bench_startup;
 mod builder;
 mod context_impl;
 mod device_memo_stats;
@@ -22,13 +24,15 @@ mod lifecycle;
 pub(crate) mod member_index;
 mod messaging;
 mod node_io;
+mod notification_scope;
+pub(crate) use notification_scope::NotificationScope;
 pub(crate) mod offline_resume;
 mod sender_keys;
 mod sessions;
 pub(crate) mod subsystem;
 pub(crate) mod voip;
 use builder::{ClientAssembly, ClientExtensions};
-pub use builder::{ClientBuild, ClientBuilder, ClientBuilderError};
+pub use builder::{ClientBuild, ClientBuilder, ClientBuilderError, ClientOptions};
 pub(crate) use device_memo_stats::{
     DeviceMemoCounters, GroupDevicesMemoOutcome, SkdmTargetsMemoOutcome,
 };
@@ -38,7 +42,11 @@ use extension_lifecycle::LifecycleRegistration;
 #[cfg(feature = "client-lifecycle")]
 #[cfg_attr(docsrs, doc(cfg(feature = "client-lifecycle")))]
 pub use extension_lifecycle::{ClientLifecycle, ConnectionScope, ConnectionScopeState};
-pub use lifecycle::{Connection, ProtocolTerminalReason, Reachability, RunCompletionReason};
+pub use lifecycle::{
+    ConflictKind, Connection, DeregistrationOutcome, DeregistrationSkipReason, DrainOutcome,
+    LogoutReport, ProtocolTerminalReason, Reachability, RunCompletionReason, SecretFlushReport,
+    ShutdownReport,
+};
 pub use voip::{CallError, Voip};
 
 use crate::cache::Cache;
@@ -75,7 +83,7 @@ use wacore_binary::Jid;
 
 use portable_atomic::AtomicU64;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicUsize, Ordering};
 use wacore::stanza::wire_tags::{NotificationType, StanzaTag};
 
 /// Lease that keeps decrypted-payload events enabled for one consumer.
@@ -278,7 +286,7 @@ impl wacore::socket::FrameTap for SentFrameTap {
 #[derive(Debug, Clone)]
 pub struct NodeFilter {
     tag: String,
-    attrs: Vec<(String, String)>,
+    attrs: Vec<(String, Option<String>)>,
 }
 
 impl NodeFilter {
@@ -292,7 +300,12 @@ impl NodeFilter {
 
     /// Add an attribute constraint. All attributes must match.
     pub fn attr(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.attrs.push((key.into(), value.into()));
+        self.attrs.push((key.into(), Some(value.into())));
+        self
+    }
+
+    pub(crate) fn without_attr(mut self, key: impl Into<String>) -> Self {
+        self.attrs.push((key.into(), None));
         self
     }
 
@@ -303,44 +316,116 @@ impl NodeFilter {
 
     fn matches(&self, node: &wacore_binary::NodeRef<'_>) -> bool {
         node.tag == self.tag.as_str()
-            && self.attrs.iter().all(|(k, v)| {
-                node.get_attr(k.as_str())
-                    .is_some_and(|attr| attr == v.as_str())
+            && self.attrs.iter().all(|(k, v)| match v {
+                Some(value) => node
+                    .get_attr(k.as_str())
+                    .is_some_and(|attr| attr == value.as_str()),
+                None => node.get_attr(k.as_str()).is_none(),
             })
     }
 }
 
-struct NodeWaiter {
+struct NodeWaiterEntry<T> {
+    id: u64,
     filter: NodeFilter,
-    tx: futures::channel::oneshot::Sender<Arc<wacore_binary::OwnedNodeRef>>,
+    tx: futures::channel::oneshot::Sender<Arc<T>>,
 }
 
-struct SentNodeWaiter {
-    filter: NodeFilter,
-    tx: futures::channel::oneshot::Sender<Arc<Node>>,
+type NodeWaiterEntries<T> = std::sync::Mutex<Vec<NodeWaiterEntry<T>>>;
+
+/// An immediately registered, owned node subscription.
+///
+/// Dropping this future removes its filter without waiting for traffic. It does
+/// not keep the client alive. Incoming subscriptions survive reconnect; outgoing
+/// diagnostic subscriptions are cancelled when the connection is cleaned up.
+#[must_use = "dropping the waiter cancels its subscription"]
+pub struct NodeWaiter<T> {
+    rx: futures::channel::oneshot::Receiver<Arc<T>>,
+    entries: std::sync::Weak<NodeWaiterEntries<T>>,
+    count: Arc<AtomicUsize>,
+    id: u64,
 }
 
-fn resolve_waiters(
-    waiters_mutex: &std::sync::Mutex<Vec<NodeWaiter>>,
+impl<T> NodeWaiter<T> {
+    /// Inspect a buffered match without waiting. A pending subscription remains
+    /// registered until it resolves or this handle is dropped.
+    pub fn try_recv(&mut self) -> Result<Option<Arc<T>>, futures::channel::oneshot::Canceled> {
+        self.rx.try_recv()
+    }
+}
+
+impl<T> Future for NodeWaiter<T> {
+    type Output = Result<Arc<T>, futures::channel::oneshot::Canceled>;
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        std::pin::Pin::new(&mut self.rx).poll(cx)
+    }
+}
+
+impl<T> Drop for NodeWaiter<T> {
+    fn drop(&mut self) {
+        if let Some(entries) = self.entries.upgrade() {
+            let mut entries = entries.lock().unwrap_or_else(|p| p.into_inner());
+            let removed = entries
+                .iter()
+                .position(|entry| entry.id == self.id)
+                .map(|index| {
+                    let entry = entries.swap_remove(index);
+                    self.count.fetch_sub(1, Ordering::Release);
+                    entry
+                });
+            drop(entries);
+            drop(removed);
+        }
+    }
+}
+
+fn register_node_waiter<T>(
+    entries: &Arc<NodeWaiterEntries<T>>,
+    count: &Arc<AtomicUsize>,
+    filter: NodeFilter,
+) -> NodeWaiter<T> {
+    static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    let (tx, rx) = futures::channel::oneshot::channel();
+    let mut locked = entries.lock().unwrap_or_else(|p| p.into_inner());
+    locked.push(NodeWaiterEntry { id, filter, tx });
+    count.fetch_add(1, Ordering::Release);
+    NodeWaiter {
+        rx,
+        entries: Arc::downgrade(entries),
+        count: count.clone(),
+        id,
+    }
+}
+
+fn resolve_waiters<T>(
+    waiters_mutex: &NodeWaiterEntries<T>,
     counter: &AtomicUsize,
-    node: &Arc<wacore_binary::OwnedNodeRef>,
+    node: &Arc<T>,
+    nr: &wacore_binary::NodeRef<'_>,
 ) {
-    let nr = node.get();
     let mut waiters = waiters_mutex
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut ready = Vec::new();
     let mut i = 0;
     while i < waiters.len() {
-        if waiters[i].tx.is_canceled() {
-            waiters.swap_remove(i);
-            counter.fetch_sub(1, Ordering::Release);
-        } else if waiters[i].filter.matches(nr) {
+        if waiters[i].filter.matches(nr) {
             let w = waiters.swap_remove(i);
             counter.fetch_sub(1, Ordering::Release);
-            let _ = w.tx.send(Arc::clone(node));
+            ready.push(w.tx);
         } else {
             i += 1;
         }
+    }
+    // A custom waker may synchronously drop a handle and re-enter the registry.
+    drop(waiters);
+    for tx in ready {
+        let _ = tx.send(Arc::clone(node));
     }
 }
 
@@ -382,9 +467,6 @@ use crate::socket::{NoiseSocket, SocketError, error::EncryptSendError};
 use crate::sync_task::MajorSyncTask;
 use wacore::runtime::Runtime;
 
-/// Type alias for chatstate event handler functions.
-type ChatStateHandler = Arc<dyn Fn(ChatStateEvent) + Send + Sync>;
-
 /// Per-chat lane for sequential message processing. Combines the enqueue lock
 /// and queue sender into a single cached entry (one lookup instead of two).
 /// Keyed by `Jid` to avoid per-message `to_string()` allocation.
@@ -399,18 +481,29 @@ pub(crate) struct ChatLane {
 }
 
 impl ChatLane {
+    #[cfg(test)]
     pub(crate) fn try_enqueue(
         &self,
         node: Arc<wacore_binary::OwnedNodeRef>,
     ) -> Result<(), async_channel::TrySendError<QueuedChatMessage>> {
+        self.try_enqueue_scoped(node, wacore::runtime::ShutdownSignal::never())
+    }
+
+    pub(crate) fn try_enqueue_scoped(
+        &self,
+        node: Arc<wacore_binary::OwnedNodeRef>,
+        shutdown: wacore::runtime::ShutdownSignal,
+    ) -> Result<(), async_channel::TrySendError<QueuedChatMessage>> {
         self.queue_tx.try_send(QueuedChatMessage {
             node,
+            shutdown,
             lane_liveness: Arc::clone(&self.enqueue_lock),
         })
     }
 }
 
 pub(crate) struct QueuedChatMessage {
+    pub shutdown: wacore::runtime::ShutdownSignal,
     pub node: Arc<wacore_binary::OwnedNodeRef>,
     pub lane_liveness: Arc<Mutex<()>>,
 }
@@ -561,17 +654,25 @@ pub struct MemoryReport {
     /// Waiters parked on outgoing nodes, the pre-encryption counterpart of
     /// [`Self::node_waiters`]. Each retains a filter and a oneshot sender.
     pub sent_node_waiters: usize,
+    /// Distinct pending media reuploads, shared by identical subscribers.
+    /// Counts operations, not subscribers; each retains one target and media key.
+    pub media_reuploads: usize,
     pub pending_retries: usize,
     /// Numbers with a `refresh_lid` re-resolve in flight. Bounded by the
     /// number of distinct peers acked at once; a value that stays high
     /// means refreshes are not completing, not that many were requested.
     pub pending_lid_refreshes: usize,
+    /// Sent group-history message IDs by payload kind. Capped at 1024
+    /// short-ID entries, so a value pinned at the cap means steady history
+    /// traffic, not a leak; ID bytes are bounded by the cap and need no
+    /// byte counter.
+    pub history_payload_ids: u64,
     pub presence_subscriptions: usize,
     pub app_state_key_requests: usize,
-    /// Expanded app-state keys the processor holds in memory. No capacity cap
-    /// and no TTL — one entry per distinct key id the server's patches
-    /// reference, emptied only on reconnect. Zero until the first app-state
-    /// sync builds the processor.
+    /// Expanded app-state keys the processor holds in memory. Capped at 32
+    /// entries, with the oldest inserted key evicted first. The cache survives
+    /// reconnects and stays empty until the first app-state sync builds the
+    /// processor.
     pub app_state_key_cache: usize,
     /// Collections with an outstanding snapshot-recovery request.
     ///
@@ -579,13 +680,17 @@ pub struct MemoryReport {
     /// reply consumes the entry, so it is reported rather than assumed small.
     pub app_state_recovery_requests: usize,
     pub app_state_syncing: usize,
+    /// Synced audience retention. `entries` counts top-level JIDs, custom-list
+    /// records, and JIDs inside those lists. `bytes` attributes the shared
+    /// action allocation once.
+    pub status_privacy: CollectionStats,
     pub signal_sessions: CollectionStats,
     pub signal_identities: CollectionStats,
     pub signal_sender_keys: CollectionStats,
     /// What the optional subsystems attached to this build retain. Empty when
     /// none is attached. One field rather than a `cfg`'d field per subsystem,
     /// so the report has one shape whatever was compiled; see
-    /// `agent_docs/subsystem_boundary.md`.
+    /// `agent_docs/architecture.md`.
     pub subsystems: Vec<SubsystemMemory>,
     #[cfg(feature = "plugins")]
     pub plugins: u64,
@@ -659,7 +764,7 @@ pub struct SubsystemMemory {
 impl MemoryReport {
     /// Common byte-carrying collections used by both totals and `Display`.
     /// Feature-specific collections stay beside their gated report section.
-    fn collections(&self) -> [(&'static str, &CollectionStats); 18] {
+    fn collections(&self) -> [(&'static str, &CollectionStats); 19] {
         [
             ("group_cache:", &self.group_cache),
             ("device_registry_cache:", &self.device_registry_cache),
@@ -679,6 +784,7 @@ impl MemoryReport {
             ("inbound_commit_batch:", &self.inbound_commit_batch),
             ("offline_receipts:", &self.offline_receipt_buffer),
             ("core_event_handlers:", &self.core_event_handlers),
+            ("status_privacy:", &self.status_privacy),
         ]
     }
 
@@ -745,6 +851,7 @@ impl MemoryReport {
             ("response_waiters", n(self.response_waiters)),
             ("node_waiters", n(self.node_waiters)),
             ("sent_node_waiters", n(self.sent_node_waiters)),
+            ("media_reuploads", n(self.media_reuploads)),
             ("pending_retries", n(self.pending_retries)),
             ("pending_lid_refreshes", n(self.pending_lid_refreshes)),
             ("presence_subscriptions", n(self.presence_subscriptions)),
@@ -755,6 +862,7 @@ impl MemoryReport {
                 n(self.app_state_recovery_requests),
             ),
             ("app_state_syncing", n(self.app_state_syncing)),
+            ("status_privacy", self.status_privacy.entries),
             ("signal_sessions", self.signal_sessions.entries),
             ("signal_identities", self.signal_identities.entries),
             ("signal_sender_keys", self.signal_sender_keys.entries),
@@ -848,7 +956,9 @@ impl std::fmt::Display for MemoryReport {
         writeln!(f, "  response_waiters:       {}", self.response_waiters)?;
         writeln!(f, "  node_waiters:           {}", self.node_waiters)?;
         writeln!(f, "  sent_node_waiters:      {}", self.sent_node_waiters)?;
+        writeln!(f, "  media_reuploads:        {}", self.media_reuploads)?;
         writeln!(f, "  pending_retries:        {}", self.pending_retries)?;
+        writeln!(f, "  history_payload_ids:    {}", self.history_payload_ids)?;
         writeln!(
             f,
             "  pending_lid_refreshes:  {}",
@@ -871,6 +981,7 @@ impl std::fmt::Display for MemoryReport {
             self.app_state_recovery_requests
         )?;
         writeln!(f, "  app_state_syncing:      {}", self.app_state_syncing)?;
+        line(f, "status_privacy:", &self.status_privacy)?;
         writeln!(f, "--- Signal store caches ---")?;
         for (name, c) in &collections[LID_PN_END..LID_PN_END + SIGNAL_CACHES] {
             line(f, name, c)?;
@@ -1098,7 +1209,7 @@ impl std::fmt::Display for ConnectStage {
 }
 
 /// Failure modes of [`Client::connect`] and of the readiness waiters
-/// ([`Client::wait_for_socket`], [`Client::wait_for_connected`]).
+/// ([`Client::wait_for_socket_ready`], [`Client::wait_for_session_ready`]).
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum ConnectError {
@@ -1108,7 +1219,8 @@ pub enum ConnectError {
     /// Construction never completed, so the attempt was rejected before any I/O.
     #[error("client construction did not activate")]
     NotActivated,
-    /// The client was shut down. Shutdown is final, so build a new client
+    /// The client was shut down or ended by a terminal protocol verdict.
+    /// This is final, so build a new client
     /// rather than reconnecting this one.
     #[error("client has been shut down")]
     Shutdown,
@@ -1432,6 +1544,54 @@ impl ResponseWaiterMap {
     }
 }
 
+/// Preference and irreversible protocol verdict share one atomic word so a
+/// concurrent host re-enable cannot erase the verdict. The Arc stays the same
+/// size as the former raw atomic handle; no extra Client attachment is needed.
+struct AutoReconnect(AtomicU8);
+
+impl AutoReconnect {
+    const ENABLED: u8 = 1;
+    const TERMINAL: u8 = 2;
+
+    fn new(enabled: bool) -> Self {
+        Self(AtomicU8::new(u8::from(enabled)))
+    }
+
+    fn load(&self, ordering: Ordering) -> bool {
+        self.0.load(ordering) & Self::ENABLED != 0
+    }
+
+    fn swap(&self, enabled: bool, ordering: Ordering) -> bool {
+        let previous = self
+            .0
+            .fetch_update(ordering, Ordering::Relaxed, |state| {
+                Some(if enabled && state & Self::TERMINAL == 0 {
+                    state | Self::ENABLED
+                } else {
+                    state & !Self::ENABLED
+                })
+            })
+            .unwrap_or_else(|state| state);
+        previous & Self::ENABLED != 0
+    }
+
+    fn store(&self, enabled: bool, ordering: Ordering) {
+        self.swap(enabled, ordering);
+    }
+
+    fn stop_permanently(&self) {
+        let _ = self
+            .0
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+                Some((state | Self::TERMINAL) & !Self::ENABLED)
+            });
+    }
+
+    fn is_terminal(&self) -> bool {
+        self.0.load(Ordering::Acquire) & Self::TERMINAL != 0
+    }
+}
+
 /// A single WhatsApp session: the connection, the Signal state, and every
 /// protocol operation built on top of them.
 ///
@@ -1450,7 +1610,7 @@ impl ResponseWaiterMap {
 /// # Lifecycle
 ///
 /// [`Client::run`] owns the session: it connects, keeps the socket alive, and
-/// reconnects with backoff until [`Client::disconnect`] is called or the device
+/// reconnects with backoff until [`Client::shutdown`] is called or the device
 /// is logged out. [`Client::connect`] performs a single connection attempt
 /// without the supervision loop, for hosts that manage retries themselves.
 ///
@@ -1464,11 +1624,31 @@ impl ResponseWaiterMap {
 ///
 /// # Sending
 ///
-/// [`Client::send_message`] covers the common path;
-/// [`Client::send_message_with_options`] takes a [`SendOptions`](crate::send::SendOptions)
-/// for message-id pinning, ephemeral expiration, and cache freshness. Domain
+/// [`Client::send_message`] covers the default-content shortcut;
+/// [`Client::send`] takes a [`SendRequest`](crate::SendRequest), with
+/// [`SendOptions`](crate::SendOptions) for message-id pinning, ephemeral
+/// expiration, and cache freshness. Domain
 /// operations hang off accessors such as [`Client::groups`], [`Client::contacts`],
 /// and [`Client::presence`].
+///
+/// # Encapsulated implementation state
+///
+/// Use [`Self::set_auto_reconnect`], [`Self::http_client`], builder-installed
+/// encrypted handlers, and [`Self::memory_report`] instead of implementation
+/// containers. These fields are deliberately unavailable to consumers:
+///
+/// ```compile_fail,E0616
+/// fn raw_cache(client: &whatsapp_rust::Client) { let _ = &client.group_cache; }
+/// ```
+/// ```compile_fail,E0616
+/// fn raw_policy(client: &whatsapp_rust::Client) { let _ = &client.enable_auto_reconnect; }
+/// ```
+/// ```compile_fail,E0616
+/// fn raw_handlers(client: &whatsapp_rust::Client) { let _ = &client.custom_enc_handlers; }
+/// ```
+/// ```compile_fail,E0616
+/// fn raw_http(client: &whatsapp_rust::Client) { let _ = &client.http_client; }
+/// ```
 pub struct Client {
     pub(crate) runtime: Arc<dyn Runtime>,
     pub(crate) core: wacore::client::CoreClient,
@@ -1523,7 +1703,7 @@ pub struct Client {
     /// including reconnects, reads this same value, so the policy cannot
     /// change under an in-flight handshake.
     pub(crate) noise_cert_policy: wacore::handshake::NoiseCertPolicy,
-    /// Terminal shutdown (process-wide). Fired ONLY by `disconnect()`.
+    /// Terminal shutdown (process-wide). Fired by shutdown, logout or synchronous drop cleanup.
     /// Long-lived subscribers that must outlive reconnect cycles (saver,
     /// device registry cleanup) subscribe here.
     pub(crate) shutdown_notifier: wacore::runtime::ShutdownNotifier,
@@ -1574,11 +1754,14 @@ pub struct Client {
     /// Generic node waiters for waiting on specific stanzas by tag/attributes.
     /// Uses std::sync::Mutex (not tokio) since the critical section is trivial.
     /// Guarded by `node_waiter_count` for zero-cost when no waiters are active.
-    node_waiters: std::sync::Mutex<Vec<NodeWaiter>>,
-    node_waiter_count: AtomicUsize,
+    node_waiters: Arc<NodeWaiterEntries<wacore_binary::OwnedNodeRef>>,
+    node_waiter_count: Arc<AtomicUsize>,
     /// Waiters for raw outgoing nodes before encryption.
-    sent_node_waiters: std::sync::Mutex<Vec<SentNodeWaiter>>,
-    sent_node_waiter_count: AtomicUsize,
+    sent_node_waiters: Arc<NodeWaiterEntries<Node>>,
+    sent_node_waiter_count: Arc<AtomicUsize>,
+
+    pub(crate) media_reuploads:
+        std::sync::Mutex<HashMap<String, crate::features::MediaReuploadInFlight>>,
 
     pub(crate) unique_id: String,
     pub(crate) id_counter: Arc<AtomicU64>,
@@ -1641,7 +1824,7 @@ pub struct Client {
 
     /// Lazily built on the first group send and never replaced afterwards, so a
     /// `OnceLock` keeps the read on that path down to an atomic load.
-    pub group_cache: std::sync::OnceLock<Arc<GroupCache>>,
+    pub(crate) group_cache: std::sync::OnceLock<Arc<GroupCache>>,
 
     pub(crate) expected_disconnect: AtomicBool,
     /// Set by `reconnect()` to suppress the "Message loop exited with an error" warning.
@@ -1651,6 +1834,8 @@ pub struct Client {
     /// Connection generation counter - incremented on each new connection.
     /// Used to detect stale post-login tasks from previous connections.
     pub(crate) connection_generation: Arc<AtomicU64>,
+    #[cfg(feature = "bench-harness")]
+    pub(crate) bench_startup: Arc<bench_startup::StartupTasks>,
 
     /// Cache for recent messages (serialized bytes) for retry functionality.
     /// Uses an in-process cache with TTL and max capacity for automatic eviction.
@@ -1673,6 +1858,12 @@ pub struct Client {
     pub(crate) fail_next_device_list_write: AtomicBool,
 
     pub(crate) pending_retries: Arc<std::sync::Mutex<HashSet<String>>>,
+
+    /// Message IDs of sent group-history bundles and notices with their
+    /// payload kind (see [`crate::retry::HistoryPayloadRegistry`}). Lets
+    /// retry handling skip sender-key repair for pairwise bundles even on
+    /// a recent-message cache miss, without loading message contents.
+    pub(crate) history_payload_ids: Arc<std::sync::Mutex<crate::retry::HistoryPayloadRegistry>>,
 
     /// Identities with a `refresh_lid` re-resolve in flight, keyed by
     /// `(connection_generation, PN-side JID)`. A burst of sends to one stale
@@ -1727,7 +1918,7 @@ pub struct Client {
     /// window does not end because our socket did.
     pub(crate) duplicate_dispatch_suppressed: AtomicU64,
 
-    pub enable_auto_reconnect: Arc<AtomicBool>,
+    enable_auto_reconnect: Arc<AutoReconnect>,
     /// Set by [`Client::pause`] and cleared by [`Client::resume`]: the run loop
     /// parks instead of connecting for as long as it holds.
     ///
@@ -1835,7 +2026,7 @@ pub struct Client {
     /// Task count, retained payload storage, peaks, and idle notification for
     /// history sync work.
     pub(crate) history_sync_activity: Arc<crate::sync_task::HistorySyncActivity>,
-    /// Flushed by `disconnect()`/`reconnect()` before tearing down the transport
+    /// Flushed by `shutdown()`/`reconnect()` before tearing down the transport
     /// so in-flight delivery receipts aren't dropped with `NotConnected`
     /// (issue #571).
     pub(crate) outbound_flush: Arc<crate::flush_scope::FlushScope>,
@@ -1869,7 +2060,7 @@ pub struct Client {
     pub(crate) socket_ready_notifier: event_listener::Event,
     /// Set to `true` only when `dispatch_connected()` fires (once the critical
     /// sync has an answer, clean or not). Reset on each new connection attempt.
-    /// Used by `wait_for_connected()` to avoid a false-positive fast path when
+    /// Used by `wait_for_session_ready()` to avoid a false-positive fast path when
     /// the client is logged in but critical app state hasn't been asked for yet.
     pub(crate) is_ready: AtomicBool,
     /// Notifier for when the client is fully connected and logged in.
@@ -1913,13 +2104,13 @@ pub struct Client {
     /// Per-client state of every optional subsystem attached to this build,
     /// each under its own type, in one field rather than one field per
     /// subsystem. Empty, and zero-sized, in a build with none attached; see
-    /// `agent_docs/subsystem_boundary.md`.
+    /// `agent_docs/architecture.md`.
     pub(crate) subsystems: subsystem::Subsystems,
 
     /// Custom handlers for encrypted message types. Set once at `Bot::build` and
     /// immutable afterward, so the receive hot path reads it with a plain
     /// `OnceLock::get` (no lock) and no per-node guard acquisition.
-    pub custom_enc_handlers: std::sync::OnceLock<HashMap<String, Arc<dyn EncHandler>>>,
+    pub(crate) custom_enc_handlers: std::sync::OnceLock<HashMap<String, Arc<dyn EncHandler>>>,
 
     /// Optional inbound durability hook. When set, the transport ack for a
     /// decrypted user message is deferred until the hook commits it, converting
@@ -1928,6 +2119,14 @@ pub struct Client {
     /// at-most-once behavior with zero overhead.
     pub(crate) inbound_durability_hook:
         std::sync::OnceLock<Arc<dyn crate::types::durability_hook::InboundDurabilityHook>>,
+
+    /// Optional whole-envelope group capture before effects and ACK; fixed at build.
+    pub(crate) group_notification_durability_hook:
+        std::sync::OnceLock<Arc<dyn crate::GroupNotificationDurabilityHook>>,
+
+    /// History capture is independent of message durability and immutable after build.
+    pub(crate) history_sync_capture_hook:
+        std::sync::OnceLock<Arc<dyn crate::types::durability_hook::HistorySyncCaptureHook>>,
 
     /// Optional retry-receipt admission policy (see
     /// [`crate::types::retry_admission::RetryAdmission`]): an operator opt-in to
@@ -1941,21 +2140,24 @@ pub struct Client {
     /// for one that fails to decrypt. See [`Client::set_withhold_receipts`].
     pub(crate) withhold_receipts: std::sync::atomic::AtomicBool,
 
+    /// Optional run-loop dial admission policy, fixed during assembly.
+    pub(crate) connect_admission:
+        Option<Arc<dyn crate::types::connect_admission::ConnectAdmission>>,
     /// Optional inbound history-sync admission policy, fixed during assembly.
     pub(crate) history_sync_admission:
         Option<Arc<dyn crate::types::history_sync_admission::HistorySyncAdmission>>,
 
-    /// Chat state (typing indicator) handlers registered by external consumers.
-    /// Each handler receives a `ChatStateEvent` describing the chat, optional participant and state.
-    ///
-    /// Copy-on-write behind a sync lock, guarded by `chatstate_handler_count` so
-    /// the default (no handler registered) never takes the lock nor builds the
-    /// event that only a handler would read. The outer lock is inline (`Client`
-    /// is always behind `Arc`); only the inner snapshot is `Arc`-shared.
-    pub(crate) chatstate_handlers: std::sync::RwLock<Arc<[ChatStateHandler]>>,
-    pub(crate) chatstate_handler_count: AtomicUsize,
+    /// Live chatstate adapters owned by the event bus (including retired snapshots).
+    /// Handler storage and filtering belong exclusively to the core event bus.
+    pub(crate) chatstate_handler_count: Arc<AtomicUsize>,
 
-    pub(crate) pdo_pending_requests: Cache<ChatMessageId, crate::pdo::PendingPdoRequest>,
+    pub(crate) pdo_pending_requests: Cache<
+        ChatMessageId,
+        (
+            crate::pdo::PendingPdoRequest,
+            Arc<crate::pdo::PdoRequestMemo>,
+        ),
+    >,
 
     /// Messages already covered by a placeholder-resend PDO request. Mirrors
     /// the session-lifetime set in
@@ -1968,7 +2170,9 @@ pub struct Client {
     /// is a purely local gate that never has to agree with anything the phone
     /// sends back, so it can name the message precisely; the pending map has
     /// to match a response and keeps the key the phone answers with.
-    pub(crate) pdo_requested: Cache<wacore::types::message::SenderMessageId, ()>,
+    pub(crate) pdo_requested:
+        Cache<wacore::types::message::SenderMessageId, Arc<crate::pdo::PdoRequestMemo>>,
+    pub(crate) pdo_explicit_published: AtomicBool,
 
     /// LRU cache for device registry (matches WhatsApp Web's 5000 entry limit).
     /// Maps user ID to DeviceListRecord for fast device existence checks.
@@ -2027,11 +2231,14 @@ pub struct Client {
     /// Router for dispatching stanzas to their appropriate handlers
     pub(crate) stanza_router: crate::handlers::router::StanzaRouter,
 
+    /// Missing IB capabilities already warned about, retained across reconnects.
+    pub(crate) unsupported_ib_warnings: AtomicU8,
+
     /// Whether to send ACKs synchronously or in a background task
     pub(crate) synchronous_ack: bool,
 
     /// HTTP client for making HTTP requests (media upload/download, version fetching)
-    pub http_client: Arc<dyn crate::http::HttpClient>,
+    pub(crate) http_client: Arc<dyn crate::http::HttpClient>,
 
     /// Version override for testing or manual specification
     pub(crate) override_version: Option<(u32, u32, u32)>,

@@ -1,7 +1,21 @@
+//! Select capture by origin; no single hook covers all incoming content.
+//!
+//! | Origin | Commit gate before ACK/receipt |
+//! | --- | --- |
+//! | Encrypted live/offline direct and group messages | [`InboundDurabilityHook`] |
+//! | Newsletter/channel messages and PDO recovery | No durable capture gate; event-only paths |
+//! | Group `w:gp2` notifications | [`crate::GroupNotificationDurabilityHook`] |
+//! | Admitted history chunks | [`HistorySyncCaptureHook`], registered separately |
+//! | Callbacks/event subscriptions | Observers, not durable capture |
+//!
+//! Each hook defines its own idempotence, cancellation and replay limits.
+//! Withholding an ACK/receipt does not promise indefinite retention or redelivery.
+
 use crate::client::Client;
 use anyhow::Result;
 use std::sync::Arc;
 pub use wacore::types::events::InboundMessage;
+use waproto::whatsapp as wa;
 
 /// Hook invoked for every decrypted inbound user message before it is
 /// acknowledged to the server, turning the consumer from at-most-once into
@@ -24,10 +38,14 @@ pub use wacore::types::events::InboundMessage;
 /// stanza ids are only unique within a `(chat, sender)`, so two chats can
 /// reuse the same id.
 ///
-/// Durable replay across process crashes requires a backend that implements the
-/// `ProtocolStore` pending-inbound methods (the bundled `SqliteStore` does).
-/// With a backend that does not, the hook still runs and still gates the ack for
-/// the live attempt, but a crash mid-commit cannot be replayed.
+/// The builder checks the `ProtocolStore` bounded pending-inbound exact/group-alias reads and
+/// conditional replacement/deletion operations, and rejects unsupported backends with
+/// [`ClientBuilderError::UnsupportedDurabilityBackend`](crate::ClientBuilderError::UnsupportedDurabilityBackend).
+/// Custom batched overrides must preserve those operations' semantics; the
+/// construction probe does not certify an arbitrary batch implementation.
+///
+/// History capture is configured independently through [`HistorySyncCaptureHook`].
+/// Registering this hook alone does not change history receipt ordering.
 ///
 /// The hook is awaited inside the receive pipeline, so a slow hook backpressures
 /// inbound processing (the same trade-off as whatsmeow's synchronous ack). Do
@@ -42,14 +60,24 @@ pub use wacore::types::events::InboundMessage;
 ///   hook does not gate them (they dispatch event-only). The same applies to PDO
 ///   placeholder recoveries (`info.unavailable_request_id` is set): their ack runs
 ///   on the PDO path, so the hook never sees them.
-/// - If the durable buffer write itself fails (e.g. disk full, after retries),
-///   the acks are suppressed, but if the process does not crash the Signal
-///   ratchet still advances and those messages degrade to at-most-once on their
-///   next redelivery (they can no longer be decrypted, and there is no buffered
-///   copy to replay). The guarantee holds whenever the buffer write succeeds.
+/// - Live plaintext backing is admitted before Signal decryption under a
+///   4 MiB budget and 400 reservations. Admission accounts for both the carrier
+///   and consumer projection plus metadata; the maximum ciphertext size is
+///   therefore smaller than 4 MiB. Capacity refusal leaves Signal untouched
+///   and sends no positive ACK. A later server redelivery can retry after
+///   capacity is released; an oversized stanza remains refused under this bound.
+/// - If a durable buffer write fails, plaintext remains owned by this Client
+///   across cancellation and reconnect, and redelivery retries storage without
+///   repeating Signal decryption. This resident copy cannot survive process
+///   termination. Crash recovery requires the pending row to have been stored
+///   durably before the process exits.
+///   Resident retry projections use encoded backing; decoded graphs belong to
+///   active processing, callbacks or consumers and are outside this backing
+///   budget. Consumer-held messages are not a bounded Client cache.
 /// - On a redelivery replay the `info` is re-parsed from the stanza, so a few
 ///   fields derived during the first dispatch (the ephemeral timer, encrypted
-///   comment threading) may be absent. The `message` body is always the original.
+///   comment threading) may be absent. The stored `message` is the consumer
+///   projection, including the resolved payload of secret messages.
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 pub trait InboundDurabilityHook: wacore::sync_marker::MaybeSendSync {
@@ -63,6 +91,66 @@ pub trait InboundDurabilityHook: wacore::sync_marker::MaybeSendSync {
     /// granularity), so one round-trip covers the lot.
     /// [`Event::Messages`](wacore::types::events::Event::Messages) then
     /// carries the exact same items: what this method committed is what event
-    /// consumers observe.
+    /// consumers observe. Publication precedes conditional pending-row cleanup
+    /// so a partial cleanup cannot discard part of this committed event. ACK
+    /// waits for the complete cleanup; an error or cancellation can therefore
+    /// leave rows to retry after the event has already been published. The
+    /// existing dispatch cache suppresses repeated events within its retention
+    /// window, including reconnects of the same Client. A process restart still
+    /// requires the idempotent durable consumer described above.
     async fn on_messages(&self, client: Arc<Client>, batch: &[InboundMessage]) -> Result<()>;
+}
+
+/// Optional capture of history-sync bytes before attempting their receipt.
+///
+/// Register with [`crate::ClientBuilder::with_history_sync_capture_hook`] or
+/// [`crate::bot::BotBuilder::with_history_sync_capture_hook`]. This hook does not
+/// enable message durability or require pending-inbound storage. Consumers
+/// migrating from `InboundDurabilityHook::on_history_sync` must implement this
+/// trait and register it separately, even when one object implements both hooks.
+///
+/// ```
+/// use std::sync::Arc;
+/// use whatsapp_rust::{ClientBuilder, HistorySyncCaptureHook};
+///
+/// fn capture_history(builder: ClientBuilder, capture: Arc<dyn HistorySyncCaptureHook>) -> ClientBuilder {
+///     builder.with_history_sync_capture_hook_arc(capture)
+/// }
+/// ```
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+pub trait HistorySyncCaptureHook: wacore::sync_marker::MaybeSendSync {
+    /// Durably capture one history-sync chunk before its `hist_sync` receipt
+    /// is sent. `compressed` is the chunk exactly as the phone uploaded it
+    /// (zlib-compressed `HistorySync`), whether it arrived inline or as a
+    /// downloaded blob.
+    ///
+    /// Return `Ok(())` only after the capture is durable. The SDK awaits this
+    /// method before attempting the receipt. Download failures, hook errors,
+    /// and cancellation before this method returns leave the chunk without a
+    /// `hist_sync` receipt. The SDK does not retry the hook or persist a replay
+    /// buffer for history chunks; withholding a receipt does not itself
+    /// guarantee that the phone will redeliver the chunk.
+    ///
+    /// Duplicate notifications can invoke this hook again, including after a
+    /// successful capture whose receipt failed to send. Make capture idempotent
+    /// by `message_id`. Downloaded bytes are decrypted but still compressed;
+    /// capture runs before decompression and protobuf validation.
+    ///
+    /// History tasks can call this hook concurrently. A slow hook holds a history
+    /// worker slot. Shutdown does not join these detached tasks or cancel an
+    /// already-running hook; use [`Client::shutdown_signal`] if the capture needs
+    /// to observe shutdown, and make partial writes safe against cancellation.
+    ///
+    /// Chunks the SDK does not process (history sync skipped, or rejected by the
+    /// admission policy) are acknowledged without calling the hook. Without a
+    /// capture hook the receipt is attempted before download, including when only
+    /// an [`InboundDurabilityHook`] is registered. There is no default capture.
+    async fn on_history_sync(
+        &self,
+        client: Arc<Client>,
+        message_id: &str,
+        sync_type: Option<wa::message::HistorySyncType>,
+        compressed: &[u8],
+    ) -> Result<()>;
 }

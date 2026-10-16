@@ -9,8 +9,12 @@ pub use waproto::whatsapp::message::event_response_message::EventResponseType;
 use crate::client::Client;
 use crate::send::{SendError, SendResult};
 
+super::creation::creation_types!(CreatedEvent, EventRef, event_ref);
+
 /// Parameters for creating an event message. Only `name` is required.
-#[derive(Debug, Clone, Default)]
+/// Use [`Self::builder`]; creation rejects a blank name before sending.
+#[derive(Debug, Clone, bon::Builder)]
+#[non_exhaustive]
 pub struct EventCreationParams {
     pub name: String,
     pub description: Option<String>,
@@ -31,13 +35,22 @@ impl<'a> Events<'a> {
         Self { client }
     }
 
-    /// Create an event. Returns the `message_secret` the creator needs to decrypt
-    /// later responses (RSVPs) via [`wacore::event::decrypt_event_response_with_secret`].
+    /// Create an E2E event. Its named result carries the secret needed to decrypt
+    /// RSVPs via [`wacore::event::decrypt_event_response_with_secret`].
+    ///
+    /// ```no_run
+    /// # use whatsapp_rust::{Client, Jid, EventCreationParams, EventResponseType};
+    /// # async fn example(client: &Client, chat: &Jid) -> whatsapp_rust::anyhow::Result<()> {
+    /// let params = EventCreationParams::builder().name("Launch".into()).build();
+    /// let created = client.events().create(chat, params).await?;
+    /// client.events().respond(&created.event_ref()?, EventResponseType::Going, None).await?;
+    /// # Ok(()) }
+    /// ```
     pub async fn create(
         &self,
         to: impl Into<Jid>,
         params: EventCreationParams,
-    ) -> Result<(SendResult, Vec<u8>), SendError> {
+    ) -> Result<CreatedEvent, SendError> {
         let to = &to.into();
         if params.name.trim().is_empty() {
             return Err(SendError::InvalidRequest(
@@ -45,49 +58,37 @@ impl<'a> Events<'a> {
             ));
         }
 
-        let mut message = wa::Message {
-            event_message: buffa::MessageField::some(build_event_message(params)),
-            ..Default::default()
+        let mut message = {
+            let mut proto = wa::Message::default();
+            proto.event_message = buffa::MessageField::some(build_event_message(params));
+            proto
         };
 
         // Events carry a per-message secret (like polls); responders derive their
         // RSVP encryption key from it. WA Web rejects an event without one
         // (Events/ValidationError MISSING_MESSAGE_SECRET).
-        let message_secret: Vec<u8> = {
-            use rand::Rng;
-            let mut secret = vec![0u8; 32];
-            rand::rng().fill_bytes(&mut secret);
-            secret
-        };
-        message.message_context_info = buffa::MessageField::some(wa::MessageContextInfo {
-            message_secret: Some(message_secret.clone()),
-            ..Default::default()
+        let message_secret = super::creation::generate_message_secret();
+        message.message_context_info = buffa::MessageField::some({
+            let mut proto = wa::MessageContextInfo::default();
+            proto.message_secret = Some(message_secret.as_bytes().to_vec());
+            proto
         });
 
-        let result = self.client.send_message(to, message).await?;
-        Ok((result, message_secret))
+        let (result, creator) = self.client.send_creation_message(to, message).await?;
+        Ok(CreatedEvent::new(result, creator, message_secret))
     }
 
-    /// RSVP to an event. `message_secret` is the event's secret (from its creation
-    /// message); `event_creator_jid` is who created the event.
+    /// RSVP using the creation's addressing, creator and validated secret.
     pub async fn respond(
         &self,
-        chat_jid: impl Into<Jid>,
-        event_msg_id: &str,
-        event_creator_jid: &Jid,
-        message_secret: &[u8],
+        target: &EventRef<'_>,
         response: EventResponseType,
         extra_guest_count: Option<i32>,
     ) -> Result<SendResult, SendError> {
-        let chat_jid = &chat_jid.into();
-        // The event secret keys the RSVP's HKDF; a wrong length is caller error,
-        // not an internal failure, so reject it before the encrypt call.
-        if message_secret.len() != 32 {
-            return Err(SendError::InvalidRequest(format!(
-                "event message_secret must be 32 bytes, got {}",
-                message_secret.len()
-            )));
-        }
+        let chat_jid = target.message().chat();
+        let event_msg_id = target.message().id().as_str();
+        let event_creator_jid = target.creator();
+        let message_secret = target.secret().as_bytes();
         let my_jid = self.client.pn().ok_or(SendError::NotLoggedIn)?;
         let my_base = my_jid.to_non_ad();
 
@@ -97,10 +98,12 @@ impl<'a> Events<'a> {
         let responder_str = responder.to_string();
         let creator_str = event_creator_jid.to_non_ad_string();
 
-        let response_msg = wa::message::EventResponseMessage {
-            response: Some(response),
-            timestamp_ms: Some(wacore::time::now_millis()),
-            extra_guest_count,
+        let response_msg = {
+            let mut proto = wa::message::EventResponseMessage::default();
+            proto.response = Some(response);
+            proto.timestamp_ms = Some(wacore::time::now_millis());
+            proto.extra_guest_count = extra_guest_count;
+            proto
         };
 
         let (enc_payload, iv) = event::encrypt_event_response_with_secret(
@@ -111,28 +114,65 @@ impl<'a> Events<'a> {
             &responder_str,
         )?;
 
-        let from_me = my_base.is_same_user_as(event_creator_jid);
-        let enc = wa::message::EncEventResponseMessage {
-            event_creation_message_key: buffa::MessageField::some(wa::MessageKey {
-                remote_jid: Some(chat_jid.to_string()),
-                from_me: Some(from_me),
-                id: Some(event_msg_id.to_string()),
-                participant: if chat_jid.is_group() {
+        let from_me = target.message().from_me();
+        let enc = {
+            let mut proto = wa::message::EncEventResponseMessage::default();
+            proto.event_creation_message_key = buffa::MessageField::some({
+                let mut proto = wa::MessageKey::default();
+                proto.remote_jid = Some(chat_jid.to_string());
+                proto.from_me = Some(from_me);
+                proto.id = Some(event_msg_id.to_string());
+                proto.participant = if chat_jid.is_group() {
                     Some(event_creator_jid.to_string())
                 } else {
                     None
-                },
-            }),
-            enc_payload: Some(enc_payload),
-            enc_iv: Some(iv.to_vec()),
+                };
+                proto
+            });
+            proto.enc_payload = Some(enc_payload);
+            proto.enc_iv = Some(iv.to_vec());
+            proto
         };
 
-        let message = wa::Message {
-            enc_event_response_message: buffa::MessageField::some(enc),
-            ..Default::default()
+        let message = {
+            let mut proto = wa::Message::default();
+            proto.enc_event_response_message = buffa::MessageField::some(enc);
+            proto
         };
 
         self.client.send_message(chat_jid, message).await
+    }
+
+    /// Explicit raw addressing interop. Rejects malformed secret lengths before
+    /// encryption; prefer `respond` with received or created event metadata.
+    pub async fn respond_raw(
+        &self,
+        chat_jid: impl Into<Jid>,
+        event_msg_id: &str,
+        event_creator_jid: &Jid,
+        message_secret: &[u8],
+        response: EventResponseType,
+        extra_guest_count: Option<i32>,
+    ) -> Result<SendResult, SendError> {
+        let chat = chat_jid.into();
+        let secret = crate::MessageSecret::try_from(message_secret)?;
+        let own = self.client.pn().ok_or(SendError::NotLoggedIn)?.to_non_ad();
+        let message = crate::MessageRef::new(
+            &chat,
+            crate::MessageId::new(event_msg_id)?,
+            Some(event_creator_jid),
+            own.is_same_user_as(event_creator_jid)
+                || self
+                    .client
+                    .lid()
+                    .is_some_and(|lid| lid.is_same_user_as(event_creator_jid)),
+        )?;
+        self.respond(
+            &EventRef::new(message, event_creator_jid, &secret)?,
+            response,
+            extra_guest_count,
+        )
+        .await
     }
 
     /// The responder (self) JID keys the RSVP's HKDF/AAD, so it must use the event
@@ -158,16 +198,17 @@ impl Client {
 /// Build an `EventMessage` from the public params. Mirrors WA Web's
 /// `GenerateEventCreationMessageProto` field set.
 fn build_event_message(params: EventCreationParams) -> wa::message::EventMessage {
-    wa::message::EventMessage {
-        name: Some(params.name),
-        description: params.description,
-        start_time: params.start_time,
-        end_time: params.end_time,
-        join_link: params.join_link,
-        location: params.location.into(),
-        is_schedule_call: params.is_scheduled_call,
-        extra_guests_allowed: params.extra_guests_allowed,
-        ..Default::default()
+    {
+        let mut proto = wa::message::EventMessage::default();
+        proto.name = Some(params.name);
+        proto.description = params.description;
+        proto.start_time = params.start_time;
+        proto.end_time = params.end_time;
+        proto.join_link = params.join_link;
+        proto.location = params.location.into();
+        proto.is_schedule_call = params.is_scheduled_call;
+        proto.extra_guests_allowed = params.extra_guests_allowed;
+        proto
     }
 }
 
@@ -179,16 +220,15 @@ mod tests {
 
     #[test]
     fn build_event_message_maps_fields() {
-        let params = EventCreationParams {
-            name: "Launch".into(),
-            description: Some("desc".into()),
-            start_time: Some(1_700_000_000),
-            end_time: Some(1_700_003_600),
-            join_link: Some("https://call".into()),
-            is_scheduled_call: Some(true),
-            extra_guests_allowed: Some(true),
-            ..Default::default()
-        };
+        let params = EventCreationParams::builder()
+            .name("Launch".into())
+            .description("desc".into())
+            .start_time(1_700_000_000)
+            .end_time(1_700_003_600)
+            .join_link("https://call".into())
+            .is_scheduled_call(true)
+            .extra_guests_allowed(true)
+            .build();
         let msg = build_event_message(params);
         assert_eq!(msg.name.as_deref(), Some("Launch"));
         assert_eq!(msg.description.as_deref(), Some("desc"));

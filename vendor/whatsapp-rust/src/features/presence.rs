@@ -1,8 +1,8 @@
 use crate::client::{Client, ClientError};
 use log::{debug, warn};
 use thiserror::Error;
-use wacore::WireEnum;
 use wacore::iq::tctoken::build_tc_token_node;
+pub use wacore::types::presence::PresenceStatus;
 use wacore_binary::Jid;
 use wacore_binary::Node;
 use wacore_binary::builder::NodeBuilder;
@@ -18,25 +18,6 @@ pub enum PresenceError {
     /// Catch-all for internal failures with no dedicated variant.
     #[error("{0}")]
     Other(#[from] anyhow::Error),
-}
-
-/// Presence status for online/offline state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, WireEnum)]
-#[non_exhaustive]
-pub enum PresenceStatus {
-    #[wire = "available"]
-    Available,
-    #[wire = "unavailable"]
-    Unavailable,
-}
-
-impl From<crate::types::presence::Presence> for PresenceStatus {
-    fn from(p: crate::types::presence::Presence) -> Self {
-        match p {
-            crate::types::presence::Presence::Available => PresenceStatus::Available,
-            crate::types::presence::Presence::Unavailable => PresenceStatus::Unavailable,
-        }
-    }
 }
 
 /// Who announces the account's own `available` presence.
@@ -107,12 +88,11 @@ impl<'a> Presence<'a> {
 
         // Track receipt activity like whatsmeow: available -> active receipts,
         // unavailable -> back to inactive (a forced value is preserved).
-        match status {
-            PresenceStatus::Available => {
-                self.client.send_unified_session().await;
-                self.client.mark_receipts_active_on_presence();
-            }
-            PresenceStatus::Unavailable => self.client.mark_receipts_inactive_on_presence(),
+        if status == PresenceStatus::Available {
+            self.client.send_unified_session().await;
+            self.client.mark_receipts_active_on_presence();
+        } else {
+            self.client.mark_receipts_inactive_on_presence();
         }
 
         let presence_type = status.as_str();
@@ -270,7 +250,7 @@ impl Client {
                 return;
             }
 
-            if !self.is_connected() {
+            if !self.is_socket_connected() {
                 debug!("Stopping presence re-subscribe: connection closed");
                 return;
             }
@@ -348,10 +328,7 @@ mod tests {
     #[async_trait::async_trait]
     impl HttpClient for MockHttpClient {
         async fn execute(&self, _request: HttpRequest) -> Result<HttpResponse> {
-            Ok(HttpResponse {
-                status_code: 200,
-                body: br#"self.__swData=JSON.parse(/*BTDS*/"{\"dynamic_data\":{\"SiteData\":{\"server_revision\":1026131876,\"client_revision\":1026131876}}}");"#.to_vec(),
-            })
+            Ok(HttpResponse::new(200, br#"self.__swData=JSON.parse(/*BTDS*/"{\"dynamic_data\":{\"SiteData\":{\"server_revision\":1026131876,\"client_revision\":1026131876}}}");"#.to_vec()))
         }
     }
 
@@ -361,7 +338,7 @@ mod tests {
             uuid::Uuid::new_v4()
         );
         Arc::new(
-            SqliteStore::new(&temp_db)
+            SqliteStore::open(&temp_db)
                 .await
                 .expect("Failed to create test SqliteStore"),
         ) as Arc<dyn Backend>

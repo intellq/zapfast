@@ -10,14 +10,16 @@
 //! ```no_run
 //! # fn build(upload: whatsapp_rust::upload::UploadResponse) {
 //! use whatsapp_rust::media::{self, ImageOptions};
-//! let _msg = media::image_message(upload, ImageOptions { caption: Some("hi".into()), ..Default::default() });
+//! let _msg = media::image_message(upload, ImageOptions::default().with_caption("hi"));
 //! # }
 //! ```
 
 use crate::upload::UploadResponse;
 use waproto::whatsapp as wa;
 
+/// Optional image metadata. An empty configuration uses the default MIME type.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct ImageOptions {
     pub caption: Option<String>,
     /// Defaults to `image/jpeg`.
@@ -26,7 +28,9 @@ pub struct ImageOptions {
     pub context_info: Option<Box<wa::ContextInfo>>,
 }
 
+/// Optional video metadata. An empty configuration uses the default MIME type.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct VideoOptions {
     pub caption: Option<String>,
     /// Defaults to `video/mp4`.
@@ -38,7 +42,9 @@ pub struct VideoOptions {
     pub context_info: Option<Box<wa::ContextInfo>>,
 }
 
+/// Optional document metadata. An empty configuration uses the default MIME type.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct DocumentOptions {
     /// Defaults to `application/octet-stream`.
     pub mimetype: Option<String>,
@@ -51,7 +57,9 @@ pub struct DocumentOptions {
     pub context_info: Option<Box<wa::ContextInfo>>,
 }
 
+/// Optional audio metadata. An empty configuration uses the default MIME type.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct AudioOptions {
     /// Defaults to `audio/ogg; codecs=opus`.
     pub mimetype: Option<String>,
@@ -63,115 +71,263 @@ pub struct AudioOptions {
     pub context_info: Option<Box<wa::ContextInfo>>,
 }
 
+impl ImageOptions {
+    /// Set the image caption.
+    pub fn with_caption(mut self, caption: impl Into<String>) -> Self {
+        self.caption = Some(caption.into());
+        self
+    }
+
+    /// Override the default MIME type.
+    pub fn with_mimetype(mut self, mimetype: impl Into<String>) -> Self {
+        self.mimetype = Some(mimetype.into());
+        self
+    }
+
+    /// Set a JPEG thumbnail.
+    pub fn with_jpeg_thumbnail(mut self, thumbnail: Vec<u8>) -> Self {
+        self.jpeg_thumbnail = Some(thumbnail);
+        self
+    }
+
+    /// Attach reply, mention or other message context.
+    pub fn with_context_info(mut self, context_info: Box<wa::ContextInfo>) -> Self {
+        self.context_info = Some(context_info);
+        self
+    }
+}
+
+impl VideoOptions {
+    /// Set the video caption.
+    pub fn with_caption(mut self, caption: impl Into<String>) -> Self {
+        self.caption = Some(caption.into());
+        self
+    }
+
+    /// Override the default MIME type.
+    pub fn with_mimetype(mut self, mimetype: impl Into<String>) -> Self {
+        self.mimetype = Some(mimetype.into());
+        self
+    }
+
+    /// Set a JPEG thumbnail.
+    pub fn with_jpeg_thumbnail(mut self, thumbnail: Vec<u8>) -> Self {
+        self.jpeg_thumbnail = Some(thumbnail);
+        self
+    }
+
+    /// Set the clip duration in seconds.
+    pub fn with_duration_seconds(mut self, seconds: u32) -> Self {
+        self.duration_seconds = Some(seconds);
+        self
+    }
+
+    /// Set whether to send as a looping GIF-style clip.
+    pub fn with_gif_playback(mut self, enabled: bool) -> Self {
+        self.gif_playback = Some(enabled);
+        self
+    }
+
+    /// Attach reply, mention or other message context.
+    pub fn with_context_info(mut self, context_info: Box<wa::ContextInfo>) -> Self {
+        self.context_info = Some(context_info);
+        self
+    }
+}
+
+impl DocumentOptions {
+    /// Override the default MIME type.
+    pub fn with_mimetype(mut self, mimetype: impl Into<String>) -> Self {
+        self.mimetype = Some(mimetype.into());
+        self
+    }
+
+    /// Set the file name shown to the recipient.
+    pub fn with_file_name(mut self, file_name: impl Into<String>) -> Self {
+        self.file_name = Some(file_name.into());
+        self
+    }
+
+    /// Set the document title.
+    pub fn with_title(mut self, title: impl Into<String>) -> Self {
+        self.title = Some(title.into());
+        self
+    }
+
+    /// Set the document caption.
+    pub fn with_caption(mut self, caption: impl Into<String>) -> Self {
+        self.caption = Some(caption.into());
+        self
+    }
+
+    /// Set the document page count.
+    pub fn with_page_count(mut self, page_count: u32) -> Self {
+        self.page_count = Some(page_count);
+        self
+    }
+
+    /// Set a JPEG thumbnail.
+    pub fn with_jpeg_thumbnail(mut self, thumbnail: Vec<u8>) -> Self {
+        self.jpeg_thumbnail = Some(thumbnail);
+        self
+    }
+
+    /// Attach reply, mention or other message context.
+    pub fn with_context_info(mut self, context_info: Box<wa::ContextInfo>) -> Self {
+        self.context_info = Some(context_info);
+        self
+    }
+}
+
+impl AudioOptions {
+    /// Override the default MIME type.
+    pub fn with_mimetype(mut self, mimetype: impl Into<String>) -> Self {
+        self.mimetype = Some(mimetype.into());
+        self
+    }
+
+    /// Set the audio duration in seconds.
+    pub fn with_duration_seconds(mut self, seconds: u32) -> Self {
+        self.duration_seconds = Some(seconds);
+        self
+    }
+
+    /// Set the push-to-talk (voice note) flag.
+    pub fn with_ptt(mut self, enabled: bool) -> Self {
+        self.ptt = Some(enabled);
+        self
+    }
+
+    /// Set waveform preview bytes.
+    pub fn with_waveform(mut self, waveform: Vec<u8>) -> Self {
+        self.waveform = Some(waveform);
+        self
+    }
+
+    /// Attach reply, mention or other message context.
+    pub fn with_context_info(mut self, context_info: Box<wa::ContextInfo>) -> Self {
+        self.context_info = Some(context_info);
+        self
+    }
+}
+
 /// Build an image message from an upload result.
 pub fn image_message(upload: UploadResponse, opts: ImageOptions) -> wa::Message {
-    wa::Message {
-        image_message: buffa::MessageField::some(wa::message::ImageMessage {
-            url: Some(upload.url),
-            direct_path: Some(upload.direct_path),
-            media_key: Some(upload.media_key.to_vec()),
-            file_sha256: Some(upload.file_sha256.to_vec()),
-            file_enc_sha256: Some(upload.file_enc_sha256.to_vec()),
-            file_length: Some(upload.file_length),
-            media_key_timestamp: Some(upload.media_key_timestamp),
-            mimetype: Some(opts.mimetype.unwrap_or_else(|| "image/jpeg".to_string())),
-            caption: opts.caption,
-            jpeg_thumbnail: opts.jpeg_thumbnail,
-            context_info: opts
+    {
+        let mut proto = wa::Message::default();
+        proto.image_message = buffa::MessageField::some({
+            let mut proto = wa::message::ImageMessage::default();
+            proto.url = Some(upload.url);
+            proto.direct_path = Some(upload.direct_path);
+            proto.media_key = Some(upload.media_key.to_vec());
+            proto.file_sha256 = Some(upload.file_sha256.to_vec());
+            proto.file_enc_sha256 = Some(upload.file_enc_sha256.to_vec());
+            proto.file_length = Some(upload.file_length);
+            proto.media_key_timestamp = Some(upload.media_key_timestamp);
+            proto.mimetype = Some(opts.mimetype.unwrap_or_else(|| "image/jpeg".to_string()));
+            proto.caption = opts.caption;
+            proto.jpeg_thumbnail = opts.jpeg_thumbnail;
+            proto.context_info = opts
                 .context_info
                 .map(|ci| buffa::MessageField::some(*ci))
-                .unwrap_or_default(),
-            ..Default::default()
-        }),
-        ..Default::default()
+                .unwrap_or_default();
+            proto
+        });
+        proto
     }
 }
 
 /// Build a video message from an upload result. Carries the streaming sidecar
 /// (progressive-playback HMAC table) from the upload when present.
 pub fn video_message(upload: UploadResponse, opts: VideoOptions) -> wa::Message {
-    wa::Message {
-        video_message: buffa::MessageField::some(wa::message::VideoMessage {
-            url: Some(upload.url),
-            direct_path: Some(upload.direct_path),
-            media_key: Some(upload.media_key.to_vec()),
-            file_sha256: Some(upload.file_sha256.to_vec()),
-            file_enc_sha256: Some(upload.file_enc_sha256.to_vec()),
-            file_length: Some(upload.file_length),
-            media_key_timestamp: Some(upload.media_key_timestamp),
-            streaming_sidecar: upload.streaming_sidecar,
-            mimetype: Some(opts.mimetype.unwrap_or_else(|| "video/mp4".to_string())),
-            caption: opts.caption,
-            jpeg_thumbnail: opts.jpeg_thumbnail,
-            seconds: opts.duration_seconds,
-            gif_playback: opts.gif_playback,
-            context_info: opts
+    {
+        let mut proto = wa::Message::default();
+        proto.video_message = buffa::MessageField::some({
+            let mut proto = wa::message::VideoMessage::default();
+            proto.url = Some(upload.url);
+            proto.direct_path = Some(upload.direct_path);
+            proto.media_key = Some(upload.media_key.to_vec());
+            proto.file_sha256 = Some(upload.file_sha256.to_vec());
+            proto.file_enc_sha256 = Some(upload.file_enc_sha256.to_vec());
+            proto.file_length = Some(upload.file_length);
+            proto.media_key_timestamp = Some(upload.media_key_timestamp);
+            proto.streaming_sidecar = upload.streaming_sidecar;
+            proto.mimetype = Some(opts.mimetype.unwrap_or_else(|| "video/mp4".to_string()));
+            proto.caption = opts.caption;
+            proto.jpeg_thumbnail = opts.jpeg_thumbnail;
+            proto.seconds = opts.duration_seconds;
+            proto.gif_playback = opts.gif_playback;
+            proto.context_info = opts
                 .context_info
                 .map(|ci| buffa::MessageField::some(*ci))
-                .unwrap_or_default(),
-            ..Default::default()
-        }),
-        ..Default::default()
+                .unwrap_or_default();
+            proto
+        });
+        proto
     }
 }
 
 /// Build a document message from an upload result.
 pub fn document_message(upload: UploadResponse, opts: DocumentOptions) -> wa::Message {
-    wa::Message {
-        document_message: buffa::MessageField::some(wa::message::DocumentMessage {
-            url: Some(upload.url),
-            direct_path: Some(upload.direct_path),
-            media_key: Some(upload.media_key.to_vec()),
-            file_sha256: Some(upload.file_sha256.to_vec()),
-            file_enc_sha256: Some(upload.file_enc_sha256.to_vec()),
-            file_length: Some(upload.file_length),
-            media_key_timestamp: Some(upload.media_key_timestamp),
-            mimetype: Some(
+    {
+        let mut proto = wa::Message::default();
+        proto.document_message = buffa::MessageField::some({
+            let mut proto = wa::message::DocumentMessage::default();
+            proto.url = Some(upload.url);
+            proto.direct_path = Some(upload.direct_path);
+            proto.media_key = Some(upload.media_key.to_vec());
+            proto.file_sha256 = Some(upload.file_sha256.to_vec());
+            proto.file_enc_sha256 = Some(upload.file_enc_sha256.to_vec());
+            proto.file_length = Some(upload.file_length);
+            proto.media_key_timestamp = Some(upload.media_key_timestamp);
+            proto.mimetype = Some(
                 opts.mimetype
                     .unwrap_or_else(|| "application/octet-stream".to_string()),
-            ),
-            file_name: opts.file_name,
-            title: opts.title,
-            caption: opts.caption,
-            page_count: opts.page_count,
-            jpeg_thumbnail: opts.jpeg_thumbnail,
-            context_info: opts
+            );
+            proto.file_name = opts.file_name;
+            proto.title = opts.title;
+            proto.caption = opts.caption;
+            proto.page_count = opts.page_count;
+            proto.jpeg_thumbnail = opts.jpeg_thumbnail;
+            proto.context_info = opts
                 .context_info
                 .map(|ci| buffa::MessageField::some(*ci))
-                .unwrap_or_default(),
-            ..Default::default()
-        }),
-        ..Default::default()
+                .unwrap_or_default();
+            proto
+        });
+        proto
     }
 }
 
 /// Build an audio / voice-note message from an upload result. Carries the
 /// streaming sidecar from the upload when present.
 pub fn audio_message(upload: UploadResponse, opts: AudioOptions) -> wa::Message {
-    wa::Message {
-        audio_message: buffa::MessageField::some(wa::message::AudioMessage {
-            url: Some(upload.url),
-            direct_path: Some(upload.direct_path),
-            media_key: Some(upload.media_key.to_vec()),
-            file_sha256: Some(upload.file_sha256.to_vec()),
-            file_enc_sha256: Some(upload.file_enc_sha256.to_vec()),
-            file_length: Some(upload.file_length),
-            media_key_timestamp: Some(upload.media_key_timestamp),
-            streaming_sidecar: upload.streaming_sidecar,
-            mimetype: Some(
+    {
+        let mut proto = wa::Message::default();
+        proto.audio_message = buffa::MessageField::some({
+            let mut proto = wa::message::AudioMessage::default();
+            proto.url = Some(upload.url);
+            proto.direct_path = Some(upload.direct_path);
+            proto.media_key = Some(upload.media_key.to_vec());
+            proto.file_sha256 = Some(upload.file_sha256.to_vec());
+            proto.file_enc_sha256 = Some(upload.file_enc_sha256.to_vec());
+            proto.file_length = Some(upload.file_length);
+            proto.media_key_timestamp = Some(upload.media_key_timestamp);
+            proto.streaming_sidecar = upload.streaming_sidecar;
+            proto.mimetype = Some(
                 opts.mimetype
                     .unwrap_or_else(|| "audio/ogg; codecs=opus".to_string()),
-            ),
-            seconds: opts.duration_seconds,
-            ptt: opts.ptt,
-            waveform: opts.waveform,
-            context_info: opts
+            );
+            proto.seconds = opts.duration_seconds;
+            proto.ptt = opts.ptt;
+            proto.waveform = opts.waveform;
+            proto.context_info = opts
                 .context_info
                 .map(|ci| buffa::MessageField::some(*ci))
-                .unwrap_or_default(),
-            ..Default::default()
-        }),
-        ..Default::default()
+                .unwrap_or_default();
+            proto
+        });
+        proto
     }
 }
 
@@ -210,12 +366,10 @@ mod tests {
     fn video_carries_sidecar_and_options() {
         let msg = video_message(
             sample_upload(),
-            VideoOptions {
-                caption: Some("c".into()),
-                duration_seconds: Some(12),
-                gif_playback: Some(true),
-                ..Default::default()
-            },
+            VideoOptions::default()
+                .with_caption("c")
+                .with_duration_seconds(12)
+                .with_gif_playback(true),
         );
         let vm = msg.video_message.unwrap();
         assert_eq!(vm.streaming_sidecar.as_deref(), Some(&[9, 9, 9][..]));
@@ -229,11 +383,9 @@ mod tests {
     fn document_and_audio_set_type_specific_fields() {
         let doc = document_message(
             sample_upload(),
-            DocumentOptions {
-                file_name: Some("f.pdf".into()),
-                page_count: Some(3),
-                ..Default::default()
-            },
+            DocumentOptions::default()
+                .with_file_name("f.pdf")
+                .with_page_count(3),
         )
         .document_message
         .unwrap();
@@ -243,11 +395,9 @@ mod tests {
 
         let audio = audio_message(
             sample_upload(),
-            AudioOptions {
-                ptt: Some(true),
-                duration_seconds: Some(5),
-                ..Default::default()
-            },
+            AudioOptions::default()
+                .with_ptt(true)
+                .with_duration_seconds(5),
         )
         .audio_message
         .unwrap();
@@ -262,10 +412,7 @@ mod tests {
 
         let image_msg = image_message(
             sample_upload(),
-            ImageOptions {
-                context_info: Some(context),
-                ..Default::default()
-            },
+            ImageOptions::default().with_context_info(context),
         );
 
         let image = image_msg.image_message.unwrap();
@@ -279,10 +426,7 @@ mod tests {
 
         let video_msg = video_message(
             sample_upload(),
-            VideoOptions {
-                context_info: Some(context),
-                ..Default::default()
-            },
+            VideoOptions::default().with_context_info(context),
         );
 
         let video = video_msg.video_message.unwrap();

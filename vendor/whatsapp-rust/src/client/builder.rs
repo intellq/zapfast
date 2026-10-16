@@ -19,8 +19,10 @@ use crate::store::error::StoreError;
 use crate::store::persistence_manager::PersistenceManager;
 use crate::sync_task::MajorSyncTask;
 use crate::transport::TransportFactory;
-use crate::types::durability_hook::InboundDurabilityHook;
+use crate::types::connect_admission::ConnectAdmission;
+use crate::types::durability_hook::{HistorySyncCaptureHook, InboundDurabilityHook};
 use crate::types::enc_handler::EncHandler;
+use crate::types::group_notification_durability::GroupNotificationDurabilityHook;
 use crate::types::history_sync_admission::HistorySyncAdmission;
 use wacore::handshake::NoiseCertPolicy;
 use wacore::iq::abprops::AbProp;
@@ -54,7 +56,22 @@ impl ClientBuild {
     }
 
     /// Transfer ownership of the client and its sole sync-task receiver.
-    /// The caller must drain the receiver for history sync to keep working.
+    /// No major-sync worker is started on this path. The caller must drain the
+    /// receiver and call [`Client::process_sync_task`] for history sync to keep
+    /// working. Ordinary services already started by `build()` are unaffected;
+    /// this is not an inert-client constructor.
+    ///
+    /// ```no_run
+    /// # async fn example(build: whatsapp_rust::ClientBuild) {
+    /// let (client, receiver) = build.into_parts();
+    /// while let Ok(task) = receiver.recv().await {
+    ///     // Type-erase the instrumented sync future inside the host worker.
+    ///     let processing: whatsapp_rust::wacore::runtime::BoxFuture<'_, ()> =
+    ///         Box::pin(client.process_sync_task(task));
+    ///     processing.await;
+    /// }
+    /// # }
+    /// ```
     pub fn into_parts(self) -> (Arc<Client>, async_channel::Receiver<MajorSyncTask>) {
         (self.client, self.sync_task_receiver)
     }
@@ -109,6 +126,54 @@ pub enum ClientBuilderError {
     PluginPlan(#[from] PluginPlanError),
 }
 
+/// Shared runtime, cache and sync configuration for both construction facades.
+///
+/// Start with [`Default`] and change the fields you need. Applying options replaces
+/// the entire configuration, including the saver policy: the low-level default is
+/// no saver, whereas [`crate::bot::BotBuilder`] starts with a 30-second saver.
+/// Host dependencies and Bot callbacks are deliberately not part of this value.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct ClientOptions {
+    /// `None` keeps the client's automatic version selection.
+    pub override_version: Option<(u32, u32, u32)>,
+    /// Cache TTLs, capacities, resource pools and optional shared cache stores.
+    pub cache_config: CacheConfig,
+    /// Acknowledge history-sync notifications without processing their payloads.
+    pub skip_history_sync: bool,
+    /// Fetch server A/B props on connect; see [`ClientBuilder::with_ab_props_fetch`].
+    pub ab_props_fetch: bool,
+    /// Additional props to retain; see [`ClientBuilder::with_watched_ab_props`].
+    pub watched_ab_props: Vec<AbProp>,
+    /// Ownership of the account's own available-presence announcement.
+    pub presence_policy: PresencePolicy,
+    /// Server certificate verification for every Noise handshake.
+    pub noise_cert_policy: NoiseCertPolicy,
+    /// `None` keeps the client's default prekey batch size.
+    pub wanted_pre_key_count: Option<usize>,
+    /// Optional `(burst, refill_per_minute)` override for outbound retry resends.
+    pub resend_rate_limit: Option<(u32, u32)>,
+    /// `None` disables periodic persistence; zero is rejected during build.
+    pub background_saver_interval: Option<Duration>,
+}
+
+impl Default for ClientOptions {
+    fn default() -> Self {
+        Self {
+            override_version: None,
+            cache_config: CacheConfig::default(),
+            skip_history_sync: false,
+            ab_props_fetch: true,
+            watched_ab_props: Vec::new(),
+            presence_policy: PresencePolicy::default(),
+            noise_cert_policy: NoiseCertPolicy::default(),
+            wanted_pre_key_count: None,
+            resend_rate_limit: None,
+            background_saver_interval: None,
+        }
+    }
+}
+
 /// Runtime-validated, low-level builder for [`Client`].
 ///
 /// Unlike [`crate::bot::BotBuilder`], this builder deliberately does not use
@@ -120,21 +185,15 @@ pub struct ClientBuilder {
     persistence_manager: Option<Arc<PersistenceManager>>,
     transport_factory: Option<Arc<dyn TransportFactory>>,
     http_client: Option<Arc<dyn HttpClient>>,
-    override_version: Option<(u32, u32, u32)>,
-    cache_config: CacheConfig,
+    options: ClientOptions,
     custom_enc_handlers: HashMap<String, Arc<dyn EncHandler>>,
     inbound_durability_hook: Option<Arc<dyn InboundDurabilityHook>>,
+    history_sync_capture_hook: Option<Arc<dyn HistorySyncCaptureHook>>,
+    group_notification_durability_hook: Option<Arc<dyn GroupNotificationDurabilityHook>>,
     history_sync_admission: Option<Arc<dyn HistorySyncAdmission>>,
-    skip_history_sync: bool,
-    ab_props_fetch: bool,
-    watched_ab_props: Vec<AbProp>,
-    presence_policy: PresencePolicy,
-    noise_cert_policy: NoiseCertPolicy,
-    wanted_pre_key_count: Option<usize>,
-    resend_rate_limit: Option<(u32, u32)>,
+    connect_admission: Option<Arc<dyn ConnectAdmission>>,
     task_instrument: Option<Arc<dyn wacore::stats::TaskInstrument>>,
     alloc_meter: Option<Arc<wacore::stats::AllocMeter>>,
-    background_saver_interval: Option<Duration>,
     #[cfg(feature = "client-lifecycle")]
     lifecycle: Option<Arc<dyn ClientLifecycle>>,
     #[cfg(feature = "plugins")]
@@ -162,21 +221,15 @@ impl ClientBuilder {
             persistence_manager: None,
             transport_factory: None,
             http_client: None,
-            override_version: None,
-            cache_config: CacheConfig::default(),
+            options: ClientOptions::default(),
             custom_enc_handlers: HashMap::new(),
             inbound_durability_hook: None,
+            history_sync_capture_hook: None,
+            group_notification_durability_hook: None,
             history_sync_admission: None,
-            skip_history_sync: false,
-            ab_props_fetch: true,
-            watched_ab_props: Vec::new(),
-            presence_policy: PresencePolicy::default(),
-            noise_cert_policy: NoiseCertPolicy::default(),
-            wanted_pre_key_count: None,
-            resend_rate_limit: None,
+            connect_admission: None,
             task_instrument: None,
             alloc_meter: None,
-            background_saver_interval: None,
             #[cfg(feature = "client-lifecycle")]
             lifecycle: None,
             #[cfg(feature = "plugins")]
@@ -188,6 +241,22 @@ impl ClientBuilder {
         }
     }
 
+    pub(crate) fn task_instrument(&self) -> Option<Arc<dyn wacore::stats::TaskInstrument>> {
+        self.task_instrument.clone()
+    }
+
+    /// Replace all shared options without changing injected dependencies.
+    pub fn with_options(mut self, options: ClientOptions) -> Self {
+        self.options = options;
+        self
+    }
+
+    /// Borrow the effective shared construction options.
+    pub fn options(&self) -> &ClientOptions {
+        &self.options
+    }
+
+    /// Move a concrete runtime into this builder; use the Arc variant to share it.
     pub fn with_runtime<R>(mut self, runtime: R) -> Self
     where
         R: Runtime,
@@ -196,11 +265,13 @@ impl ClientBuilder {
         self
     }
 
+    /// Reuse an already-shared runtime without another Arc allocation.
     pub fn with_runtime_arc(mut self, runtime: Arc<dyn Runtime>) -> Self {
         self.runtime = Some(runtime);
         self
     }
 
+    /// Set the persistence manager for this session.
     pub fn with_persistence_manager(
         mut self,
         persistence_manager: Arc<PersistenceManager>,
@@ -209,6 +280,7 @@ impl ClientBuilder {
         self
     }
 
+    /// Move a concrete connection factory into this builder.
     pub fn with_transport_factory<T>(mut self, transport_factory: T) -> Self
     where
         T: TransportFactory + 'static,
@@ -217,6 +289,7 @@ impl ClientBuilder {
         self
     }
 
+    /// Reuse an already-shared connection factory.
     pub fn with_transport_factory_arc(
         mut self,
         transport_factory: Arc<dyn TransportFactory>,
@@ -225,6 +298,7 @@ impl ClientBuilder {
         self
     }
 
+    /// Move a concrete HTTP client into this builder, without requiring Clone.
     pub fn with_http_client<H>(mut self, http_client: H) -> Self
     where
         H: HttpClient + 'static,
@@ -233,6 +307,7 @@ impl ClientBuilder {
         self
     }
 
+    /// Reuse an already-shared HTTP client and its pool across sessions.
     pub fn with_http_client_arc(mut self, http_client: Arc<dyn HttpClient>) -> Self {
         self.http_client = Some(http_client);
         self
@@ -263,17 +338,21 @@ impl ClientBuilder {
         self
     }
 
+    /// Override automatic WhatsApp version selection.
     pub fn with_version_override(mut self, version: (u32, u32, u32)) -> Self {
-        self.override_version = Some(version);
+        self.options.override_version = Some(version);
         self
     }
 
+    /// Replace cache/resource settings, preserving other shared options.
     pub fn with_cache_config(mut self, cache_config: CacheConfig) -> Self {
-        self.cache_config = cache_config;
+        self.options.cache_config = cache_config;
         self
     }
 
     /// Register a handler for one encrypted payload type before the client starts.
+    /// The last registration for the same type wins. Custom handlers take
+    /// precedence over built-in handlers; the registry is frozen at build time.
     pub fn with_enc_handler<H>(mut self, payload_type: impl Into<String>, handler: H) -> Self
     where
         H: EncHandler + 'static,
@@ -283,7 +362,9 @@ impl ClientBuilder {
         self
     }
 
-    /// Register an already-shared encrypted payload handler.
+    /// Register an already-shared encrypted payload handler, preserving its Arc
+    /// identity. Uses the same last-registration-wins rule as
+    /// [`Self::with_enc_handler`].
     pub fn with_enc_handler_arc(
         mut self,
         payload_type: impl Into<String>,
@@ -291,14 +372,6 @@ impl ClientBuilder {
     ) -> Self {
         self.custom_enc_handlers
             .insert(payload_type.into(), handler);
-        self
-    }
-
-    pub(crate) fn with_custom_enc_handlers(
-        mut self,
-        handlers: HashMap<String, Arc<dyn EncHandler>>,
-    ) -> Self {
-        self.custom_enc_handlers = handlers;
         self
     }
 
@@ -317,6 +390,45 @@ impl ClientBuilder {
         hook: Arc<dyn InboundDurabilityHook>,
     ) -> Self {
         self.inbound_durability_hook = Some(hook);
+        self
+    }
+
+    /// Persist each complete group notification before effects and ACK.
+    /// See [`GroupNotificationDurabilityHook`] for cancellation and replay limits.
+    pub fn with_group_notification_durability_hook<Gh>(mut self, hook: Gh) -> Self
+    where
+        Gh: GroupNotificationDurabilityHook + 'static,
+    {
+        self.group_notification_durability_hook = Some(Arc::new(hook));
+        self
+    }
+
+    /// Register an already-shared hook. The last registration wins.
+    pub fn with_group_notification_durability_hook_arc(
+        mut self,
+        hook: Arc<dyn GroupNotificationDurabilityHook>,
+    ) -> Self {
+        self.group_notification_durability_hook = Some(hook);
+        self
+    }
+
+    /// Await history capture before its receipt, independently of message durability.
+    /// See [`HistorySyncCaptureHook`] for input, cancellation and replay limits.
+    pub fn with_history_sync_capture_hook<H>(mut self, hook: H) -> Self
+    where
+        H: HistorySyncCaptureHook + 'static,
+    {
+        self.history_sync_capture_hook = Some(Arc::new(hook));
+        self
+    }
+
+    /// Register an already-shared capture hook, preserving its Arc identity.
+    /// The last registration wins, as with [`Self::with_history_sync_capture_hook`].
+    pub fn with_history_sync_capture_hook_arc(
+        mut self,
+        hook: Arc<dyn HistorySyncCaptureHook>,
+    ) -> Self {
+        self.history_sync_capture_hook = Some(hook);
         self
     }
 
@@ -339,8 +451,25 @@ impl ClientBuilder {
         self
     }
 
+    /// Pace first and reconnect run-loop dials with a synchronous host policy.
+    /// See [`ConnectAdmission`] for cancellation and reservation limits.
+    pub fn with_connect_admission<A>(mut self, admission: A) -> Self
+    where
+        A: ConnectAdmission + 'static,
+    {
+        self.connect_admission = Some(Arc::new(admission));
+        self
+    }
+
+    /// Share a host's dial budget across clients. Manual `connect()` is unaffected.
+    pub fn with_connect_admission_arc(mut self, admission: Arc<dyn ConnectAdmission>) -> Self {
+        self.connect_admission = Some(admission);
+        self
+    }
+
+    /// Acknowledge history-sync notifications without processing them when true.
     pub fn with_skip_history_sync(mut self, skip: bool) -> Self {
-        self.skip_history_sync = skip;
+        self.options.skip_history_sync = skip;
         self
     }
 
@@ -361,7 +490,7 @@ impl ClientBuilder {
     /// the props (`lid_one_on_one_migration_enabled` defaults to off), and
     /// privacy-token and trusted-contact-token gates run on their defaults.
     pub fn with_ab_props_fetch(mut self, enabled: bool) -> Self {
-        self.ab_props_fetch = enabled;
+        self.options.ab_props_fetch = enabled;
         self
     }
 
@@ -371,14 +500,14 @@ impl ClientBuilder {
     /// watch while the catalog streams in, so the set is fixed here, before
     /// the first fetch. Accumulates across calls.
     pub fn with_watched_ab_props(mut self, props: impl IntoIterator<Item = AbProp>) -> Self {
-        self.watched_ab_props.extend(props);
+        self.options.watched_ab_props.extend(props);
         self
     }
 
     /// Choose who announces the account's own `available` presence; see
     /// [`PresencePolicy`].
     pub fn with_presence_policy(mut self, policy: PresencePolicy) -> Self {
-        self.presence_policy = policy;
+        self.options.presence_policy = policy;
         self
     }
 
@@ -389,17 +518,19 @@ impl ClientBuilder {
     /// against a mock server that cannot produce a WhatsApp-rooted chain.
     /// Fixed at build time and applied to every connect, including reconnects.
     pub fn with_noise_cert_policy(mut self, policy: NoiseCertPolicy) -> Self {
-        self.noise_cert_policy = policy;
+        self.options.noise_cert_policy = policy;
         self
     }
 
+    /// Override the prekey batch size (clamped to protocol limits at upload).
     pub fn with_wanted_pre_key_count(mut self, count: usize) -> Self {
-        self.wanted_pre_key_count = Some(count);
+        self.options.wanted_pre_key_count = Some(count);
         self
     }
 
+    /// Override the outbound retry token bucket's burst and per-minute refill.
     pub fn with_resend_rate_limit(mut self, burst: u32, refill_per_min: u32) -> Self {
-        self.resend_rate_limit = Some((burst, refill_per_min));
+        self.options.resend_rate_limit = Some((burst, refill_per_min));
         self
     }
 
@@ -422,7 +553,7 @@ impl ClientBuilder {
 
     /// Run periodic device persistence for the lifetime of the client.
     pub fn with_background_saver_interval(mut self, interval: Duration) -> Self {
-        self.background_saver_interval = Some(interval);
+        self.options.background_saver_interval = Some(interval);
         self
     }
 
@@ -489,15 +620,6 @@ impl ClientBuilder {
         self
     }
 
-    #[cfg(feature = "plugins")]
-    pub(crate) fn with_plugin_registrations(
-        mut self,
-        registrations: Vec<PluginRegistration>,
-    ) -> Self {
-        self.plugins = registrations;
-        self
-    }
-
     /// Validate dependencies, assemble an inert client, then start its services.
     pub async fn build(self) -> Result<ClientBuild, ClientBuilderError> {
         self.build_boxed().await
@@ -529,7 +651,7 @@ impl ClientBuilder {
                 .cloned()
                 .ok_or(ClientBuilderError::MissingHttpClient)?;
 
-            if self.background_saver_interval == Some(Duration::ZERO) {
+            if self.options.background_saver_interval == Some(Duration::ZERO) {
                 return Err(ClientBuilderError::InvalidBackgroundSaverInterval);
             }
 
@@ -547,33 +669,12 @@ impl ClientBuilder {
             }
 
             if self.inbound_durability_hook.is_some() {
-                probe_durability_backend(&persistence_manager.backend()).await?;
+                probe_durability_backend(&persistence_manager.backend(), &runtime).await?;
             }
 
             self.finish(runtime, persistence_manager, transport_factory, http_client)
                 .await
         })
-    }
-
-    pub(crate) async fn build_required(
-        runtime: Arc<dyn Runtime>,
-        persistence_manager: Arc<PersistenceManager>,
-        transport_factory: Arc<dyn TransportFactory>,
-        http_client: Arc<dyn HttpClient>,
-        override_version: Option<(u32, u32, u32)>,
-        cache_config: CacheConfig,
-    ) -> ClientBuild {
-        let result = Self {
-            override_version,
-            cache_config,
-            ..Self::new()
-        }
-        .finish(runtime, persistence_manager, transport_factory, http_client)
-        .await;
-        match result {
-            Ok(build) => build,
-            Err(error) => unreachable!("default lifecycle-free build failed: {error}"),
-        }
     }
 
     async fn finish(
@@ -583,6 +684,7 @@ impl ClientBuilder {
         transport_factory: Arc<dyn TransportFactory>,
         http_client: Arc<dyn HttpClient>,
     ) -> Result<ClientBuild, ClientBuilderError> {
+        let options = self.options;
         #[cfg(feature = "plugins")]
         let plugin_plan = PluginPlan::prepare(self.plugins)?;
         let runtime: Arc<dyn Runtime> = match self.task_instrument {
@@ -621,15 +723,16 @@ impl ClientBuilder {
             Arc::clone(&persistence_manager),
             transport_factory,
             http_client,
-            self.override_version,
-            self.cache_config,
+            options.override_version,
+            options.cache_config,
             ClientExtensions {
                 #[cfg(feature = "client-lifecycle")]
                 lifecycle,
                 #[cfg(feature = "plugins")]
                 plugin_host,
-                noise_cert_policy: self.noise_cert_policy,
+                noise_cert_policy: options.noise_cert_policy,
                 history_sync_admission: self.history_sync_admission,
+                connect_admission: self.connect_admission,
             },
         );
         let client = assembly.client();
@@ -665,25 +768,31 @@ impl ClientBuilder {
         let mut construction = ClientConstructionGuard::new(Arc::clone(&client));
 
         if !self.custom_enc_handlers.is_empty() {
-            let _ = client.custom_enc_handlers.set(self.custom_enc_handlers);
+            let _ = client.install_enc_handlers(self.custom_enc_handlers);
         }
         if let Some(hook) = self.inbound_durability_hook {
             let _ = client.inbound_durability_hook.set(hook);
         }
-        if self.skip_history_sync {
+        if let Some(hook) = self.group_notification_durability_hook {
+            let _ = client.group_notification_durability_hook.set(hook);
+        }
+        if let Some(hook) = self.history_sync_capture_hook {
+            let _ = client.history_sync_capture_hook.set(hook);
+        }
+        if options.skip_history_sync {
             client.set_skip_history_sync(true);
         }
-        if !self.ab_props_fetch {
+        if !options.ab_props_fetch {
             client.set_ab_props_fetch(false);
         }
-        if !self.watched_ab_props.is_empty() {
-            client.ab_props.watch_many(&self.watched_ab_props).await;
+        if !options.watched_ab_props.is_empty() {
+            client.ab_props.watch_many(&options.watched_ab_props).await;
         }
-        client.set_presence_policy(self.presence_policy);
-        if let Some(count) = self.wanted_pre_key_count {
+        client.set_presence_policy(options.presence_policy);
+        if let Some(count) = options.wanted_pre_key_count {
             client.set_wanted_pre_key_count(count);
         }
-        if let Some((burst, refill_per_min)) = self.resend_rate_limit {
+        if let Some((burst, refill_per_min)) = options.resend_rate_limit {
             client.set_resend_rate_limit(burst, refill_per_min);
         }
         if let Some(meter) = self.alloc_meter {
@@ -701,7 +810,7 @@ impl ClientBuilder {
         }
 
         let build = assembly.start();
-        if let Some(interval) = self.background_saver_interval {
+        if let Some(interval) = options.background_saver_interval {
             let saver_handle = persistence_manager.run_background_saver(
                 runtime,
                 interval,
@@ -741,6 +850,25 @@ impl ClientBuilder {
 
 async fn probe_durability_backend(
     backend: &Arc<dyn crate::store::traits::Backend>,
+    runtime: &Arc<dyn Runtime>,
+) -> Result<(), ClientBuilderError> {
+    let backend = Arc::clone(backend);
+    let (send, receive) = futures::channel::oneshot::channel();
+    // Construction cancellation must not abandon a probe that a backend
+    // worker may already have inserted. The runtime owns its entire lifetime.
+    runtime.spawn_detached(Box::pin(async move {
+        let result = probe_durability_backend_owned(&backend).await;
+        let _ = send.send(result);
+    }));
+    receive.await.map_err(|_| {
+        ClientBuilderError::UnsupportedDurabilityBackend(
+            "pending-inbound probe worker stopped".to_string(),
+        )
+    })?
+}
+
+async fn probe_durability_backend_owned(
+    backend: &Arc<dyn crate::store::traits::Backend>,
 ) -> Result<(), ClientBuilderError> {
     const PROBE_JID: &str = "0@s.whatsapp.net";
     const PROBE_PAYLOAD: &[u8] = b"probe";
@@ -748,22 +876,94 @@ async fn probe_durability_backend(
     let map_err =
         |error: StoreError| ClientBuilderError::UnsupportedDurabilityBackend(error.to_string());
 
-    backend
-        .store_pending_inbound(PROBE_JID, PROBE_JID, &probe_id, PROBE_PAYLOAD)
+    use wacore::store::traits::{
+        PendingInboundKey, PendingInboundLease, PendingInboundMutation, PendingInboundPayload,
+        PendingInboundRevision,
+    };
+    let key = PendingInboundKey {
+        chat: "0@g.us",
+        sender: "0:1@s.whatsapp.net",
+        id: &probe_id,
+    };
+    let lease = PendingInboundLease::new(Arc::new(()));
+    let bound = PROBE_PAYLOAD.len();
+    if backend
+        .read_pending_inbound_bounded(key, bound, lease.clone())
         .await
-        .map_err(map_err)?;
-    let stored = backend
-        .get_pending_inbound(PROBE_JID, PROBE_JID, &probe_id)
-        .await
-        .map_err(map_err)?;
-    backend
-        .delete_pending_inbound(PROBE_JID, PROBE_JID, &probe_id)
-        .await
-        .map_err(map_err)?;
-
-    if stored.as_deref() != Some(PROBE_PAYLOAD) {
+        .map_err(map_err)?
+        .is_some()
+    {
         return Err(ClientBuilderError::UnsupportedDurabilityBackend(
-            "pending-inbound buffer did not round-trip".to_string(),
+            "pending-inbound probe identity already exists".to_string(),
+        ));
+    }
+    let revision = PendingInboundRevision::for_bytes(PROBE_PAYLOAD);
+    let payload =
+        PendingInboundPayload::new(bytes::Bytes::from_static(PROBE_PAYLOAD), lease.clone());
+    let replaced = backend
+        .replace_pending_inbound_if(key, PendingInboundRevision::missing(), payload, bound)
+        .await;
+    if replaced
+        .as_ref()
+        .is_ok_and(|mutation| *mutation != PendingInboundMutation::Applied)
+    {
+        return Err(ClientBuilderError::UnsupportedDurabilityBackend(
+            "pending-inbound conditional insert did not apply".to_string(),
+        ));
+    }
+    // Attempt conditional cleanup even if the round-trip read fails. Never
+    // delete a replacement or an unrelated row through an unconditional path.
+    let stored = backend
+        .read_pending_inbound_bounded(key, bound, lease.clone())
+        .await;
+    let grouped = if replaced.is_ok() {
+        backend
+            .read_pending_inbound_group_bounded(
+                PendingInboundKey {
+                    chat: key.chat,
+                    sender: PROBE_JID,
+                    id: key.id,
+                },
+                bound,
+                lease.clone(),
+            )
+            .await
+    } else {
+        Ok(None)
+    };
+    // A reported insertion error can follow a visible commit. Its cleanup
+    // shares the successful probe's conditional-delete path, but only after
+    // the exact probe revision became visible. Never delete a successor.
+    let deleted = if replaced.is_ok()
+        || stored.as_ref().is_ok_and(|record| {
+            record
+                .as_ref()
+                .is_some_and(|record| record.revision() == revision)
+        }) {
+        backend
+            .delete_pending_inbound_if(key, revision, bound, lease.clone())
+            .await
+    } else {
+        Ok(PendingInboundMutation::Conflict)
+    };
+    replaced.map_err(map_err)?;
+    let stored = stored.map_err(map_err)?;
+    let grouped = grouped.map_err(map_err)?;
+    if grouped
+        .as_ref()
+        .map(|(sender, record)| (sender.as_str(), record.bytes()))
+        != Some((key.sender, PROBE_PAYLOAD))
+        || stored.as_ref().map(|record| record.bytes()) != Some(PROBE_PAYLOAD)
+        || stored.as_ref().map(|record| record.revision()) != Some(revision)
+        || deleted.map_err(map_err)? != PendingInboundMutation::Applied
+        || backend
+            .read_pending_inbound_bounded(key, bound, lease)
+            .await
+            .map_err(map_err)?
+            .is_some()
+    {
+        return Err(ClientBuilderError::UnsupportedDurabilityBackend(
+            "bounded pending-inbound CAS did not round-trip and clean up".to_string(),
         ));
     }
     Ok(())
@@ -813,6 +1013,7 @@ pub(super) struct ClientExtensions {
     pub(super) plugin_host: Option<Arc<PluginHost>>,
     pub(super) noise_cert_policy: NoiseCertPolicy,
     pub(super) history_sync_admission: Option<Arc<dyn HistorySyncAdmission>>,
+    pub(super) connect_admission: Option<Arc<dyn ConnectAdmission>>,
 }
 
 impl ClientAssembly {
@@ -1044,9 +1245,10 @@ mod tests {
             .await
             .expect("seed unrelated row");
 
+        let runtime: Arc<dyn Runtime> = Arc::new(TokioRuntime);
         let (first, second) = futures::join!(
-            probe_durability_backend(&backend),
-            probe_durability_backend(&backend)
+            probe_durability_backend(&backend, &runtime),
+            probe_durability_backend(&backend, &runtime)
         );
         first.expect("first probe");
         second.expect("second probe");
@@ -1065,6 +1267,137 @@ mod tests {
             1,
             "only the unrelated row should remain"
         );
+    }
+
+    #[tokio::test]
+    async fn durability_probe_cleans_visible_insert_errors_and_cancelled_cleanup() {
+        use wacore::store::traits::ProtocolStore;
+        for cancel in [false, true] {
+            let backend = Arc::new(wacore::store::in_memory::InMemoryBackend::new());
+            let erased: Arc<dyn crate::store::traits::Backend> = backend.clone();
+            let runtime: Arc<dyn Runtime> = Arc::new(TokioRuntime);
+            let gate = Arc::new(async_lock::Barrier::new(2));
+            if cancel {
+                backend.park_pending_delete(0, gate.clone());
+            } else {
+                backend.fail_next_pending_replace_after_commit();
+            }
+            let worker =
+                tokio::spawn(async move { probe_durability_backend(&erased, &runtime).await });
+            if cancel {
+                tokio::time::timeout(Duration::from_secs(5), gate.wait())
+                    .await
+                    .unwrap();
+                worker.abort();
+                assert!(matches!(worker.await, Err(error) if error.is_cancelled()));
+                backend.set_fail_pending_delete(None);
+                gate.wait().await;
+            } else {
+                assert!(worker.await.unwrap().is_err());
+            }
+            assert_eq!(
+                backend
+                    .delete_expired_pending_inbound(i64::MAX)
+                    .await
+                    .unwrap(),
+                0,
+                "a failed or cancelled construction must not strand its probe"
+            );
+        }
+    }
+
+    struct CaptureOnly;
+
+    #[async_trait::async_trait]
+    impl HistorySyncCaptureHook for CaptureOnly {
+        async fn on_history_sync(
+            &self,
+            _: Arc<Client>,
+            _: &str,
+            _: Option<waproto::whatsapp::message::HistorySyncType>,
+            _: &[u8],
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct MessageCommit;
+
+    #[async_trait::async_trait]
+    impl InboundDurabilityHook for MessageCommit {
+        async fn on_messages(
+            &self,
+            _: Arc<Client>,
+            _: &[crate::types::events::InboundMessage],
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn capture_only_builds_without_pending_inbound_operations() {
+        use diesel::{Connection, RunQueryDsl, SqliteConnection};
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let db = format!(
+            "file:capture_only_{}_{}?mode=memory&cache=shared",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::SeqCst)
+        );
+        let backend: Arc<dyn crate::store::traits::Backend> =
+            Arc::new(crate::store::SqliteStore::open(&db).await.unwrap());
+        let mut sql = SqliteConnection::establish(&db).unwrap();
+        // Disable only pending-inbound operations in this synthetic database.
+        // Capture has no dependency on that table, whereas message commit does.
+        diesel::sql_query("ALTER TABLE pending_inbound_messages RENAME TO unavailable_pending")
+            .execute(&mut sql)
+            .unwrap();
+        assert!(
+            backend
+                .store_pending_inbound("chat", "sender", "id", b"body")
+                .await
+                .is_err()
+        );
+        assert!(
+            backend
+                .get_pending_inbound("chat", "sender", "id")
+                .await
+                .is_err()
+        );
+        assert!(
+            backend
+                .delete_pending_inbound("chat", "sender", "id")
+                .await
+                .is_err()
+        );
+        let persistence = Arc::new(PersistenceManager::new(backend).await.unwrap());
+        let hook: Arc<dyn HistorySyncCaptureHook> = Arc::new(CaptureOnly);
+        let builder = || {
+            ClientBuilder::new()
+                .with_runtime(TokioRuntime)
+                .with_persistence_manager(persistence.clone())
+                .with_transport_factory(MockTransportFactory::new())
+                .with_http_client(MockHttpClient)
+        };
+        let build = builder()
+            .with_history_sync_capture_hook(CaptureOnly)
+            .with_history_sync_capture_hook_arc(hook.clone())
+            .build()
+            .await
+            .expect("capture-only must not probe pending-inbound storage");
+        let (client, _receiver) = build.into_parts();
+        assert!(client.inbound_durability_hook.get().is_none());
+        assert!(Arc::ptr_eq(
+            client.history_sync_capture_hook.get().unwrap(),
+            &hook
+        ));
+        assert!(matches!(
+            builder()
+                .with_history_sync_capture_hook_arc(hook)
+                .with_inbound_durability_hook(MessageCommit)
+                .build()
+                .await,
+            Err(ClientBuilderError::UnsupportedDurabilityBackend(_))
+        ));
     }
 
     #[tokio::test]
@@ -1111,18 +1444,18 @@ mod tests {
     fn noise_cert_policy_setter_stores_per_builder_value() {
         let strict = ClientBuilder::new();
         assert_eq!(
-            strict.noise_cert_policy,
+            strict.options.noise_cert_policy,
             NoiseCertPolicy::default(),
             "fresh builder carries the default policy"
         );
         let bypass =
             ClientBuilder::new().with_noise_cert_policy(NoiseCertPolicy::DangerSkipCertChainVerify);
         assert_eq!(
-            bypass.noise_cert_policy,
+            bypass.options.noise_cert_policy,
             NoiseCertPolicy::DangerSkipCertChainVerify
         );
         // No shared state: opting one builder in leaves the other alone.
-        assert_eq!(strict.noise_cert_policy, NoiseCertPolicy::default());
+        assert_eq!(strict.options.noise_cert_policy, NoiseCertPolicy::default());
     }
 
     #[test]
@@ -1504,6 +1837,43 @@ mod tests {
             .expect("complete builder")
             .into_client();
 
+        assert!(!client.major_sync_task_sender.is_closed());
+        client.signal_shutdown_sync();
+    }
+
+    #[tokio::test]
+    async fn sync_receiver_has_one_owner_and_into_client_starts_one_worker() {
+        let spawns = Arc::new(AtomicUsize::new(0));
+        let build = complete_builder()
+            .await
+            .with_runtime(CountingRuntime {
+                spawns: spawns.clone(),
+            })
+            .build()
+            .await
+            .expect("manual build");
+        let before = spawns.load(Ordering::SeqCst);
+        let (client, receiver) = build.into_parts();
+        assert_eq!(spawns.load(Ordering::SeqCst), before);
+        assert_eq!(receiver.receiver_count(), 1);
+        drop(receiver);
+        assert!(
+            client.major_sync_task_sender.is_closed(),
+            "no hidden receiver clone or consumer"
+        );
+        client.signal_shutdown_sync();
+
+        let build = complete_builder()
+            .await
+            .with_runtime(CountingRuntime {
+                spawns: spawns.clone(),
+            })
+            .build()
+            .await
+            .expect("automatic build");
+        let before = spawns.load(Ordering::SeqCst);
+        let client = build.into_client();
+        assert_eq!(spawns.load(Ordering::SeqCst), before + 1);
         assert!(!client.major_sync_task_sender.is_closed());
         client.signal_shutdown_sync();
     }

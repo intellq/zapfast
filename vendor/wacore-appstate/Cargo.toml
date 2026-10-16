@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.94"
 authors = ["João Lucas <jlucaso@hotmail.com>"]
 license = "MIT"
-repository = "https://github.com/jlucaso1/whatsapp-rust"
+repository = "https://github.com/oxidezap/whatsapp-rust"
 description = "Appstate for WhatsApp protocol (copia do fork intellq, ver VENDORED.md)"
 
 [lib]
@@ -23,8 +23,8 @@ serde-big-array = "0.5"
 serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
 sha2 = { version = "0.11.0", default-features = false }
 thiserror = "2.0.19"
-wacore-binary = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "f7468ae2920a2b0aedbd0848cf121de56a07f93c", default-features = false }
-wacore-libsignal = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "f7468ae2920a2b0aedbd0848cf121de56a07f93c" }
-waproto = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "f7468ae2920a2b0aedbd0848cf121de56a07f93c" }
+wacore-binary = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "5e72baf000aa4fb65ed89d1c955a54029a7f29a6", default-features = false }
+wacore-libsignal = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "5e72baf000aa4fb65ed89d1c955a54029a7f29a6" }
+waproto = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "5e72baf000aa4fb65ed89d1c955a54029a7f29a6" }
 
 [dev-dependencies]

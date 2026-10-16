@@ -1,4 +1,4 @@
-use crate::types::events::{Event, LazyHistorySync};
+use crate::types::events::{CallLogHistory, Event, LazyHistorySync};
 use bytes::Bytes;
 use std::sync::Arc;
 use wacore::history_sync::{
@@ -363,16 +363,29 @@ impl Client {
             notification.sync_type
         );
 
-        self.send_protocol_receipt(
-            message_id.clone(),
-            crate::types::presence::ReceiptType::HistorySync,
-        )
-        .await;
+        // With a capture hook the receipt waits until the hook has captured
+        // the chunk. Download or capture failures leave it unacknowledged.
+        let capture_hook = self.history_sync_capture_hook.get().cloned();
+        if capture_hook.is_none() {
+            self.send_protocol_receipt(
+                message_id.clone(),
+                crate::types::presence::ReceiptType::HistorySync,
+            )
+            .await;
+        }
+
+        // Exercise shutdown between the receipt decision and payload acquisition
+        // without relying on scheduler timing in the regression test.
+        #[cfg(test)]
+        if tests::SHUTDOWN_BEFORE_PAYLOAD.with(|requested| requested.replace(false)) {
+            self.signal_shutdown_sync();
+        }
 
         if self.is_shutting_down() {
             log::debug!(
-                "Aborting history sync {} after receipt during shutdown",
-                message_id
+                "Aborting history sync {} before payload acquisition during shutdown (early receipt attempted: {})",
+                message_id,
+                capture_hook.is_none()
             );
             return;
         }
@@ -387,7 +400,7 @@ impl Client {
             (inline_payload, payload_bytes)
         } else {
             log::info!("Downloading external history sync blob...");
-            if self.is_shutting_down() || !self.is_connected() {
+            if self.is_shutting_down() || !self.is_socket_connected() {
                 log::debug!(
                     "Aborting history sync {} before blob download: client disconnected",
                     message_id
@@ -398,7 +411,7 @@ impl Client {
             // pre-sizes its fresh retry buffer from the declared file length.
             // Reuse it here so a ~1 MiB history blob does not climb the Vec
             // doubling ladder (1 MiB -> 2 MiB) on every successful download.
-            match self.download(&notification).await {
+            match self.download(&notification, Default::default()).await {
                 Ok(bytes) => {
                     log::info!("Successfully downloaded history sync blob.");
                     // Payload accounting uses logical compressed bytes for
@@ -421,6 +434,30 @@ impl Client {
             }
         };
         tracker.set_payload_bytes(payload_bytes);
+
+        if let Some(hook) = capture_hook {
+            if let Err(e) = hook
+                .on_history_sync(
+                    self.clone(),
+                    &message_id,
+                    notification.sync_type,
+                    &compressed_data,
+                )
+                .await
+            {
+                log::error!(
+                    "History sync {} was not captured; withholding its receipt: {:?}",
+                    message_id,
+                    e
+                );
+                return;
+            }
+            self.send_protocol_receipt(
+                message_id.clone(),
+                crate::types::presence::ReceiptType::HistorySync,
+            )
+            .await;
+        }
 
         let device_snapshot = self.persistence_manager.get_device_snapshot();
         let own_pn = device_snapshot.pn.as_ref().map(|jid| jid.to_non_ad());
@@ -541,6 +578,12 @@ impl Client {
                 self.store_history_sync_msg_secret_entries(secret_entries, secret_seed_config)
                     .await;
 
+                // One canonical identity snapshot for the entire chunk, before
+                // any host callback can change it. This is the same predicate
+                // underlying is_own_jid, without reloading per record.
+                let identity = self.persistence_manager.get_device_snapshot();
+                let identity_known = identity.pn.is_some() || identity.lid.is_some();
+
                 // No interest pre-check: dispatch() evaluates handler interest
                 // against a single bus snapshot (and skips materializing the
                 // Arc when nobody listens), so deferring to it removes the
@@ -560,6 +603,37 @@ impl Client {
                     self.core
                         .event_bus
                         .dispatch(Event::HistorySync(Box::new(lazy_hs)));
+                }
+
+                // Preserve the legacy chunk's place in bounded/drop-newest
+                // mailboxes before the new burst consumes their capacity. This
+                // adds no reliability guarantee for an already-full mailbox.
+                for record in sync_result.call_log_records {
+                    let call_creator_jid = record
+                        .call_creator_jid
+                        .as_deref()
+                        .and_then(|raw| raw.parse::<Jid>().ok());
+                    let from_me = call_creator_jid
+                        .as_ref()
+                        .filter(|_| identity_known)
+                        .map(|jid| {
+                            crate::send::is_own_identity(
+                                identity.pn.as_ref(),
+                                identity.lid.as_ref(),
+                                jid,
+                            )
+                        });
+                    let timestamp = record.start_time.and_then(wacore::time::from_secs);
+                    self.core.event_bus.dispatch(Event::CallLogHistory(
+                        CallLogHistory::builder()
+                            .maybe_call_creator_jid(call_creator_jid)
+                            .maybe_from_me(from_me)
+                            .maybe_timestamp(timestamp)
+                            .record(Box::new(record))
+                            .maybe_sync_type(notification.sync_type.map(|t| t as i32))
+                            .maybe_chunk_order(notification.chunk_order)
+                            .build(),
+                    ));
                 }
             }
             Some((Err(e), _)) => {
@@ -776,6 +850,11 @@ mod tests {
     use waproto::whatsapp as wa;
     use waproto::whatsapp::message::HistorySyncNotification;
 
+    std::thread_local! {
+        pub(super) static SHUTDOWN_BEFORE_PAYLOAD: std::cell::Cell<bool> =
+            const { std::cell::Cell::new(false) };
+    }
+
     struct RecordingAdmission {
         decision: HistorySyncDecision,
         calls: AtomicUsize,
@@ -798,14 +877,15 @@ mod tests {
     }
 
     fn admission_notification() -> DetachedHistorySyncNotification {
-        HistorySyncNotification {
-            file_length: Some(42),
-            sync_type: Some(wa::message::HistorySyncType::INITIAL_BOOTSTRAP),
-            chunk_order: Some(7),
-            progress: Some(55),
-            peer_data_request_session_id: Some("session-test".to_string()),
-            initial_hist_bootstrap_inline_payload: Some(vec![1, 2, 3]),
-            ..Default::default()
+        {
+            let mut proto_addition = HistorySyncNotification::default();
+            proto_addition.file_length = Some(42);
+            proto_addition.sync_type = Some(wa::message::HistorySyncType::INITIAL_BOOTSTRAP);
+            proto_addition.chunk_order = Some(7);
+            proto_addition.progress = Some(55);
+            proto_addition.peer_data_request_session_id = Some("session-test".to_string());
+            proto_addition.initial_hist_bootstrap_inline_payload = Some(vec![1, 2, 3]);
+            proto_addition
         }
         .into()
     }
@@ -813,10 +893,7 @@ mod tests {
     async fn client_with_receipt_waiter(
         _name: &str,
         admission: Arc<dyn crate::HistorySyncAdmission>,
-    ) -> (
-        Arc<Client>,
-        futures::channel::oneshot::Receiver<Arc<wacore_binary::Node>>,
-    ) {
+    ) -> (Arc<Client>, crate::NodeWaiter<wacore_binary::Node>) {
         let (client, _receiver) =
             crate::test_utils::create_test_client_with_sync_receiver_and_admission(admission).await;
         client.is_running.store(true, Ordering::Relaxed);
@@ -923,6 +1000,515 @@ mod tests {
         encoder.finish().expect("zlib finish")
     }
 
+    struct CallHistoryRecorder(std::sync::Mutex<Vec<Arc<Event>>>);
+
+    impl wacore::types::events::EventHandler for CallHistoryRecorder {
+        fn handle_event(&self, event: Arc<Event>) {
+            self.0.lock().unwrap().push(event);
+        }
+
+        fn interest(&self) -> wacore::types::events::EventInterest {
+            use wacore::types::events::{EventInterest, EventKind};
+            EventInterest::of(&[EventKind::CallLogHistory, EventKind::HistorySync])
+        }
+    }
+
+    struct HarvestBeforeCallRecorder {
+        client: std::sync::Weak<Client>,
+        recorder: Arc<CallHistoryRecorder>,
+    }
+
+    impl wacore::types::events::EventHandler for HarvestBeforeCallRecorder {
+        fn handle_event(&self, event: Arc<Event>) {
+            if matches!(&*event, Event::CallLogHistory(_)) {
+                // Assert at callback time, not merely after processing returns:
+                // moving call dispatch ahead of harvest must fail this fixture.
+                let client = self.client.upgrade().unwrap();
+                let snapshot = client.persistence_manager.get_device_snapshot();
+                assert_eq!(snapshot.nct_salt.as_deref(), Some(&[17; 32][..]));
+            }
+            wacore::types::events::EventHandler::handle_event(self.recorder.as_ref(), event);
+        }
+
+        fn interest(&self) -> wacore::types::events::EventInterest {
+            wacore::types::events::EventHandler::interest(self.recorder.as_ref())
+        }
+    }
+
+    async fn process_call_history_chunk(
+        client: &Arc<Client>,
+        records: Vec<wa::CallLogRecord>,
+        order: u32,
+    ) {
+        let history = {
+            let mut proto_value = wa::HistorySync::default();
+            proto_value.sync_type = wa::history_sync::HistorySyncType::INITIAL_BOOTSTRAP;
+            proto_value.call_log_records = records;
+            proto_value.nct_salt = Some(vec![17; 32]);
+            proto_value.phone_number_to_lid_mappings = vec![{
+                let mut proto_value = wa::PhoneNumberToLIDMapping::default();
+                proto_value.pn_jid = Some("15550000002@s.whatsapp.net".into());
+                proto_value.lid_jid = Some("100000000000002@lid".into());
+                proto_value
+            }];
+            proto_value.conversations = vec![{
+                let mut proto_value = wa::Conversation::default();
+                proto_value.id = "15550000002@s.whatsapp.net".into();
+                proto_value
+            }];
+            proto_value
+        };
+        let compressed = compress_history_sync(&history);
+        let notification = {
+            let mut proto_addition = HistorySyncNotification::default();
+            proto_addition.sync_type = Some(wa::message::HistorySyncType::INITIAL_BOOTSTRAP);
+            proto_addition.chunk_order = Some(order);
+            proto_addition.initial_hist_bootstrap_inline_payload = Some(compressed);
+            proto_addition
+        };
+        client
+            .process_history_sync_task("CALL-HISTORY".into(), notification.into())
+            .await;
+    }
+
+    #[tokio::test]
+    async fn compressed_history_emits_placed_and_received_calls_after_harvest() {
+        let client = crate::test_utils::create_test_client_with_name("call_history").await;
+        client.is_running.store(true, Ordering::Relaxed);
+        for command in [
+            wacore::store::commands::DeviceCommand::SetId(Some(
+                "15550000001:3@s.whatsapp.net".parse().unwrap(),
+            )),
+            wacore::store::commands::DeviceCommand::SetLid(Some(
+                "100000000000001:3@lid".parse().unwrap(),
+            )),
+        ] {
+            client.persistence_manager.process_command(command).await;
+        }
+        let recorder = Arc::new(CallHistoryRecorder(std::sync::Mutex::new(Vec::new())));
+        client
+            .core
+            .event_bus
+            .subscribe_handler(Arc::new(HarvestBeforeCallRecorder {
+                client: Arc::downgrade(&client),
+                recorder: recorder.clone(),
+            }))
+            .detach();
+        let receipt = client.wait_for_sent_node(crate::client::NodeFilter::tag("receipt"));
+        let records = vec![
+            {
+                let mut proto_value = wa::CallLogRecord::default();
+                proto_value.call_creator_jid = Some("15550000001@s.whatsapp.net".into());
+                proto_value.call_id = Some("placed".into());
+                proto_value.start_time = Some(1_700_000_000);
+                proto_value.duration = Some(91);
+                proto_value.is_incoming = Some(true);
+                proto_value.is_video = Some(true);
+                proto_value.call_result = Some(wa::call_log_record::CallResult::CONNECTED);
+                proto_value
+            },
+            {
+                let mut proto_value = wa::CallLogRecord::default();
+                proto_value.call_creator_jid = Some("15550000002@s.whatsapp.net".into());
+                proto_value.call_id = Some("received".into());
+                proto_value.start_time = Some(1_700_000_100);
+                proto_value.is_incoming = Some(false);
+                proto_value.participants = vec![{
+                    let mut proto_value = wa::call_log_record::ParticipantInfo::default();
+                    proto_value.user_jid = Some("15550000001@s.whatsapp.net".into());
+                    proto_value
+                }];
+                proto_value
+            },
+        ];
+        process_call_history_chunk(&client, records, 7).await;
+        assert_eq!(
+            receipt
+                .await
+                .unwrap()
+                .attrs()
+                .optional_string("type")
+                .as_deref(),
+            Some("hist_sync")
+        );
+        assert_eq!(
+            client
+                .persistence_manager
+                .get_device_snapshot()
+                .nct_salt
+                .as_deref(),
+            Some(&[17; 32][..])
+        );
+        assert_eq!(
+            client
+                .lid_pn_cache
+                .get_current_lid("15550000002")
+                .await
+                .as_deref(),
+            Some("100000000000002")
+        );
+        let events = recorder.0.lock().unwrap();
+        assert_eq!(events.len(), 3);
+        for (index, direction, seconds) in [(1, true, 1_700_000_000), (2, false, 1_700_000_100)] {
+            let Event::CallLogHistory(call) = &*events[index] else {
+                panic!("expected call record");
+            };
+            assert_eq!(call.from_me, Some(direction));
+            assert_eq!(call.timestamp.unwrap().timestamp(), seconds);
+            assert_eq!(call.chunk_order, Some(7));
+            assert_eq!(
+                call.sync_type,
+                Some(wa::message::HistorySyncType::INITIAL_BOOTSTRAP as i32)
+            );
+            assert_eq!(
+                call.call_creator_jid.as_ref().unwrap().to_string(),
+                call.record.call_creator_jid.as_deref().unwrap()
+            );
+            if index == 1 {
+                assert_eq!(call.record.duration, Some(91));
+                assert_eq!(call.record.is_video, Some(true));
+                assert_eq!(
+                    call.record.call_result,
+                    Some(wa::call_log_record::CallResult::CONNECTED)
+                );
+            } else {
+                assert_eq!(call.record.participants.len(), 1);
+            }
+        }
+        let Event::HistorySync(lazy) = &*events[0] else {
+            panic!("expected legacy chunk event first");
+        };
+        assert_eq!(lazy.chunk_order(), Some(7));
+        assert_eq!(lazy.get().unwrap().call_log_records.len(), 2);
+        assert_eq!(lazy.get().unwrap().conversations.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn call_history_aliases_unknown_fields_and_replayed_chunk_boundaries() {
+        let client = crate::test_utils::create_test_client_with_name("call_history_aliases").await;
+        client.is_running.store(true, Ordering::Relaxed);
+        client
+            .persistence_manager
+            .process_command(wacore::store::commands::DeviceCommand::SetId(Some(
+                "15550000001@s.whatsapp.net".parse().unwrap(),
+            )))
+            .await;
+        client
+            .persistence_manager
+            .process_command(wacore::store::commands::DeviceCommand::SetLid(Some(
+                "100000000000001@lid".parse().unwrap(),
+            )))
+            .await;
+        let recorder = Arc::new(CallHistoryRecorder(std::sync::Mutex::new(Vec::new())));
+        client
+            .core
+            .event_bus
+            .subscribe_handler(recorder.clone())
+            .detach();
+        let creators = [
+            Some("15550000001:8@c.us"),
+            Some("100000000000001:4@lid"),
+            Some("15550000001@lid"),
+            None,
+            Some("not a jid"),
+        ];
+        let records = || {
+            creators
+                .iter()
+                .enumerate()
+                .map(|(index, creator)| {
+                    let mut proto_value = wa::CallLogRecord::default();
+                    proto_value.call_creator_jid = creator.map(str::to_owned);
+                    proto_value.start_time =
+                        [Some(0), Some(-1), Some(i64::MAX), None, Some(i64::MIN)][index];
+                    proto_value.is_incoming = Some(false);
+                    proto_value
+                })
+                .collect()
+        };
+        // No cross-chunk reorder or dedup is introduced: a replay emits again,
+        // and a lower-order empty chunk emits only the existing lazy event.
+        process_call_history_chunk(&client, records(), 9).await;
+        process_call_history_chunk(&client, records(), 9).await;
+        process_call_history_chunk(&client, Vec::new(), 2).await;
+        let events = recorder.0.lock().unwrap();
+        assert_eq!(events.len(), 13);
+        for offset in [0, 6] {
+            for (index, direction) in [Some(true), Some(true), Some(false), None, None]
+                .into_iter()
+                .enumerate()
+            {
+                let Event::CallLogHistory(call) = &*events[offset + index + 1] else {
+                    panic!("expected call");
+                };
+                assert_eq!(call.from_me, direction);
+                assert_eq!(
+                    call.timestamp.map(|time| time.timestamp()),
+                    [Some(0), Some(-1), None, None, None][index]
+                );
+                assert_eq!(call.record.call_creator_jid.as_deref(), creators[index]);
+                assert_eq!(call.call_creator_jid.is_some(), direction.is_some());
+                assert_eq!(call.record.call_id, None);
+            }
+            assert!(matches!(&*events[offset], Event::HistorySync(_)));
+        }
+        let Event::HistorySync(last) = &*events[12] else {
+            panic!("empty chunk event");
+        };
+        assert_eq!(last.chunk_order(), Some(2));
+    }
+
+    #[tokio::test]
+    async fn corrupt_history_chunk_never_emits_partial_calls() {
+        let client = crate::test_utils::create_test_client_with_name("call_history_corrupt").await;
+        client.is_running.store(true, Ordering::Relaxed);
+        let recorder = Arc::new(CallHistoryRecorder(std::sync::Mutex::new(Vec::new())));
+        client
+            .core
+            .event_bus
+            .subscribe_handler(recorder.clone())
+            .detach();
+        let compress = |raw: &[u8]| {
+            let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+            encoder.write_all(raw).unwrap();
+            encoder.finish().unwrap()
+        };
+        let mut truncated = compress(&[0x6a, 0]);
+        truncated.truncate(truncated.len() - 1);
+        // Valid call precedes broken top-level framing, or missing zlib tail.
+        for compressed in [compress(&[0x6a, 0, 0x6a, 4, 0x62]), truncated] {
+            client
+                .process_history_sync_task(
+                    "CALL-CORRUPT".into(),
+                    {
+                        let mut proto_addition = HistorySyncNotification::default();
+                        proto_addition.initial_hist_bootstrap_inline_payload = Some(compressed);
+                        proto_addition
+                    }
+                    .into(),
+                )
+                .await;
+            assert!(recorder.0.lock().unwrap().is_empty());
+        }
+        // Bad framed record is skipped, but a subsequent optional-only valid
+        // record and the existing lazy chunk are still surfaced.
+        client
+            .process_history_sync_task(
+                "CALL-FRAMED".into(),
+                {
+                    let mut proto_addition = HistorySyncNotification::default();
+                    proto_addition.initial_hist_bootstrap_inline_payload =
+                        Some(compress(&[0x6a, 3, 0x62, 2, b'x', 0x6a, 0]));
+                    proto_addition
+                }
+                .into(),
+            )
+            .await;
+        let events = recorder.0.lock().unwrap();
+        assert_eq!(events.len(), 2);
+        let Event::CallLogHistory(call) = &*events[1] else {
+            panic!("valid record");
+        };
+        assert_eq!(call.timestamp, None);
+        assert_eq!(call.from_me, None);
+        assert_eq!(call.call_creator_jid, None);
+        assert_eq!(call.chunk_order, None);
+        assert_eq!(call.sync_type, None);
+        assert!(matches!(&*events[0], Event::HistorySync(_)));
+    }
+
+    #[tokio::test]
+    async fn call_history_keeps_legacy_chunk_in_default_bounded_mailbox() {
+        use wacore::types::events::ChannelEventHandler;
+        let client =
+            crate::test_utils::create_test_client_with_name("call_history_backpressure").await;
+        client.is_running.store(true, Ordering::Relaxed);
+        let (handler, receiver) = ChannelEventHandler::new();
+        client
+            .core
+            .event_bus
+            .subscribe_handler(handler.clone())
+            .detach();
+        process_call_history_chunk(
+            &client,
+            (0..300)
+                .map(|n| {
+                    let mut proto_value = wa::CallLogRecord::default();
+                    proto_value.call_id = Some(format!("call-{n}"));
+                    proto_value
+                })
+                .collect(),
+            4,
+        )
+        .await;
+        let mut calls = Vec::new();
+        let mut saw_history = false;
+        while let Ok(event) = receiver.try_recv() {
+            match &*event {
+                Event::HistorySync(lazy) => {
+                    assert!(calls.is_empty());
+                    assert_eq!(lazy.get().unwrap().call_log_records.len(), 300);
+                    saw_history = true;
+                }
+                Event::CallLogHistory(call) => {
+                    assert!(saw_history);
+                    calls.push(call.record.call_id.clone().unwrap());
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_history);
+        assert!(!calls.is_empty());
+        for (n, id) in calls.iter().enumerate() {
+            assert_eq!(id, &format!("call-{n}"));
+        }
+        assert!(handler.stats().dropped_full > 0);
+    }
+
+    #[tokio::test]
+    async fn call_history_budget_emits_only_raw_chunk_and_preserves_harvest() {
+        let client = crate::test_utils::create_test_client_with_name("call_history_budget").await;
+        client.is_running.store(true, Ordering::Relaxed);
+        let recorder = Arc::new(CallHistoryRecorder(std::sync::Mutex::new(Vec::new())));
+        client
+            .core
+            .event_bus
+            .subscribe_handler(recorder.clone())
+            .detach();
+        process_call_history_chunk(&client, vec![wa::CallLogRecord::default(); 1025], 5).await;
+        let events = recorder.0.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        let Event::HistorySync(lazy) = &*events[0] else {
+            panic!("raw chunk must survive");
+        };
+        assert_eq!(lazy.get().unwrap().call_log_records.len(), 1025);
+        assert_eq!(lazy.get().unwrap().conversations.len(), 1);
+        assert_eq!(
+            client
+                .persistence_manager
+                .get_device_snapshot()
+                .nct_salt
+                .as_deref(),
+            Some(&[17; 32][..])
+        );
+    }
+
+    #[tokio::test]
+    async fn call_history_direction_is_unknown_without_account_identities() {
+        let client =
+            crate::test_utils::create_test_client_with_name("call_history_no_identity").await;
+        client.is_running.store(true, Ordering::Relaxed);
+        for command in [
+            wacore::store::commands::DeviceCommand::SetId(None),
+            wacore::store::commands::DeviceCommand::SetLid(None),
+        ] {
+            client.persistence_manager.process_command(command).await;
+        }
+        let recorder = Arc::new(CallHistoryRecorder(std::sync::Mutex::new(Vec::new())));
+        client
+            .core
+            .event_bus
+            .subscribe_handler(recorder.clone())
+            .detach();
+        process_call_history_chunk(
+            &client,
+            vec![{
+                let mut proto_value = wa::CallLogRecord::default();
+                proto_value.call_creator_jid = Some("15550000001@s.whatsapp.net".into());
+                proto_value
+            }],
+            6,
+        )
+        .await;
+        let events = recorder.0.lock().unwrap();
+        let Event::CallLogHistory(call) = &*events[1] else {
+            panic!("expected call");
+        };
+        assert!(call.call_creator_jid.is_some());
+        assert_eq!(call.from_me, None);
+    }
+
+    #[tokio::test]
+    async fn call_history_uses_one_identity_snapshot_despite_host_updates() {
+        struct ChangeIdentity {
+            client: std::sync::Weak<Client>,
+            changed: std::sync::atomic::AtomicBool,
+            recorder: Arc<CallHistoryRecorder>,
+        }
+        impl wacore::types::events::EventHandler for ChangeIdentity {
+            fn handle_event(&self, event: Arc<Event>) {
+                use futures::FutureExt;
+                if !self.changed.swap(true, Ordering::Relaxed) {
+                    let client = self.client.upgrade().unwrap();
+                    // No lock is held by dispatch: deterministically apply the
+                    // command in its first poll, never mutate Device directly.
+                    client
+                        .persistence_manager
+                        .process_command(wacore::store::commands::DeviceCommand::SetId(Some(
+                            "15550000002@s.whatsapp.net".parse().unwrap(),
+                        )))
+                        .now_or_never()
+                        .expect("uncontended command must be ready");
+                }
+                wacore::types::events::EventHandler::handle_event(self.recorder.as_ref(), event);
+            }
+            fn interest(&self) -> wacore::types::events::EventInterest {
+                wacore::types::events::EventHandler::interest(self.recorder.as_ref())
+            }
+        }
+        let client =
+            crate::test_utils::create_test_client_with_name("call_history_identity_update").await;
+        client.is_running.store(true, Ordering::Relaxed);
+        client
+            .persistence_manager
+            .process_command(wacore::store::commands::DeviceCommand::SetId(Some(
+                "15550000001@s.whatsapp.net".parse().unwrap(),
+            )))
+            .await;
+        let recorder = Arc::new(CallHistoryRecorder(std::sync::Mutex::new(Vec::new())));
+        client
+            .core
+            .event_bus
+            .subscribe_handler(Arc::new(ChangeIdentity {
+                client: Arc::downgrade(&client),
+                changed: std::sync::atomic::AtomicBool::new(false),
+                recorder: recorder.clone(),
+            }))
+            .detach();
+        process_call_history_chunk(
+            &client,
+            vec![
+                {
+                    let mut proto_value = wa::CallLogRecord::default();
+                    proto_value.call_creator_jid = Some("15550000001:8@c.us".into());
+                    proto_value
+                };
+                2
+            ],
+            7,
+        )
+        .await;
+        let events = recorder.0.lock().unwrap();
+        assert!(matches!(&*events[0], Event::HistorySync(_)));
+        for event in &events[1..] {
+            let Event::CallLogHistory(call) = &**event else {
+                panic!("expected call");
+            };
+            assert_eq!(call.from_me, Some(true));
+        }
+        assert_eq!(
+            client
+                .persistence_manager
+                .get_device_snapshot()
+                .pn
+                .as_ref()
+                .unwrap()
+                .user
+                .as_str(),
+            "15550000002"
+        );
+    }
+
     fn sender_record(from_me: bool) -> HistoryMsgSecretRecordRef<'static> {
         HistoryMsgSecretRecordRef {
             conversation_index: 0,
@@ -999,6 +1585,533 @@ mod tests {
         assert_eq!(entries[1].sender, entries[1].chat);
     }
 
+    /// Captures every history-sync chunk the hook is handed, and how many
+    /// frames had reached the wire when it was.
+    struct HistoryCaptureHook {
+        transport: Arc<crate::transport::mock::CapturingMockTransport>,
+        fail: bool,
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Semaphore,
+        captured: std::sync::Mutex<Vec<CapturedChunk>>,
+    }
+
+    struct CapturedChunk {
+        message_id: String,
+        sync_type: Option<wa::message::HistorySyncType>,
+        compressed: Vec<u8>,
+        frames_sent_before: usize,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::types::durability_hook::HistorySyncCaptureHook for HistoryCaptureHook {
+        async fn on_history_sync(
+            &self,
+            _: Arc<Client>,
+            message_id: &str,
+            sync_type: Option<wa::message::HistorySyncType>,
+            compressed: &[u8],
+        ) -> anyhow::Result<()> {
+            self.captured.lock().unwrap().push(CapturedChunk {
+                message_id: message_id.to_owned(),
+                sync_type,
+                compressed: compressed.to_vec(),
+                frames_sent_before: self.transport.sent().len(),
+            });
+            self.entered.notify_one();
+            self.release.acquire().await.unwrap().forget();
+            if self.fail {
+                anyhow::bail!("the capture store is unavailable");
+            }
+            Ok(())
+        }
+    }
+
+    /// A connected client that knows its own number, so it can send receipts,
+    /// with `hook` installed when given.
+    async fn history_receipt_client(
+        fail: Option<bool>,
+    ) -> (
+        Arc<Client>,
+        Arc<crate::transport::mock::CapturingMockTransport>,
+        Option<Arc<HistoryCaptureHook>>,
+    ) {
+        history_receipt_client_with_http(fail, Arc::new(crate::test_utils::MockHttpClient)).await
+    }
+
+    async fn history_receipt_client_with_http(
+        fail: Option<bool>,
+        http: Arc<dyn crate::http::HttpClient>,
+    ) -> (
+        Arc<Client>,
+        Arc<crate::transport::mock::CapturingMockTransport>,
+        Option<Arc<HistoryCaptureHook>>,
+    ) {
+        use crate::transport::mock::CapturingMockTransportFactory;
+        use wacore::handshake::NoiseCipher;
+
+        let client = crate::test_utils::create_test_client_with_http("history-receipt", http).await;
+        let transport = CapturingMockTransportFactory::new().transport();
+        *client.noise_socket.lock().unwrap() =
+            Some(Arc::new(crate::socket::NoiseSocket::with_observers(
+                client.runtime.clone(),
+                transport.clone(),
+                NoiseCipher::new(&[0; 32]).unwrap(),
+                NoiseCipher::new(&[0; 32]).unwrap(),
+                crate::socket::noise_socket::SendObservers::with_stats(client.stats.clone())
+                    .with_sent_frames(client.sent_frame_tap.clone()),
+            )));
+        client.set_connected_for_test(true);
+        client.is_running.store(true, Ordering::Release);
+        client.enter_live_mode_for_tests();
+        client
+            .persistence_manager
+            .process_command(wacore::store::commands::DeviceCommand::SetId(Some(
+                "5511000000001:0@s.whatsapp.net".parse().unwrap(),
+            )))
+            .await;
+        let hook = fail.map(|fail| {
+            Arc::new(HistoryCaptureHook {
+                transport: transport.clone(),
+                fail,
+                entered: tokio::sync::Notify::new(),
+                release: tokio::sync::Semaphore::new(1),
+                captured: std::sync::Mutex::new(Vec::new()),
+            })
+        });
+        if let Some(hook) = &hook {
+            client
+                .history_sync_capture_hook
+                .set(hook.clone())
+                .ok()
+                .unwrap();
+        }
+        (client, transport, hook)
+    }
+
+    fn recent_history_chunk() -> (Vec<u8>, HistorySyncNotification) {
+        let compressed = compress_history_sync(&{
+            let mut proto_value = wa::HistorySync::default();
+            proto_value.sync_type = wa::history_sync::HistorySyncType::RECENT;
+            proto_value
+        });
+        let notification = {
+            let mut proto_addition = HistorySyncNotification::default();
+            proto_addition.file_length = Some(compressed.len() as u64);
+            proto_addition.sync_type = Some(wa::message::HistorySyncType::RECENT);
+            proto_addition.initial_hist_bootstrap_inline_payload = Some(compressed.clone());
+            proto_addition
+        };
+        (compressed, notification)
+    }
+
+    /// The `hist_sync` receipts that reached the wire for `message_id`.
+    async fn history_receipts(
+        transport: &Arc<crate::transport::mock::CapturingMockTransport>,
+        message_id: &str,
+    ) -> usize {
+        let mut receipts = 0;
+        for index in 0..transport.sent().len() {
+            let frame = crate::test_utils::decode_sent_iq(transport, index).await;
+            let node = frame.get();
+            let mut attrs = node.attrs();
+            if node.tag.as_ref() == "receipt"
+                && attrs.optional_string("type").as_deref() == Some("hist_sync")
+                && attrs.optional_string("id").as_deref() == Some(message_id)
+            {
+                receipts += 1;
+            }
+        }
+        receipts
+    }
+
+    #[tokio::test]
+    async fn history_sync_receipt_is_sent_without_a_capture_hook() {
+        let (client, transport, _) = history_receipt_client(None).await;
+        let (_, notification) = recent_history_chunk();
+
+        client
+            .process_history_sync_task("HIST_NO_HOOK".to_string(), notification.into())
+            .await;
+
+        assert_eq!(history_receipts(&transport, "HIST_NO_HOOK").await, 1);
+    }
+
+    #[tokio::test]
+    async fn history_sync_receipt_waits_until_the_capture_hook_captured_the_chunk() {
+        let (client, transport, hook) = history_receipt_client(Some(false)).await;
+        let hook = hook.unwrap();
+        let (compressed, notification) = recent_history_chunk();
+
+        client
+            .process_history_sync_task("HIST_CAPTURED".to_string(), notification.into())
+            .await;
+
+        {
+            let captured = hook.captured.lock().unwrap();
+            assert_eq!(captured.len(), 1);
+            assert_eq!(captured[0].message_id, "HIST_CAPTURED");
+            assert_eq!(
+                captured[0].sync_type,
+                Some(wa::message::HistorySyncType::RECENT)
+            );
+            assert_eq!(captured[0].compressed, compressed);
+            assert_eq!(
+                captured[0].frames_sent_before, 0,
+                "nothing, the receipt included, may be sent before the chunk is captured"
+            );
+        }
+        assert_eq!(history_receipts(&transport, "HIST_CAPTURED").await, 1);
+    }
+
+    #[tokio::test]
+    async fn history_sync_receipt_is_withheld_when_the_capture_hook_fails() {
+        let (client, transport, hook) = history_receipt_client(Some(true)).await;
+        let (_, notification) = recent_history_chunk();
+
+        client
+            .process_history_sync_task("HIST_LOST".to_string(), notification.into())
+            .await;
+
+        assert_eq!(hook.unwrap().captured.lock().unwrap().len(), 1);
+        assert_eq!(
+            history_receipts(&transport, "HIST_LOST").await,
+            0,
+            "a failed capture must not acknowledge the chunk"
+        );
+    }
+
+    struct MessageOnlyHook;
+
+    #[async_trait::async_trait]
+    impl crate::InboundDurabilityHook for MessageOnlyHook {
+        async fn on_messages(
+            &self,
+            _: Arc<Client>,
+            _: &[crate::types::events::InboundMessage],
+        ) -> anyhow::Result<()> {
+            panic!("history must not invoke the message commit hook");
+        }
+    }
+
+    #[tokio::test]
+    async fn message_only_hook_keeps_history_receipt_before_download() {
+        let (_, notification, http) = external_history_chunk(200);
+        let (client, transport, _) = history_receipt_client_with_http(None, http.clone()).await;
+        client
+            .inbound_durability_hook
+            .set(Arc::new(MessageOnlyHook))
+            .ok()
+            .unwrap();
+        set_history_media_conn(&client).await;
+        let mut task = Box::pin(
+            client.process_history_sync_task("HIST_MESSAGE_ONLY".to_owned(), notification.into()),
+        );
+        tokio::select! {
+            _ = http.entered.notified() => {},
+            _ = &mut task => panic!("history completed before download release"),
+        }
+        assert_eq!(history_receipts(&transport, "HIST_MESSAGE_ONLY").await, 1);
+        http.release.add_permits(1);
+        task.await;
+        assert_eq!(history_receipts(&transport, "HIST_MESSAGE_ONLY").await, 1);
+    }
+
+    #[tokio::test]
+    async fn both_hooks_keep_history_receipt_after_capture_completion() {
+        let (client, transport, hook) = history_receipt_client(Some(false)).await;
+        client
+            .inbound_durability_hook
+            .set(Arc::new(MessageOnlyHook))
+            .ok()
+            .unwrap();
+        let hook = hook.unwrap();
+        hook.release.try_acquire().unwrap().forget();
+        let (_, notification) = recent_history_chunk();
+        let mut task = Box::pin(
+            client.process_history_sync_task("HIST_BOTH_HOOKS".to_owned(), notification.into()),
+        );
+        tokio::select! {
+            _ = hook.entered.notified() => {},
+            _ = &mut task => panic!("history completed before capture release"),
+        }
+        assert_eq!(history_receipts(&transport, "HIST_BOTH_HOOKS").await, 0);
+        hook.release.add_permits(1);
+        task.await;
+        assert_eq!(history_receipts(&transport, "HIST_BOTH_HOOKS").await, 1);
+    }
+
+    #[tokio::test]
+    async fn capture_gets_unvalidated_bytes_again_on_duplicate_notification() {
+        let (client, transport, hook) = history_receipt_client(Some(false)).await;
+        let hook = hook.unwrap();
+        hook.release.add_permits(1);
+        let invalid = vec![0xff];
+        for _ in 0..2 {
+            let notification = {
+                let mut proto_addition = HistorySyncNotification::default();
+                proto_addition.initial_hist_bootstrap_inline_payload = Some(invalid.clone());
+                proto_addition
+            };
+            client
+                .process_history_sync_task("HIST_UNVALIDATED".to_owned(), notification.into())
+                .await;
+        }
+        {
+            let captured = hook.captured.lock().unwrap();
+            assert_eq!(
+                captured.len(),
+                2,
+                "deduplication belongs to the capture store"
+            );
+            assert!(captured.iter().all(|chunk| chunk.compressed == invalid));
+        }
+        assert_eq!(history_receipts(&transport, "HIST_UNVALIDATED").await, 2);
+    }
+
+    #[tokio::test]
+    async fn shutdown_does_not_join_or_cancel_an_entered_history_capture() {
+        let (client, transport, hook) = history_receipt_client(Some(false)).await;
+        let hook = hook.unwrap();
+        hook.release.try_acquire().unwrap().forget();
+        let (_, notification) = recent_history_chunk();
+        let history_client = client.clone();
+        let task = tokio::spawn(async move {
+            history_client
+                .process_history_sync_task("HIST_ENTERED_SHUTDOWN".to_owned(), notification.into())
+                .await;
+        });
+        hook.entered.notified().await;
+        assert_eq!(
+            history_receipts(&transport, "HIST_ENTERED_SHUTDOWN").await,
+            0
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(2), client.shutdown())
+            .await
+            .expect("shutdown does not join an entered history callback");
+        assert!(
+            !task.is_finished(),
+            "shutdown must not abort the running capture"
+        );
+        hook.release.add_permits(1);
+        task.await.unwrap();
+        assert_eq!(client.history_sync_activity.snapshot().tasks, 0);
+    }
+
+    /// A real encrypted history download whose response is released by the test.
+    struct HistoryBlobHttp {
+        body: Vec<u8>,
+        status: u16,
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Semaphore,
+        requests: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::http::HttpClient for HistoryBlobHttp {
+        async fn execute(
+            &self,
+            request: crate::http::HttpRequest,
+        ) -> anyhow::Result<crate::http::HttpResponse> {
+            self.requests.lock().unwrap().push(request.url);
+            self.entered.notify_one();
+            self.release.acquire().await.unwrap().forget();
+            Ok(crate::http::HttpResponse::new(
+                self.status,
+                self.body.clone(),
+            ))
+        }
+    }
+
+    fn external_history_chunk(
+        status: u16,
+    ) -> (Vec<u8>, HistorySyncNotification, Arc<HistoryBlobHttp>) {
+        let (compressed, mut notification) = recent_history_chunk();
+        let encrypted =
+            wacore::upload::encrypt_media(&compressed, wacore::download::MediaType::History)
+                .unwrap();
+        notification.initial_hist_bootstrap_inline_payload = None;
+        notification.direct_path = Some("/history-fixture".to_owned());
+        notification.media_key = Some(encrypted.media_key.to_vec());
+        notification.file_sha256 = Some(encrypted.file_sha256.to_vec());
+        notification.file_enc_sha256 = Some(encrypted.file_enc_sha256.to_vec());
+        let http = Arc::new(HistoryBlobHttp {
+            body: encrypted.data_to_upload,
+            status,
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Semaphore::new(0),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        (compressed, notification, http)
+    }
+
+    async fn set_history_media_conn(client: &Client) {
+        *client.media_conn.write().await = Some(crate::mediaconn::MediaConn {
+            auth: "history-test-auth".to_owned(),
+            ttl: 3600,
+            auth_ttl: None,
+            hosts: vec![wacore::iq::mediaconn::MediaConnHost::new(
+                "history.example.com".to_owned(),
+            )],
+            fetched_at: wacore::time::Instant::now(),
+        });
+    }
+
+    #[tokio::test]
+    async fn history_sync_blob_receipt_waits_for_download_and_capture() {
+        for capture_fails in [false, true] {
+            let (compressed, notification, http) = external_history_chunk(200);
+            let (client, transport, hook) =
+                history_receipt_client_with_http(Some(capture_fails), http.clone()).await;
+            set_history_media_conn(&client).await;
+            let hook = hook.unwrap();
+            hook.release.try_acquire().unwrap().forget();
+            let mut task = Box::pin(
+                client.process_history_sync_task("HIST_BLOB".to_owned(), notification.into()),
+            );
+            tokio::select! {
+                _ = http.entered.notified() => {},
+                _ = &mut task => panic!("history completed before download release"),
+            }
+            assert_eq!(history_receipts(&transport, "HIST_BLOB").await, 0);
+            assert!(hook.captured.lock().unwrap().is_empty());
+            http.release.add_permits(1);
+            tokio::select! {
+                _ = hook.entered.notified() => {},
+                _ = &mut task => panic!("history completed before capture release"),
+            }
+            assert_eq!(history_receipts(&transport, "HIST_BLOB").await, 0);
+            {
+                let captured = hook.captured.lock().unwrap();
+                assert_eq!(captured.len(), 1);
+                assert_eq!(captured[0].message_id, "HIST_BLOB");
+                assert_eq!(
+                    captured[0].sync_type,
+                    Some(wa::message::HistorySyncType::RECENT)
+                );
+                assert_eq!(captured[0].compressed, compressed);
+                assert_eq!(captured[0].frames_sent_before, 0);
+            }
+            hook.release.add_permits(1);
+            task.await;
+            assert_eq!(
+                history_receipts(&transport, "HIST_BLOB").await,
+                usize::from(!capture_fails)
+            );
+            let requests = http.requests.lock().unwrap();
+            assert_eq!(requests.len(), 1);
+            assert!(requests[0].starts_with("https://history.example.com/history-fixture?"));
+            assert_eq!(client.history_sync_activity.snapshot().tasks, 0);
+            assert_eq!(client.history_sync_activity.snapshot().payload_bytes, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn history_sync_failed_blob_download_never_calls_capture_or_sends_receipt() {
+        // One failing host exhausts failover without a media-connection refresh.
+        let (_, notification, http) = external_history_chunk(500);
+        let (client, transport, hook) =
+            history_receipt_client_with_http(Some(false), http.clone()).await;
+        set_history_media_conn(&client).await;
+        http.release.add_permits(1);
+        client
+            .process_history_sync_task("HIST_BLOB_GONE".to_owned(), notification.into())
+            .await;
+        assert_eq!(http.requests.lock().unwrap().len(), 1);
+        assert!(hook.unwrap().captured.lock().unwrap().is_empty());
+        assert_eq!(history_receipts(&transport, "HIST_BLOB_GONE").await, 0);
+        assert_eq!(client.history_sync_activity.snapshot().tasks, 0);
+    }
+
+    #[tokio::test]
+    async fn history_sync_cancelled_download_or_capture_leaves_no_receipt() {
+        for cancel_during_capture in [false, true] {
+            let (_, notification, http) = external_history_chunk(200);
+            let (client, transport, hook) =
+                history_receipt_client_with_http(Some(false), http.clone()).await;
+            set_history_media_conn(&client).await;
+            let hook = hook.unwrap();
+            hook.release.try_acquire().unwrap().forget();
+            let mut task = Box::pin(
+                client.process_history_sync_task("HIST_CANCELLED".to_owned(), notification.into()),
+            );
+            tokio::select! {
+                _ = http.entered.notified() => {},
+                _ = &mut task => panic!("history completed before download release"),
+            }
+            if cancel_during_capture {
+                http.release.add_permits(1);
+                tokio::select! {
+                    _ = hook.entered.notified() => {},
+                    _ = &mut task => panic!("history completed before capture release"),
+                }
+            }
+            drop(task);
+            assert_eq!(
+                hook.captured.lock().unwrap().len(),
+                usize::from(cancel_during_capture)
+            );
+            assert_eq!(history_receipts(&transport, "HIST_CANCELLED").await, 0);
+            assert_eq!(client.history_sync_activity.snapshot().tasks, 0);
+            assert_eq!(client.history_sync_activity.snapshot().payload_bytes, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn history_sync_shutdown_before_processing_does_not_capture_or_acknowledge() {
+        let (client, transport, hook) = history_receipt_client(Some(false)).await;
+        let (_, notification) = recent_history_chunk();
+        client.signal_shutdown_sync();
+        client
+            .process_history_sync_task("HIST_SHUTDOWN".to_owned(), notification.into())
+            .await;
+        assert!(hook.unwrap().captured.lock().unwrap().is_empty());
+        assert_eq!(history_receipts(&transport, "HIST_SHUTDOWN").await, 0);
+        assert_eq!(client.history_sync_activity.snapshot().tasks, 0);
+    }
+
+    #[tokio::test]
+    async fn history_sync_shutdown_after_receipt_decision_reports_attempt() {
+        use crate::test_utils::log_capture;
+
+        if log_capture::delegated_to_child(
+            "history_sync::tests::history_sync_shutdown_after_receipt_decision_reports_attempt",
+        ) {
+            return;
+        }
+
+        for hook_registered in [false, true] {
+            let logs = log_capture::session();
+            let (client, transport, hook) =
+                history_receipt_client(hook_registered.then_some(false)).await;
+            let (_, notification) = recent_history_chunk();
+            SHUTDOWN_BEFORE_PAYLOAD.with(|requested| requested.set(true));
+            client
+                .process_history_sync_task(
+                    "HIST_SHUTDOWN_AFTER_RECEIPT".to_owned(),
+                    notification.into(),
+                )
+                .await;
+
+            assert_eq!(
+                history_receipts(&transport, "HIST_SHUTDOWN_AFTER_RECEIPT").await,
+                usize::from(!hook_registered)
+            );
+            if let Some(hook) = hook {
+                assert!(hook.captured.lock().unwrap().is_empty());
+            }
+            let records = logs.records_for("whatsapp_rust::history_sync");
+            assert!(records.contains(&(
+                log::Level::Debug,
+                format!(
+                    "Aborting history sync HIST_SHUTDOWN_AFTER_RECEIPT before payload acquisition during shutdown (early receipt attempted: {})",
+                    !hook_registered
+                ),
+            )), "missing shutdown diagnostic: {records:?}");
+            assert_eq!(client.history_sync_activity.snapshot().tasks, 0);
+            assert_eq!(client.history_sync_activity.snapshot().payload_bytes, 0);
+        }
+    }
+
     #[tokio::test]
     async fn process_history_sync_task_stores_message_secrets_without_handlers() {
         let client = crate::test_utils::create_test_client_with_name("history_msg_secret").await;
@@ -1013,37 +2126,46 @@ mod tests {
         let chat = "5511777776666@s.whatsapp.net";
         let parent_id = "HIST_PARENT";
         let secret = vec![0x44u8; 32];
-        let history_sync = wa::HistorySync {
-            sync_type: wa::history_sync::HistorySyncType::INITIAL_BOOTSTRAP,
-            conversations: vec![wa::Conversation {
-                id: chat.into(),
-                messages: vec![wa::HistorySyncMsg {
-                    message: buffa::MessageField::some(wa::WebMessageInfo {
-                        key: buffa::MessageField::some(wa::MessageKey {
-                            remote_jid: Some(chat.to_string()),
-                            from_me: Some(false),
-                            id: Some(parent_id.to_string()),
-                            participant: None,
-                        }),
-                        message: buffa::MessageField::some(wa::Message {
-                            conversation: Some("historical".to_string()),
-                            ..Default::default()
-                        }),
-                        message_secret: Some(secret.clone()),
-                        ..Default::default()
-                    }),
-                    msg_order_id: Some(1),
-                }],
-                ..Default::default()
-            }],
-            ..Default::default()
+        let history_sync = {
+            let mut proto_value = wa::HistorySync::default();
+            proto_value.sync_type = wa::history_sync::HistorySyncType::INITIAL_BOOTSTRAP;
+            proto_value.conversations = vec![{
+                let mut proto_value = wa::Conversation::default();
+                proto_value.id = chat.into();
+                proto_value.messages = vec![{
+                    let mut proto_value = wa::HistorySyncMsg::default();
+                    proto_value.message = buffa::MessageField::some({
+                        let mut proto_value = wa::WebMessageInfo::default();
+                        proto_value.key = buffa::MessageField::some({
+                            let mut proto_value = wa::MessageKey::default();
+                            proto_value.remote_jid = Some(chat.to_string());
+                            proto_value.from_me = Some(false);
+                            proto_value.id = Some(parent_id.to_string());
+                            proto_value.participant = None;
+                            proto_value
+                        });
+                        proto_value.message = buffa::MessageField::some({
+                            let mut proto_value = wa::Message::default();
+                            proto_value.conversation = Some("historical".to_string());
+                            proto_value
+                        });
+                        proto_value.message_secret = Some(secret.clone());
+                        proto_value
+                    });
+                    proto_value.msg_order_id = Some(1);
+                    proto_value
+                }];
+                proto_value
+            }];
+            proto_value
         };
         let compressed = compress_history_sync(&history_sync);
-        let notification = HistorySyncNotification {
-            file_length: Some(compressed.len() as u64),
-            sync_type: Some(wa::message::HistorySyncType::INITIAL_BOOTSTRAP),
-            initial_hist_bootstrap_inline_payload: Some(compressed),
-            ..Default::default()
+        let notification = {
+            let mut proto_addition = HistorySyncNotification::default();
+            proto_addition.file_length = Some(compressed.len() as u64);
+            proto_addition.sync_type = Some(wa::message::HistorySyncType::INITIAL_BOOTSTRAP);
+            proto_addition.initial_hist_bootstrap_inline_payload = Some(compressed);
+            proto_addition
         };
 
         client
@@ -1064,20 +2186,24 @@ mod tests {
         let client = crate::test_utils::create_test_client_with_name("history_lid_mappings").await;
         client.is_running.store(true, Ordering::Relaxed);
 
-        let history_sync = wa::HistorySync {
-            sync_type: wa::history_sync::HistorySyncType::INITIAL_BOOTSTRAP,
-            phone_number_to_lid_mappings: vec![wa::PhoneNumberToLIDMapping {
-                pn_jid: Some("5511777776666@s.whatsapp.net".to_string()),
-                lid_jid: Some("111222333444555@lid".to_string()),
-            }],
-            ..Default::default()
+        let history_sync = {
+            let mut proto_value = wa::HistorySync::default();
+            proto_value.sync_type = wa::history_sync::HistorySyncType::INITIAL_BOOTSTRAP;
+            proto_value.phone_number_to_lid_mappings = vec![{
+                let mut proto_value = wa::PhoneNumberToLIDMapping::default();
+                proto_value.pn_jid = Some("5511777776666@s.whatsapp.net".to_string());
+                proto_value.lid_jid = Some("111222333444555@lid".to_string());
+                proto_value
+            }];
+            proto_value
         };
         let compressed = compress_history_sync(&history_sync);
-        let notification = HistorySyncNotification {
-            file_length: Some(compressed.len() as u64),
-            sync_type: Some(wa::message::HistorySyncType::INITIAL_BOOTSTRAP),
-            initial_hist_bootstrap_inline_payload: Some(compressed),
-            ..Default::default()
+        let notification = {
+            let mut proto_addition = HistorySyncNotification::default();
+            proto_addition.file_length = Some(compressed.len() as u64);
+            proto_addition.sync_type = Some(wa::message::HistorySyncType::INITIAL_BOOTSTRAP);
+            proto_addition.initial_hist_bootstrap_inline_payload = Some(compressed);
+            proto_addition
         };
 
         client
@@ -1101,22 +2227,25 @@ mod tests {
         client.is_running.store(true, Ordering::Relaxed);
 
         let chat = "5511777776666@s.whatsapp.net";
-        let history_sync = wa::HistorySync {
-            sync_type: wa::history_sync::HistorySyncType::INITIAL_BOOTSTRAP,
-            conversations: vec![wa::Conversation {
-                id: chat.into(),
-                ..Default::default()
-            }],
-            ..Default::default()
+        let history_sync = {
+            let mut proto_value = wa::HistorySync::default();
+            proto_value.sync_type = wa::history_sync::HistorySyncType::INITIAL_BOOTSTRAP;
+            proto_value.conversations = vec![{
+                let mut proto_value = wa::Conversation::default();
+                proto_value.id = chat.into();
+                proto_value
+            }];
+            proto_value
         };
         let raw_len = history_sync.encode_to_vec().len();
         let compressed = compress_history_sync(&history_sync);
         let compressed_copy = compressed.clone();
-        let notification = HistorySyncNotification {
-            file_length: Some(compressed.len() as u64),
-            sync_type: Some(wa::message::HistorySyncType::INITIAL_BOOTSTRAP),
-            initial_hist_bootstrap_inline_payload: Some(compressed),
-            ..Default::default()
+        let notification = {
+            let mut proto_addition = HistorySyncNotification::default();
+            proto_addition.file_length = Some(compressed.len() as u64);
+            proto_addition.sync_type = Some(wa::message::HistorySyncType::INITIAL_BOOTSTRAP);
+            proto_addition.initial_hist_bootstrap_inline_payload = Some(compressed);
+            proto_addition
         };
 
         // Register a handler BEFORE the task so retain_blob is true.
@@ -1161,37 +2290,46 @@ mod tests {
         let chat = "867051314767696@bot";
         let parent_id = "HIST_BOT_PARENT";
         let secret = vec![0x61u8; 32];
-        let history_sync = wa::HistorySync {
-            sync_type: wa::history_sync::HistorySyncType::INITIAL_BOOTSTRAP,
-            conversations: vec![wa::Conversation {
-                id: chat.into(),
-                messages: vec![wa::HistorySyncMsg {
-                    message: buffa::MessageField::some(wa::WebMessageInfo {
-                        key: buffa::MessageField::some(wa::MessageKey {
-                            remote_jid: Some(chat.to_string()),
-                            from_me: Some(false),
-                            id: Some(parent_id.to_string()),
-                            participant: None,
-                        }),
-                        message: buffa::MessageField::some(wa::Message {
-                            conversation: Some("bot historical".to_string()),
-                            ..Default::default()
-                        }),
-                        message_secret: Some(secret.clone()),
-                        ..Default::default()
-                    }),
-                    msg_order_id: Some(1),
-                }],
-                ..Default::default()
-            }],
-            ..Default::default()
+        let history_sync = {
+            let mut proto_value = wa::HistorySync::default();
+            proto_value.sync_type = wa::history_sync::HistorySyncType::INITIAL_BOOTSTRAP;
+            proto_value.conversations = vec![{
+                let mut proto_value = wa::Conversation::default();
+                proto_value.id = chat.into();
+                proto_value.messages = vec![{
+                    let mut proto_value = wa::HistorySyncMsg::default();
+                    proto_value.message = buffa::MessageField::some({
+                        let mut proto_value = wa::WebMessageInfo::default();
+                        proto_value.key = buffa::MessageField::some({
+                            let mut proto_value = wa::MessageKey::default();
+                            proto_value.remote_jid = Some(chat.to_string());
+                            proto_value.from_me = Some(false);
+                            proto_value.id = Some(parent_id.to_string());
+                            proto_value.participant = None;
+                            proto_value
+                        });
+                        proto_value.message = buffa::MessageField::some({
+                            let mut proto_value = wa::Message::default();
+                            proto_value.conversation = Some("bot historical".to_string());
+                            proto_value
+                        });
+                        proto_value.message_secret = Some(secret.clone());
+                        proto_value
+                    });
+                    proto_value.msg_order_id = Some(1);
+                    proto_value
+                }];
+                proto_value
+            }];
+            proto_value
         };
         let compressed = compress_history_sync(&history_sync);
-        let notification = HistorySyncNotification {
-            file_length: Some(compressed.len() as u64),
-            sync_type: Some(wa::message::HistorySyncType::INITIAL_BOOTSTRAP),
-            initial_hist_bootstrap_inline_payload: Some(compressed),
-            ..Default::default()
+        let notification = {
+            let mut proto_addition = HistorySyncNotification::default();
+            proto_addition.file_length = Some(compressed.len() as u64);
+            proto_addition.sync_type = Some(wa::message::HistorySyncType::INITIAL_BOOTSTRAP);
+            proto_addition.initial_hist_bootstrap_inline_payload = Some(compressed);
+            proto_addition
         };
 
         client
@@ -1219,32 +2357,38 @@ mod tests {
         is_poll: bool,
     ) -> wa::HistorySyncMsg {
         let message = if is_poll {
-            wa::Message {
-                poll_creation_message: buffa::MessageField::some(
-                    wa::message::PollCreationMessage::default(),
-                ),
-                ..Default::default()
+            {
+                let mut proto_value = wa::Message::default();
+                proto_value.poll_creation_message =
+                    buffa::MessageField::some(wa::message::PollCreationMessage::default());
+                proto_value
             }
         } else {
-            wa::Message {
-                conversation: Some("historical".to_string()),
-                ..Default::default()
+            {
+                let mut proto_value = wa::Message::default();
+                proto_value.conversation = Some("historical".to_string());
+                proto_value
             }
         };
-        wa::HistorySyncMsg {
-            message: buffa::MessageField::some(wa::WebMessageInfo {
-                key: buffa::MessageField::some(wa::MessageKey {
-                    remote_jid: Some(chat.to_string()),
-                    from_me: Some(false),
-                    id: Some(msg_id.to_string()),
-                    participant: None,
-                }),
-                message: buffa::MessageField::some(message),
-                message_secret: Some(secret.to_vec()),
-                message_timestamp: Some(ts_secs),
-                ..Default::default()
-            }),
-            msg_order_id: Some(1),
+        {
+            let mut proto_value = wa::HistorySyncMsg::default();
+            proto_value.message = buffa::MessageField::some({
+                let mut proto_value = wa::WebMessageInfo::default();
+                proto_value.key = buffa::MessageField::some({
+                    let mut proto_value = wa::MessageKey::default();
+                    proto_value.remote_jid = Some(chat.to_string());
+                    proto_value.from_me = Some(false);
+                    proto_value.id = Some(msg_id.to_string());
+                    proto_value.participant = None;
+                    proto_value
+                });
+                proto_value.message = buffa::MessageField::some(message);
+                proto_value.message_secret = Some(secret.to_vec());
+                proto_value.message_timestamp = Some(ts_secs);
+                proto_value
+            });
+            proto_value.msg_order_id = Some(1);
+            proto_value
         }
     }
 
@@ -1252,21 +2396,24 @@ mod tests {
         chat: &str,
         messages: Vec<wa::HistorySyncMsg>,
     ) -> HistorySyncNotification {
-        let history_sync = wa::HistorySync {
-            sync_type: wa::history_sync::HistorySyncType::INITIAL_BOOTSTRAP,
-            conversations: vec![wa::Conversation {
-                id: chat.into(),
-                messages,
-                ..Default::default()
-            }],
-            ..Default::default()
+        let history_sync = {
+            let mut proto_value = wa::HistorySync::default();
+            proto_value.sync_type = wa::history_sync::HistorySyncType::INITIAL_BOOTSTRAP;
+            proto_value.conversations = vec![{
+                let mut proto_addition = wa::Conversation::default();
+                proto_addition.id = chat.into();
+                proto_addition.messages = messages;
+                proto_addition
+            }];
+            proto_value
         };
         let compressed = compress_history_sync(&history_sync);
-        HistorySyncNotification {
-            file_length: Some(compressed.len() as u64),
-            sync_type: Some(wa::message::HistorySyncType::INITIAL_BOOTSTRAP),
-            initial_hist_bootstrap_inline_payload: Some(compressed),
-            ..Default::default()
+        {
+            let mut proto_addition = HistorySyncNotification::default();
+            proto_addition.file_length = Some(compressed.len() as u64);
+            proto_addition.sync_type = Some(wa::message::HistorySyncType::INITIAL_BOOTSTRAP);
+            proto_addition.initial_hist_bootstrap_inline_payload = Some(compressed);
+            proto_addition
         }
     }
 
@@ -1511,36 +2658,43 @@ mod tests {
         ts_secs: u64,
         bot_prompt: bool,
     ) -> wa::HistorySyncMsg {
-        let message_context_info = bot_prompt.then(|| wa::MessageContextInfo {
-            bot_metadata: buffa::MessageField::some(wa::BotMetadata {
-                persona_id: Some("867051314767696".into()),
-                ..Default::default()
-            }),
-            ..Default::default()
+        let message_context_info = bot_prompt.then(|| {
+            let mut proto_value = wa::MessageContextInfo::default();
+            proto_value.bot_metadata = buffa::MessageField::some({
+                let mut proto_value = wa::BotMetadata::default();
+                proto_value.persona_id = Some("867051314767696".into());
+                proto_value
+            });
+            proto_value
         });
-        wa::HistorySyncMsg {
-            message: buffa::MessageField::some(wa::WebMessageInfo {
-                key: buffa::MessageField::some(wa::MessageKey {
-                    remote_jid: Some(chat.to_string()),
-                    from_me: Some(false),
-                    id: Some(msg_id.to_string()),
-                    participant: Some(participant.to_string()),
-                }),
-                message: buffa::MessageField::some(wa::Message {
-                    extended_text_message: buffa::MessageField::some(
-                        wa::message::ExtendedTextMessage {
-                            text: Some("hi".into()),
-                            ..Default::default()
-                        },
-                    ),
-                    message_context_info: message_context_info.into(),
-                    ..Default::default()
-                }),
-                message_secret: Some(secret.to_vec()),
-                message_timestamp: Some(ts_secs),
-                ..Default::default()
-            }),
-            msg_order_id: Some(1),
+        {
+            let mut proto_value = wa::HistorySyncMsg::default();
+            proto_value.message = buffa::MessageField::some({
+                let mut proto_value = wa::WebMessageInfo::default();
+                proto_value.key = buffa::MessageField::some({
+                    let mut proto_value = wa::MessageKey::default();
+                    proto_value.remote_jid = Some(chat.to_string());
+                    proto_value.from_me = Some(false);
+                    proto_value.id = Some(msg_id.to_string());
+                    proto_value.participant = Some(participant.to_string());
+                    proto_value
+                });
+                proto_value.message = buffa::MessageField::some({
+                    let mut proto_value = wa::Message::default();
+                    proto_value.extended_text_message = buffa::MessageField::some({
+                        let mut proto_value = wa::message::ExtendedTextMessage::default();
+                        proto_value.text = Some("hi".into());
+                        proto_value
+                    });
+                    proto_value.message_context_info = message_context_info.into();
+                    proto_value
+                });
+                proto_value.message_secret = Some(secret.to_vec());
+                proto_value.message_timestamp = Some(ts_secs);
+                proto_value
+            });
+            proto_value.msg_order_id = Some(1);
+            proto_value
         }
     }
 

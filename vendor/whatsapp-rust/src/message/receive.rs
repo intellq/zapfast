@@ -2,6 +2,7 @@
 
 use super::*;
 use smallvec::SmallVec;
+use wacore::telemetry::LiveAdmissionRefusal;
 
 /// Parsed session envelope with explicit retry/ownership semantics.
 ///
@@ -113,7 +114,66 @@ async fn decrypt_session_message(
     }
 }
 
+pub(super) struct PlaintextSlot<'a> {
+    pub index: usize,
+    pub annotations: EncNodeAnnotations<'a>,
+    pub producer: raw_pending::StanzaOrigin,
+    pub receipt: Option<Arc<live_retention::ReceiptScope>>,
+}
+
+#[inline(never)]
+fn poll_inbound_phase<F: Future>(
+    future: std::pin::Pin<&mut F>,
+    cx: &mut std::task::Context<'_>,
+) -> std::task::Poll<F::Output> {
+    future.poll(cx)
+}
+
+#[inline(never)]
+fn defer_plaintext(
+    deferred: &mut Vec<DeferredPlaintext>,
+    enc_type: &'static str,
+    plaintext: bytes::Bytes,
+    padding_version: u8,
+    enc_index: usize,
+    annotations: EncNodeAnnotations<'_>,
+) {
+    deferred.push(DeferredPlaintext {
+        enc_type,
+        plaintext,
+        padding_version,
+        enc_index,
+        state: annotations.state.map(str::to_owned),
+        session_type: annotations.session_type.map(str::to_owned),
+    });
+}
+
 impl Client {
+    #[inline(never)]
+    pub(super) fn stage_retained_plaintext(
+        &self,
+        info: &Arc<MessageInfo>,
+        producer: raw_pending::StanzaOrigin,
+        slot: (usize, &'static str, u8),
+        plaintext: &bytes::Bytes,
+    ) {
+        if self.inbound_durability_hook.get().is_some() {
+            self.inbound_commit_batch.live_retention.stage_owned(
+                info,
+                producer,
+                slot,
+                plaintext.clone(),
+            );
+        }
+    }
+
+    #[inline(never)]
+    pub(super) fn finish_retained_raw(&self, origin: raw_pending::DeliveryOrigin) {
+        if self.inbound_durability_hook.get().is_some() {
+            self.inbound_commit_batch.live_retention.finish_raw(origin);
+        }
+    }
+
     /// Test and bench convenience: scope to the current generation. Production
     /// inbound traffic always goes through the chat-lane worker, which passes
     /// its own spawn generation.
@@ -220,6 +280,14 @@ impl Client {
             info.is_offline,
         )
         .await;
+        if info.source.is_self_fanout() {
+            self.cache_lid_pn_from_message(
+                &info.source.chat,
+                info.source.recipient_alt.as_ref(),
+                info.is_offline,
+            )
+            .await;
+        }
         let sender_encryption_jid = self.resolve_encryption_jid(&info.source.sender).await;
 
         let unavailable_node = nr.get_optional_child("unavailable");
@@ -481,19 +549,6 @@ impl Client {
             decrypt_fail_mode,
         } = msg;
 
-        if max_sender_retry_count > 0 {
-            let cache_key = self
-                .make_retry_cache_key(&info.source.chat, &info.id, &info.source.sender)
-                .await;
-            self.preseed_retry_count(&cache_key, max_sender_retry_count)
-                .await;
-            log::debug!(
-                "[msg:{}] Sender retry count {} pre-seeded into cache",
-                info.id,
-                max_sender_retry_count
-            );
-        }
-
         // Acquire the global processing permit (1 during offline sync, N after).
         // The helper re-acquires across a 1→N semaphore swap (offline→online):
         // without that, a task waiting on the old 1-permit semaphore would be
@@ -532,6 +587,138 @@ impl Client {
             return;
         }
 
+        let stanza_origin = raw_pending::StanzaOrigin::new();
+        let mut receipt_producer = None;
+        if self.inbound_durability_hook().is_some()
+            && self.inbound_commit_batch.is_active()
+            && self.inbound_commit_batch.has_entries()
+            && self
+                .inbound_commit_batch
+                .live_retention
+                .has_owned_for_message(&info)
+            && !Box::pin(self.flush_inbound_commits_while_processing()).await
+        {
+            wacore::telemetry::live_admission_refused(LiveAdmissionRefusal::RetainedWrite);
+            return;
+        }
+        if self.inbound_durability_hook().is_some()
+            && self
+                .inbound_commit_batch
+                .live_retention
+                .has_raw_for_message(&info)
+        {
+            // Resume the older plaintext using its existing charge. A full
+            // budget must not require a second admission to make progress.
+            // Its hook may stream, but this arrival cannot ACK by identity:
+            // the current ciphertext still has to finish below.
+            receipt_producer = match self
+                .inbound_commit_batch
+                .live_retention
+                .begin_receipts(&info)
+            {
+                Ok(producer) => Some(producer),
+                Err(error) => {
+                    wacore::telemetry::live_admission_refused(LiveAdmissionRefusal::Receipts);
+                    log::warn!("Receipt admission refused before decrypt: {error:?}");
+                    return;
+                }
+            };
+            if !self.ack_or_replay_to_hook(&info).await {
+                wacore::telemetry::live_admission_refused(LiveAdmissionRefusal::RetainedWrite);
+                return;
+            }
+            if self.inbound_commit_batch.is_active()
+                && self.inbound_commit_batch.has_entries()
+                && !Box::pin(self.flush_inbound_commits_while_processing()).await
+            {
+                wacore::telemetry::live_admission_refused(LiveAdmissionRefusal::RetainedWrite);
+                return;
+            }
+        }
+        // Admission precedes every ratchet mutation. Refusal leaves ciphertext
+        // untouched for server redelivery; reset never evicts a retained live row.
+        let _live_admission = if self.inbound_durability_hook().is_some() {
+            if let Err(error) = self.persist_live_retained_before_decrypt(&info).await {
+                wacore::telemetry::live_admission_refused(LiveAdmissionRefusal::RetainedWrite);
+                log::warn!(
+                    "Retained live write is still unavailable; leaving ciphertext untouched: {error:?}"
+                );
+                return;
+            }
+            let payloads = session_payloads
+                .iter()
+                .chain(&group_payloads)
+                .chain(&bot_payloads);
+            let (wire_bytes, slots) = payloads.fold((0usize, 0usize), |(bytes, count), payload| {
+                (
+                    bytes.saturating_add(payload.ciphertext.len()),
+                    count.saturating_add(1),
+                )
+            });
+            let mut admission = self.inbound_commit_batch.live_retention.reserve_with_info(
+                stanza_origin,
+                wire_bytes,
+                slots,
+                &info,
+            );
+            if admission.is_err()
+                && self.inbound_commit_batch.is_active()
+                && self.inbound_commit_batch.has_entries()
+            {
+                if !Box::pin(self.flush_inbound_commits_while_processing()).await {
+                    wacore::telemetry::live_admission_refused(LiveAdmissionRefusal::RetainedWrite);
+                    log::warn!("Live pending batch flush failed before decrypt");
+                    return;
+                }
+                admission = self.inbound_commit_batch.live_retention.reserve_with_info(
+                    stanza_origin,
+                    wire_bytes,
+                    slots,
+                    &info,
+                );
+            }
+            match admission {
+                Ok(admission) => Some(admission),
+                Err(error) => {
+                    wacore::telemetry::live_admission_refused(LiveAdmissionRefusal::Capacity);
+                    log::warn!("Live pending capacity exhausted before decrypt: {error:?}");
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+        // Scope only receipts; predecessor hooks continue streaming.
+        if receipt_producer.is_none() && self.inbound_durability_hook().is_some() {
+            receipt_producer = match self
+                .inbound_commit_batch
+                .live_retention
+                .begin_receipts(&info)
+            {
+                Ok(producer) => Some(producer),
+                Err(error) => {
+                    wacore::telemetry::live_admission_refused(LiveAdmissionRefusal::Receipts);
+                    log::warn!("Receipt admission refused before decrypt: {error:?}");
+                    return;
+                }
+            };
+        }
+        if let (Some(admission), Some(producer)) = (&_live_admission, &receipt_producer) {
+            admission.attach_receipts(producer);
+        }
+        if max_sender_retry_count > 0 {
+            let cache_key = self
+                .make_retry_cache_key(&info.source.chat, &info.id, &info.source.sender)
+                .await;
+            self.preseed_retry_count(&cache_key, max_sender_retry_count)
+                .await;
+            log::debug!(
+                "[msg:{}] Sender retry count {} pre-seeded into cache",
+                info.id,
+                max_sender_retry_count
+            );
+        }
+
         log::debug!(
             "Starting PASS 1: Processing {} session establishment messages (pkmsg/msg)",
             session_payloads.len()
@@ -546,11 +733,12 @@ impl Client {
 
         let session_outcome = if !is_group_sender && !session_payloads_empty {
             self.clone()
-                .process_session_enc_batch(
+                .process_session_enc_batch_with_origin(
                     session_payloads,
                     &info,
                     &sender_encryption_jid,
                     decrypt_fail_mode,
+                    stanza_origin,
                 )
                 .await
         } else {
@@ -571,6 +759,9 @@ impl Client {
             }
             SessionBatchOutcome::default()
         };
+        if session_outcome.had_failure && self.inbound_durability_hook.get().is_some() {
+            self.inbound_commit_batch.live_retention.fail_receipt(&info);
+        }
         let session_decrypted_successfully = session_outcome.decrypted;
         let session_had_duplicates = session_outcome.duplicate;
         let session_dispatched_undecryptable = session_outcome.undecryptable;
@@ -601,6 +792,7 @@ impl Client {
                         &info,
                         &sender_encryption_jid,
                         decrypt_fail_mode,
+                        stanza_origin,
                     )
                     .await
                 {
@@ -726,7 +918,14 @@ impl Client {
         // with the session/group decrypt batches under the same global
         // permit + per-chat enqueue lock acquired upstream.
         for payload in bot_payloads {
-            self.handle_msmsg_payload(&info, payload).await;
+            // Keep the bot-only decrypt frame out of every chat lane future.
+            Box::pin(self.handle_msmsg_payload_in_scope(&info, payload, stanza_origin)).await;
+        }
+
+        if let Some(producer) = &receipt_producer
+            && producer.finish()
+        {
+            self.ack_received_message_unscoped(producer.info());
         }
 
         // Live: coalesce the receive-side flush. A lost advance re-derives
@@ -741,6 +940,7 @@ impl Client {
     }
 
     #[cfg_attr(feature = "tracing", tracing::instrument(name = "wa.recv.session_decrypt", level = "debug", skip_all, fields(chat = %info.source.chat.observe(), sender = %sender_encryption_jid.observe(), msg_id = %info.id)))]
+    #[cfg(test)]
     pub(crate) async fn process_session_enc_batch(
         self: Arc<Self>,
         payloads: Vec<EncPayload>,
@@ -748,8 +948,109 @@ impl Client {
         sender_encryption_jid: &Jid,
         decrypt_fail_mode: crate::types::events::DecryptFailMode,
     ) -> SessionBatchOutcome {
+        self.process_session_enc_batch_with_origin(
+            payloads,
+            info,
+            sender_encryption_jid,
+            decrypt_fail_mode,
+            raw_pending::StanzaOrigin::new(),
+        )
+        .await
+    }
+
+    async fn process_session_enc_batch_with_origin(
+        self: Arc<Self>,
+        payloads: Vec<EncPayload>,
+        info: &Arc<MessageInfo>,
+        sender_encryption_jid: &Jid,
+        decrypt_fail_mode: crate::types::events::DecryptFailMode,
+        stanza_origin: raw_pending::StanzaOrigin,
+    ) -> SessionBatchOutcome {
+        // Decrypt and projection are sequential phases. Keeping their state in
+        // separate futures lets idle lanes reuse the frame without a per-batch box.
+        let (mut outcome, deferred, _timer) = {
+            let mut future = std::pin::pin!(self.clone().decrypt_session_enc_batch_with_origin(
+                payloads,
+                info,
+                sender_encryption_jid,
+                decrypt_fail_mode,
+                stanza_origin,
+            ));
+            std::future::poll_fn(|cx| poll_inbound_phase(future.as_mut(), cx)).await
+        };
+
+        for DeferredPlaintext {
+            enc_type,
+            plaintext,
+            padding_version,
+            enc_index,
+            state,
+            session_type,
+        } in deferred
+        {
+            match self
+                .handle_decrypted_plaintext_in_scope(
+                    enc_type,
+                    plaintext,
+                    padding_version,
+                    PlaintextSlot {
+                        index: enc_index,
+                        annotations: EncNodeAnnotations {
+                            state: state.as_deref(),
+                            session_type: session_type.as_deref(),
+                        },
+                        producer: stanza_origin,
+                        receipt: None,
+                    },
+                    info,
+                )
+                .await
+            {
+                Ok(plaintext_outcome) => {
+                    outcome.dispatched |= plaintext_outcome.dispatched;
+                    outcome.skdm_only |= plaintext_outcome.skdm_only;
+                }
+                Err(e) => {
+                    log::warn!(
+                        "[msg:{}] Failed processing plaintext from {}: {e:?}",
+                        info.id,
+                        info.source.sender.observe()
+                    );
+                    outcome.plaintext_failed = true;
+                    outcome.had_failure = true;
+                    // The one report that can follow a DecryptedPayload for the
+                    // same enc: the bytes existed, they just could not be made
+                    // into a message. Unpadding fails ahead of that event, so
+                    // there this is the only signal.
+                    self.report_enc_decrypt_failure(
+                        info,
+                        enc_index,
+                        enc_type,
+                        EncDecryptFailureReason::PlaintextUnusable,
+                    );
+                    outcome.undecryptable |=
+                        self.handle_plaintext_failure(info, decrypt_fail_mode).await;
+                }
+            }
+        }
+
+        outcome
+    }
+
+    async fn decrypt_session_enc_batch_with_origin(
+        self: Arc<Self>,
+        payloads: Vec<EncPayload>,
+        info: &Arc<MessageInfo>,
+        sender_encryption_jid: &Jid,
+        decrypt_fail_mode: crate::types::events::DecryptFailMode,
+        stanza_origin: raw_pending::StanzaOrigin,
+    ) -> (
+        SessionBatchOutcome,
+        Vec<DeferredPlaintext>,
+        Option<wacore::telemetry::Timer>,
+    ) {
         if payloads.is_empty() {
-            return SessionBatchOutcome::default();
+            return (SessionBatchOutcome::default(), Vec::new(), None);
         }
 
         // Acquire a per-sender session lock to prevent race conditions when
@@ -767,7 +1068,7 @@ impl Client {
             Some(session_mutex.lock_arc().await);
 
         // Started after the lock so the histogram excludes lock/queue wait.
-        let _t = wacore::telemetry::timer(wacore::telemetry::DECRYPT_DURATION);
+        let timer = wacore::telemetry::timer(wacore::telemetry::DECRYPT_DURATION);
 
         let mut adapter = self.signal_adapter();
         let mut rng = LazyStdRng::default();
@@ -788,29 +1089,28 @@ impl Client {
                 state,
                 session_type,
             } = payload;
-            let annotations = EncNodeAnnotations {
-                state: state.as_deref(),
-                session_type: session_type.as_deref(),
-            };
-            let enc_type_str = enc_type.as_wire_str();
+            let is_prekey = enc_type == EncType::PreKeyMessage;
+            let enc_type = enc_type.as_wire_str();
             #[cfg(feature = "tracing")]
             let ciphertext_len = ciphertext.len();
 
-            if enc_type == EncType::PreKeyMessage {
+            if is_prekey {
                 // Capture before parsing moves the wire buffer into the owned
                 // decrypt path; this feature exists to reproduce BadMac reports.
                 #[cfg(feature = "debug-snapshots")]
                 {
                     use base64::prelude::*;
-                    let payload = serde_json::json!({
-                        "id": info.id,
-                        "sender_jid": sender_encryption_jid.to_string(),
-                        "timestamp": info.timestamp,
-                        "enc_type": enc_type_str,
-                        "payload_base64": BASE64_STANDARD.encode(ciphertext.as_ref()),
-                    });
+                    let content_bytes = {
+                        let payload = serde_json::json!({
+                            "id": info.id,
+                            "sender_jid": sender_encryption_jid.to_string(),
+                            "timestamp": info.timestamp,
+                            "enc_type": enc_type,
+                            "payload_base64": BASE64_STANDARD.encode(ciphertext.as_ref()),
+                        });
 
-                    let content_bytes = serde_json::to_vec_pretty(&payload).unwrap_or_default();
+                        serde_json::to_vec_pretty(&payload).unwrap_or_default()
+                    };
 
                     if let Err(e) = self
                         .persistence_manager
@@ -831,10 +1131,10 @@ impl Client {
                 let _parse_span = tracing::trace_span!(
                     "wa.recv.session_parse",
                     ciphertext_bytes = ciphertext_len as u64,
-                    enc_type = enc_type_str
+                    enc_type = enc_type
                 )
                 .entered();
-                if enc_type == EncType::PreKeyMessage {
+                if is_prekey {
                     PreKeySignalMessage::try_from(ciphertext)
                         .map(CiphertextMessage::PreKeySignalMessage)
                         .map(OwnedCiphertextMessage::from)
@@ -849,7 +1149,7 @@ impl Client {
                 Ok(message) => message,
                 Err(e) => {
                     log::error!(
-                        "[msg:{}] Failed to parse {enc_type_str} Signal envelope from {}: {e:?}. Sending nack.",
+                        "[msg:{}] Failed to parse {enc_type} Signal envelope from {}: {e:?}. Sending nack.",
                         info.id,
                         info.source.sender.observe()
                     );
@@ -859,7 +1159,7 @@ impl Client {
                     self.report_enc_decrypt_failure(
                         info,
                         enc_index,
-                        enc_type_str,
+                        enc_type,
                         EncDecryptFailureReason::MalformedCiphertext,
                     );
                     outcome.undecryptable |= self
@@ -875,28 +1175,40 @@ impl Client {
                 }
             };
 
-            // Shadow with wire string for all downstream usage (logging, handlers)
-            let enc_type = enc_type_str;
-
-            let decrypt_res = decrypt_session_message(
-                &mut parsed_message,
-                &signal_address,
-                &mut adapter,
-                &mut rng,
-            );
-            #[cfg(feature = "tracing")]
-            let decrypt_res = tracing::Instrument::instrument(
-                decrypt_res,
-                tracing::trace_span!(
-                    "wa.recv.session_crypto",
-                    ciphertext_bytes = ciphertext_len as u64,
-                    enc_type = enc_type_str
-                ),
-            );
-            let decrypt_res = decrypt_res.await;
+            let decrypt_res = {
+                let decrypt_res = decrypt_session_message(
+                    &mut parsed_message,
+                    &signal_address,
+                    &mut adapter,
+                    &mut rng,
+                );
+                #[cfg(feature = "tracing")]
+                let decrypt_res = tracing::Instrument::instrument(
+                    decrypt_res,
+                    tracing::trace_span!(
+                        "wa.recv.session_crypto",
+                        ciphertext_bytes = ciphertext_len as u64,
+                        enc_type = enc_type
+                    ),
+                );
+                decrypt_res
+            }
+            .await;
 
             match decrypt_res {
                 Ok(decrypted) => {
+                    let plaintext = bytes::Bytes::from(decrypted.plaintext);
+                    self.stage_retained_plaintext(
+                        info,
+                        stanza_origin,
+                        (enc_index, enc_type, padding_version),
+                        &plaintext,
+                    );
+                    #[cfg(test)]
+                    self.inbound_commit_batch
+                        .live_retention
+                        .pause_after_stage()
+                        .await;
                     // Buffer the prekey this pkmsg consumed: message_decrypt promoted
                     // the session into the (volatile) cache but no longer deletes the
                     // prekey itself. The post-loop flush deletes it only once that
@@ -916,14 +1228,17 @@ impl Client {
                     // Decrypt succeeded (the ratchet advanced); defer the
                     // plaintext handling until the lock is dropped.
                     outcome.decrypted = true;
-                    deferred.push(DeferredPlaintext {
+                    defer_plaintext(
+                        &mut deferred,
                         enc_type,
-                        plaintext: decrypted.plaintext,
+                        plaintext,
                         padding_version,
                         enc_index,
-                        state: state.clone(),
-                        session_type: session_type.clone(),
-                    });
+                        EncNodeAnnotations {
+                            state: state.as_deref(),
+                            session_type: session_type.as_deref(),
+                        },
+                    );
                 }
                 Err(e) => {
                     // Handle DuplicatedMessage: This is expected when messages are redelivered during reconnection
@@ -1017,6 +1332,13 @@ impl Client {
 
                         match retry_decrypt_res {
                             Ok(decrypted) => {
+                                let plaintext = bytes::Bytes::from(decrypted.plaintext);
+                                self.stage_retained_plaintext(
+                                    info,
+                                    stanza_origin,
+                                    (enc_index, enc_type, padding_version),
+                                    &plaintext,
+                                );
                                 log::debug!(
                                     "[msg:{}] Successfully decrypted message from {} after handling untrusted identity",
                                     info.id,
@@ -1041,14 +1363,17 @@ impl Client {
                                 // Decrypt succeeded after the identity retry;
                                 // defer plaintext handling until the lock drops.
                                 outcome.decrypted = true;
-                                deferred.push(DeferredPlaintext {
+                                defer_plaintext(
+                                    &mut deferred,
                                     enc_type,
-                                    plaintext: decrypted.plaintext,
+                                    plaintext,
                                     padding_version,
                                     enc_index,
-                                    state: state.clone(),
-                                    session_type: session_type.clone(),
-                                });
+                                    EncNodeAnnotations {
+                                        state: state.as_deref(),
+                                        session_type: session_type.as_deref(),
+                                    },
+                                );
                             }
                             Err(retry_err) => {
                                 // Handle DuplicatedMessage in retry path: This commonly happens during reconnection
@@ -1069,24 +1394,33 @@ impl Client {
                                 } else if matches!(retry_err, SignalProtocolError::InvalidPreKeyId)
                                 {
                                     // Session may exist under PN address after identity change
-                                    match self
-                                        .try_pn_to_lid_migration_decrypt(
-                                            sender_encryption_jid,
-                                            &signal_address,
-                                            &mut parsed_message,
-                                            &mut adapter,
-                                            &mut rng,
-                                            enc_type,
-                                            padding_version,
-                                            enc_index,
-                                            annotations,
-                                            info,
-                                            &session_mutex,
-                                            &mut session_guard,
-                                            &mut deferred,
-                                        )
+                                    let migration = {
+                                        let mut future =
+                                            std::pin::pin!(self.try_pn_to_lid_migration_decrypt(
+                                                sender_encryption_jid,
+                                                &signal_address,
+                                                &mut parsed_message,
+                                                &mut adapter,
+                                                &mut rng,
+                                                enc_type,
+                                                padding_version,
+                                                enc_index,
+                                                EncNodeAnnotations {
+                                                    state: state.as_deref(),
+                                                    session_type: session_type.as_deref(),
+                                                },
+                                                info,
+                                                &session_mutex,
+                                                &mut session_guard,
+                                                &mut deferred,
+                                                stanza_origin,
+                                            ));
+                                        std::future::poll_fn(|cx| {
+                                            poll_inbound_phase(future.as_mut(), cx)
+                                        })
                                         .await
-                                    {
+                                    };
+                                    match migration {
                                         MigrationDecryptResult::Decrypted => {
                                             outcome.decrypted = true;
                                         }
@@ -1187,8 +1521,8 @@ impl Client {
                         // `Some` only when a migration ran and its retry decrypt
                         // failed: then that failure is the terminal one, not the
                         // error that opened the migration.
-                        let terminal = match self
-                            .try_pn_to_lid_migration_decrypt(
+                        let migration = {
+                            let mut future = std::pin::pin!(self.try_pn_to_lid_migration_decrypt(
                                 sender_encryption_jid,
                                 &signal_address,
                                 &mut parsed_message,
@@ -1197,14 +1531,19 @@ impl Client {
                                 enc_type,
                                 padding_version,
                                 enc_index,
-                                annotations,
+                                EncNodeAnnotations {
+                                    state: state.as_deref(),
+                                    session_type: session_type.as_deref(),
+                                },
                                 info,
                                 &session_mutex,
                                 &mut session_guard,
                                 &mut deferred,
-                            )
-                            .await
-                        {
+                                stanza_origin,
+                            ));
+                            std::future::poll_fn(|cx| poll_inbound_phase(future.as_mut(), cx)).await
+                        };
+                        let terminal = match migration {
                             MigrationDecryptResult::Decrypted => {
                                 outcome.decrypted = true;
                                 continue;
@@ -1242,8 +1581,8 @@ impl Client {
                         // `Some` only when a migration ran and its retry decrypt
                         // failed: then that failure is the terminal one, not the
                         // error that opened the migration.
-                        let terminal = match self
-                            .try_pn_to_lid_migration_decrypt(
+                        let migration = {
+                            let mut future = std::pin::pin!(self.try_pn_to_lid_migration_decrypt(
                                 sender_encryption_jid,
                                 &signal_address,
                                 &mut parsed_message,
@@ -1252,14 +1591,19 @@ impl Client {
                                 enc_type,
                                 padding_version,
                                 enc_index,
-                                annotations,
+                                EncNodeAnnotations {
+                                    state: state.as_deref(),
+                                    session_type: session_type.as_deref(),
+                                },
                                 info,
                                 &session_mutex,
                                 &mut session_guard,
                                 &mut deferred,
-                            )
-                            .await
-                        {
+                                stanza_origin,
+                            ));
+                            std::future::poll_fn(|cx| poll_inbound_phase(future.as_mut(), cx)).await
+                        };
+                        let terminal = match migration {
                             MigrationDecryptResult::Decrypted => {
                                 outcome.decrypted = true;
                                 continue;
@@ -1315,8 +1659,8 @@ impl Client {
                         // `Some` only when a migration ran and its retry decrypt
                         // failed: then that failure is the terminal one, not the
                         // error that opened the migration.
-                        let terminal = match self
-                            .try_pn_to_lid_migration_decrypt(
+                        let migration = {
+                            let mut future = std::pin::pin!(self.try_pn_to_lid_migration_decrypt(
                                 sender_encryption_jid,
                                 &signal_address,
                                 &mut parsed_message,
@@ -1325,14 +1669,19 @@ impl Client {
                                 enc_type,
                                 padding_version,
                                 enc_index,
-                                annotations,
+                                EncNodeAnnotations {
+                                    state: state.as_deref(),
+                                    session_type: session_type.as_deref(),
+                                },
                                 info,
                                 &session_mutex,
                                 &mut session_guard,
                                 &mut deferred,
-                            )
-                            .await
-                        {
+                                stanza_origin,
+                            ));
+                            std::future::poll_fn(|cx| poll_inbound_phase(future.as_mut(), cx)).await
+                        };
+                        let terminal = match migration {
                             MigrationDecryptResult::Decrypted => {
                                 outcome.decrypted = true;
                                 continue;
@@ -1435,58 +1784,8 @@ impl Client {
         // serial chat-lane worker, not this guard. Matches whatsmeow.
         drop(session_guard);
 
-        for DeferredPlaintext {
-            enc_type,
-            plaintext,
-            padding_version,
-            enc_index,
-            state,
-            session_type,
-        } in deferred
-        {
-            match self
-                .handle_decrypted_plaintext(
-                    enc_type,
-                    plaintext,
-                    padding_version,
-                    enc_index,
-                    EncNodeAnnotations {
-                        state: state.as_deref(),
-                        session_type: session_type.as_deref(),
-                    },
-                    info,
-                )
-                .await
-            {
-                Ok(plaintext_outcome) => {
-                    outcome.dispatched |= plaintext_outcome.dispatched;
-                    outcome.skdm_only |= plaintext_outcome.skdm_only;
-                }
-                Err(e) => {
-                    log::warn!(
-                        "[msg:{}] Failed processing plaintext from {}: {e:?}",
-                        info.id,
-                        info.source.sender.observe()
-                    );
-                    outcome.plaintext_failed = true;
-                    outcome.had_failure = true;
-                    // The one report that can follow a DecryptedPayload for the
-                    // same enc: the bytes existed, they just could not be made
-                    // into a message. Unpadding fails ahead of that event, so
-                    // there this is the only signal.
-                    self.report_enc_decrypt_failure(
-                        info,
-                        enc_index,
-                        enc_type,
-                        EncDecryptFailureReason::PlaintextUnusable,
-                    );
-                    outcome.undecryptable |=
-                        self.handle_plaintext_failure(info, decrypt_fail_mode).await;
-                }
-            }
-        }
-
-        outcome
+        // Keep the existing measurement boundary through plaintext projection.
+        (outcome, deferred, Some(timer))
     }
 
     #[cfg_attr(feature = "tracing", tracing::instrument(name = "wa.recv.group_decrypt", level = "debug", skip_all, fields(chat = %info.source.chat.observe(), sender = %info.source.sender.observe(), msg_id = %info.id), err(Debug)))]
@@ -1496,6 +1795,7 @@ impl Client {
         info: &Arc<MessageInfo>,
         _sender_encryption_jid: &Jid,
         decrypt_fail_mode: crate::types::events::DecryptFailMode,
+        stanza_origin: raw_pending::StanzaOrigin,
     ) -> Result<(), DecryptionError> {
         if payloads.is_empty() {
             return Ok(());
@@ -1545,6 +1845,18 @@ impl Client {
 
             match decrypt_result {
                 Ok(padded_plaintext) => {
+                    let padded_plaintext = bytes::Bytes::from(padded_plaintext);
+                    self.stage_retained_plaintext(
+                        info,
+                        stanza_origin,
+                        (enc_index, enc_type, padding_version),
+                        &padded_plaintext,
+                    );
+                    #[cfg(test)]
+                    self.inbound_commit_batch
+                        .live_retention
+                        .pause_after_stage()
+                        .await;
                     // Sync device list if sender is unknown, but still process
                     // the message. Signal decryption success already proves the
                     // sender holds the session key — discarding would only add
@@ -1559,12 +1871,16 @@ impl Client {
                     }
 
                     if let Err(e) = self
-                        .handle_decrypted_plaintext(
+                        .handle_decrypted_plaintext_in_scope(
                             "skmsg",
                             padded_plaintext,
                             padding_version,
-                            enc_index,
-                            payload.annotations(),
+                            PlaintextSlot {
+                                index: enc_index,
+                                annotations: payload.annotations(),
+                                producer: stanza_origin,
+                                receipt: None,
+                            },
                             info,
                         )
                         .await
@@ -1765,6 +2081,7 @@ impl Client {
     }
 
     #[cfg_attr(feature = "tracing", tracing::instrument(name = "wa.recv.handle_plaintext", level = "debug", skip_all, fields(chat = %info.source.chat.observe(), sender = %info.source.sender.observe(), msg_id = %info.id, enc_type = %enc_type), err(Debug)))]
+    #[cfg(any(test, feature = "bench-harness"))]
     pub(crate) async fn handle_decrypted_plaintext(
         self: &Arc<Self>,
         enc_type: &'static str,
@@ -1774,7 +2091,75 @@ impl Client {
         annotations: EncNodeAnnotations<'_>,
         info: &Arc<MessageInfo>,
     ) -> Result<PlaintextHandleOutcome, anyhow::Error> {
-        let source = wacore::messages::unpad_plaintext(padded_plaintext, padding_version)?;
+        self.handle_decrypted_plaintext_in_scope(
+            enc_type,
+            padded_plaintext.into(),
+            padding_version,
+            PlaintextSlot {
+                index: enc_index,
+                annotations,
+                producer: raw_pending::StanzaOrigin::new(),
+                receipt: None,
+            },
+            info,
+        )
+        .await
+    }
+
+    pub(super) async fn handle_decrypted_plaintext_in_scope(
+        self: &Arc<Self>,
+        enc_type: &'static str,
+        padded_plaintext: bytes::Bytes,
+        padding_version: u8,
+        slot: PlaintextSlot<'_>,
+        info: &Arc<MessageInfo>,
+    ) -> Result<PlaintextHandleOutcome, anyhow::Error> {
+        let origin = raw_pending::DeliveryOrigin {
+            stanza: slot.producer,
+            position: slot.index,
+        };
+        let mut future = std::pin::pin!(self.handle_decrypted_plaintext_retained(
+            enc_type,
+            padded_plaintext,
+            padding_version,
+            slot,
+            info,
+        ));
+        let result = std::future::poll_fn(|cx| poll_inbound_phase(future.as_mut(), cx)).await;
+        if result.as_ref().is_ok_and(|outcome| !outcome.dispatched) {
+            // Successful protocol-only processing has no consumer delivery.
+            // Recoverable errors and cancellation keep raw ownership; the
+            // terminal padding/decode checks release only their rejected slot.
+            self.finish_retained_raw(origin);
+        }
+        result
+    }
+
+    async fn handle_decrypted_plaintext_retained(
+        self: &Arc<Self>,
+        enc_type: &'static str,
+        padded_plaintext: bytes::Bytes,
+        padding_version: u8,
+        slot: PlaintextSlot<'_>,
+        info: &Arc<MessageInfo>,
+    ) -> Result<PlaintextHandleOutcome, anyhow::Error> {
+        let PlaintextSlot {
+            index: enc_index,
+            annotations,
+            producer: stanza_origin,
+            receipt,
+        } = slot;
+        let origin = raw_pending::DeliveryOrigin {
+            stanza: stanza_origin,
+            position: enc_index,
+        };
+        let unpadded_len = wacore::messages::MessageUtils::unpadded_message_len(
+            &padded_plaintext,
+            padding_version,
+        )
+        .inspect_err(|_| self.finish_retained_raw(origin))?;
+        let mut source = padded_plaintext;
+        source.truncate(unpadded_len);
 
         // Emitted before decoding, so a payload this build cannot decode still
         // reaches a consumer that wants it. Nothing is cloned while no lease is
@@ -1792,8 +2177,16 @@ impl Client {
             ));
         }
 
+        // Retain the exact unpadded carrier before detached-history decode,
+        // DSM unwrapping or consumer projection construction can discard it.
+        let carrier = self
+            .inbound_durability_hook()
+            .is_some()
+            .then(|| u32::try_from(enc_index).map(|index| (Some(index), source.clone())))
+            .transpose()?;
         let (original_msg, history_sync_taken) =
-            wacore::messages::decode_unpadded_detached_history_sync(source)?;
+            wacore::messages::decode_unpadded_detached_history_sync(source)
+                .inspect_err(|_| self.finish_retained_raw(origin))?;
         log::debug!(
             "[msg:{}] Successfully decrypted message from {}: type={} [batch path]",
             info.id,
@@ -1832,6 +2225,7 @@ impl Client {
         // is nested inside device_sent_message.message and must be
         // extracted before protocol checks or dispatch.
         let mut msg = wacore::messages::unwrap_device_sent(original_msg);
+        let skdm_only = wacore::messages::is_sender_key_distribution_only(&mut msg);
 
         if info.source.chat.is_group()
             && let Some(protocol) = msg.protocol_message.as_option()
@@ -1872,13 +2266,31 @@ impl Client {
         if let Some(skdm) = msg.sender_key_distribution_message.as_option()
             && let Some(axolotl_bytes) = &skdm.axolotl_sender_key_distribution_message
         {
-            self.handle_sender_key_distribution_message(
-                &info.source.chat,
-                &info.source.sender,
-                &info.id,
-                axolotl_bytes,
-            )
-            .await;
+            let result = self
+                .handle_sender_key_distribution_message(
+                    &info.source.chat,
+                    &info.source.sender,
+                    &info.id,
+                    axolotl_bytes,
+                )
+                .await;
+            if let Err(error) = result {
+                if matches!(error, crate::features::SignalError::InvalidInput(_)) {
+                    if skdm_only {
+                        self.finish_retained_raw(origin);
+                        return Err(error.into());
+                    }
+                    // Renderable content has independent ownership from an
+                    // invalid auxiliary sender-key distribution. Its original
+                    // carrier remains retained until consumer commit succeeds.
+                    warn!(
+                        "[msg:{}] Ignoring malformed auxiliary SKDM: {error}",
+                        info.id
+                    );
+                } else {
+                    return Err(error.into());
+                }
+            }
         }
 
         // A peer-provided key could forge app-state mutations, so match WA Web's
@@ -1937,7 +2349,9 @@ impl Client {
                 .peer_data_operation_request_response_message
                 .as_option()
         {
-            self.handle_pdo_response(pdo_response, info).await;
+            // PDO recovery holds a decoded WebMessageInfo across storage awaits.
+            // Allocate that rare future here so every chat lane need not carry it.
+            Box::pin(self.handle_pdo_response(pdo_response, info)).await;
         }
 
         // history_sync_notification is self-only (our phone drives history sync).
@@ -1961,7 +2375,7 @@ impl Client {
         // (protocol-level key exchange) with no user-visible content.
         // These arrive as a separate pkmsg enc node alongside the actual
         // group message (skmsg) and would otherwise surface as "unknown".
-        if wacore::messages::is_sender_key_distribution_only(&mut msg) {
+        if skdm_only {
             log::debug!(
                 "[msg:{}] Skipping event dispatch for sender key distribution message",
                 info.id
@@ -1974,8 +2388,11 @@ impl Client {
             // The probe may have already materialized a secret envelope while
             // fingerprinting; hand it to dispatch instead of resolving the
             // parent secret a second time.
-            let pre_decrypted = match self.probe_message_dispatch(info, &msg).await {
-                ProbeOutcome::Suppress => {
+            let pre_decrypted = match self
+                .probe_message_dispatch(info, &msg, Some(DispatchKey::new(stanza_origin)))
+                .await
+            {
+                ProbeOutcome::Suppress { decrypted } => {
                     // The event is a duplicate; the message secret it carries may not
                     // be. Capture is write-behind and can drop an entry when its
                     // backend is down, and this branch skips `dispatch_parsed_message`,
@@ -1991,8 +2408,39 @@ impl Client {
                     // survived replays instead of being acked, which dispatches the
                     // message again: that is the documented at-least-once shape, not a
                     // suppression, so it is not counted as one.
-                    let replayed = !info.source.chat.is_status_broadcast()
-                        && self.ack_or_replay_to_hook(info).await;
+                    let (replayed, commit_state) =
+                        if self.inbound_durability_hook().is_some() && carrier.is_some() {
+                            // A consumer claim does not prove that this raw occurrence
+                            // is stored. Commit it directly instead of recursively
+                            // replaying the raw entry that is currently being prepared.
+                            let state = self
+                                .commit_or_batch_pending(
+                                    raw_pending::PendingDelivery {
+                                        item: wacore::types::events::InboundMessage::builder()
+                                            .message(decrypted.unwrap_or_else(|| Arc::new(msg)))
+                                            .info(Arc::clone(info))
+                                            .build(),
+                                        carrier,
+                                        origin: Some(raw_pending::DeliveryOrigin {
+                                            stanza: stanza_origin,
+                                            position: enc_index,
+                                        }),
+                                        retention: None,
+                                        receipt: receipt.clone(),
+                                        storage_sender: None,
+                                        consumer_claimed: true,
+                                    },
+                                    app_state_key_share_job.is_some(),
+                                )
+                                .await;
+                            (matches!(state, InboundCommitState::Durable), Some(state))
+                        } else {
+                            (
+                                !info.source.chat.is_status_broadcast()
+                                    && self.ack_or_replay_to_hook(info).await,
+                                None,
+                            )
+                        };
                     if !replayed {
                         self.duplicate_dispatch_suppressed
                             .fetch_add(1, Ordering::Relaxed);
@@ -2008,26 +2456,59 @@ impl Client {
                     // one. Sending them twice costs a stanza; not sending them leaves
                     // the requester without app-state keys until it changes request id.
                     if let Some((requester, request)) = app_state_key_share_job {
-                        self.schedule_app_state_sync_key_share(requester, request, None);
+                        match commit_state {
+                            Some(InboundCommitState::Durable | InboundCommitState::Buffered)
+                            | None => {
+                                self.schedule_app_state_sync_key_share(requester, request, None);
+                            }
+                            Some(InboundCommitState::Deferred(Some(ticket))) => {
+                                self.schedule_app_state_sync_key_share(
+                                    requester,
+                                    request,
+                                    Some(ticket),
+                                );
+                            }
+                            Some(
+                                InboundCommitState::Deferred(None) | InboundCommitState::Failed,
+                            ) => {
+                                warn!(
+                                    "[msg:{}] Deferring app-state key-share until durable retry",
+                                    info.id
+                                );
+                            }
+                        }
                     }
                     return Ok(PlaintextHandleOutcome {
                         dispatched: true,
+                        delivered: replayed,
                         ..Default::default()
                     });
                 }
-                ProbeOutcome::Proceed { decrypted } => decrypted.map(|boxed| *boxed),
+                ProbeOutcome::Proceed { decrypted } => decrypted,
             };
+            // Only messages entering dispatch need an outer message Arc. Avoid
+            // that allocation for SKDM carriers and suppressed resends; dispatch
+            // still carries the event's final handle rather than a Message.
             let commit_state = self
-                .dispatch_parsed_message_with_decrypted(
-                    msg,
+                .dispatch_shared_message_with_carrier(
+                    Arc::new(msg),
                     info,
                     app_state_key_share_job.is_some(),
                     pre_decrypted,
+                    carrier,
+                    (
+                        Some(raw_pending::DeliveryOrigin {
+                            stanza: stanza_origin,
+                            position: enc_index,
+                        }),
+                        receipt,
+                    ),
                 )
                 .await;
+            let delivered = matches!(commit_state, InboundCommitState::Durable);
             if let Some((requester, request)) = app_state_key_share_job {
                 match commit_state {
-                    InboundCommitState::Durable => {
+                    InboundCommitState::Durable | InboundCommitState::Buffered => {
                         self.schedule_app_state_sync_key_share(requester, request, None);
                     }
                     InboundCommitState::Deferred(Some(ticket)) => {
@@ -2043,6 +2524,7 @@ impl Client {
             }
             Ok(PlaintextHandleOutcome {
                 dispatched: true,
+                delivered,
                 ..Default::default()
             })
         }
@@ -2075,6 +2557,7 @@ impl Client {
         session_mutex: &Arc<async_lock::Mutex<()>>,
         session_guard: &mut Option<async_lock::MutexGuardArc<()>>,
         deferred: &mut Vec<DeferredPlaintext>,
+        stanza_origin: raw_pending::StanzaOrigin,
     ) -> MigrationDecryptResult {
         if !parsed_message.is_available() || !sender_jid.is_lid() {
             return MigrationDecryptResult::NotDecrypted(None);
@@ -2113,6 +2596,13 @@ impl Client {
             // the identity for the first time (NewOrUnchanged), so no local
             // identity-change reaction is warranted here.
             Ok(decrypted) => {
+                let plaintext = bytes::Bytes::from(decrypted.plaintext);
+                self.stage_retained_plaintext(
+                    info,
+                    stanza_origin,
+                    (enc_index, enc_type, padding_version),
+                    &plaintext,
+                );
                 log::info!(
                     "[msg:{}] Decrypted after PN→LID session migration for {}",
                     info.id,
@@ -2126,14 +2616,14 @@ impl Client {
                 }
                 // Buffer for post-lock handling, keeping the same ordering as the
                 // batch's main path.
-                deferred.push(DeferredPlaintext {
+                defer_plaintext(
+                    deferred,
                     enc_type,
-                    plaintext: decrypted.plaintext,
+                    plaintext,
                     padding_version,
                     enc_index,
-                    state: annotations.state.map(str::to_owned),
-                    session_type: annotations.session_type.map(str::to_owned),
-                });
+                    annotations,
+                );
                 MigrationDecryptResult::Decrypted
             }
             Err(SignalProtocolError::DuplicatedMessage(chain, counter)) => {

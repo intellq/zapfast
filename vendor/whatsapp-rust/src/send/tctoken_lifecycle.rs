@@ -15,6 +15,22 @@ pub(crate) fn is_own_identity(own_pn: Option<&Jid>, own_lid: Option<&Jid>, jid: 
         || own_lid.is_some_and(|lid| lid.is_same_chat_as(jid))
 }
 
+// The echoed token and issuance bucket each have independent merge rules.
+// Keep the original caller's timestamps, but never replace a row captured before
+// another notification/issuance. Each merge is atomic; the pair is not a transaction.
+async fn persist_issued_tc_token(
+    backend: &dyn wacore::store::traits::ProtocolStore,
+    received: &wacore::iq::tctoken::ReceivedTcToken,
+    sender_timestamp: i64,
+) -> wacore::store::error::Result<()> {
+    backend
+        .store_received_tc_token(&received.jid.user, &received.token, received.timestamp)
+        .await?;
+    backend
+        .touch_tc_token_sender_timestamp(&received.jid.user, sender_timestamp)
+        .await
+}
+
 impl Client {
     /// Whether `jid` is our own account (PN or LID). The privacy-token paths
     /// never attach to or issue for ourselves; a single source of truth keeps
@@ -26,13 +42,10 @@ impl Client {
 
     /// Look up and include a privacy token in outgoing 1:1 message stanza nodes.
     ///
-    /// Follows WA Web's fallback chain (MsgCreateFanoutStanza.js `Re = R(te) ?? D(te, s)`):
-    ///   1. tctoken — stored trusted contact token, gated on
-    ///      `privacy_token_sending_on_all_1_on_1_messages` (WA Web `R`).
+    /// Follows the fallback chain selected by [`wacore::iq::tctoken::choose_privacy_token`]:
+    ///   1. tctoken — stored, non-empty, unexpired received trusted-contact token.
     ///   2. cstoken — `HMAC-SHA256(nct_salt, recipient_lid)` fallback, gated
-    ///      independently on `wa_nct_token_send_enabled` (WA Web `D`). The cstoken
-    ///      is NOT nested behind the 1:1 prop — WA Web attaches it even when `R`
-    ///      returns null.
+    ///      independently on `wa_nct_token_send_enabled`.
     ///   3. No token — message sent without token (server may return 463).
     ///
     /// Returns whether a new tc token should be issued after send.
@@ -95,7 +108,7 @@ impl Client {
                 && !is_tc_token_expired_with_at(entry.token_timestamp, &tc_config, now))
             .then_some(entry.token.as_slice())
         });
-        // cstoken needs both the NCT salt and a resolved account LID (WA Web `D`).
+        // cstoken needs both the NCT salt and a resolved account LID.
         let snapshot = self.persistence_manager.get_device_snapshot();
         let cs_token_inputs: Option<(&[u8], &wacore_binary::CompactString)> =
             match (&snapshot.nct_salt, &resolved_lid) {
@@ -103,17 +116,13 @@ impl Client {
                 _ => None,
             };
 
-        let tc_send_enabled = self
-            .ab_props
-            .is_enabled(web::PRIVACY_TOKEN_SENDING_ON_ALL_1_ON_1_MESSAGES)
-            .await;
         let nct_send_enabled = self
             .ab_props
             .is_enabled(web::WA_NCT_TOKEN_SEND_ENABLED)
             .await;
 
         let choice = choose_privacy_token(
-            tc_send_enabled,
+            false,
             nct_send_enabled,
             valid_tc_token.is_some(),
             cs_token_inputs.is_some(),
@@ -196,8 +205,6 @@ impl Client {
         &self,
         tokens: &[wacore::iq::tctoken::ReceivedTcToken],
     ) {
-        use wacore::store::traits::TcTokenEntry;
-
         let backend = self.persistence_manager.backend();
         let now = wacore::time::now_secs();
         for received in tokens {
@@ -206,13 +213,7 @@ impl Client {
                 continue;
             }
 
-            let entry = TcTokenEntry {
-                token: received.token.clone(),
-                token_timestamp: received.timestamp,
-                sender_timestamp: Some(now),
-            };
-
-            if let Err(e) = backend.put_tc_token(&received.jid.user, &entry).await {
+            if let Err(e) = persist_issued_tc_token(backend.as_ref(), received, now).await {
                 log::warn!(target: "Client/TcToken", "Failed to store issued tc_token: {e}");
             }
         }
@@ -225,19 +226,12 @@ impl Client {
         tokens: &[wacore::iq::tctoken::ReceivedTcToken],
         sender_ts: i64,
     ) {
-        use wacore::store::traits::TcTokenEntry;
-
         let backend = self.persistence_manager.backend();
         for received in tokens {
             if received.token.is_empty() {
                 continue;
             }
-            let entry = TcTokenEntry {
-                token: received.token.clone(),
-                token_timestamp: received.timestamp,
-                sender_timestamp: Some(sender_ts),
-            };
-            if let Err(e) = backend.put_tc_token(&received.jid.user, &entry).await {
+            if let Err(e) = persist_issued_tc_token(backend.as_ref(), received, sender_ts).await {
                 log::warn!(target: "Client/TcToken", "Failed to store re-issued tc_token: {e}");
             }
         }
@@ -600,5 +594,52 @@ mod tests {
             !client.should_issue_tc_token(&own).await,
             "a self-call must never issue a tc token for our own account"
         );
+    }
+    #[tokio::test]
+    async fn issued_token_merge_preserves_newer_notification_and_sender() {
+        assert_issued_token_merge(false).await;
+    }
+
+    #[tokio::test]
+    async fn reissued_token_merge_preserves_newer_notification_and_sender() {
+        assert_issued_token_merge(true).await;
+    }
+
+    async fn assert_issued_token_merge(reissue: bool) {
+        use wacore::iq::tctoken::ReceivedTcToken;
+        let client = create_test_client().await;
+        let backend = client.persistence_manager.backend();
+        let jid = Jid::new("770000099", Server::Lid);
+        let sender = wacore::time::now_secs() + 1000;
+        // A notification and another successful issuance landed while this IQ was pending.
+        backend
+            .store_received_tc_token(&jid.user, b"notification", 6000)
+            .await
+            .unwrap();
+        backend
+            .touch_tc_token_sender_timestamp(&jid.user, sender)
+            .await
+            .unwrap();
+        for (token, timestamp, expected) in [
+            (b"old-response".as_slice(), 3000, b"notification".as_slice()),
+            (b"new-response".as_slice(), 7000, b"new-response".as_slice()),
+        ] {
+            let tokens = [ReceivedTcToken {
+                jid: jid.clone(),
+                token: token.to_vec(),
+                timestamp,
+            }];
+            if reissue {
+                client
+                    .store_issued_tc_tokens_with_sender_ts(&tokens, 100)
+                    .await;
+            } else {
+                client.store_issued_tc_tokens(&tokens).await;
+            }
+            let held = backend.get_tc_token(&jid.user).await.unwrap().unwrap();
+            assert_eq!(held.token, expected);
+            assert_eq!(held.token_timestamp, timestamp.max(6000));
+            assert_eq!(held.sender_timestamp, Some(sender));
+        }
     }
 }

@@ -1,7 +1,6 @@
 use crate::client::Client;
 use crate::request::IqError;
 use futures::FutureExt;
-use log::{debug, warn};
 use rand::RngExt;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -11,6 +10,41 @@ use wacore::protocol::keepalive::{
     KEEP_ALIVE_INTERVAL_MAX, KEEP_ALIVE_INTERVAL_MIN, KEEP_ALIVE_RESPONSE_DEADLINE, elapsed_since,
     elapsed_since_at, is_dead_socket_at,
 };
+
+// Keep direct loop events attributable without keeping a client-lifetime span.
+// Read one snapshot only for an enabled event; borrow its JIDs so formatting
+// remains the subscriber's choice. Field evaluation happens only after the
+// actual event callsite is enabled; a separate probe can receive a different
+// metadata filter decision. A log-only host keeps the existing output.
+macro_rules! client_log {
+    ($client:expr, $level:ident, target: $target:expr, $($args:tt)*) => {{
+        #[cfg(feature = "tracing")]
+        {
+            let snapshot = std::cell::OnceCell::new();
+            let mut traced = false;
+            tracing::$level!(
+                target: $target,
+                lid = {
+                    traced = true;
+                    snapshot.get_or_init(|| $client.persistence_manager.get_device_snapshot())
+                        .lid.as_ref().map(tracing::field::display)
+                },
+                pn = snapshot.get_or_init(|| $client.persistence_manager.get_device_snapshot())
+                    .pn.as_ref().map(|pn| tracing::field::display(pn.observe())),
+                $($args)*
+            );
+            if !traced {
+                log::$level!(target: $target, $($args)*);
+            }
+        }
+        #[cfg(not(feature = "tracing"))]
+        log::$level!(target: $target, $($args)*);
+    }};
+    ($client:expr, $level:ident, $($args:tt)*) => {
+        client_log!($client, $level, target: module_path!(), $($args)*)
+    };
+}
+pub(crate) use client_log;
 
 #[cfg(test)]
 mod silent_iq_tests;
@@ -136,10 +170,12 @@ impl Client {
     /// WA Web: `sendPing` → `onClockSkewUpdate(Math.round((start + rtt/2) / 1000 - serverTime))`
     #[cfg_attr(
         feature = "tracing",
-        tracing::instrument(name = "wa.conn.keepalive.ping", level = "debug", skip_all)
+        tracing::instrument(name = "wa.conn.keepalive.ping", level = "debug", skip_all, fields(lid = tracing::field::Empty, pn = tracing::field::Empty))
     )]
     async fn send_keepalive(&self) -> KeepaliveResult {
-        if !self.is_connected() {
+        #[cfg(feature = "tracing")]
+        self.record_identity_on_current_span("wa.conn.keepalive.ping", module_path!());
+        if !self.is_socket_connected() {
             return KeepaliveResult::FatalFailure;
         }
 
@@ -156,13 +192,13 @@ impl Client {
             let silent_too_long = elapsed_since_at(last_recv, now)
                 .is_none_or(|elapsed| elapsed >= KEEP_ALIVE_INTERVAL_MAX);
             if !watchdog_expired && !silent_too_long {
-                debug!(target: "Client/Keepalive", "Skipping routine ping: responses pending");
+                client_log!(self, debug, target: "Client/Keepalive", "Skipping routine ping: responses pending");
                 return KeepaliveResult::Skipped;
             }
-            debug!(target: "Client/Keepalive", "Watchdog expired with responses pending; probing before reconnect");
+            client_log!(self, debug, target: "Client/Keepalive", "Watchdog expired with responses pending; probing before reconnect");
         }
 
-        debug!(target: "Client/Keepalive", "Sending keepalive ping");
+        client_log!(self, debug, target: "Client/Keepalive", "Sending keepalive ping");
 
         // wall_rtt_ms feeds the WA Web onClockSkewUpdate formula, which
         // mixes start_ms with serverTime — both halves must be wall-clock.
@@ -175,7 +211,7 @@ impl Client {
             Ok(response_node) => {
                 let rtt_monotonic = rtt_start.elapsed();
                 let wall_rtt_ms = wacore::time::now_millis().saturating_sub(start_ms).max(0);
-                debug!(target: "Client/Keepalive", "Received keepalive pong (RTT: {rtt_monotonic:.2?})");
+                client_log!(self, debug, target: "Client/Keepalive", "Received keepalive pong (RTT: {rtt_monotonic:.2?})");
                 self.unified_session.update_server_time_offset_with_rtt(
                     response_node.get(),
                     start_ms,
@@ -192,13 +228,25 @@ impl Client {
                 // failure the keepalive may see first, so it stays loud — as do all
                 // transient failures.
                 if is_benign_teardown(&e) {
-                    debug!(target: "Client/Keepalive", "Keepalive skipped, connection already closing: {e:?}");
+                    client_log!(self, debug, target: "Client/Keepalive", "Keepalive skipped, connection already closing: {e:?}");
                 } else {
-                    warn!(target: "Client/Keepalive", "Keepalive ping failed: {e:?}");
+                    client_log!(self, warn, target: "Client/Keepalive", "Keepalive ping failed: {e:?}");
                 }
                 result
             }
         }
+    }
+
+    /// Start the keepalive for the connection `generation` names.
+    ///
+    /// The shutdown signal is subscribed here, before the spawn, for the reason
+    /// [`keepalive_loop`](Self::keepalive_loop) takes it as an argument.
+    pub(crate) fn spawn_keepalive(self: &Arc<Self>, generation: u64) {
+        let shutdown_signal = self.connection_shutdown_signal();
+        let keepalive = self.clone();
+        self.runtime.spawn_detached(Box::pin(async move {
+            keepalive.keepalive_loop(shutdown_signal, generation).await
+        }));
     }
 
     // Deliberately NOT instrumented: a span here would live for the whole
@@ -220,6 +268,7 @@ impl Client {
         generation: u64,
     ) {
         let mut error_count = 0u32;
+        let mut failed_probe_deadline = None;
         let mut cleanup_counter = 0u32;
         let mut maintenance_counter = 0u32;
         let mut engine_maintenance_counter = 0u32;
@@ -243,8 +292,8 @@ impl Client {
 
             futures::select! {
                 _ = self.runtime.sleep(interval).fuse() => {
-                    if !self.is_connected() {
-                        debug!(target: "Client/Keepalive", "Not connected, exiting keepalive loop.");
+                    if !self.is_socket_connected() {
+                        client_log!(self, debug, target: "Client/Keepalive", "Not connected, exiting keepalive loop.");
                         return;
                     }
                     // The connected flag alone cannot tell "still my connection"
@@ -256,7 +305,7 @@ impl Client {
                         Ordering::Acquire,
                     );
                     if current != generation {
-                        debug!(
+                        client_log!(self, debug,
                             target: "Client/Keepalive",
                             "Connection generation moved on ({generation} -> {current}), exiting keepalive loop.",
                         );
@@ -306,10 +355,28 @@ impl Client {
                     {
                         // Connection alive — reset error state, skip ping.
                         if error_count > 0 {
-                            debug!(target: "Client/Keepalive", "Keepalive restored (recent activity).");
+                            client_log!(self, debug, target: "Client/Keepalive", "Keepalive restored (recent activity).");
                             error_count = 0;
                         }
+                        failed_probe_deadline = None;
                         continue;
+                    }
+
+                    // A failed bounded probe already gave the peer a chance to
+                    // respond. WA Web's independent watchdog does not wait for
+                    // another ping once that first-send deadline has expired.
+                    let first_send = self.stats.first_send_since_recv();
+                    if error_count > 0
+                        && first_send == failed_probe_deadline
+                        && is_dead_socket_at(
+                            first_send,
+                            self.stats.last_data_received(),
+                            wacore::time::Instant::now(),
+                        )
+                    {
+                        client_log!(self, warn, target: "Client/Keepalive", "Watchdog expired after a failed keepalive attempt, forcing reconnect.");
+                        self.reconnect_immediately().await;
+                        return;
                     }
 
                     // Probe the connection BEFORE checking dead-socket so that a
@@ -318,6 +385,7 @@ impl Client {
                     // connection.  WA Web uses a separate 20 s timer that is
                     // cancelled on any receive; our periodic loop needs to send the
                     // ping first to give the server a chance to prove it is alive.
+                    let receive_before_probe = self.stats.last_data_received();
                     match self.send_keepalive().await {
                         // A skipped ping neither restores health nor authorizes
                         // a teardown if the deadline crosses during this tick.
@@ -325,19 +393,25 @@ impl Client {
                         KeepaliveResult::Skipped => continue,
                         KeepaliveResult::Ok => {
                             if error_count > 0 {
-                                debug!(target: "Client/Keepalive", "Keepalive restored after {error_count} failure(s).");
+                                client_log!(self, debug, target: "Client/Keepalive", "Keepalive restored after {error_count} failure(s).");
                             }
                             error_count = 0;
+                            failed_probe_deadline = None;
                         }
                         KeepaliveResult::FatalFailure => {
-                            debug!(target: "Client/Keepalive", "Fatal keepalive failure, exiting loop.");
+                            client_log!(self, debug, target: "Client/Keepalive", "Fatal keepalive failure, exiting loop.");
                             return;
                         }
                         KeepaliveResult::TransientFailure => {
+                            // An IQ error is inbound activity too: a failure may
+                            // only authorize skipping a later probe for the
+                            // same deadline, with no intervening receive.
+                            failed_probe_deadline = (self.stats.last_data_received() == receive_before_probe)
+                                .then(|| self.stats.first_send_since_recv()).flatten();
                             error_count += 1;
-                            warn!(target: "Client/Keepalive", "Keepalive timeout, error count: {error_count}");
+                            client_log!(self, warn, target: "Client/Keepalive", "Keepalive timeout, error count: {error_count}");
                             if keepalive_failures_are_terminal(error_count) {
-                                warn!(
+                                client_log!(self, warn,
                                     target: "Client/Keepalive",
                                     "{error_count} consecutive unanswered pings, forcing reconnect.",
                                 );
@@ -360,7 +434,7 @@ impl Client {
                     if is_dead_socket_at(first_send, last_recv, now) {
                         let elapsed = elapsed_since_at(first_send, now).unwrap_or_default();
                         let pending = self.response_waiters_guard().len();
-                        warn!(
+                        client_log!(self, warn,
                             target: "Client/Keepalive",
                             "No inbound data for {:.1}s after first send; pending response waiters: {pending}; watchdog expired after keepalive attempt, forcing reconnect.",
                             elapsed.as_secs_f64()
@@ -370,7 +444,7 @@ impl Client {
                     }
                 },
                 _ = shutdown.fuse() => {
-                    debug!(target: "Client/Keepalive", "Shutdown signaled, exiting keepalive loop.");
+                    client_log!(self, debug, target: "Client/Keepalive", "Shutdown signaled, exiting keepalive loop.");
                     return;
                 }
             }
@@ -404,7 +478,7 @@ impl Client {
         self.lid_pn_cache.run_pending_tasks().await;
         // `get()`, not `get_group_cache()`: maintenance must not be what
         // builds a cache the client never used.
-        if let Some(group_cache) = self.group_cache.get() {
+        if let Some(group_cache) = self.initialized_group_cache() {
             group_cache.run_pending_tasks().await;
         }
     }
@@ -498,17 +572,17 @@ impl Client {
         if let Some(cutoff) = sent_cutoff
             && let Err(e) = backend.delete_expired_sent_messages(cutoff).await
         {
-            warn!(target: "Client/Keepalive", "Sent message cleanup error: {e}");
+            client_log!(self, warn, target: "Client/Keepalive", "Sent message cleanup error: {e}");
         }
 
         if sweep_pending_inbound
             && let Err(e) = backend.delete_expired_pending_inbound(pending_cutoff).await
         {
-            warn!(target: "Client/Keepalive", "Pending inbound cleanup error: {e}");
+            client_log!(self, warn, target: "Client/Keepalive", "Pending inbound cleanup error: {e}");
         }
 
         if let Err(e) = backend.delete_expired_base_keys(base_key_cutoff).await {
-            warn!(target: "Client/Keepalive", "Base key cleanup error: {e}");
+            client_log!(self, warn, target: "Client/Keepalive", "Base key cleanup error: {e}");
         }
 
         // msg_secrets retention: prune rows whose per-row deadline has passed.
@@ -517,11 +591,11 @@ impl Client {
         if prune_msg_secrets {
             match backend.delete_expired_msg_secrets(now).await {
                 Ok(n) if n > 0 => {
-                    debug!(target: "Client/Keepalive", "Pruned {n} expired msg_secrets");
+                    client_log!(self, debug, target: "Client/Keepalive", "Pruned {n} expired msg_secrets");
                 }
                 Ok(_) => {}
                 Err(e) => {
-                    warn!(target: "Client/Keepalive", "msg_secrets cleanup error: {e}");
+                    client_log!(self, warn, target: "Client/Keepalive", "msg_secrets cleanup error: {e}");
                 }
             }
         }
@@ -546,8 +620,12 @@ impl Client {
     /// re-commit it instead of the redelivery being acked as a duplicate.
     pub(crate) fn run_startup_maintenance(self: &Arc<Self>) {
         let client = Arc::clone(self);
+        #[cfg(feature = "bench-harness")]
+        let startup_task = self.bench_startup.begin();
         self.runtime
             .spawn(Box::pin(async move {
+                #[cfg(feature = "bench-harness")]
+                let _startup_task = startup_task;
                 client.run_startup_retention_cleanup().await;
             }))
             .detach();
@@ -576,11 +654,20 @@ impl Client {
     /// it, and cheap enough for a live connection by contract
     /// (`DeviceStore::maintenance`).
     fn spawn_engine_maintenance(&self) {
-        let backend = self.persistence_manager.backend();
+        let backend = self.persistence_manager.backend_lease();
+        // This detached task must not retain the client or its device snapshot.
+        // Attribute its result to the identity that scheduled this operation.
+        #[cfg(feature = "tracing")]
+        // The detached task can inherit a different subscriber. Capture only tags,
+        // then let the actual event callsite decide whether to emit them.
+        let identity = Some(self.identity_tags());
         self.runtime
             .spawn(Box::pin(async move {
                 if let Err(e) = backend.maintenance().await {
-                    warn!(target: "Client/Keepalive", "Storage maintenance error: {e}");
+                    #[cfg(feature = "tracing")]
+                    Client::log_engine_maintenance_error(identity, &e);
+                    #[cfg(not(feature = "tracing"))]
+                    log::warn!(target: "Client/Keepalive", "Storage maintenance error: {e}");
                 }
             }))
             .detach();
@@ -599,7 +686,7 @@ impl Client {
             if let Err(e) = rotation
                 && !self.is_shutting_down()
             {
-                warn!(target: "Client/Keepalive", "Signed pre-key rotation check failed: {e:?}");
+                client_log!(self, warn, target: "Client/Keepalive", "Signed pre-key rotation check failed: {e:?}");
             }
         }
 
@@ -607,7 +694,7 @@ impl Client {
         if let Err(e) = pruned
             && !self.is_shutting_down()
         {
-            warn!(target: "Client/Keepalive", "Failed to prune expired tc_tokens: {e:?}");
+            client_log!(self, warn, target: "Client/Keepalive", "Failed to prune expired tc_tokens: {e:?}");
         }
     }
 }
@@ -617,6 +704,35 @@ mod tests {
     use super::*;
     use crate::socket::error::{EncryptSendError, SocketError};
     use wacore_binary::builder::NodeBuilder;
+
+    #[tokio::test]
+    async fn storage_maintenance_keeps_its_lease_after_client_drop() {
+        use crate::store::release::tests::ProbeBackend;
+        let (mut backend, dropped) = ProbeBackend::new();
+        let (unpark, parked) = async_channel::bounded(1);
+        let (entered, entry) = async_channel::bounded(1);
+        backend.gate_method = "maintenance";
+        backend.gate = Some(parked);
+        backend.entered = Some(entered);
+        let client = crate::test_utils::create_test_client_with_backend(Arc::new(backend)).await;
+        let release = client.store_release();
+        let weak = Arc::downgrade(&client);
+        client.spawn_engine_maintenance();
+        tokio::time::timeout(Duration::from_secs(5), entry.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        drop(client);
+        crate::test_utils::poll_until("last client reference", || weak.upgrade().is_none()).await;
+        let mut waiter = Box::pin(release.wait());
+        assert!(futures::poll!(waiter.as_mut()).is_pending());
+        assert!(!dropped.load(Ordering::SeqCst));
+        unpark.send(()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), waiter)
+            .await
+            .unwrap();
+        assert!(dropped.load(Ordering::SeqCst));
+    }
 
     // The maintenance cadence is a tick count, so the interval it really lands
     // on depends on where each randomized tick falls. Both ends must stay in
@@ -671,7 +787,7 @@ mod tests {
 
     /// A keepalive belongs to the connection it was started for. Its first poll
     /// can land after that connection is gone — the spawn only promises the
-    /// task will run — and `is_connected()` is true again by then if a
+    /// task will run — and `is_socket_connected()` is true again by then if a
     /// reconnect has completed, so without the generation check the old loop
     /// would go on pinging the new connection's socket alongside its own
     /// keepalive: two pingers on one socket, and one more with every reconnect.
@@ -835,4 +951,255 @@ mod tests {
     }
 
     // elapsed_since, is_dead_socket, and constants tests live in wacore::protocol::keepalive
+}
+
+#[cfg(all(test, feature = "tracing"))]
+mod identity_event_tests {
+    use super::*;
+    use crate::request::tracing_tests::{Capture, set_identity};
+    use tracing::instrument::WithSubscriber;
+
+    #[tokio::test]
+    async fn keepalive_failure_keeps_warning_and_client_identity() {
+        let capture = Capture::default();
+        for level in [tracing::Level::DEBUG, tracing::Level::INFO] {
+            let dispatch = capture.dispatch(level);
+            async {
+                for n in [1, 2] {
+                    let (client, transport) = crate::test_utils::create_iq_test_client().await;
+                    set_identity(&client, n).await;
+                    let ping = client.send_keepalive();
+                    let answer = async {
+                        let sent = crate::test_utils::decode_sent_iq(&transport, 0).await;
+                        let id = sent.attrs().optional_string("id").unwrap().into_owned();
+                        crate::test_utils::answer_iq(
+                            &client,
+                            &id,
+                            &wacore_binary::builder::NodeBuilder::new("iq")
+                                .attr("id", id.as_str())
+                                .attr("type", "error")
+                                .children([wacore_binary::builder::NodeBuilder::new("error")
+                                    .attr("code", "500")
+                                    .build()])
+                                .build(),
+                        )
+                        .await;
+                    };
+                    let (outcome, _) = futures::join!(ping, answer);
+                    assert!(matches!(outcome, KeepaliveResult::TransientFailure));
+                    let records = capture.records();
+                    let warning = records
+                        .iter()
+                        .rev()
+                        .find(|r| r.level == tracing::Level::WARN)
+                        .unwrap();
+                    assert_eq!(
+                        warning.fields.get("lid"),
+                        client.identity_tags().lid.as_ref()
+                    );
+                    assert_eq!(warning.fields.get("pn"), client.identity_tags().pn.as_ref());
+                    assert_eq!(warning.name, "Client/Keepalive");
+                    if level == tracing::Level::DEBUG {
+                        let span = warning.spans.last().unwrap();
+                        assert_eq!(span.0, "wa.conn.keepalive.ping");
+                        assert_eq!(span.1.get("lid"), client.identity_tags().lid.as_ref());
+                    } else {
+                        assert!(warning.spans.is_empty());
+                    }
+                }
+            }
+            .with_subscriber(dispatch)
+            .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn review_detached_warning_keeps_log_fallback() {
+        use crate::test_utils::log_capture;
+        if log_capture::delegated_to_child(
+            "keepalive::identity_event_tests::review_detached_warning_keeps_log_fallback",
+        ) {
+            return;
+        }
+        let logs = log_capture::session();
+        let capture = Capture::default();
+        let client = crate::test_utils::create_test_client().await;
+        set_identity(&client, 1).await;
+        let task =
+            tracing::dispatcher::with_default(&capture.dispatch(tracing::Level::WARN), || {
+                assert!(tracing::event_enabled!(target: "Client/Keepalive", tracing::Level::WARN));
+                let identity = Some(client.identity_tags());
+                tokio::spawn(async move {
+                    Client::log_engine_maintenance_error(
+                        identity,
+                        &crate::store::error::StoreError::Validation(
+                            "synthetic-maintenance-failure".into(),
+                        ),
+                    );
+                })
+            });
+        task.await.unwrap();
+        assert!(
+            logs.records_for("Client/Keepalive")
+                .iter()
+                .any(|(level, message)| *level == log::Level::Warn
+                    && message.contains("synthetic-maintenance-failure"))
+        );
+    }
+
+    #[tokio::test]
+    async fn detached_field_filtered_warning_keeps_scheduling_identity() {
+        use crate::store::release::tests::ProbeBackend;
+        use wacore::runtime::{AbortHandle, BoxFuture, Runtime};
+        #[derive(Default)]
+        struct QueuedRuntime(std::sync::Mutex<Vec<BoxFuture<'static, ()>>>);
+        #[async_trait::async_trait]
+        impl Runtime for QueuedRuntime {
+            fn spawn(&self, future: BoxFuture<'static, ()>) -> AbortHandle {
+                self.0.lock().unwrap().push(future);
+                AbortHandle::new(|| {})
+            }
+            fn sleep(&self, duration: Duration) -> BoxFuture<'static, ()> {
+                Box::pin(tokio::time::sleep(duration))
+            }
+            fn spawn_blocking(
+                &self,
+                f: Box<dyn FnOnce() + Send + 'static>,
+            ) -> BoxFuture<'static, ()> {
+                crate::runtime_impl::TokioRuntime.spawn_blocking(f)
+            }
+            fn yield_now(&self) -> Option<BoxFuture<'static, ()>> {
+                crate::runtime_impl::TokioRuntime.yield_now()
+            }
+        }
+        use tracing_subscriber::{Layer, prelude::*};
+        let (mut backend, _) = ProbeBackend::new();
+        backend.fail_maintenance = true;
+        let pm = Arc::new(
+            crate::store::persistence_manager::PersistenceManager::new(Arc::new(backend))
+                .await
+                .unwrap(),
+        );
+        let runtime = Arc::new(QueuedRuntime::default());
+        let (client, _) = Client::builder()
+            .with_runtime_arc(runtime.clone())
+            .with_persistence_manager(pm)
+            .with_transport_factory_arc(Arc::new(
+                crate::transport::mock::MockTransportFactory::new(),
+            ))
+            .with_http_client_arc(Arc::new(crate::test_utils::MockHttpClient))
+            .build()
+            .await
+            .unwrap()
+            .into_parts();
+        set_identity(&client, 1).await;
+        runtime.0.lock().unwrap().clear();
+        let identity = client.identity_tags();
+        let weak = Arc::downgrade(&client);
+        tracing::subscriber::with_default(tracing::subscriber::NoSubscriber::default(), || {
+            client.spawn_engine_maintenance();
+        });
+        let future = runtime.0.lock().unwrap().pop().unwrap();
+        drop(client);
+        assert!(weak.upgrade().is_none());
+        let capture = Capture::default();
+        let subscriber = tracing_subscriber::registry().with(capture.clone().with_filter(
+            tracing_subscriber::filter::filter_fn(|metadata| {
+                metadata.is_event() && metadata.fields().field("lid").is_some()
+            }),
+        ));
+        future.with_subscriber(subscriber).await;
+        let records = capture.records();
+        let warning = records
+            .iter()
+            .find(|record| {
+                record
+                    .fields
+                    .get("message")
+                    .is_some_and(|text| text.contains("synthetic maintenance failure"))
+            })
+            .expect("detached maintenance warning");
+        assert_eq!(
+            warning.fields.get("lid"),
+            identity.lid.as_ref().map(|s| format!("{s:?}")).as_ref()
+        );
+        assert_eq!(
+            warning.fields.get("pn"),
+            identity.pn.as_ref().map(|s| format!("{s:?}")).as_ref()
+        );
+    }
+
+    #[tokio::test]
+    async fn field_filtered_events_keep_identity_and_logout_warning() {
+        use tracing_subscriber::{Layer, prelude::*};
+        let client = crate::test_utils::create_test_client().await;
+        set_identity(&client, 1).await;
+        let capture = Capture::default();
+        let subscriber = tracing_subscriber::registry().with(capture.clone().with_filter(
+            tracing_subscriber::filter::filter_fn(|metadata| {
+                metadata.is_event()
+                    && *metadata.level() <= tracing::Level::WARN
+                    && metadata.fields().field("lid").is_some()
+                    && metadata.fields().field("pn").is_some()
+            }),
+        ));
+        async {
+            client_log!(&client, warn, "field-filtered warning");
+            Client::log_engine_maintenance_error(
+                Some(client.identity_tags()),
+                &crate::store::error::StoreError::Validation("field-filtered maintenance".into()),
+            );
+            client.set_connected_for_test(true);
+            let report = client.logout().await;
+            assert!(matches!(
+                report.deregistration,
+                crate::DeregistrationOutcome::Failed { .. }
+            ));
+        }
+        .with_subscriber(subscriber)
+        .await;
+        let records = capture.records();
+        for message in [
+            "field-filtered warning",
+            "field-filtered maintenance",
+            "Failed to send logout IQ",
+        ] {
+            let events: Vec<_> = records
+                .iter()
+                .filter(|record| {
+                    record
+                        .fields
+                        .get("message")
+                        .is_some_and(|text| text.contains(message))
+                })
+                .collect();
+            assert_eq!(
+                events.len(),
+                1,
+                "missing or duplicated {message}: {records:?}"
+            );
+            let identity = client.identity_tags();
+            for (field, value) in [("lid", identity.lid), ("pn", identity.pn)] {
+                let expected = value.map(|value| {
+                    if message == "field-filtered maintenance" {
+                        format!("{value:?}")
+                    } else {
+                        value
+                    }
+                });
+                assert_eq!(events[0].fields.get(field), expected.as_ref());
+            }
+            assert!(events[0].spans.is_empty());
+        }
+    }
+
+    #[test]
+    fn filtered_events_do_not_read_identity() {
+        fn client() -> &'static Client {
+            panic!("disabled event evaluated its client")
+        }
+        tracing::subscriber::with_default(tracing::subscriber::NoSubscriber::default(), || {
+            client_log!(client(), debug, "filtered event");
+        });
+    }
 }

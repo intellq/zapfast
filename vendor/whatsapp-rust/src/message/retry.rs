@@ -27,7 +27,7 @@ impl Client {
         if stanza.get_attr("from").is_none() {
             return Err(crate::features::RetryRequestError::MissingAttribute("from"));
         }
-        if !self.is_connected() {
+        if !self.is_socket_connected() {
             return Err(crate::client::ClientError::NotConnected.into());
         }
 
@@ -83,6 +83,9 @@ impl Client {
         enc_type: &'static str,
         reason: EncDecryptFailureReason,
     ) {
+        if self.inbound_durability_hook.get().is_some() {
+            self.inbound_commit_batch.live_retention.fail_receipt(info);
+        }
         if !self.enc_decrypt_failed_forwarding_enabled() {
             return;
         }

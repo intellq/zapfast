@@ -5,10 +5,9 @@ use crate::client::Client;
 use async_trait::async_trait;
 use log::debug;
 use std::sync::Arc;
-use wacore::iq::chatstate::{
-    ChatstateParseError, ChatstateSource, ChatstateStanza, ReceivedChatState,
-};
+use wacore::iq::chatstate::{ChatstateParseError, ChatstateSource, ChatstateStanza};
 use wacore::stanza::wire_tags::StanzaTag;
+use wacore::types::presence::ChatActivity;
 use wacore_binary::Jid;
 
 /// Event for incoming chatstate (`<chatstate/>`) stanzas.
@@ -22,10 +21,22 @@ pub struct ChatStateEvent {
     /// For group chats, the participant who triggered the event
     pub participant: Option<Jid>,
     /// The chat state (typing, recording_audio, or idle)
-    pub state: ReceivedChatState,
+    pub state: ChatActivity,
 }
 
 impl ChatStateEvent {
+    /// Project the shared bus payload into the typed chatstate view.
+    pub fn from_presence(presence: &wacore::types::events::ChatPresenceUpdate) -> Self {
+        Self {
+            chat: presence.source.chat.clone(),
+            participant: presence
+                .source
+                .is_group
+                .then(|| presence.source.sender.clone()),
+            state: presence.state,
+        }
+    }
+
     /// Create a `ChatStateEvent` from a parsed `ChatstateStanza`.
     pub fn from_stanza(stanza: ChatstateStanza) -> Self {
         let (chat, participant) = match stanza.source {
@@ -40,12 +51,34 @@ impl ChatStateEvent {
     }
 }
 
+pub(crate) struct ChatstateRegistration {
+    pub(crate) callback: Arc<crate::bot::CallbackEventHandler>,
+    pub(crate) count: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl wacore::types::events::EventHandler for ChatstateRegistration {
+    fn handle_event(&self, event: Arc<wacore::types::events::Event>) {
+        self.callback.handle_event(event);
+    }
+
+    fn interest(&self) -> wacore::types::events::EventInterest {
+        self.callback.interest()
+    }
+}
+
+impl Drop for ChatstateRegistration {
+    fn drop(&mut self) {
+        self.count
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// Handler for `<chatstate>` stanzas.
 ///
 /// Parses incoming chatstate stanzas using the `ProtocolNode` pattern
 /// and dispatches events to registered handlers.
 #[derive(Default)]
-pub struct ChatstateHandler;
+pub(crate) struct ChatstateHandler;
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]

@@ -15,9 +15,9 @@ use wacore::types::jid::JidExt;
 use wacore::types::message::AddressingMode;
 #[cfg(test)]
 use wacore_binary::DeviceKey;
-use wacore_binary::Node;
 use wacore_binary::builder::NodeBuilder;
 use wacore_binary::{Jid, JidExt as _, Server};
+use wacore_binary::{Node, NodeContent};
 use waproto::whatsapp as wa;
 
 use crate::client::ClientError;
@@ -26,8 +26,11 @@ use crate::request::IqError;
 use thiserror::Error;
 
 mod actions;
+mod requests;
+pub use requests::{EditRequest, SendRequest};
 pub(crate) mod group_repair;
 mod tctoken_lifecycle;
+pub(crate) use tctoken_lifecycle::is_own_identity;
 
 /// Error returned by the message send path ([`Client::send_message`],
 /// [`Client::send_text`], [`Client::forward_message`], reactions, edits,
@@ -40,6 +43,12 @@ mod tctoken_lifecycle;
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum SendError {
+    /// Invalid or incomplete target addressing, rejected before sending.
+    #[error("{0}")]
+    MessageRef(#[from] crate::MessageRefError),
+    /// Malformed raw message-secret material, rejected before encryption.
+    #[error("{0}")]
+    InvalidSecret(#[from] crate::InvalidMessageSecret),
     /// Connection/transport/IQ failure (embeds the shared base error).
     // No `#[from]`: the manual `From<ClientError>` impl flattens a bare `?` so
     // `NotLoggedIn`/`Iq` stay matchable instead of nesting under `Client(..)`.
@@ -135,14 +144,50 @@ impl From<GroupError> for SendError {
             GroupError::Iq(iq) => SendError::Iq(iq),
             GroupError::InvalidRequest(msg) => SendError::InvalidRequest(msg),
             GroupError::Internal(e) => SendError::from_anyhow(e),
-            // No dedicated variant for MEX mutations or description conflicts;
-            // preserve the full typed error as the `Internal` source so its
-            // Display/source chain survives.
-            group @ (GroupError::Mex(_) | GroupError::DescriptionConflict) => {
-                SendError::Internal(group.into())
-            }
+            // Preserve domain errors without a dedicated send variant as typed
+            // sources rather than flattening their Display text.
+            group @ (GroupError::Mex(_)
+            | GroupError::DescriptionConflict
+            | GroupError::EmptyPicture) => SendError::Internal(group.into()),
         }
     }
+}
+
+pub(crate) fn same_group_user(
+    left: &Jid,
+    right: &Jid,
+    info: &wacore::client::context::GroupRoutingInfo,
+) -> bool {
+    if left.user == right.user && left.server == right.server {
+        return true;
+    }
+    (left.is_lid()
+        && info
+            .phone_jid_for_lid_user(&left.user)
+            .is_some_and(|phone| phone.user == right.user && right.is_pn()))
+        || (right.is_lid()
+            && info
+                .phone_jid_for_lid_user(&right.user)
+                .is_some_and(|phone| phone.user == left.user && left.is_pn()))
+        || (left.is_pn()
+            && info
+                .lid_user_for_phone_user(&left.user)
+                .is_some_and(|lid_user| right.is_lid() && lid_user == right.user))
+        || (right.is_pn()
+            && info
+                .lid_user_for_phone_user(&right.user)
+                .is_some_and(|lid_user| left.is_lid() && lid_user == left.user))
+}
+
+fn require_history_device_coverage(requested: &[Jid], devices: &[Jid]) -> anyhow::Result<()> {
+    if requested.iter().any(|user| {
+        !devices.iter().any(|device| {
+            !device.is_hosted() && device.user == user.user && device.server == user.server
+        })
+    }) {
+        anyhow::bail!("group history device resolution omitted a requested identity");
+    }
+    Ok(())
 }
 
 /// Returns a `GroupRoutingInfo` whose participant list is guaranteed to contain our own
@@ -241,6 +286,9 @@ struct SendBranchOutput {
     /// entry it came from. Handed to the phash waiter as its exclude list.
     dm_devices: Option<std::sync::Arc<wacore::send::ResolvedDmDevices>>,
     group_devices: Option<std::sync::Arc<wacore::send::ResolvedGroupDevices>>,
+    /// Pairwise group-direct sends refresh the group/device topology too, so
+    /// they must not cross a connection generation while preparing encryption.
+    requires_connection_generation_check: bool,
     /// Of those, the ones that produced no `<enc>`. Empty on a complete fan-out.
     dm_unreached: Vec<Jid>,
 }
@@ -266,6 +314,14 @@ struct DmBranchRequest<'a> {
     is_status_addon: bool,
     device_freshness: crate::cache::Freshness,
     borrowed_message_id: bool,
+    creation_sender: Option<&'a mut Option<Jid>>,
+}
+
+struct GroupDirectBranchRequest<'a> {
+    to: Jid,
+    message: &'a wa::Message,
+    request_id: &'a str,
+    recipients: &'a [Jid],
 }
 
 enum GroupDeviceSnapshot {
@@ -366,12 +422,13 @@ impl SendBranchOutput {
             recipient_fanout: None,
             dm_devices: None,
             group_devices: None,
+            requires_connection_generation_check: false,
             dm_unreached: Vec::new(),
         }
     }
 }
 
-/// Options for [`Client::send_message_with_options`].
+/// Options for [`SendRequest`] passed to [`Client::send`].
 ///
 /// Start from [`SendOptions::default`] and chain the `with_*` setters; the
 /// struct is `#[non_exhaustive]` so new knobs can be added without breaking
@@ -379,14 +436,16 @@ impl SendBranchOutput {
 ///
 /// ```
 /// # use whatsapp_rust::send::SendOptions;
-/// let options = SendOptions::default().with_message_id("3EB0ABCDEF");
+/// # use whatsapp_rust::MessageId;
+/// let options = SendOptions::default().with_message_id(MessageId::new("3EB0ABCDEF")?);
+/// # Ok::<(), whatsapp_rust::MessageRefError>(())
 /// ```
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct SendOptions {
     /// Override the auto-generated message ID.
     /// Useful for resending a failed message with the same ID or idempotency.
-    pub message_id: Option<String>,
+    pub message_id: Option<crate::MessageId>,
     /// Extra XML child nodes on the message stanza. A node the send already
     /// derives from the message content — `<biz>`, and `<bot>` on a DM — is
     /// refused with [`SendError::InvalidRequest`] rather than stacked next to
@@ -408,8 +467,8 @@ pub struct SendOptions {
 impl SendOptions {
     /// See [`SendOptions::message_id`].
     #[must_use]
-    pub fn with_message_id(mut self, message_id: impl Into<String>) -> Self {
-        self.message_id = Some(message_id.into());
+    pub fn with_message_id(mut self, message_id: crate::MessageId) -> Self {
+        self.message_id = Some(message_id);
         self
     }
 
@@ -449,7 +508,7 @@ impl SendOptions {
     }
 }
 
-/// Options for [`Client::edit_message_with_options`].
+/// Options for [`EditRequest`] passed to [`Client::edit_message`].
 ///
 /// Start from [`EditOptions::default`] and chain the `with_*` setters; the
 /// struct is `#[non_exhaustive]` so new knobs can be added without breaking
@@ -466,14 +525,14 @@ pub struct EditOptions {
     /// - Whether the wire-level collision is honored is server- and
     ///   client-dependent (the server may dedupe against the outer id), so treat
     ///   the visible outcome as non-guaranteed.
-    pub stanza_id: Option<String>,
+    pub stanza_id: Option<crate::StanzaId>,
 }
 
 impl EditOptions {
     /// See [`EditOptions::stanza_id`].
     #[must_use]
-    pub fn with_stanza_id(mut self, stanza_id: impl Into<String>) -> Self {
-        self.stanza_id = Some(stanza_id.into());
+    pub fn with_stanza_id(mut self, stanza_id: crate::StanzaId) -> Self {
+        self.stanza_id = Some(stanza_id);
         self
     }
 }
@@ -502,6 +561,357 @@ impl SendInstant {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum GroupDirectAcknowledgement {
+    Accepted,
+    Rejected {
+        error: Option<String>,
+        code: Option<String>,
+    },
+    /// The ACK timed out, was malformed, or did not match this exact stanza.
+    /// The server may still have accepted the message; callers must not send a
+    /// follow-up notice on this outcome.
+    Indeterminate,
+}
+
+#[derive(Debug)]
+pub(crate) enum GroupDirectSendError {
+    /// Another send with this message ID already owns the ACK waiter; it may
+    /// still be in flight, so the result is indeterminate rather than unsent.
+    AckAlreadyPending,
+    Send(SendError),
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct GroupDirectSendOutcome {
+    /// For group-direct sends, counts both opted-in receivers and the sender's
+    /// relevant companion devices (the sender's active device is excluded).
+    pub recipient_fanout: Option<RecipientFanout>,
+    pub acknowledgement: GroupDirectAcknowledgement,
+}
+
+fn parse_group_direct_ack(
+    ack: &wacore_binary::OwnedNodeRef,
+    message_id: &str,
+    group: &Jid,
+    expected_phash: Option<&str>,
+) -> GroupDirectAcknowledgement {
+    let node = ack.get();
+    let group = group.to_string();
+    if node.tag != "ack"
+        || node
+            .get_attr("id")
+            .is_none_or(|value| value.as_str() != message_id)
+        || node
+            .get_attr("class")
+            .is_none_or(|value| value.as_str() != "message")
+        || node
+            .get_attr("from")
+            .is_none_or(|value| value.as_str() != group)
+    {
+        return GroupDirectAcknowledgement::Indeterminate;
+    }
+
+    let error = node.get_attr("error").map(|value| value.to_string());
+    let code = node
+        .get_attr("code")
+        .map(|value| value.to_string())
+        .or_else(|| {
+            error
+                .as_ref()
+                .filter(|value| value.parse::<u16>().is_ok())
+                .cloned()
+        });
+    if error.is_some() || code.is_some() {
+        GroupDirectAcknowledgement::Rejected { error, code }
+    } else if node
+        .get_attr("phash")
+        .is_some_and(|server| expected_phash.is_none_or(|ours| ours != server.as_str()))
+    {
+        // A device added after resolution cannot be declared covered. A retry
+        // refreshes only the same authorized audience, with the same ID.
+        GroupDirectAcknowledgement::Indeterminate
+    } else {
+        GroupDirectAcknowledgement::Accepted
+    }
+}
+
+#[cfg(test)]
+mod group_direct_tests {
+    use super::*;
+    use wacore_binary::builder::NodeBuilder;
+
+    fn owned_node(node: Node) -> wacore_binary::OwnedNodeRef {
+        let packed = wacore_binary::marshal::marshal_ref(&node.as_node_ref()).expect("marshal");
+        wacore_binary::OwnedNodeRef::new(
+            wacore_binary::util::unpack(&packed)
+                .expect("unpack")
+                .into_owned(),
+        )
+        .expect("owned protocol node")
+    }
+
+    #[test]
+    fn group_direct_ack_requires_matching_class_id_and_group() {
+        let group: Jid = "120363000000000001@g.us".parse().unwrap();
+        let accepted = owned_node(
+            NodeBuilder::new("ack")
+                .attr("id", "SYNTHETIC-ID")
+                .attr("class", "message")
+                .attr("from", &group)
+                .build(),
+        );
+        assert_eq!(
+            parse_group_direct_ack(&accepted, "SYNTHETIC-ID", &group, None),
+            GroupDirectAcknowledgement::Accepted
+        );
+
+        for (id, class, from) in [
+            ("OTHER-ID", "message", group.to_string()),
+            ("SYNTHETIC-ID", "receipt", group.to_string()),
+            (
+                "SYNTHETIC-ID",
+                "message",
+                "120363000000000002@g.us".to_string(),
+            ),
+        ] {
+            let malformed = owned_node(
+                NodeBuilder::new("ack")
+                    .attr("id", id)
+                    .attr("class", class)
+                    .attr("from", from)
+                    .build(),
+            );
+            assert_eq!(
+                parse_group_direct_ack(&malformed, "SYNTHETIC-ID", &group, None),
+                GroupDirectAcknowledgement::Indeterminate
+            );
+        }
+
+        let mismatched_phash = owned_node(
+            NodeBuilder::new("ack")
+                .attr("id", "SYNTHETIC-ID")
+                .attr("class", "message")
+                .attr("from", &group)
+                .attr("phash", "server-devices")
+                .build(),
+        );
+        assert_eq!(
+            parse_group_direct_ack(
+                &mismatched_phash,
+                "SYNTHETIC-ID",
+                &group,
+                Some("sent-devices")
+            ),
+            GroupDirectAcknowledgement::Indeterminate
+        );
+        assert_eq!(
+            parse_group_direct_ack(
+                &mismatched_phash,
+                "SYNTHETIC-ID",
+                &group,
+                Some("server-devices")
+            ),
+            GroupDirectAcknowledgement::Accepted
+        );
+
+        let rejected = owned_node(
+            NodeBuilder::new("ack")
+                .attr("id", "SYNTHETIC-ID")
+                .attr("class", "message")
+                .attr("from", &group)
+                .attr("error", "500")
+                .attr("code", "500")
+                .build(),
+        );
+        assert_eq!(
+            parse_group_direct_ack(&rejected, "SYNTHETIC-ID", &group, None),
+            GroupDirectAcknowledgement::Rejected {
+                error: Some("500".into()),
+                code: Some("500".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn group_history_ack_normalizes_numeric_rejection_codes() {
+        let group: Jid = "120363000000000001@g.us".parse().unwrap();
+        for (error, code, expected) in [
+            (Some("503"), None, Some("503")),
+            (Some("429"), None, Some("429")),
+            (Some("403"), None, Some("403")),
+            (Some("unavailable"), None, None),
+            (None, Some("503"), Some("503")),
+            (Some("unavailable"), Some("503"), Some("503")),
+            (Some("503"), Some("403"), Some("403")),
+        ] {
+            let mut ack = NodeBuilder::new("ack")
+                .attr("id", "SYNTHETIC-ID")
+                .attr("class", "message")
+                .attr("from", &group);
+            if let Some(error) = error {
+                ack = ack.attr("error", error);
+            }
+            if let Some(code) = code {
+                ack = ack.attr("code", code);
+            }
+            let ack = owned_node(ack.build());
+            assert_eq!(
+                parse_group_direct_ack(&ack, "SYNTHETIC-ID", &group, None),
+                GroupDirectAcknowledgement::Rejected {
+                    error: error.map(str::to_owned),
+                    code: expected.map(str::to_owned),
+                }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn group_direct_ack_waiters_do_not_replace_or_remove_a_newer_retry() {
+        let client = crate::test_utils::create_test_client().await;
+        let (first_receiver, first_generation) = client
+            .try_register_ack_waiter("SYNTHETIC-ID")
+            .expect("first ACK waiter");
+        assert!(client.try_register_ack_waiter("SYNTHETIC-ID").is_none());
+
+        drop(first_receiver);
+        client.response_waiters_guard().remove("SYNTHETIC-ID");
+        let (second_receiver, second_generation) = client
+            .try_register_ack_waiter("SYNTHETIC-ID")
+            .expect("retry waiter after the first ACK was consumed");
+        assert_ne!(first_generation, second_generation);
+        client
+            .response_waiters_guard()
+            .remove_guarded("SYNTHETIC-ID", first_generation);
+        assert!(client.response_waiters_guard().contains_key("SYNTHETIC-ID"));
+        client
+            .response_waiters_guard()
+            .remove_guarded("SYNTHETIC-ID", second_generation);
+        drop(second_receiver);
+    }
+
+    #[tokio::test]
+    async fn raw_group_history_cannot_fall_through_to_sender_key_broadcast() {
+        let client = crate::test_utils::create_test_client().await;
+        let group: Jid = "120363000000000001@g.us".parse().unwrap();
+        for message in [
+            {
+                let mut proto = wa::Message::default();
+                proto.message_history_bundle = buffa::MessageField::some(Default::default());
+                proto
+            },
+            {
+                let mut proto = wa::Message::default();
+                proto.message_history_notice = buffa::MessageField::some(Default::default());
+                proto
+            },
+            {
+                let mut proto = wa::Message::default();
+                proto.ephemeral_message = buffa::MessageField::some({
+                    let mut proto = wa::message::FutureProofMessage::default();
+                    proto.message = buffa::MessageField::some({
+                        let mut proto = wa::Message::default();
+                        proto.message_history_bundle =
+                            buffa::MessageField::some(Default::default());
+                        proto
+                    });
+                    proto
+                });
+                proto
+            },
+            {
+                let mut proto = wa::Message::default();
+                proto.edited_message = buffa::MessageField::some({
+                    let mut proto = wa::message::FutureProofMessage::default();
+                    proto.message = buffa::MessageField::some({
+                        let mut proto = wa::Message::default();
+                        proto.message_history_bundle =
+                            buffa::MessageField::some(Default::default());
+                        proto
+                    });
+                    proto
+                });
+                proto
+            },
+            {
+                let mut proto = wa::Message::default();
+                proto.bot_task_message = buffa::MessageField::some({
+                    let mut proto = wa::message::FutureProofMessage::default();
+                    proto.message = buffa::MessageField::some({
+                        let mut proto = wa::Message::default();
+                        proto.message_history_bundle =
+                            buffa::MessageField::some(Default::default());
+                        proto
+                    });
+                    proto
+                });
+                proto
+            },
+            {
+                let mut proto = wa::Message::default();
+                proto.newsletter_admin_profile_status_message = buffa::MessageField::some({
+                    let mut proto = wa::message::FutureProofMessage::default();
+                    proto.message = buffa::MessageField::some({
+                        let mut proto = wa::Message::default();
+                        proto.message_history_bundle =
+                            buffa::MessageField::some(Default::default());
+                        proto
+                    });
+                    proto
+                });
+                proto
+            },
+            {
+                let mut proto = wa::Message::default();
+                proto.bot_platform_registration_success_message = buffa::MessageField::some({
+                    let mut proto = wa::message::FutureProofMessage::default();
+                    proto.message = buffa::MessageField::some({
+                        let mut proto = wa::Message::default();
+                        proto.message_history_bundle =
+                            buffa::MessageField::some(Default::default());
+                        proto
+                    });
+                    proto
+                });
+                proto
+            },
+        ] {
+            let error = client
+                .send_message_impl(group.clone(), &message, SendPipelineOptions::default())
+                .await
+                .expect_err("raw group send must not broadcast history");
+            assert!(error.to_string().contains("add-with-history"));
+        }
+    }
+
+    #[tokio::test]
+    async fn group_direct_send_rejects_empty_or_non_user_audiences() {
+        let client = crate::test_utils::create_test_client().await;
+        let group: Jid = "120363000000000001@g.us".parse().unwrap();
+        let message = {
+            let mut proto = wa::Message::default();
+            proto.conversation = Some("synthetic history test".into());
+            proto
+        };
+        let invalid_group_recipient = [group.clone()];
+
+        for recipients in [&[][..], &invalid_group_recipient[..]] {
+            let result = client
+                .send_group_direct_branch(GroupDirectBranchRequest {
+                    to: group.clone(),
+                    message: &message,
+                    request_id: "SYNTHETIC-ID",
+                    recipients,
+                })
+                .await;
+            let Err(error) = result else {
+                panic!("invalid pairwise audience must be rejected before sending");
+            };
+            assert!(error.to_string().contains("group-direct"));
+        }
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct SendPipelineOptions<'a> {
     /// Instant this operation is stamped with, when the caller already sampled
@@ -512,6 +922,9 @@ pub(crate) struct SendPipelineOptions<'a> {
     /// instead of handing over a copy.
     pub(crate) request_id: Option<&'a str>,
     pub(crate) peer: bool,
+    /// A peer recovery must use the socket its request generation names.
+    pub(crate) send_scope: Option<(u64, std::sync::Arc<crate::socket::NoiseSocket>)>,
+    pub(crate) send_observer: Option<Box<dyn wacore::socket::noise_socket::SendObserver>>,
     pub(crate) edit: Option<EditAttribute>,
     pub(crate) extra_stanza_nodes: Vec<Node>,
     pub(crate) stanza_type: Option<StanzaType>,
@@ -523,6 +936,16 @@ pub(crate) struct SendPipelineOptions<'a> {
     /// Without this, the borrowed id clobbers the original message's retry
     /// content and outbound secret.
     pub(crate) borrowed_message_id: bool,
+    /// Internal pairwise audience for group-history bundles. Ordinary sends
+    /// continue through sender-key fanout.
+    pub(crate) group_direct_recipients: Option<&'a [Jid]>,
+    /// An ACK-gated, group-wide notice sent after its bundle was accepted.
+    pub(crate) group_history_notice: bool,
+    /// Capture the exact fanout phash before registering an ACK waiter.
+    pub(crate) history_expected_phash: Option<&'a mut Option<wacore_binary::CompactString>>,
+    /// Capture the identity actually selected by the encryption branch, not a
+    /// later metadata lookup that can change namespaces after the send.
+    pub(crate) creation_sender: Option<&'a mut Option<Jid>>,
 }
 
 /// The devices a freshly resolved fan-out holds that the sent stanza did not.
@@ -553,7 +976,7 @@ pub(crate) struct DmDeltaResend<'a> {
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct SendResult {
-    pub message_id: String,
+    pub message_id: crate::MessageId,
     pub to: Jid,
     /// The message this send encoded, exactly as the pipeline handed it to
     /// the encoder: after every change the send applied on the caller's
@@ -589,13 +1012,37 @@ pub struct SendResult {
 }
 
 impl SendResult {
+    /// Reference the emitted message, not the original target of an edit,
+    /// revoke or add-on. Its body stays in the existing Arc, untouched. For
+    /// newsletter plaintext sends use `newsletter_ref` instead.
+    pub fn message_ref(&self) -> Result<crate::MessageRef<'_>, crate::MessageRefError> {
+        crate::MessageRef::new(&self.to, self.message_id.clone(), None, true)
+    }
+
+    /// A freshly sent newsletter post has a client id but no server id until
+    /// learned from the server. This result does not manufacture that id.
+    pub fn newsletter_ref(
+        &self,
+    ) -> Result<crate::NewsletterMessageRef<'_>, crate::MessageRefError> {
+        crate::NewsletterMessageRef::new(&self.to, Some(self.message_id.clone()), None)
+            .map(|r| r.with_from_me(true))
+    }
+
+    /// Outer operation id for ACK correlation. For edits/revokes this is NOT
+    /// the original target id; an ACK match does not prove recipient delivery.
+    pub fn stanza_id(&self) -> crate::StanzaId {
+        crate::StanzaId::from_message_id(&self.message_id)
+    }
+
     /// `participant` is `None` -- only valid for the sender's own messages.
     pub fn message_key(&self) -> wa::MessageKey {
-        wa::MessageKey {
-            remote_jid: Some(self.to.to_string()),
-            from_me: Some(true),
-            id: Some(self.message_id.clone()),
-            participant: None,
+        {
+            let mut proto = wa::MessageKey::default();
+            proto.remote_jid = Some(self.to.to_string());
+            proto.from_me = Some(true);
+            proto.id = Some(self.message_id.to_string());
+            proto.participant = None;
+            proto
         }
     }
 }
@@ -640,65 +1087,32 @@ pub enum RevokeType {
 /// `polltype=vote` meta; an event edit sets both `event_type=edit` meta and
 /// `edit="1"` attribute).
 pub(crate) fn infer_stanza_metadata(msg: &wa::Message) -> (Option<EditAttribute>, Option<Node>) {
-    use wacore::proto_helpers::MessageExt;
-    let edit = EditAttribute::infer_from_message(msg);
+    (
+        EditAttribute::infer_from_message(msg),
+        wacore::send::message_meta_from_message(msg),
+    )
+}
 
-    // genMetaNode builds a single <meta> carrying every applicable attr together,
-    // so accumulate onto one node instead of emitting at most one attr.
-    let mut meta = NodeBuilder::new("meta");
-    let mut has_attr = false;
-
-    if msg.poll_creation_message.is_set()
-        || msg.poll_creation_message_v2.is_set()
-        || msg.poll_creation_message_v3.is_set()
+// Status posts use the outer wire ID as their content ID. Revokes/reactions
+// instead carry their target in an embedded key and need an operation ID.
+fn status_id_override<'a>(
+    message: &wa::Message,
+    options: &'a crate::features::status::StatusSendOptions,
+) -> Result<Option<&'a str>, SendError> {
+    let is_content = wacore::send::status_carries_privacy_meta(message);
+    if (is_content && options.stanza_id.is_some()) || (!is_content && options.message_id.is_some())
     {
-        meta = meta.attr("polltype", "creation");
-        has_attr = true;
-    } else if let Some(poll_update) = msg.poll_update_message.as_option()
-        && poll_update.vote.is_set()
-    {
-        meta = meta.attr("polltype", "vote");
-        has_attr = true;
-        // TODO: polltype="result_snapshot" for poll_result_snapshot_message (gated behind AB flag)
-    } else if msg.event_message.is_set() {
-        meta = meta.attr("event_type", "creation");
-        has_attr = true;
-    } else if msg.enc_event_response_message.is_set() {
-        meta = meta.attr("event_type", "response");
-        has_attr = true;
-    } else if let Some(sec) = msg.secret_encrypted_message.as_option()
-        && sec.secret_enc_type
-            == Some(wa::message::secret_encrypted_message::SecretEncType::EventEdit)
-    {
-        meta = meta.attr("event_type", "edit");
-        has_attr = true;
-    } else if let Some(ml) = msg
-        .protocol_message
-        .as_option()
-        .and_then(|pm| pm.member_label.as_option())
-    {
-        // genMetaNode (MsgMetaNode `d`/`p`): a member_label protocol message carries
-        // appdata="member_tag" and tag_reason="user_delete" when the label is cleared
-        // (empty/absent), "user_update" otherwise.
-        let tag_reason = if ml.label.as_deref().unwrap_or("").is_empty() {
-            "user_delete"
-        } else {
-            "user_update"
-        };
-        meta = meta
-            .attr("appdata", "member_tag")
-            .attr("tag_reason", tag_reason);
-        has_attr = true;
+        return Err(SendError::InvalidRequest(
+            "status posts do not accept a stanza_id override; revokes/reactions do not accept a message_id override".into(),
+        ));
     }
-
-    // genMetaNode: `view_once="true"` whenever the media is view-once (wrapper or
-    // inline flag). Detection covers both via MessageExt::is_view_once.
-    if msg.is_view_once() {
-        meta = meta.attr("view_once", "true");
-        has_attr = true;
-    }
-
-    (edit, has_attr.then(|| meta.build()))
+    let outer_id = if is_content {
+        options.message_id.as_ref().map(crate::MessageId::as_str)
+    } else {
+        options.stanza_id.as_ref().map(crate::StanzaId::as_str)
+    };
+    validate_status_message_id(message, outer_id)?;
+    Ok(outer_id)
 }
 
 fn validate_status_message_id(
@@ -941,18 +1355,22 @@ fn build_revoke_message(
     message_id: String,
     participant: Option<String>,
 ) -> wa::Message {
-    wa::Message {
-        protocol_message: buffa::MessageField::some(wa::message::ProtocolMessage {
-            key: buffa::MessageField::some(wa::MessageKey {
-                remote_jid: Some(remote_jid.to_string()),
-                from_me: Some(from_me),
-                id: Some(message_id),
-                participant,
-            }),
-            r#type: Some(wa::message::protocol_message::Type::Revoke),
-            ..Default::default()
-        }),
-        ..Default::default()
+    {
+        let mut proto_ = wa::Message::default();
+        proto_.protocol_message = buffa::MessageField::some({
+            let mut proto_ = wa::message::ProtocolMessage::default();
+            proto_.key = buffa::MessageField::some({
+                let mut proto = wa::MessageKey::default();
+                proto.remote_jid = Some(remote_jid.to_string());
+                proto.from_me = Some(from_me);
+                proto.id = Some(message_id);
+                proto.participant = participant;
+                proto
+            });
+            proto_.r#type = Some(wa::message::protocol_message::Type::Revoke);
+            proto_
+        });
+        proto_
     }
 }
 
@@ -1010,25 +1428,43 @@ pub(crate) fn build_edit_message(
     new_content: wa::Message,
     timestamp_ms: i64,
 ) -> wa::Message {
-    wa::Message {
-        protocol_message: buffa::MessageField::some(wa::message::ProtocolMessage {
-            key: buffa::MessageField::some(wa::MessageKey {
-                remote_jid: Some(remote_jid.to_string()),
-                from_me: Some(true),
-                id: Some(message_id),
-                participant,
-            }),
-            r#type: Some(wa::message::protocol_message::Type::MessageEdit),
-            edited_message: buffa::MessageField::some(new_content),
-            timestamp_ms: Some(timestamp_ms),
-            ..Default::default()
-        }),
-        ..Default::default()
+    {
+        let mut proto_ = wa::Message::default();
+        proto_.protocol_message = buffa::MessageField::some({
+            let mut proto_ = wa::message::ProtocolMessage::default();
+            proto_.key = buffa::MessageField::some({
+                let mut proto = wa::MessageKey::default();
+                proto.remote_jid = Some(remote_jid.to_string());
+                proto.from_me = Some(true);
+                proto.id = Some(message_id);
+                proto.participant = participant;
+                proto
+            });
+            proto_.r#type = Some(wa::message::protocol_message::Type::MessageEdit);
+            proto_.edited_message = buffa::MessageField::some(new_content);
+            proto_.timestamp_ms = Some(timestamp_ms);
+            proto_
+        });
+        proto_
     }
 }
 
 impl Client {
-    /// Send a message to a user, group, or newsletter.
+    /// Canonical send entry point. All content shortcuts use this implementation.
+    ///
+    /// Newsletter content remains plaintext; status uses the dedicated facade.
+    pub async fn send(&self, request: SendRequest) -> Result<SendResult, SendError> {
+        Box::pin(self.send_message_with_options_inner(
+            request.to,
+            request.message,
+            request.options,
+            None,
+        ))
+        .await
+    }
+
+    /// Send a message to a user, group, or newsletter with default options.
+    /// For configurable sends use [`Self::send`] with [`SendRequest`].
     ///
     /// Newsletter messages are sent as plaintext (no E2E encryption).
     /// For status/story updates use [`Client::status()`] instead.
@@ -1037,17 +1473,7 @@ impl Client {
         to: impl Into<Jid>,
         message: wa::Message,
     ) -> impl Future<Output = Result<SendResult, SendError>> + '_ {
-        // Sync-prologue allocation: a plain async fn would hold the ~1 KB
-        // message by value in every embedder's frame. An `Arc` rather than a
-        // `Box` because the same allocation is what `SendResult::message`
-        // hands back, so the send never copies the message again.
-        let to = to.into();
-        let message = std::sync::Arc::new(message);
-        async move {
-            // Box::pin: the inner future carries ~1 KB of pre-encrypt locals.
-            Box::pin(self.send_message_with_options_inner(to, message, SendOptions::default()))
-                .await
-        }
+        self.send(SendRequest::from_owned(to.into(), message))
     }
 
     /// Plain-text convenience over [`Client::send_message`].
@@ -1057,12 +1483,7 @@ impl Client {
         text: impl Into<String>,
     ) -> impl Future<Output = Result<SendResult, SendError>> + '_ {
         use wacore::proto_helpers::MessageBuilderExt;
-        let to = to.into();
-        let message = std::sync::Arc::new(wa::Message::text(text));
-        async move {
-            Box::pin(self.send_message_with_options_inner(to, message, SendOptions::default()))
-                .await
-        }
+        self.send(SendRequest::from_owned(to.into(), wa::Message::text(text)))
     }
 
     /// Forward an existing message to a chat.
@@ -1081,28 +1502,48 @@ impl Client {
         message: &wa::Message,
     ) -> impl Future<Output = Result<SendResult, SendError>> + '_ {
         use wacore::proto_helpers::MessageExt;
-        let to = to.into();
-        // Same sync-prologue `Arc` as `send_message`: the prepared copy is
-        // built straight into the allocation the result hands back.
-        let body = std::sync::Arc::new(message.get_base_message().prepare_for_forward());
-        async move {
-            Box::pin(self.send_message_with_options_inner(to, body, SendOptions::default())).await
-        }
+        self.send(SendRequest::from_owned(
+            to.into(),
+            message.get_base_message().prepare_for_forward(),
+        ))
     }
 
-    /// Send a message with additional options.
-    pub fn send_message_with_options(
+    // Fixture adapter for pre-existing directed send controls. Production and
+    // external hosts use only the canonical request or the default shortcuts.
+    #[cfg(test)]
+    fn send_message_with_options(
         &self,
         to: impl Into<Jid>,
         message: wa::Message,
         options: SendOptions,
     ) -> impl Future<Output = Result<SendResult, SendError>> + '_ {
-        // Thin generic shim: the large async body below stays monomorphic so
-        // each `Into<Jid>` instantiation does not duplicate the state machine.
-        // Sync-prologue `Arc` + Box::pin as in send_message.
-        let to = to.into();
-        let message = std::sync::Arc::new(message);
-        async move { Box::pin(self.send_message_with_options_inner(to, message, options)).await }
+        self.send(SendRequest::from_owned(to.into(), message).with_options(options))
+    }
+
+    pub(crate) async fn send_creation_message(
+        &self,
+        to: &Jid,
+        message: wa::Message,
+    ) -> Result<(SendResult, Jid), SendError> {
+        // These references address E2E creations. Raw newsletter publication
+        // remains available through send_message and the newsletter facade.
+        if to.is_newsletter() || to.is_broadcast_list() || to.is_status_broadcast() {
+            return Err(SendError::InvalidRequest(
+                "creation requires an E2E chat".into(),
+            ));
+        }
+        let mut creator = None;
+        let result = Box::pin(self.send_message_with_options_inner(
+            to.clone(),
+            std::sync::Arc::new(message),
+            SendOptions::default(),
+            Some(&mut creator),
+        ))
+        .await?;
+        let creator = creator.ok_or_else(|| {
+            SendError::InvalidRequest("creation send did not report a sender identity".into())
+        })?;
+        Ok((result, creator.to_non_ad()))
     }
 
     #[cfg_attr(
@@ -1124,17 +1565,12 @@ impl Client {
         to: Jid,
         mut message: std::sync::Arc<wa::Message>,
         options: SendOptions,
+        creation_sender: Option<&mut Option<Jid>>,
     ) -> Result<SendResult, SendError> {
         #[cfg(feature = "tracing")]
         self.record_identity_on_span(&tracing::Span::current());
 
         validate_extra_stanza_nodes(&options.extra_stanza_nodes)?;
-        if options.message_id.as_ref().is_some_and(String::is_empty) {
-            return Err(SendError::InvalidRequest(
-                "message ID must not be empty".into(),
-            ));
-        }
-
         let _t = wacore::telemetry::timer(wacore::telemetry::SEND_DURATION);
         self.stats.record_message_sent();
         wacore::telemetry::send(match to.server {
@@ -1160,7 +1596,7 @@ impl Client {
         let device_freshness = options.device_freshness;
         let sent_at = SendInstant::now();
         let request_id = match options.message_id {
-            Some(id) => id,
+            Some(id) => id.into_string(),
             None => self.generate_message_id_at(sent_at.unix_secs_u64()),
         };
         // Both paths below consume `to`, so save a copy for the result. The id
@@ -1194,7 +1630,7 @@ impl Client {
                 .build();
             self.send_node(stanza).await?;
             return Ok(SendResult {
-                message_id: request_id,
+                message_id: crate::MessageId::try_from(request_id)?,
                 to: result_to,
                 recipient_fanout: None,
                 message,
@@ -1222,13 +1658,14 @@ impl Client {
                     stanza_type: stanza_type_override,
                     group_metadata_freshness,
                     device_freshness,
+                    creation_sender,
                     ..Default::default()
                 },
             )
             .await
             .map_err(SendError::from_anyhow)?;
         Ok(SendResult {
-            message_id: request_id,
+            message_id: crate::MessageId::try_from(request_id)?,
             to: result_to,
             recipient_fanout,
             message,
@@ -1249,7 +1686,7 @@ impl Client {
         &self,
         message: wa::Message,
         recipients: &[Jid],
-        mut options: crate::features::status::StatusSendOptions,
+        options: crate::features::status::StatusSendOptions,
     ) -> Result<SendResult, SendError> {
         use wacore::client::context::GroupRoutingInfo;
         use wacore_binary::builder::NodeBuilder;
@@ -1261,7 +1698,7 @@ impl Client {
             ));
         }
         validate_extra_stanza_nodes(&options.extra_stanza_nodes)?;
-        validate_status_message_id(&message, options.message_id.as_deref())?;
+        let id_override = status_id_override(&message, &options)?.map(str::to_owned);
 
         // Status posts don't go through send_message_with_options, so count them here.
         let _t = wacore::telemetry::timer(wacore::telemetry::SEND_DURATION);
@@ -1269,10 +1706,8 @@ impl Client {
         wacore::telemetry::send("status");
 
         let to = Jid::status_broadcast();
-        let request_id = options
-            .message_id
-            .take()
-            .unwrap_or_else(|| self.generate_message_id());
+        let request_id = id_override
+            .unwrap_or_else(|| self.generate_message_id_at(wacore::time::now_secs_u64()));
 
         // Borrow from the held snapshot: no field clones, the Arc keeps it alive.
         let device_snapshot = self.persistence_manager.get_device_snapshot();
@@ -1511,7 +1946,7 @@ impl Client {
         }
 
         Ok(SendResult {
-            message_id: request_id,
+            message_id: crate::MessageId::try_from(request_id)?,
             to,
             recipient_fanout: None,
             message: std::sync::Arc::new(message),
@@ -2114,14 +2549,117 @@ impl Client {
         Ok(wacore::send::ensure_status_participants(stanza, group_info))
     }
 
-    /// Send a message this crate built on the caller's behalf (an edit, a
-    /// revoke, a pin) under an explicit stanza `edit` attribute, and hand back
-    /// the same [`SendResult`] a caller-built send gets, message included: the
-    /// only way a caller can see what those sends put in the chat.
+    /// Pairwise-encrypt a group-history message for an explicit group-member
+    /// audience and await its correlated server ACK. The audience is rechecked
+    /// against fresh group routing data by the send branch; ordinary group
+    /// messages continue through sender-key fanout.
+    pub(crate) async fn send_group_direct_message(
+        &self,
+        to: &Jid,
+        recipients: &[Jid],
+        message: &wa::Message,
+        message_id: &str,
+    ) -> Result<GroupDirectSendOutcome, GroupDirectSendError> {
+        self.send_group_history_message(to, Some(recipients), message, message_id)
+            .await
+    }
+
+    /// Notices contain no media key and must use the normal group sender-key
+    /// path so existing members see the announcement too.
+    pub(crate) async fn send_group_history_notice(
+        &self,
+        to: &Jid,
+        message: &wa::Message,
+        message_id: &str,
+    ) -> Result<GroupDirectSendOutcome, GroupDirectSendError> {
+        self.send_group_history_message(to, None, message, message_id)
+            .await
+    }
+
+    async fn send_group_history_message(
+        &self,
+        to: &Jid,
+        recipients: Option<&[Jid]>,
+        message: &wa::Message,
+        message_id: &str,
+    ) -> Result<GroupDirectSendOutcome, GroupDirectSendError> {
+        if !to.is_group() || recipients.is_some_and(|recipients| recipients.is_empty()) {
+            return Err(GroupDirectSendError::Send(SendError::InvalidRequest(
+                "group-direct send requires a group and at least one recipient".into(),
+            )));
+        }
+        // Record the payload kind before any await: a later retry receipt
+        // on a cache miss must still know bundles are pairwise.
+        self.note_history_payload(
+            message_id.to_owned(),
+            if message.message_history_bundle.is_unset() {
+                crate::retry::HistoryPayloadKind::Notice
+            } else {
+                crate::retry::HistoryPayloadKind::Bundle
+            },
+        );
+        let sent_at = SendInstant::now();
+        let request_id = message_id.to_owned();
+        let Some((ack_receiver, ack_generation)) = self.try_register_ack_waiter(&request_id) else {
+            return Err(GroupDirectSendError::AckAlreadyPending);
+        };
+        let _ack_guard = crate::request::ResponseWaiterGuard::new(
+            self.response_waiters.clone(),
+            request_id.clone(),
+            ack_generation,
+        );
+        let mut expected_phash = None;
+        let recipient_fanout = match self
+            .send_message_impl(
+                to.clone(),
+                message,
+                SendPipelineOptions {
+                    sent_at: Some(sent_at),
+                    request_id: Some(&request_id),
+                    group_direct_recipients: recipients,
+                    // The normal group branch also computes a phash; the
+                    // ACK-capture path below must not replace our waiter.
+                    group_history_notice: recipients.is_none(),
+                    history_expected_phash: Some(&mut expected_phash),
+                    group_metadata_freshness: crate::cache::Freshness::Refresh,
+                    device_freshness: crate::cache::Freshness::Refresh,
+                    ..Default::default()
+                },
+            )
+            .await
+        {
+            Ok(fanout) => fanout,
+            Err(error) => {
+                return Err(GroupDirectSendError::Send(SendError::from_anyhow(error)));
+            }
+        };
+
+        let ack_result = wacore::runtime::timeout(
+            &*self.runtime,
+            std::time::Duration::from_secs(30),
+            ack_receiver,
+        )
+        .await;
+        let acknowledgement = match ack_result {
+            Ok(Ok(ack)) => parse_group_direct_ack(
+                &ack,
+                &request_id,
+                to,
+                expected_phash.as_ref().map(|phash| phash.as_str()),
+            ),
+            Ok(Err(_)) | Err(_) => GroupDirectAcknowledgement::Indeterminate,
+        };
+        Ok(GroupDirectSendOutcome {
+            recipient_fanout,
+            acknowledgement,
+        })
+    }
+
+    /// Send a message built by this crate with an explicit stanza `edit`
+    /// attribute and return the message in its [`SendResult`].
     ///
-    /// `borrowed_stanza_id` names the outer stanza after another message (see
-    /// [`EditOptions::stanza_id`]), so the pipeline binds no id-keyed state to
-    /// it. `None` names the send with a fresh id, like every other send.
+    /// `borrowed_stanza_id` names the outer stanza after another message, so
+    /// the pipeline binds no ID-keyed state to it. `None` uses a fresh ID.
     pub(crate) async fn send_built_message(
         &self,
         to: Jid,
@@ -2146,6 +2684,9 @@ impl Client {
                     sent_at: Some(sent_at),
                     request_id: Some(&request_id),
                     edit: Some(edit),
+                    extra_stanza_nodes: wacore::send::message_meta_from_message(&message)
+                        .into_iter()
+                        .collect(),
                     borrowed_message_id,
                     ..Default::default()
                 },
@@ -2153,11 +2694,51 @@ impl Client {
             .await
             .map_err(SendError::from_anyhow)?;
         Ok(SendResult {
-            message_id: request_id,
+            message_id: crate::MessageId::try_from(request_id)?,
             to: result_to,
             recipient_fanout,
             message,
         })
+    }
+
+    // Keep the policy IQ and metadata future out of the ordinary DM/group
+    // send frame: all normal sends share send_message_impl's boxed future.
+    async fn validate_history_publication(
+        &self,
+        group: &Jid,
+        message: &wa::Message,
+        recipients: Option<&[Jid]>,
+    ) -> Result<(), SendError> {
+        let (metadata, limits) = crate::features::Groups::new(self)
+            .group_history_context(group)
+            .await
+            .map_err(|_| {
+                SendError::InvalidRequest(
+                    "group history authorization changed before publication".into(),
+                )
+            })?;
+        if !message.message_history_bundle.is_unset() {
+            if !recipients.is_some_and(|recipients| {
+                crate::features::group_history_audience_is_current(
+                    &metadata.participants,
+                    recipients,
+                )
+            }) {
+                return Err(SendError::InvalidRequest(
+                    "group history recipient is no longer a group member".into(),
+                ));
+            }
+            if !crate::features::group_history_bundle_fits_current_limits(
+                message,
+                limits,
+                wacore::time::now_secs_u64(),
+            ) {
+                return Err(SendError::InvalidRequest(
+                    "group history expired before publication".into(),
+                ));
+            }
+        }
+        Ok(())
     }
 
     #[cfg_attr(feature = "tracing", tracing::instrument(name = "wa.send.impl", level = "debug", skip_all, fields(to = %to.observe()), err(Debug)))]
@@ -2171,12 +2752,18 @@ impl Client {
             sent_at,
             request_id: request_id_override,
             peer,
+            send_scope,
+            send_observer,
             edit,
             extra_stanza_nodes,
             stanza_type: stanza_type_override,
             group_metadata_freshness,
             device_freshness,
             borrowed_message_id,
+            group_direct_recipients,
+            group_history_notice,
+            history_expected_phash,
+            mut creation_sender,
         } = options;
         // Callers that already stamped their message hand the instant down; the
         // rest sample here so the pipeline below still has exactly one.
@@ -2192,6 +2779,18 @@ impl Client {
         validate_extra_stanza_nodes(&extra_stanza_nodes)?;
         if request_id_override.is_some_and(str::is_empty) {
             return Err(SendError::InvalidRequest("message ID must not be empty".into()).into());
+        }
+        if (wacore::send::contains_group_history_payload(message)
+            && message.message_history_bundle.is_unset()
+            && message.message_history_notice.is_unset())
+            || (!message.message_history_bundle.is_unset() && group_direct_recipients.is_none())
+            || (!message.message_history_notice.is_unset() && !group_history_notice)
+        {
+            return Err(SendError::InvalidRequest(
+                "group history requires the add-with-history API and its authorized audience"
+                    .into(),
+            )
+            .into());
         }
         if to.is_group()
             && let Some(protocol) = message.protocol_message.as_option()
@@ -2268,9 +2867,24 @@ impl Client {
             recipient_fanout,
             dm_devices: covered_dm_devices,
             group_devices,
+            requires_connection_generation_check,
             dm_unreached,
         } = if peer && !to.is_group() {
             box_send_branch(self.send_peer_branch(to, message, request_id)).await?
+        } else if let Some(recipients) = group_direct_recipients {
+            if !to.is_group() {
+                return Err(SendError::InvalidRequest(
+                    "group-direct fanout requires a group JID".into(),
+                )
+                .into());
+            }
+            box_send_branch(self.send_group_direct_branch(GroupDirectBranchRequest {
+                to,
+                message,
+                request_id,
+                recipients,
+            }))
+            .await?
         } else if to.is_group() {
             box_send_branch(self.send_group_branch(GroupBranchRequest {
                 to,
@@ -2294,9 +2908,16 @@ impl Client {
                 is_status_addon,
                 device_freshness,
                 borrowed_message_id,
+                creation_sender: creation_sender.as_deref_mut(),
             }))
             .await?
         };
+
+        if let Some(capture) = creation_sender
+            && let Some(sender) = outbound_group_sender_identity.as_ref()
+        {
+            *capture = Some(sender.clone());
+        }
 
         // The outbound advance must be durable BEFORE the stanza hits the wire:
         // reusing an outbound counter reuses its message key + IV. Counters are
@@ -2322,7 +2943,16 @@ impl Client {
             Some(request_id),
             "branch stanza must carry the id this send was named with"
         );
-        if group_devices.is_some()
+        if !message.message_history_bundle.is_unset() || !message.message_history_notice.is_unset()
+        {
+            Box::pin(self.validate_history_publication(
+                &tc_issue_target,
+                message,
+                group_direct_recipients,
+            ))
+            .await?;
+        }
+        if (group_devices.is_some() || requires_connection_generation_check)
             && self
                 .connection_generation
                 .load(std::sync::atomic::Ordering::Acquire)
@@ -2330,7 +2960,14 @@ impl Client {
         {
             anyhow::bail!("connection changed while preparing group message");
         }
-        let ack_message_id = if !borrowed_message_id && let Some(phash) = ack_phash {
+        let awaiting_history_ack = history_expected_phash.is_some();
+        if let Some(slot) = history_expected_phash {
+            *slot = ack_phash.clone();
+        }
+        let ack_message_id = if !borrowed_message_id
+            && !awaiting_history_ack
+            && let Some(phash) = ack_phash
+        {
             // Group refresh and message resend have separate lifetimes.
             let invalidate_group = tc_issue_target.is_group();
             if let Some(devices) = group_devices {
@@ -2388,7 +3025,14 @@ impl Client {
             stanza_to_send.attrs.insert("type", t.as_wire());
         }
 
-        if let Err(e) = self.send_node(stanza_to_send).await {
+        let send = match send_scope {
+            Some((generation, socket)) => {
+                self.send_node_observed_in_scope(stanza_to_send, send_observer, generation, socket)
+                    .await
+            }
+            None => self.send_node_observed(stanza_to_send, send_observer).await,
+        };
+        if let Err(e) = send {
             if let Some(msg_id) = ack_message_id {
                 self.response_waiters_guard().remove(msg_id);
             }
@@ -2909,6 +3553,7 @@ impl Client {
             issue_tc_token_after_send: false,
             ack_phash: group_ack_phash,
             group_devices,
+            requires_connection_generation_check: false,
             recipient_fanout: None,
             dm_devices: None,
             dm_unreached: Vec::new(),
@@ -2931,6 +3576,7 @@ impl Client {
             is_status_addon,
             device_freshness,
             borrowed_message_id,
+            creation_sender,
         } = request;
         let mut should_issue_tc_token_after_send = false;
         let (prepared, dm_devices) = {
@@ -2966,6 +3612,18 @@ impl Client {
                 .pn
                 .as_ref()
                 .ok_or(ClientError::NotLoggedIn)?;
+
+            if let Some(capture) = creation_sender {
+                *capture = Some(if to.is_bot() {
+                    device_snapshot
+                        .lid
+                        .as_ref()
+                        .ok_or(ClientError::NotLoggedIn)?
+                        .clone()
+                } else {
+                    own_jid.clone()
+                });
+            }
 
             // PN→LID mapping (WA Web: ManagePhoneNumberMappingJob)
             if to.is_pn() && self.lid_pn_cache.get_current_lid(&to.user).await.is_none() {
@@ -3099,11 +3757,193 @@ impl Client {
             recipient_fanout: (!is_status_addon).then_some(prepared.recipient_fanout),
             dm_devices: (!is_status_addon).then_some(dm_devices),
             group_devices: None,
+            requires_connection_generation_check: false,
             dm_unreached: if is_status_addon {
                 Vec::new()
             } else {
                 prepared.unreached_devices
             },
+        })
+    }
+
+    /// Pairwise fanout for group-history bundles. This never advances a sender
+    /// key. It refreshes devices only for the supplied, current group members
+    /// and our own account, then uses the DM Signal path inside a
+    /// group-addressed stanza. Notices use [`Self::send_group_history_notice`].
+    async fn send_group_direct_branch(
+        &self,
+        request: GroupDirectBranchRequest<'_>,
+    ) -> Result<SendBranchOutput, anyhow::Error> {
+        let GroupDirectBranchRequest {
+            to,
+            message,
+            request_id,
+            recipients,
+        } = request;
+        if recipients.is_empty()
+            || recipients
+                .iter()
+                .any(|jid| !matches!(jid.server, Server::Pn | Server::Lid))
+        {
+            anyhow::bail!("group-direct audience must contain user JIDs");
+        }
+
+        let group_info = self
+            .groups()
+            .routing_info_with_freshness(&to, crate::cache::Freshness::Refresh)
+            .await?;
+        let device_snapshot = self.persistence_manager.get_device_snapshot();
+        let own_jid = device_snapshot
+            .pn
+            .as_ref()
+            .ok_or(ClientError::NotLoggedIn)?;
+        let own_lid = device_snapshot
+            .lid
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("LID not set, cannot send to group"))?;
+
+        let mut group_recipients = Vec::with_capacity(recipients.len());
+        for requested in recipients {
+            let Some(member) = group_info
+                .participants
+                .iter()
+                .find(|member| same_group_user(member, requested, &group_info))
+            else {
+                anyhow::bail!("group-direct recipient is no longer a group member");
+            };
+            if !group_recipients
+                .iter()
+                .any(|jid: &Jid| same_group_user(jid, member, &group_info))
+            {
+                group_recipients.push(member.to_non_ad());
+            }
+        }
+        if group_recipients.is_empty() {
+            anyhow::bail!("group-direct audience became empty");
+        }
+
+        let mut device_queries = Vec::with_capacity(group_recipients.len() + 1);
+        for recipient in &group_recipients {
+            device_queries.push(
+                if recipient.is_lid()
+                    && let Some(phone) = group_info.phone_jid_for_lid_user(&recipient.user)
+                {
+                    phone.to_non_ad()
+                } else {
+                    recipient.to_non_ad()
+                },
+            );
+        }
+        device_queries.push(own_jid.to_non_ad());
+        wacore::types::jid::sort_dedup_by_user(&mut device_queries);
+
+        let mut devices = self.refresh_user_devices(device_queries.clone()).await?;
+        require_history_device_coverage(&device_queries, &devices)?;
+        if group_info.addressing_mode == AddressingMode::Lid {
+            devices = devices
+                .into_iter()
+                .map(|device| {
+                    if device.is_pn() && device.user == own_jid.user {
+                        own_lid.with_device(device.device)
+                    } else {
+                        group_info.phone_device_jid_into_lid(device)
+                    }
+                })
+                .collect();
+        }
+        devices.retain(|device| !device.is_hosted());
+        wacore::types::jid::sort_dedup_by_device(&mut devices);
+        let dm_devices = std::sync::Arc::new(wacore::send::ResolvedDmDevices::new(
+            devices,
+            own_jid,
+            Some(own_lid),
+        ));
+
+        let resolved_here;
+        let addressing = match dm_devices.signal_addressing() {
+            Some(addressing) => addressing,
+            None => {
+                let encryption = self.resolve_encryption_jids(dm_devices.devices()).await;
+                let mut lock_keys = encryption.clone();
+                sort_session_lock_keys(&mut lock_keys);
+                let built = wacore::send::DmSignalAddressing::new(encryption, lock_keys);
+                match dm_devices.signal_addressing_or_init(built) {
+                    Ok(addressing) => addressing,
+                    Err(refused) => {
+                        resolved_here = refused;
+                        &resolved_here
+                    }
+                }
+            }
+        };
+        self.ensure_e2e_sessions_resolved(addressing.encryption())
+            .await?;
+        let _session_guards = self.session_guards_for(addressing.lock_keys()).await;
+
+        let shared_content = message
+            .message_context_info
+            .is_unset()
+            .then(|| std::sync::Arc::new(waproto::codec::message_to_vec(message)));
+        self.add_recent_message(&to, request_id, message, shared_content.clone())
+            .await;
+        let mut store_adapter = self.signal_adapter();
+        let mut stores = store_adapter.as_signal_stores();
+        let mut prepared = wacore::send::prepare_dm_stanza(
+            &*self.runtime,
+            &mut stores,
+            self,
+            wacore::send::DmStanzaRequest {
+                own_jid,
+                own_lid: Some(own_lid),
+                account: device_snapshot.account.as_deref(),
+                to: &to,
+                message,
+                message_id: request_id,
+                edit: None,
+                extra_nodes: &[],
+                devices: &dm_devices,
+                pre_encoded: shared_content.as_deref().map(Vec::as_slice),
+            },
+        )
+        .await?;
+
+        prepared
+            .node
+            .attrs
+            .insert("addressing_mode", group_info.addressing_mode.as_str());
+        let mut marker = NodeBuilder::new("enc").attr("v", "2").attr("type", "skmsg");
+        if let Some(media_type) = wacore::send::media_type_from_message(message) {
+            marker = marker.attr("mediatype", media_type);
+        }
+        match prepared.node.content.as_mut() {
+            Some(NodeContent::Nodes(children)) => children.push(marker.build()),
+            _ => anyhow::bail!("group-direct message lost its participant fanout"),
+        }
+
+        let sender_identity = match group_info.addressing_mode {
+            AddressingMode::Lid => own_lid.clone(),
+            AddressingMode::Pn => own_jid.clone(),
+        };
+        let mut direct_fanout = prepared.recipient_fanout;
+        direct_fanout.addressed = dm_devices.devices().len();
+        direct_fanout.encrypted = direct_fanout
+            .addressed
+            .saturating_sub(prepared.unreached_devices.len());
+        Ok(SendBranchOutput {
+            node: prepared.node,
+            msg_secret: prepared.message_secret,
+            group_sender_identity: Some(sender_identity),
+            skdm_update: None,
+            distribution_guard: None,
+            issue_tc_token_after_send: false,
+            // Group-direct ACKs are awaited by this operation. The ordinary
+            // group phash repair path is sender-key-specific and must not run.
+            ack_phash: prepared.phash,
+            recipient_fanout: Some(direct_fanout),
+            dm_devices: None,
+            group_devices: None,
+            requires_connection_generation_check: true,
+            dm_unreached: prepared.unreached_devices,
         })
     }
 
@@ -3269,24 +4109,68 @@ pub(crate) fn dm_stanza_to(recipient_bare: &Jid, to: &Jid) -> Jid {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 #[allow(clippy::disallowed_methods)]
 mod tests {
+    mod action_identity_tests;
+    mod creation_tests;
+    mod message_reference_tests;
+    mod privacy_tokens;
+    mod request_tests;
+
     use super::*;
     use crate::test_utils::wait_for_lock_waiter;
     use std::str::FromStr;
     use wacore::proto_helpers::MessageBuilderExt;
 
     #[test]
+    fn group_history_device_coverage_rejects_omitted_users_and_own_account() {
+        let a: Jid = "10001@s.whatsapp.net".parse().unwrap();
+        let b: Jid = "10002@s.whatsapp.net".parse().unwrap();
+        let own: Jid = "10003@s.whatsapp.net".parse().unwrap();
+        let requested = vec![a.clone(), b.clone(), own.clone()];
+        assert!(
+            require_history_device_coverage(&requested, &[a.clone(), b.clone(), own.clone()])
+                .is_ok()
+        );
+        assert!(require_history_device_coverage(&requested, &[a.clone(), own]).is_err());
+        assert!(require_history_device_coverage(&requested, &[a, b]).is_err());
+        assert!(require_history_device_coverage(&requested, &[]).is_err());
+    }
+
+    #[tokio::test]
+    async fn group_history_ack_waiter_is_removed_on_cancellation() {
+        let client =
+            crate::test_utils::create_test_client_with_failing_http("history_cancel").await;
+        let (receiver, generation) = client.try_register_ack_waiter("history-id").unwrap();
+        let guard = crate::request::ResponseWaiterGuard::new(
+            client.response_waiters.clone(),
+            "history-id".into(),
+            generation,
+        );
+        let pending = async move {
+            let _guard = guard;
+            let _ = receiver.await;
+        };
+        let mut pending = Box::pin(pending);
+        assert!(futures::poll!(pending.as_mut()).is_pending());
+        drop(pending);
+        assert!(client.try_register_ack_waiter("history-id").is_some());
+    }
+
+    #[test]
     fn status_revoke_requires_a_distinct_outer_stanza_id() {
         let target_id = "3EB0REVOKETARGET";
-        let revoke = wa::Message {
-            protocol_message: buffa::MessageField::some(wa::message::ProtocolMessage {
-                r#type: Some(wa::message::protocol_message::Type::Revoke),
-                key: buffa::MessageField::some(wa::MessageKey {
-                    id: Some(target_id.into()),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            }),
-            ..Default::default()
+        let revoke = {
+            let mut proto_ = wa::Message::default();
+            proto_.protocol_message = buffa::MessageField::some({
+                let mut proto_ = wa::message::ProtocolMessage::default();
+                proto_.r#type = Some(wa::message::protocol_message::Type::Revoke);
+                proto_.key = buffa::MessageField::some({
+                    let mut proto = wa::MessageKey::default();
+                    proto.id = Some(target_id.into());
+                    proto
+                });
+                proto_
+            });
+            proto_
         };
 
         assert!(matches!(
@@ -3295,6 +4179,83 @@ mod tests {
         ));
         assert!(validate_status_message_id(&revoke, Some("3EB0NEWSTANZAID")).is_ok());
         assert!(validate_status_message_id(&revoke, None).is_ok());
+        assert!(matches!(
+            validate_status_message_id(&revoke, Some("")),
+            Err(SendError::InvalidRequest(_))
+        ));
+
+        let collision = crate::StatusSendOptions::default()
+            .with_stanza_id(crate::StanzaId::new(target_id).unwrap());
+        assert!(matches!(
+            status_id_override(&revoke, &collision),
+            Err(SendError::InvalidRequest(_))
+        ));
+    }
+
+    #[test]
+    fn status_overrides_keep_content_and_operation_domains_distinct() {
+        use crate::{MessageId, StanzaId, StatusSendOptions};
+        let post = wa::Message::default();
+        let revoke = {
+            let mut proto_ = wa::Message::default();
+            proto_.protocol_message = buffa::MessageField::some({
+                let mut proto_ = wa::message::ProtocolMessage::default();
+                proto_.r#type = Some(wa::message::protocol_message::Type::Revoke);
+                proto_.key = buffa::MessageField::some({
+                    let mut proto = wa::MessageKey::default();
+                    proto.id = Some("TARGET".into());
+                    proto
+                });
+                proto_
+            });
+            proto_
+        };
+        let reaction = {
+            let mut proto = wa::Message::default();
+            proto.reaction_message =
+                buffa::MessageField::some(wa::message::ReactionMessage::default());
+            proto
+        };
+        let content =
+            StatusSendOptions::default().with_message_id(MessageId::new("CONTENT").unwrap());
+        let operation =
+            StatusSendOptions::default().with_stanza_id(StanzaId::new("OPERATION").unwrap());
+        assert_eq!(
+            status_id_override(&post, &content).unwrap(),
+            Some("CONTENT")
+        );
+        for message in [&revoke, &reaction] {
+            assert_eq!(
+                status_id_override(message, &operation).unwrap(),
+                Some("OPERATION")
+            );
+            assert!(matches!(
+                status_id_override(message, &content),
+                Err(SendError::InvalidRequest(_))
+            ));
+        }
+        assert!(matches!(
+            status_id_override(&post, &operation),
+            Err(SendError::InvalidRequest(_))
+        ));
+        let both = content.with_stanza_id(StanzaId::new("OPERATION").unwrap());
+        for message in [&post, &revoke, &reaction] {
+            assert!(
+                status_id_override(message, &StatusSendOptions::default())
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(matches!(
+                status_id_override(message, &both),
+                Err(SendError::InvalidRequest(_))
+            ));
+            assert!(matches!(
+                validate_status_message_id(message, Some("")),
+                Err(SendError::InvalidRequest(_))
+            ));
+        }
+        assert!(MessageId::new("").is_err());
+        assert!(StanzaId::new("").is_err());
     }
 
     /// A DM that reached none of the recipient's devices must arrive at the
@@ -3401,7 +4362,7 @@ mod tests {
         // the cooldown, not a query still running.
         tokio::task::yield_now().await;
         assert_eq!(client.pending_group_device_resync.len(), 1);
-        client.disconnect().await;
+        client.shutdown().await;
         assert_eq!(client.pending_group_device_resync.len(), 0);
     }
 
@@ -3463,13 +4424,11 @@ mod tests {
         let client = crate::test_utils::create_test_client().await;
         let to = Jid::status_broadcast();
         let err = client
-            .send_message(
-                to,
-                wa::Message {
-                    conversation: Some("hi".into()),
-                    ..Default::default()
-                },
-            )
+            .send_message(to, {
+                let mut proto = wa::Message::default();
+                proto.conversation = Some("hi".into());
+                proto
+            })
             .await
             .expect_err("status@broadcast without reaction must error");
         let msg = format!("{err}");
@@ -3507,9 +4466,10 @@ mod tests {
                 let recipient: Jid = "100000000000002@lid".parse().unwrap();
                 client
                     .send_status_message(
-                        wa::Message {
-                            conversation: Some("serialized status".into()),
-                            ..Default::default()
+                        {
+                            let mut proto = wa::Message::default();
+                            proto.conversation = Some("serialized status".into());
+                            proto
                         },
                         std::slice::from_ref(&recipient),
                         crate::features::status::StatusSendOptions::default(),
@@ -3537,13 +4497,11 @@ mod tests {
         let client = crate::test_utils::create_test_client().await;
         let to: Jid = "111111111111@s.whatsapp.net".parse().unwrap();
         let err = client
-            .send_message(
-                to,
-                wa::Message {
-                    conversation: Some("hi".into()),
-                    ..Default::default()
-                },
-            )
+            .send_message(to, {
+                let mut proto = wa::Message::default();
+                proto.conversation = Some("hi".into());
+                proto
+            })
             .await
             .expect_err("logged-out DM send must error");
         assert!(
@@ -3559,13 +4517,15 @@ mod tests {
         let client = crate::test_utils::create_test_client().await;
         let to: Jid = "111111111111@s.whatsapp.net".parse().unwrap();
         let err = client
-            .edit_message(
+            .edit_message_raw(
                 to,
                 "ORIG_ID",
-                wa::Message {
-                    conversation: Some("x".into()),
-                    ..Default::default()
+                {
+                    let mut proto = wa::Message::default();
+                    proto.conversation = Some("x".into());
+                    proto
                 },
+                EditOptions::default(),
             )
             .await
             .expect_err("logged-out DM edit must error");
@@ -3575,30 +4535,12 @@ mod tests {
         );
     }
 
-    // An empty EditOptions::stanza_id must land in request_id and be rejected as
-    // InvalidRequest — doubles as a guard that stanza_id actually reaches the id.
-    #[tokio::test]
-    async fn edit_message_with_empty_stanza_id_returns_invalid_request() {
-        let client = crate::test_utils::create_test_client().await;
-        seed_pn(&client, "222222222222@s.whatsapp.net").await;
-        let to: Jid = "111111111111@s.whatsapp.net".parse().unwrap();
-        let err = client
-            .edit_message_with_options(
-                to,
-                "ORIG_ID",
-                wa::Message {
-                    conversation: Some("x".into()),
-                    ..Default::default()
-                },
-                EditOptions {
-                    stanza_id: Some(String::new()),
-                },
-            )
-            .await
-            .expect_err("empty stanza_id must error");
-        assert!(
-            matches!(err, SendError::InvalidRequest(_)),
-            "expected SendError::InvalidRequest, got: {err:?}"
+    // Invalid operation IDs now fail before an EditOptions can carry them.
+    #[test]
+    fn edit_options_cannot_carry_an_empty_stanza_id() {
+        assert_eq!(
+            crate::StanzaId::new(""),
+            Err(crate::MessageRefError::EmptyStanzaId)
         );
     }
 
@@ -3607,23 +4549,24 @@ mod tests {
         let client = crate::test_utils::create_test_client().await;
         let to = Jid::status_broadcast();
         let err = client
-            .send_message(
-                to,
-                wa::Message {
-                    reaction_message: buffa::MessageField::some(wa::message::ReactionMessage {
-                        key: buffa::MessageField::some(wa::MessageKey {
-                            remote_jid: Some("status@broadcast".into()),
-                            from_me: Some(false),
-                            id: Some("ORIGID".into()),
-                            participant: Some("120363040237990503@g.us".into()),
-                        }),
-                        text: Some("❤️".into()),
-                        sender_timestamp_ms: Some(1),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                },
-            )
+            .send_message(to, {
+                let mut proto = wa::Message::default();
+                proto.reaction_message = buffa::MessageField::some({
+                    let mut proto = wa::message::ReactionMessage::default();
+                    proto.key = buffa::MessageField::some({
+                        let mut proto = wa::MessageKey::default();
+                        proto.remote_jid = Some("status@broadcast".into());
+                        proto.from_me = Some(false);
+                        proto.id = Some("ORIGID".into());
+                        proto.participant = Some("120363040237990503@g.us".into());
+                        proto
+                    });
+                    proto.text = Some("❤️".into());
+                    proto.sender_timestamp_ms = Some(1);
+                    proto
+                });
+                proto
+            })
             .await
             .expect_err("group JID as participant must error");
         assert!(
@@ -3637,23 +4580,24 @@ mod tests {
         let client = crate::test_utils::create_test_client().await;
         let to = Jid::status_broadcast();
         let err = client
-            .send_message(
-                to,
-                wa::Message {
-                    reaction_message: buffa::MessageField::some(wa::message::ReactionMessage {
-                        key: buffa::MessageField::some(wa::MessageKey {
-                            remote_jid: Some("status@broadcast".into()),
-                            from_me: Some(false),
-                            id: Some("ORIGID".into()),
-                            participant: None,
-                        }),
-                        text: Some("❤️".into()),
-                        sender_timestamp_ms: Some(1),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                },
-            )
+            .send_message(to, {
+                let mut proto = wa::Message::default();
+                proto.reaction_message = buffa::MessageField::some({
+                    let mut proto = wa::message::ReactionMessage::default();
+                    proto.key = buffa::MessageField::some({
+                        let mut proto = wa::MessageKey::default();
+                        proto.remote_jid = Some("status@broadcast".into());
+                        proto.from_me = Some(false);
+                        proto.id = Some("ORIGID".into());
+                        proto.participant = None;
+                        proto
+                    });
+                    proto.text = Some("❤️".into());
+                    proto.sender_timestamp_ms = Some(1);
+                    proto
+                });
+                proto
+            })
             .await
             .expect_err("reaction without key.participant must error");
         assert!(
@@ -3875,7 +4819,8 @@ mod tests {
                 .send_message_with_options(
                     self.group.clone(),
                     wa::Message::text("hi"),
-                    SendOptions::default().with_message_id(message_id),
+                    SendOptions::default()
+                        .with_message_id(crate::MessageId::new(message_id).unwrap()),
                 )
                 .await
                 .expect("group text send should reach the wire");
@@ -3952,7 +4897,7 @@ mod tests {
 
         async fn revoke(&self, message_id: &str, revoke_type: RevokeType) -> SendResult {
             self.client
-                .revoke_message(self.group.clone(), message_id, revoke_type)
+                .revoke_message_raw(self.group.clone(), message_id, revoke_type)
                 .await
                 .expect("revoke should reach the wire")
         }
@@ -3971,6 +4916,147 @@ mod tests {
         /// measured in.
         fn frame_len(&self, index: usize) -> usize {
             self.transport.sent()[index].len()
+        }
+    }
+
+    #[tokio::test]
+    async fn normal_group_and_retry_preserve_content_meta_without_copying_user_nodes() {
+        for fixture in [
+            GroupSendFixture::new().await,
+            GroupSendFixture::new_lid(2).await,
+        ] {
+            let message = {
+                let mut proto = wa::Message::default();
+                proto.view_once_message_v2_extension = Some({
+                    let mut proto = wa::message::FutureProofMessage::default();
+                    proto.message = Some({
+                        let mut proto = wa::Message::default();
+                        proto.audio_message = Some({
+                            let mut proto = wa::message::AudioMessage::default();
+                            proto.ptt = Some(true);
+                            proto.view_once = Some(true);
+                            proto
+                        })
+                        .into();
+                        proto
+                    })
+                    .into();
+                    proto
+                })
+                .into();
+                proto
+            };
+            let id = "GROUP_VIEW_ONCE_META";
+            fixture
+                .client
+                .send_message_with_options(
+                    fixture.group.clone(),
+                    message.clone(),
+                    SendOptions::default()
+                        .with_message_id(crate::MessageId::new(id).unwrap())
+                        .with_extra_stanza_nodes(vec![
+                            NodeBuilder::new("meta").attr("origin", "synthetic").build(),
+                        ]),
+                )
+                .await
+                .unwrap();
+            let normal = fixture.stanza(0).await;
+            let normal = normal.get();
+            assert_eq!(
+                normal.get_children_by_tag("meta").count(),
+                2,
+                "legitimate extra meta is not deduplicated"
+            );
+            assert_eq!(
+                normal
+                    .get_optional_child("meta")
+                    .unwrap()
+                    .attrs()
+                    .required_string("view_once")
+                    .unwrap(),
+                "true"
+            );
+            assert_eq!(
+                normal
+                    .get_optional_child("enc")
+                    .unwrap()
+                    .attrs()
+                    .required_string("mediatype")
+                    .unwrap(),
+                "ptt"
+            );
+            assert_eq!(
+                normal
+                    .get_optional_child("enc")
+                    .unwrap()
+                    .attrs()
+                    .required_string("type")
+                    .unwrap(),
+                "skmsg"
+            );
+
+            // Exercise the public API, then the automatic receipt path against
+            // the same cached semantic content and group addressing mode.
+            fixture
+                .client
+                .retransmit_message(crate::features::MessageRetransmission::new(
+                    fixture.group.clone(),
+                    fixture.member.clone(),
+                    message.clone(),
+                    crate::MessageId::new(id).unwrap(),
+                    1,
+                ))
+                .await
+                .unwrap();
+            let receipt = wacore::types::events::Receipt::builder()
+                .source(crate::types::message::MessageSource {
+                    chat: fixture.group.clone(),
+                    sender: fixture.member.clone(),
+                    is_group: true,
+                    ..Default::default()
+                })
+                .message_ids(vec![id.into()])
+                .timestamp(wacore::time::now_utc())
+                .r#type(wacore::types::presence::ReceiptType::Retry)
+                .offline(false)
+                .build();
+            let node = NodeBuilder::new("receipt")
+                .attr("participant", &fixture.member)
+                .children([NodeBuilder::new("retry")
+                    .attr("id", id)
+                    .attr("count", "1")
+                    .build()])
+                .build();
+            fixture
+                .client
+                .handle_retry_receipt(&receipt, &crate::test_utils::node_to_owned_ref(&node))
+                .await
+                .unwrap();
+            for index in [1, 2] {
+                let retried = fixture.stanza(index).await;
+                let retried = retried.get();
+                assert_eq!(retried.get_children_by_tag("meta").count(), 1);
+                let meta = retried.get_optional_child("meta").unwrap();
+                assert_eq!(meta.attrs().required_string("view_once").unwrap(), "true");
+                assert!(
+                    meta.attrs().optional_string("origin").is_none(),
+                    "do not replay consumer/context nodes"
+                );
+                assert!(retried.get_optional_child("participants").is_none());
+                assert_eq!(
+                    retried.attrs().required_jid("participant").unwrap(),
+                    fixture.member
+                );
+                assert_eq!(retried.attrs().required_jid("to").unwrap(), fixture.group);
+                assert_eq!(
+                    retried.attrs().optional_string("addressing_mode"),
+                    normal.attrs().optional_string("addressing_mode")
+                );
+                let enc = retried.get_optional_child("enc").unwrap();
+                assert_eq!(enc.attrs().required_string("mediatype").unwrap(), "ptt");
+                assert_eq!(enc.attrs().required_string("count").unwrap(), "1");
+                assert!(enc.attrs().required_string("type").unwrap() != "skmsg");
+            }
         }
     }
 
@@ -4996,7 +6082,8 @@ mod tests {
             .send_message_with_options(
                 group.clone(),
                 wa::Message::text("hi"),
-                SendOptions::default().with_message_id("LIDREPAIR1"),
+                SendOptions::default()
+                    .with_message_id(crate::MessageId::new("LIDREPAIR1").unwrap()),
             )
             .await
             .expect("group text send should reach the wire");
@@ -5059,16 +6146,18 @@ mod tests {
                 );
                 // Companions without a signed key-index-list are dropped, so
                 // the answer carries one with device 2 valid.
-                let index = wa::ADVKeyIndexList {
-                    raw_id: Some(1),
-                    timestamp: Some(1000),
-                    current_index: Some(2),
-                    valid_indexes: vec![0, 2],
-                    ..Default::default()
+                let index = {
+                    let mut proto = wa::ADVKeyIndexList::default();
+                    proto.raw_id = Some(1);
+                    proto.timestamp = Some(1000);
+                    proto.current_index = Some(2);
+                    proto.valid_indexes = vec![0, 2];
+                    proto
                 };
-                let signed = wa::ADVSignedKeyIndexList {
-                    details: Some(index.encode_to_vec()),
-                    ..Default::default()
+                let signed = {
+                    let mut proto = wa::ADVSignedKeyIndexList::default();
+                    proto.details = Some(index.encode_to_vec());
+                    proto
                 };
                 let answer = NodeBuilder::new("iq")
                     .attr("type", "result")
@@ -6147,9 +7236,10 @@ mod tests {
 
         #[test]
         fn regular_message_returns_none() {
-            let msg = wa::Message {
-                conversation: Some("hello".into()),
-                ..Default::default()
+            let msg = {
+                let mut proto = wa::Message::default();
+                proto.conversation = Some("hello".into());
+                proto
             };
             let (edit, node) = infer_stanza_metadata(&msg);
             assert!(edit.is_none());
@@ -6158,9 +7248,10 @@ mod tests {
 
         #[test]
         fn pin_returns_edit_attribute() {
-            let msg = wa::Message {
-                pin_in_chat_message: buffa::MessageField::some(Default::default()),
-                ..Default::default()
+            let msg = {
+                let mut proto = wa::Message::default();
+                proto.pin_in_chat_message = buffa::MessageField::some(Default::default());
+                proto
             };
             let (edit, node) = infer_stanza_metadata(&msg);
             assert_eq!(edit, Some(EditAttribute::PinInChat));
@@ -6169,9 +7260,10 @@ mod tests {
 
         #[test]
         fn poll_creation_v3_returns_meta_node() {
-            let msg = wa::Message {
-                poll_creation_message_v3: buffa::MessageField::some(Default::default()),
-                ..Default::default()
+            let msg = {
+                let mut proto = wa::Message::default();
+                proto.poll_creation_message_v3 = buffa::MessageField::some(Default::default());
+                proto
             };
             let (edit, node) = infer_stanza_metadata(&msg);
             assert!(edit.is_none());
@@ -6186,9 +7278,10 @@ mod tests {
 
         #[test]
         fn event_returns_meta_node() {
-            let msg = wa::Message {
-                event_message: buffa::MessageField::some(Default::default()),
-                ..Default::default()
+            let msg = {
+                let mut proto = wa::Message::default();
+                proto.event_message = buffa::MessageField::some(Default::default());
+                proto
             };
             let (edit, node) = infer_stanza_metadata(&msg);
             assert!(edit.is_none());
@@ -6243,9 +7336,10 @@ mod tests {
 
         #[test]
         fn poll_creation_v1_returns_meta_node() {
-            let msg = wa::Message {
-                poll_creation_message: buffa::MessageField::some(Default::default()),
-                ..Default::default()
+            let msg = {
+                let mut proto = wa::Message::default();
+                proto.poll_creation_message = buffa::MessageField::some(Default::default());
+                proto
             };
             let (edit, node) = infer_stanza_metadata(&msg);
             assert!(edit.is_none());
@@ -6260,9 +7354,10 @@ mod tests {
 
         #[test]
         fn poll_creation_v2_returns_meta_node() {
-            let msg = wa::Message {
-                poll_creation_message_v2: buffa::MessageField::some(Default::default()),
-                ..Default::default()
+            let msg = {
+                let mut proto = wa::Message::default();
+                proto.poll_creation_message_v2 = buffa::MessageField::some(Default::default());
+                proto
             };
             let (edit, node) = infer_stanza_metadata(&msg);
             assert!(edit.is_none());
@@ -6277,12 +7372,14 @@ mod tests {
 
         #[test]
         fn poll_vote_returns_meta_node() {
-            let msg = wa::Message {
-                poll_update_message: buffa::MessageField::some(wa::message::PollUpdateMessage {
-                    vote: buffa::MessageField::some(wa::message::PollEncValue::default()),
-                    ..Default::default()
-                }),
-                ..Default::default()
+            let msg = {
+                let mut proto = wa::Message::default();
+                proto.poll_update_message = buffa::MessageField::some({
+                    let mut proto = wa::message::PollUpdateMessage::default();
+                    proto.vote = buffa::MessageField::some(wa::message::PollEncValue::default());
+                    proto
+                });
+                proto
             };
             let (edit, node) = infer_stanza_metadata(&msg);
             assert!(edit.is_none());
@@ -6294,12 +7391,14 @@ mod tests {
 
         #[test]
         fn view_once_image_emits_view_once_meta() {
-            let msg = wa::Message {
-                image_message: buffa::MessageField::some(wa::message::ImageMessage {
-                    view_once: Some(true),
-                    ..Default::default()
-                }),
-                ..Default::default()
+            let msg = {
+                let mut proto = wa::Message::default();
+                proto.image_message = buffa::MessageField::some({
+                    let mut proto = wa::message::ImageMessage::default();
+                    proto.view_once = Some(true);
+                    proto
+                });
+                proto
             };
             let (_, node) = infer_stanza_metadata(&msg);
             let node = node.expect("view-once image should emit meta");
@@ -6312,18 +7411,21 @@ mod tests {
 
         #[test]
         fn plain_image_emits_no_meta() {
-            let msg = wa::Message {
-                image_message: buffa::MessageField::some(wa::message::ImageMessage::default()),
-                ..Default::default()
+            let msg = {
+                let mut proto = wa::Message::default();
+                proto.image_message =
+                    buffa::MessageField::some(wa::message::ImageMessage::default());
+                proto
             };
             assert!(infer_stanza_metadata(&msg).1.is_none());
         }
 
         #[test]
         fn event_response_returns_meta_node() {
-            let msg = wa::Message {
-                enc_event_response_message: buffa::MessageField::some(Default::default()),
-                ..Default::default()
+            let msg = {
+                let mut proto = wa::Message::default();
+                proto.enc_event_response_message = buffa::MessageField::some(Default::default());
+                proto
             };
             let (edit, node) = infer_stanza_metadata(&msg);
             assert!(edit.is_none());
@@ -6338,11 +7440,11 @@ mod tests {
 
         #[test]
         fn poll_update_without_vote_returns_none() {
-            let msg = wa::Message {
-                poll_update_message: buffa::MessageField::some(wa::message::PollUpdateMessage {
-                    ..Default::default()
-                }),
-                ..Default::default()
+            let msg = {
+                let mut proto = wa::Message::default();
+                proto.poll_update_message =
+                    buffa::MessageField::some(wa::message::PollUpdateMessage::default());
+                proto
             };
             let (edit, node) = infer_stanza_metadata(&msg);
             assert!(edit.is_none());
@@ -6351,12 +7453,14 @@ mod tests {
 
         #[test]
         fn revoked_reaction_returns_sender_revoke() {
-            let msg = wa::Message {
-                reaction_message: buffa::MessageField::some(wa::message::ReactionMessage {
-                    text: Some(String::new()),
-                    ..Default::default()
-                }),
-                ..Default::default()
+            let msg = {
+                let mut proto = wa::Message::default();
+                proto.reaction_message = buffa::MessageField::some({
+                    let mut proto = wa::message::ReactionMessage::default();
+                    proto.text = Some(String::new());
+                    proto
+                });
+                proto
             };
             let (edit, _) = infer_stanza_metadata(&msg);
             assert_eq!(edit, Some(EditAttribute::SenderRevoke));
@@ -6364,16 +7468,19 @@ mod tests {
 
         #[test]
         fn keep_in_chat_undo_returns_sender_revoke() {
-            let msg = wa::Message {
-                keep_in_chat_message: buffa::MessageField::some(wa::message::KeepInChatMessage {
-                    key: buffa::MessageField::some(wa::MessageKey {
-                        from_me: Some(true),
-                        ..Default::default()
-                    }),
-                    keep_type: Some(wa::KeepType::UndoKeepForAll),
-                    ..Default::default()
-                }),
-                ..Default::default()
+            let msg = {
+                let mut proto = wa::Message::default();
+                proto.keep_in_chat_message = buffa::MessageField::some({
+                    let mut proto = wa::message::KeepInChatMessage::default();
+                    proto.key = buffa::MessageField::some({
+                        let mut proto = wa::MessageKey::default();
+                        proto.from_me = Some(true);
+                        proto
+                    });
+                    proto.keep_type = Some(wa::KeepType::UndoKeepForAll);
+                    proto
+                });
+                proto
             };
             let (edit, _) = infer_stanza_metadata(&msg);
             assert_eq!(edit, Some(EditAttribute::SenderRevoke));
@@ -6381,16 +7488,15 @@ mod tests {
 
         #[test]
         fn secret_encrypted_message_edit_returns_message_edit() {
-            let msg = wa::Message {
-                secret_encrypted_message: buffa::MessageField::some(
-                    wa::message::SecretEncryptedMessage {
-                        secret_enc_type: Some(
-                            wa::message::secret_encrypted_message::SecretEncType::MessageEdit,
-                        ),
-                        ..Default::default()
-                    },
-                ),
-                ..Default::default()
+            let msg = {
+                let mut proto = wa::Message::default();
+                proto.secret_encrypted_message = buffa::MessageField::some({
+                    let mut proto = wa::message::SecretEncryptedMessage::default();
+                    proto.secret_enc_type =
+                        Some(wa::message::secret_encrypted_message::SecretEncType::MessageEdit);
+                    proto
+                });
+                proto
             };
             let (edit, _) = infer_stanza_metadata(&msg);
             assert_eq!(edit, Some(EditAttribute::MessageEdit));
@@ -6400,16 +7506,15 @@ mod tests {
         fn secret_encrypted_event_edit_emits_both_edit_attr_and_meta_node() {
             // EVENT_EDIT is the one case where the edit attribute AND the
             // meta node both fire: `event_type=edit` meta + `edit="1"` attr.
-            let msg = wa::Message {
-                secret_encrypted_message: buffa::MessageField::some(
-                    wa::message::SecretEncryptedMessage {
-                        secret_enc_type: Some(
-                            wa::message::secret_encrypted_message::SecretEncType::EventEdit,
-                        ),
-                        ..Default::default()
-                    },
-                ),
-                ..Default::default()
+            let msg = {
+                let mut proto = wa::Message::default();
+                proto.secret_encrypted_message = buffa::MessageField::some({
+                    let mut proto = wa::message::SecretEncryptedMessage::default();
+                    proto.secret_enc_type =
+                        Some(wa::message::secret_encrypted_message::SecretEncType::EventEdit);
+                    proto
+                });
+                proto
             };
             let (edit, node) = infer_stanza_metadata(&msg);
             assert_eq!(edit, Some(EditAttribute::MessageEdit));
@@ -6422,11 +7527,14 @@ mod tests {
 
         #[test]
         fn top_level_edited_message_returns_message_edit() {
-            let msg = wa::Message {
-                edited_message: buffa::MessageField::some(wa::message::FutureProofMessage {
-                    message: buffa::MessageField::some(wa::Message::default()),
-                }),
-                ..Default::default()
+            let msg = {
+                let mut proto = wa::Message::default();
+                proto.edited_message = buffa::MessageField::some({
+                    let mut proto = wa::message::FutureProofMessage::default();
+                    proto.message = buffa::MessageField::some(wa::Message::default());
+                    proto
+                });
+                proto
             };
             let (edit, _) = infer_stanza_metadata(&msg);
             assert_eq!(edit, Some(EditAttribute::MessageEdit));
@@ -6436,9 +7544,10 @@ mod tests {
         fn build_edit_message_uses_top_level_protocol_message() {
             use std::str::FromStr;
             let to = Jid::from_str("5511999999999@s.whatsapp.net").unwrap();
-            let new_content = wa::Message {
-                conversation: Some("edited".to_string()),
-                ..Default::default()
+            let new_content = {
+                let mut proto = wa::Message::default();
+                proto.conversation = Some("edited".to_string());
+                proto
             };
             let msg = build_edit_message(
                 &to,
@@ -6494,23 +7603,27 @@ mod tests {
         const EXPECTED_PRIVACY_TS: &str = "1622019543";
 
         fn msg_with_native_flow_button(button_name: &str) -> wa::Message {
-            wa::Message {
-                interactive_message: buffa::MessageField::some(wa::message::InteractiveMessage {
-                    interactive_message: Some(
-                        interactive_message::InteractiveMessage::NativeFlowMessage(Box::new(
-                            NativeFlowMessage {
-                                buttons: vec![NativeFlowButton {
-                                    name: Some(button_name.to_string()),
-                                    button_params_json: None,
-                                }],
-                                message_version: Some(1),
-                                message_params_json: None,
-                            },
-                        )),
-                    ),
-                    ..Default::default()
-                }),
-                ..Default::default()
+            {
+                let mut proto = wa::Message::default();
+                proto.interactive_message = buffa::MessageField::some({
+                    let mut proto = wa::message::InteractiveMessage::default();
+                    proto.interactive_message = Some(
+                        interactive_message::InteractiveMessage::NativeFlowMessage(Box::new({
+                            let mut proto = NativeFlowMessage::default();
+                            proto.buttons = vec![{
+                                let mut proto = NativeFlowButton::default();
+                                proto.name = Some(button_name.to_string());
+                                proto.button_params_json = None;
+                                proto
+                            }];
+                            proto.message_version = Some(1);
+                            proto.message_params_json = None;
+                            proto
+                        })),
+                    );
+                    proto
+                });
+                proto
             }
         }
 
@@ -6650,28 +7763,33 @@ mod tests {
         /// extra_stanza_nodes path).
         #[test]
         fn no_interactive_returns_none() {
-            let msg = wa::Message {
-                conversation: Some("hello".into()),
-                ..Default::default()
+            let msg = {
+                let mut proto = wa::Message::default();
+                proto.conversation = Some("hello".into());
+                proto
             };
             assert!(infer_biz_node(&msg, FIXED_NOW).is_none());
         }
 
         fn carousel_msg(im: wa::message::InteractiveMessage) -> wa::Message {
-            wa::Message {
-                interactive_message: buffa::MessageField::some(wa::message::InteractiveMessage {
-                    interactive_message: Some(
+            {
+                let mut proto = wa::Message::default();
+                proto.interactive_message = buffa::MessageField::some({
+                    let mut proto = im;
+                    proto.interactive_message = Some(
                         interactive_message::InteractiveMessage::CarouselMessage(Default::default()),
-                    ),
-                    ..im
-                }),
-                ..Default::default()
+                    );
+                    proto
+                });
+                proto
             }
         }
 
         fn body(text: &str) -> buffa::MessageField<interactive_message::Body> {
-            buffa::MessageField::some(interactive_message::Body {
-                text: Some(text.to_string()),
+            buffa::MessageField::some({
+                let mut proto = interactive_message::Body::default();
+                proto.text = Some(text.to_string());
+                proto
             })
         }
 
@@ -6680,9 +7798,10 @@ mod tests {
         /// accepted, acked, and then invisible on the recipient's handset.
         #[test]
         fn carousel_with_body_emits_mixed_biz() {
-            let msg = carousel_msg(wa::message::InteractiveMessage {
-                body: body("pick a plan"),
-                ..Default::default()
+            let msg = carousel_msg({
+                let mut proto = wa::message::InteractiveMessage::default();
+                proto.body = body("pick a plan");
+                proto
             });
             let biz = infer_biz_node(&msg, FIXED_NOW).expect("carousel should produce biz");
             assert_nested_biz(&biz, "mixed", "carousel");
@@ -6692,12 +7811,14 @@ mod tests {
         /// is a disjunction over body / title / footer / header image.
         #[test]
         fn carousel_envelope_variants_emit_mixed_biz() {
-            let title = carousel_msg(wa::message::InteractiveMessage {
-                header: buffa::MessageField::some(interactive_message::Header {
-                    title: Some("Our menu".into()),
-                    ..Default::default()
-                }),
-                ..Default::default()
+            let title = carousel_msg({
+                let mut proto = wa::message::InteractiveMessage::default();
+                proto.header = buffa::MessageField::some({
+                    let mut proto = interactive_message::Header::default();
+                    proto.title = Some("Our menu".into());
+                    proto
+                });
+                proto
             });
             assert_nested_biz(
                 &infer_biz_node(&title, FIXED_NOW).expect("title should produce biz"),
@@ -6705,12 +7826,14 @@ mod tests {
                 "header title",
             );
 
-            let footer = carousel_msg(wa::message::InteractiveMessage {
-                footer: buffa::MessageField::some(interactive_message::Footer {
-                    text: Some("tap to order".into()),
-                    ..Default::default()
-                }),
-                ..Default::default()
+            let footer = carousel_msg({
+                let mut proto = wa::message::InteractiveMessage::default();
+                proto.footer = buffa::MessageField::some({
+                    let mut proto = interactive_message::Footer::default();
+                    proto.text = Some("tap to order".into());
+                    proto
+                });
+                proto
             });
             assert_nested_biz(
                 &infer_biz_node(&footer, FIXED_NOW).expect("footer should produce biz"),
@@ -6718,14 +7841,16 @@ mod tests {
                 "footer",
             );
 
-            let image = carousel_msg(wa::message::InteractiveMessage {
-                header: buffa::MessageField::some(interactive_message::Header {
-                    media: Some(interactive_message::header::Media::ImageMessage(
+            let image = carousel_msg({
+                let mut proto = wa::message::InteractiveMessage::default();
+                proto.header = buffa::MessageField::some({
+                    let mut proto = interactive_message::Header::default();
+                    proto.media = Some(interactive_message::header::Media::ImageMessage(
                         Default::default(),
-                    )),
-                    ..Default::default()
-                }),
-                ..Default::default()
+                    ));
+                    proto
+                });
+                proto
             });
             assert_nested_biz(
                 &infer_biz_node(&image, FIXED_NOW).expect("header image should produce biz"),
@@ -6744,9 +7869,10 @@ mod tests {
         /// not presence.
         #[test]
         fn empty_body_text_is_not_an_envelope() {
-            let msg = carousel_msg(wa::message::InteractiveMessage {
-                body: body(""),
-                ..Default::default()
+            let msg = carousel_msg({
+                let mut proto = wa::message::InteractiveMessage::default();
+                proto.body = body("");
+                proto
             });
             assert!(infer_biz_node(&msg, FIXED_NOW).is_none());
         }
@@ -6754,17 +7880,19 @@ mod tests {
         /// Storefronts are excluded from the envelope rule, as in WA Web.
         #[test]
         fn shop_storefront_returns_none() {
-            let msg = wa::Message {
-                interactive_message: buffa::MessageField::some(wa::message::InteractiveMessage {
-                    body: body("visit our shop"),
-                    interactive_message: Some(
+            let msg = {
+                let mut proto = wa::Message::default();
+                proto.interactive_message = buffa::MessageField::some({
+                    let mut proto = wa::message::InteractiveMessage::default();
+                    proto.body = body("visit our shop");
+                    proto.interactive_message = Some(
                         interactive_message::InteractiveMessage::ShopStorefrontMessage(
                             Default::default(),
                         ),
-                    ),
-                    ..Default::default()
-                }),
-                ..Default::default()
+                    );
+                    proto
+                });
+                proto
             };
             assert!(infer_biz_node(&msg, FIXED_NOW).is_none());
         }
@@ -6772,16 +7900,17 @@ mod tests {
         /// Interactive but not native-flow (e.g. CollectionMessage) yields None.
         #[test]
         fn interactive_without_native_flow_returns_none() {
-            let msg = wa::Message {
-                interactive_message: buffa::MessageField::some(wa::message::InteractiveMessage {
-                    interactive_message: Some(
-                        interactive_message::InteractiveMessage::CollectionMessage(
+            let msg = {
+                let mut proto = wa::Message::default();
+                proto.interactive_message = buffa::MessageField::some({
+                    let mut proto = wa::message::InteractiveMessage::default();
+                    proto.interactive_message =
+                        Some(interactive_message::InteractiveMessage::CollectionMessage(
                             Default::default(),
-                        ),
-                    ),
-                    ..Default::default()
-                }),
-                ..Default::default()
+                        ));
+                    proto
+                });
+                proto
             };
             assert!(infer_biz_node(&msg, FIXED_NOW).is_none());
         }
@@ -6789,20 +7918,22 @@ mod tests {
         /// NativeFlow with empty button list yields None — no signal to classify.
         #[test]
         fn native_flow_without_buttons_returns_none() {
-            let msg = wa::Message {
-                interactive_message: buffa::MessageField::some(wa::message::InteractiveMessage {
-                    interactive_message: Some(
-                        interactive_message::InteractiveMessage::NativeFlowMessage(Box::new(
-                            NativeFlowMessage {
-                                buttons: vec![],
-                                message_version: Some(1),
-                                message_params_json: None,
-                            },
-                        )),
-                    ),
-                    ..Default::default()
-                }),
-                ..Default::default()
+            let msg = {
+                let mut proto = wa::Message::default();
+                proto.interactive_message = buffa::MessageField::some({
+                    let mut proto = wa::message::InteractiveMessage::default();
+                    proto.interactive_message = Some(
+                        interactive_message::InteractiveMessage::NativeFlowMessage(Box::new({
+                            let mut proto = NativeFlowMessage::default();
+                            proto.buttons = vec![];
+                            proto.message_version = Some(1);
+                            proto.message_params_json = None;
+                            proto
+                        })),
+                    );
+                    proto
+                });
+                proto
             };
             assert!(infer_biz_node(&msg, FIXED_NOW).is_none());
         }
@@ -6810,23 +7941,27 @@ mod tests {
         /// Button with `name = None` is treated as missing classifier → None.
         #[test]
         fn button_without_name_returns_none() {
-            let msg = wa::Message {
-                interactive_message: buffa::MessageField::some(wa::message::InteractiveMessage {
-                    interactive_message: Some(
-                        interactive_message::InteractiveMessage::NativeFlowMessage(Box::new(
-                            NativeFlowMessage {
-                                buttons: vec![NativeFlowButton {
-                                    name: None,
-                                    button_params_json: None,
-                                }],
-                                message_version: Some(1),
-                                message_params_json: None,
-                            },
-                        )),
-                    ),
-                    ..Default::default()
-                }),
-                ..Default::default()
+            let msg = {
+                let mut proto = wa::Message::default();
+                proto.interactive_message = buffa::MessageField::some({
+                    let mut proto = wa::message::InteractiveMessage::default();
+                    proto.interactive_message = Some(
+                        interactive_message::InteractiveMessage::NativeFlowMessage(Box::new({
+                            let mut proto = NativeFlowMessage::default();
+                            proto.buttons = vec![{
+                                let mut proto = NativeFlowButton::default();
+                                proto.name = None;
+                                proto.button_params_json = None;
+                                proto
+                            }];
+                            proto.message_version = Some(1);
+                            proto.message_params_json = None;
+                            proto
+                        })),
+                    );
+                    proto
+                });
+                proto
             };
             assert!(infer_biz_node(&msg, FIXED_NOW).is_none());
         }
@@ -6835,31 +7970,36 @@ mod tests {
         /// native_flow payload from the inner message.
         #[test]
         fn document_with_caption_wrapper() {
-            let inner = wa::Message {
-                interactive_message: buffa::MessageField::some(wa::message::InteractiveMessage {
-                    interactive_message: Some(
-                        interactive_message::InteractiveMessage::NativeFlowMessage(Box::new(
-                            NativeFlowMessage {
-                                buttons: vec![NativeFlowButton {
-                                    name: Some("quick_reply".into()),
-                                    button_params_json: None,
-                                }],
-                                message_version: Some(1),
-                                message_params_json: None,
-                            },
-                        )),
-                    ),
-                    ..Default::default()
-                }),
-                ..Default::default()
+            let inner = {
+                let mut proto = wa::Message::default();
+                proto.interactive_message = buffa::MessageField::some({
+                    let mut proto = wa::message::InteractiveMessage::default();
+                    proto.interactive_message = Some(
+                        interactive_message::InteractiveMessage::NativeFlowMessage(Box::new({
+                            let mut proto = NativeFlowMessage::default();
+                            proto.buttons = vec![{
+                                let mut proto = NativeFlowButton::default();
+                                proto.name = Some("quick_reply".into());
+                                proto.button_params_json = None;
+                                proto
+                            }];
+                            proto.message_version = Some(1);
+                            proto.message_params_json = None;
+                            proto
+                        })),
+                    );
+                    proto
+                });
+                proto
             };
-            let msg = wa::Message {
-                document_with_caption_message: buffa::MessageField::some(
-                    wa::message::FutureProofMessage {
-                        message: buffa::MessageField::some(inner),
-                    },
-                ),
-                ..Default::default()
+            let msg = {
+                let mut proto = wa::Message::default();
+                proto.document_with_caption_message = buffa::MessageField::some({
+                    let mut proto = wa::message::FutureProofMessage::default();
+                    proto.message = buffa::MessageField::some(inner);
+                    proto
+                });
+                proto
             };
             let biz = infer_biz_node(&msg, FIXED_NOW)
                 .expect("doc-with-caption wrapper should propagate the inner native_flow");
@@ -7414,11 +8554,13 @@ mod tests {
     }
 
     pub(super) fn peer_test_account_proto() -> wa::ADVSignedDeviceIdentity {
-        wa::ADVSignedDeviceIdentity {
-            details: Some(vec![0u8; 32]),
-            account_signature_key: Some(vec![0u8; 32]),
-            account_signature: Some(vec![0u8; 64]),
-            device_signature: Some(vec![0u8; 64]),
+        {
+            let mut proto = wa::ADVSignedDeviceIdentity::default();
+            proto.details = Some(vec![0u8; 32]);
+            proto.account_signature_key = Some(vec![0u8; 32]);
+            proto.account_signature = Some(vec![0u8; 64]);
+            proto.device_signature = Some(vec![0u8; 64]);
+            proto
         }
     }
 
@@ -7472,18 +8614,20 @@ mod tests {
     }
 
     fn pdo_request_message(request_type: wa::message::PeerDataOperationRequestType) -> wa::Message {
-        wa::Message {
-            protocol_message: buffa::MessageField::some(wa::message::ProtocolMessage {
-                r#type: Some(wa::message::protocol_message::Type::PeerDataOperationRequestMessage),
-                peer_data_operation_request_message: buffa::MessageField::some(
-                    wa::message::PeerDataOperationRequestMessage {
-                        peer_data_operation_request_type: Some(request_type),
-                        ..Default::default()
-                    },
-                ),
-                ..Default::default()
-            }),
-            ..Default::default()
+        {
+            let mut proto_ = wa::Message::default();
+            proto_.protocol_message = buffa::MessageField::some({
+                let mut proto_ = wa::message::ProtocolMessage::default();
+                proto_.r#type =
+                    Some(wa::message::protocol_message::Type::PeerDataOperationRequestMessage);
+                proto_.peer_data_operation_request_message = buffa::MessageField::some({
+                    let mut proto = wa::message::PeerDataOperationRequestMessage::default();
+                    proto.peer_data_operation_request_type = Some(request_type);
+                    proto
+                });
+                proto_
+            });
+            proto_
         }
     }
 
@@ -7585,6 +8729,14 @@ mod tests {
     /// session for the peer's LID device so the offline fanout can encrypt
     /// without a socket. Returns `(peer_pn, peer_lid)`.
     async fn seed_dm_wire_namespace_state(client: &Arc<Client>) -> (Jid, Jid) {
+        let peer_lid: Jid = "555000000000777@lid".parse().unwrap();
+        seed_dm_wire_namespace_state_for_peer_lid(client, peer_lid).await
+    }
+
+    async fn seed_dm_wire_namespace_state_for_peer_lid(
+        client: &Arc<Client>,
+        peer_lid: Jid,
+    ) -> (Jid, Jid) {
         use wacore::libsignal::protocol::{
             IdentityKeyPair, KeyPair, PreKeyBundle, SignalProtocolError, UsePQRatchet,
             process_prekey_bundle,
@@ -7609,7 +8761,6 @@ mod tests {
         // The peer is LID-mapped: the wire namespace is then decided solely by
         // the account's migration state.
         let peer_pn: Jid = "100000000000777@s.whatsapp.net".parse().unwrap();
-        let peer_lid: Jid = "555000000000777@lid".parse().unwrap();
         client
             .add_lid_pn_mapping(
                 peer_lid.user.as_str(),
@@ -7712,9 +8863,10 @@ mod tests {
         let request_id = "LID_DM_TO_1";
         let waiter = client
             .wait_for_sent_node(crate::client::NodeFilter::tag("message").attr("id", request_id));
-        let msg = wa::Message {
-            conversation: Some("hi".into()),
-            ..Default::default()
+        let msg = {
+            let mut proto = wa::Message::default();
+            proto.conversation = Some("hi".into());
+            proto
         };
         // Caller passes the PN form; the resolved namespace must win on the wire.
         let result = client
@@ -7789,9 +8941,10 @@ mod tests {
         let request_id = "PN_DM_TO_1";
         let waiter = client
             .wait_for_sent_node(crate::client::NodeFilter::tag("message").attr("id", request_id));
-        let msg = wa::Message {
-            conversation: Some("hi".into()),
-            ..Default::default()
+        let msg = {
+            let mut proto = wa::Message::default();
+            proto.conversation = Some("hi".into());
+            proto
         };
         let result = client
             .send_message_impl(
@@ -7858,9 +9011,10 @@ mod tests {
     async fn newsletter_jid_rejected_on_e2e_send_path() {
         let client = crate::test_utils::create_test_client_with_name("newsletter_e2e_guard").await;
         let channel: Jid = "120363000000000001@newsletter".parse().unwrap();
-        let msg = wa::Message {
-            conversation: Some("x".to_string()),
-            ..Default::default()
+        let msg = {
+            let mut proto = wa::Message::default();
+            proto.conversation = Some("x".to_string());
+            proto
         };
         let err = client
             .send_message_impl(channel, &msg, SendPipelineOptions::default())
@@ -7878,14 +9032,16 @@ mod tests {
     async fn pin_message_rejects_newsletter() {
         let client = crate::test_utils::create_test_client_with_name("newsletter_pin_guard").await;
         let channel: Jid = "120363000000000002@newsletter".parse().unwrap();
-        let key = wa::MessageKey {
-            remote_jid: Some(channel.to_string()),
-            from_me: Some(true),
-            id: Some("MID".to_string()),
-            participant: None,
+        let key = {
+            let mut proto = wa::MessageKey::default();
+            proto.remote_jid = Some(channel.to_string());
+            proto.from_me = Some(true);
+            proto.id = Some("MID".to_string());
+            proto.participant = None;
+            proto
         };
         let err = client
-            .pin_message(channel, key, PinDuration::Days7)
+            .pin_message_raw(channel, key, PinDuration::Days7)
             .await
             .expect_err("pinning a newsletter message must be rejected");
         assert!(
@@ -7901,9 +9057,10 @@ mod tests {
     fn build_newsletter_edit_node_emits_plaintext_edit() {
         use buffa::Message as _;
         let to: Jid = "120363000000000001@newsletter".parse().unwrap();
-        let content = wa::Message {
-            conversation: Some("edited text".to_string()),
-            ..Default::default()
+        let content = {
+            let mut proto = wa::Message::default();
+            proto.conversation = Some("edited text".to_string());
+            proto
         };
         let node =
             build_newsletter_edit_node(&to, "3EB0EDITTARGET", NewsletterEdit::Edit(&content));
@@ -7921,7 +9078,7 @@ mod tests {
             "a text edit must not carry a mediatype attr"
         );
         let bytes = match pt.content.as_ref() {
-            Some(wacore_binary::NodeContent::Bytes(b)) => b.clone(),
+            Some(NodeContent::Bytes(b)) => b.clone(),
             other => panic!("expected plaintext bytes, got {other:?}"),
         };
         let decoded = wa::Message::decode_from_slice(bytes.as_slice()).expect("decode plaintext");
@@ -7932,12 +9089,14 @@ mod tests {
     #[test]
     fn build_newsletter_edit_node_media_edit() {
         let to: Jid = "120363000000000001@newsletter".parse().unwrap();
-        let content = wa::Message {
-            image_message: buffa::MessageField::some(wa::message::ImageMessage {
-                caption: Some("new caption".to_string()),
-                ..Default::default()
-            }),
-            ..Default::default()
+        let content = {
+            let mut proto = wa::Message::default();
+            proto.image_message = buffa::MessageField::some({
+                let mut proto = wa::message::ImageMessage::default();
+                proto.caption = Some("new caption".to_string());
+                proto
+            });
+            proto
         };
         let node = build_newsletter_edit_node(&to, "3EB0MEDIA", NewsletterEdit::Edit(&content));
 
@@ -7974,7 +9133,7 @@ mod tests {
             .expect("plaintext child");
         let empty = match pt.content.as_ref() {
             None => true,
-            Some(wacore_binary::NodeContent::Bytes(b)) => b.is_empty(),
+            Some(NodeContent::Bytes(b)) => b.is_empty(),
             _ => false,
         };
         assert!(empty, "revoke must carry an empty plaintext");
@@ -7988,14 +9147,15 @@ mod tests {
         let channel: Jid = "120363000000000001@newsletter".parse().unwrap();
         let waiter =
             client.wait_for_sent_node(crate::client::NodeFilter::tag("message").attr("edit", "3"));
-        let content = wa::Message {
-            conversation: Some("edited".to_string()),
-            ..Default::default()
+        let content = {
+            let mut proto = wa::Message::default();
+            proto.conversation = Some("edited".to_string());
+            proto
         };
         // No socket on the test client: send_node captures the node, then errors.
         let _ = client
             .newsletter()
-            .edit_message(&channel, "TARGETMID", content)
+            .edit_message_raw(&channel, "TARGETMID", content)
             .await;
 
         let node = tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
@@ -8017,21 +9177,18 @@ mod tests {
 
         let e1 = client
             .newsletter()
-            .edit_message(
-                &dm,
-                "MID",
-                wa::Message {
-                    conversation: Some("x".to_string()),
-                    ..Default::default()
-                },
-            )
+            .edit_message_raw(&dm, "MID", {
+                let mut proto = wa::Message::default();
+                proto.conversation = Some("x".to_string());
+                proto
+            })
             .await
             .expect_err("edit_message must reject a DM JID");
         assert!(e1.to_string().to_lowercase().contains("newsletter"));
 
         let e2 = client
             .newsletter()
-            .revoke_message(&group, "MID")
+            .revoke_message_raw(&group, "MID")
             .await
             .expect_err("revoke_message must reject a group JID");
         assert!(e2.to_string().to_lowercase().contains("newsletter"));
@@ -8046,21 +9203,18 @@ mod tests {
 
         let e1 = client
             .newsletter()
-            .edit_message(
-                &channel,
-                "",
-                wa::Message {
-                    conversation: Some("x".to_string()),
-                    ..Default::default()
-                },
-            )
+            .edit_message_raw(&channel, "", {
+                let mut proto = wa::Message::default();
+                proto.conversation = Some("x".to_string());
+                proto
+            })
             .await
             .expect_err("edit_message must reject an empty message_id");
         assert!(e1.to_string().to_lowercase().contains("message_id"));
 
         let e2 = client
             .newsletter()
-            .revoke_message(&channel, "")
+            .revoke_message_raw(&channel, "")
             .await
             .expect_err("revoke_message must reject an empty message_id");
         assert!(e2.to_string().to_lowercase().contains("message_id"));
@@ -8236,9 +9390,10 @@ mod tests {
     fn prepared_dm_stanza_exposes_generated_message_secret() {
         use wacore::reporting_token::generate_reporting_token;
 
-        let msg = wa::Message {
-            conversation: Some("hi bot".into()),
-            ..Default::default()
+        let msg = {
+            let mut proto = wa::Message::default();
+            proto.conversation = Some("hi bot".into());
+            proto
         };
         let to: Jid = "867051314767696@bot".parse().unwrap();
         let result = generate_reporting_token(&msg, "MID_X", &to, &to, None);
@@ -8266,11 +9421,12 @@ mod tests {
         let result = client
             .send_message_with_options(
                 peer_pn.clone(),
-                wa::Message {
-                    conversation: Some("hi".into()),
-                    ..Default::default()
+                {
+                    let mut proto = wa::Message::default();
+                    proto.conversation = Some("hi".into());
+                    proto
                 },
-                SendOptions::default().with_message_id(message_id),
+                SendOptions::default().with_message_id(crate::MessageId::new(message_id).unwrap()),
             )
             .await
             .expect("connected test client should complete the send");
@@ -8311,13 +9467,11 @@ mod tests {
         let (peer_pn, _peer_lid) = seed_dm_wire_namespace_state(&client).await;
 
         let result = client
-            .send_message(
-                peer_pn.clone(),
-                wa::Message {
-                    conversation: Some("hi".into()),
-                    ..Default::default()
-                },
-            )
+            .send_message(peer_pn.clone(), {
+                let mut proto = wa::Message::default();
+                proto.conversation = Some("hi".into());
+                proto
+            })
             .await
             .expect("connected test client should complete the send");
 
@@ -8341,18 +9495,22 @@ mod tests {
         let (client, _transport) = crate::test_utils::create_iq_test_client().await;
         let (peer_pn, _peer_lid) = seed_dm_wire_namespace_state(&client).await;
 
-        let reaction = wa::Message {
-            reaction_message: buffa::MessageField::some(wa::message::ReactionMessage {
-                key: buffa::MessageField::some(wa::MessageKey {
-                    remote_jid: Some(Jid::status_broadcast().to_string()),
-                    from_me: Some(false),
-                    id: Some("STATUSPOST1".into()),
-                    participant: Some(peer_pn.to_string()),
-                }),
-                text: Some("\u{1f44d}".into()),
-                ..Default::default()
-            }),
-            ..Default::default()
+        let reaction = {
+            let mut proto = wa::Message::default();
+            proto.reaction_message = buffa::MessageField::some({
+                let mut proto = wa::message::ReactionMessage::default();
+                proto.key = buffa::MessageField::some({
+                    let mut proto = wa::MessageKey::default();
+                    proto.remote_jid = Some(Jid::status_broadcast().to_string());
+                    proto.from_me = Some(false);
+                    proto.id = Some("STATUSPOST1".into());
+                    proto.participant = Some(peer_pn.to_string());
+                    proto
+                });
+                proto.text = Some("\u{1f44d}".into());
+                proto
+            });
+            proto
         };
 
         let result = client
@@ -8382,14 +9540,14 @@ mod tests {
         let result = client
             .send_message_with_options(
                 peer_pn.clone(),
-                wa::Message {
-                    extended_text_message: buffa::MessageField::some(
-                        wa::message::ExtendedTextMessage {
-                            text: Some("hi".into()),
-                            ..Default::default()
-                        },
-                    ),
-                    ..Default::default()
+                {
+                    let mut proto = wa::Message::default();
+                    proto.extended_text_message = buffa::MessageField::some({
+                        let mut proto = wa::message::ExtendedTextMessage::default();
+                        proto.text = Some("hi".into());
+                        proto
+                    });
+                    proto
                 },
                 SendOptions::default().with_ephemeral_expiration(86_400),
             )
@@ -8418,7 +9576,7 @@ mod tests {
                 .lookup(
                     &peer_pn.to_non_ad_string(),
                     &client.pn().expect("own pn").to_non_ad_string(),
-                    &result.message_id,
+                    result.message_id.as_str(),
                 )
                 .is_some(),
             "the secret the wire copy carries is still held for the message's add-ons"
@@ -8439,7 +9597,12 @@ mod tests {
         );
 
         let result = client
-            .edit_message(peer_pn.clone(), "ORIGINAL", wa::Message::text("new"))
+            .edit_message_raw(
+                peer_pn.clone(),
+                "ORIGINAL",
+                wa::Message::text("new"),
+                EditOptions::default(),
+            )
             .await
             .expect("connected test client should complete the edit");
 
@@ -8481,12 +9644,12 @@ mod tests {
         );
 
         let borrowed = client
-            .edit_message_with_options(
+            .edit_message_raw(
                 peer_pn.clone(),
                 "ORIGINAL",
                 wa::Message::text("newer"),
                 EditOptions {
-                    stanza_id: Some("BORROWED".into()),
+                    stanza_id: Some(crate::StanzaId::new("BORROWED").unwrap()),
                 },
             )
             .await
@@ -8506,7 +9669,7 @@ mod tests {
         let (peer_pn, _peer_lid) = seed_dm_wire_namespace_state(&client).await;
 
         let revoke = client
-            .revoke_message(peer_pn.clone(), "TARGET", RevokeType::Sender)
+            .revoke_message_raw(peer_pn.clone(), "TARGET", RevokeType::Sender)
             .await
             .expect("connected test client should complete the revoke");
         assert_ne!(
@@ -8531,14 +9694,16 @@ mod tests {
             Some(peer_pn.to_string().as_str())
         );
 
-        let target = wa::MessageKey {
-            remote_jid: Some(peer_pn.to_string()),
-            from_me: Some(true),
-            id: Some("TARGET".into()),
-            participant: None,
+        let target = {
+            let mut proto = wa::MessageKey::default();
+            proto.remote_jid = Some(peer_pn.to_string());
+            proto.from_me = Some(true);
+            proto.id = Some("TARGET".into());
+            proto.participant = None;
+            proto
         };
         let pin = client
-            .pin_message(peer_pn.clone(), target.clone(), PinDuration::Days30)
+            .pin_message_raw(peer_pn.clone(), target.clone(), PinDuration::Days30)
             .await
             .expect("connected test client should complete the pin");
         let pinned = pin
@@ -8561,11 +9726,13 @@ mod tests {
         );
 
         let options = ["yes".to_string(), "no".to_string()];
-        let (poll, secret) = client
+        let created = client
             .polls()
             .create(peer_pn.clone(), "lunch?", &options, 1)
             .await
             .expect("connected test client should complete the poll");
+        let poll = created.send_result();
+        let secret = created.secret();
         let creation = poll
             .message
             .poll_creation_message_v3
@@ -8578,7 +9745,7 @@ mod tests {
                 .message_context_info
                 .as_option()
                 .and_then(|c| c.message_secret.as_deref()),
-            Some(secret.as_slice()),
+            Some(secret.as_bytes().as_slice()),
             "a poll's own secret is part of the message it built, so the wire \
              copy and the reported one agree on it"
         );
@@ -8599,11 +9766,12 @@ mod tests {
         client
             .send_message_with_options(
                 legacy,
-                wa::Message {
-                    conversation: Some("hi".into()),
-                    ..Default::default()
+                {
+                    let mut proto = wa::Message::default();
+                    proto.conversation = Some("hi".into());
+                    proto
                 },
-                SendOptions::default().with_message_id(message_id),
+                SendOptions::default().with_message_id(crate::MessageId::new(message_id).unwrap()),
             )
             .await
             .expect("a legacy-spelled recipient is a recipient");
@@ -8696,11 +9864,12 @@ mod tests {
         client
             .send_message_with_options(
                 peer_pn.clone(),
-                wa::Message {
-                    conversation: Some("hi".into()),
-                    ..Default::default()
+                {
+                    let mut proto = wa::Message::default();
+                    proto.conversation = Some("hi".into());
+                    proto
                 },
-                SendOptions::default().with_message_id(message_id),
+                SendOptions::default().with_message_id(crate::MessageId::new(message_id).unwrap()),
             )
             .await
             .expect("the send itself succeeds");
@@ -8755,7 +9924,7 @@ mod tests {
                 .send_message_with_options(
                     fixture.group.clone(),
                     wa::Message::text(id),
-                    SendOptions::default().with_message_id(id),
+                    SendOptions::default().with_message_id(crate::MessageId::new(id).unwrap()),
                 )
                 .await
                 .unwrap();
@@ -8916,14 +10085,18 @@ mod tests {
                 .iter()
                 .position(|original| *original == id.as_ref())
                 .unwrap();
-            let expected = wa::Message {
-                conversation: Some(ids[original].into()),
-                message_context_info: buffa::MessageField::some(wa::MessageContextInfo {
-                    message_secret: Some(snapshots[original].message_secret.unwrap().to_vec()),
-                    reporting_token_version: Some(wacore::reporting_token::REPORTING_TOKEN_VERSION),
-                    ..Default::default()
-                }),
-                ..Default::default()
+            let expected = {
+                let mut proto = wa::Message::default();
+                proto.conversation = Some(ids[original].into());
+                proto.message_context_info = buffa::MessageField::some({
+                    let mut proto = wa::MessageContextInfo::default();
+                    proto.message_secret =
+                        Some(snapshots[original].message_secret.unwrap().to_vec());
+                    proto.reporting_token_version =
+                        Some(wacore::reporting_token::REPORTING_TOKEN_VERSION);
+                    proto
+                });
+                proto
             };
             assert_eq!(
                 waproto::codec::message_to_vec(&decoded),
@@ -8970,7 +10143,7 @@ mod tests {
                     group,
                     wa::Message::text("snapshot"),
                     SendOptions::default()
-                        .with_message_id("FROZENGROUPDEVICES")
+                        .with_message_id(crate::MessageId::new("FROZENGROUPDEVICES").unwrap())
                         .with_device_freshness(crate::cache::Freshness::Refresh),
                 )
                 .await
@@ -8988,20 +10161,22 @@ mod tests {
                             .build(),
                     );
                 }
-                let index = wa::ADVKeyIndexList {
-                    raw_id: Some(1),
-                    timestamp: Some(1000),
-                    current_index: Some(2),
-                    valid_indexes: if jid == &fixture.member {
+                let index = {
+                    let mut proto = wa::ADVKeyIndexList::default();
+                    proto.raw_id = Some(1);
+                    proto.timestamp = Some(1000);
+                    proto.current_index = Some(2);
+                    proto.valid_indexes = if jid == &fixture.member {
                         vec![0, 2]
                     } else {
                         vec![0]
-                    },
-                    ..Default::default()
+                    };
+                    proto
                 };
-                let signed = wa::ADVSignedKeyIndexList {
-                    details: Some(index.encode_to_vec()),
-                    ..Default::default()
+                let signed = {
+                    let mut proto = wa::ADVSignedKeyIndexList::default();
+                    proto.details = Some(index.encode_to_vec());
+                    proto
                 };
                 NodeBuilder::new("user")
                     .attr("jid", jid.clone())
@@ -9359,33 +10534,37 @@ mod tests {
                 1
             );
 
-            let revoke = wa::Message {
-                protocol_message: buffa::MessageField::some(wa::message::ProtocolMessage {
-                    r#type: Some(wa::message::protocol_message::Type::REVOKE),
-                    key: buffa::MessageField::some(wa::MessageKey {
-                        remote_jid: Some(if wrong_chat {
+            let revoke = {
+                let mut proto_ = wa::Message::default();
+                proto_.protocol_message = buffa::MessageField::some({
+                    let mut proto_ = wa::message::ProtocolMessage::default();
+                    proto_.r#type = Some(wa::message::protocol_message::Type::REVOKE);
+                    proto_.key = buffa::MessageField::some({
+                        let mut proto = wa::MessageKey::default();
+                        proto.remote_jid = Some(if wrong_chat {
                             "120363000000000099@g.us".into()
                         } else {
                             fixture.group.to_string()
-                        }),
-                        id: Some(id.into()),
-                        from_me: Some(!admin),
-                        participant: admin.then(|| fixture.own_sending.to_non_ad_string()),
-                    }),
-                    ..Default::default()
-                }),
-                ..Default::default()
+                        });
+                        proto.id = Some(id.into());
+                        proto.from_me = Some(!admin);
+                        proto.participant = admin.then(|| fixture.own_sending.to_non_ad_string());
+                        proto
+                    });
+                    proto_
+                });
+                proto_
             };
             let incoming = if from_self {
-                wa::Message {
-                    device_sent_message: buffa::MessageField::some(
-                        wa::message::DeviceSentMessage {
-                            destination_jid: Some(fixture.group.to_string()),
-                            message: buffa::MessageField::some(revoke),
-                            ..Default::default()
-                        },
-                    ),
-                    ..Default::default()
+                {
+                    let mut proto = wa::Message::default();
+                    proto.device_sent_message = buffa::MessageField::some({
+                        let mut proto = wa::message::DeviceSentMessage::default();
+                        proto.destination_jid = Some(fixture.group.to_string());
+                        proto.message = buffa::MessageField::some(revoke);
+                        proto
+                    });
+                    proto
                 }
             } else {
                 revoke
@@ -9507,9 +10686,10 @@ mod tests {
         let result = client
             .send_message_impl(
                 peer_pn,
-                &wa::Message {
-                    conversation: Some("hi".into()),
-                    ..Default::default()
+                &{
+                    let mut proto = wa::Message::default();
+                    proto.conversation = Some("hi".into());
+                    proto
                 },
                 SendPipelineOptions {
                     request_id: Some(message_id),
@@ -9537,9 +10717,10 @@ mod tests {
         client
             .send_message_impl(
                 peer_pn.clone(),
-                &wa::Message {
-                    conversation: Some("hi".into()),
-                    ..Default::default()
+                &{
+                    let mut proto = wa::Message::default();
+                    proto.conversation = Some("hi".into());
+                    proto
                 },
                 SendPipelineOptions {
                     request_id: Some(message_id),
@@ -9574,21 +10755,15 @@ mod tests {
     async fn an_empty_id_is_refused_at_both_entry_points() {
         let client = crate::test_utils::create_test_client_with_name("empty_send_id").await;
         let peer: Jid = "100000000000777@s.whatsapp.net".parse().unwrap();
-        let msg = wa::Message {
-            conversation: Some("hi".into()),
-            ..Default::default()
+        let msg = {
+            let mut proto = wa::Message::default();
+            proto.conversation = Some("hi".into());
+            proto
         };
 
-        let public = client
-            .send_message_with_options(
-                peer.clone(),
-                msg.clone(),
-                SendOptions::default().with_message_id(""),
-            )
-            .await;
-        assert!(
-            matches!(public, Err(SendError::InvalidRequest(_))),
-            "public send must reject an empty id, got {public:?}"
+        assert_eq!(
+            crate::MessageId::new(""),
+            Err(crate::MessageRefError::EmptyMessageId)
         );
 
         let internal = client
@@ -9624,11 +10799,12 @@ mod tests {
         let result = client
             .send_message_with_options(
                 channel.clone(),
-                wa::Message {
-                    conversation: Some("hi".into()),
-                    ..Default::default()
+                {
+                    let mut proto = wa::Message::default();
+                    proto.conversation = Some("hi".into());
+                    proto
                 },
-                SendOptions::default().with_message_id(message_id),
+                SendOptions::default().with_message_id(crate::MessageId::new(message_id).unwrap()),
             )
             .await
             .expect("newsletter send is plaintext and needs no session");
@@ -9661,18 +10837,22 @@ mod jid_into_convention {
             .await;
         let _ = client.forward_message(&jid, &msg).await;
         let _ = client
-            .edit_message(&jid, "ID", wa::Message::default())
-            .await;
-        let _ = client.revoke_message(&jid, "ID", RevokeType::Sender).await;
-        let _ = client
-            .pin_message(&jid, wa::MessageKey::default(), PinDuration::default())
-            .await;
-        let _ = client.unpin_message(&jid, wa::MessageKey::default()).await;
-        let _ = client
-            .send_reaction(&jid, wa::MessageKey::default(), "x")
+            .edit_message_raw(&jid, "ID", wa::Message::default(), EditOptions::default())
             .await;
         let _ = client
-            .keep_message(&jid, wa::MessageKey::default(), true)
+            .revoke_message_raw(&jid, "ID", RevokeType::Sender)
+            .await;
+        let _ = client
+            .pin_message_raw(&jid, wa::MessageKey::default(), PinDuration::default())
+            .await;
+        let _ = client
+            .unpin_message_raw(&jid, wa::MessageKey::default())
+            .await;
+        let _ = client
+            .send_reaction_raw(&jid, wa::MessageKey::default(), "x")
+            .await;
+        let _ = client
+            .keep_message_raw(&jid, wa::MessageKey::default(), true)
             .await;
         // Owned style: moves, no clone. Each method consumes its own copy so
         // the whole core surface is pinned, not just send_message.
@@ -9682,26 +10862,31 @@ mod jid_into_convention {
             .await;
         let _ = client.forward_message(jid.clone(), &msg).await;
         let _ = client
-            .edit_message(jid.clone(), "ID", wa::Message::default())
+            .edit_message_raw(
+                jid.clone(),
+                "ID",
+                wa::Message::default(),
+                EditOptions::default(),
+            )
             .await;
         let _ = client
-            .revoke_message(jid.clone(), "ID", RevokeType::Sender)
+            .revoke_message_raw(jid.clone(), "ID", RevokeType::Sender)
             .await;
         let _ = client
-            .pin_message(
+            .pin_message_raw(
                 jid.clone(),
                 wa::MessageKey::default(),
                 PinDuration::default(),
             )
             .await;
         let _ = client
-            .unpin_message(jid.clone(), wa::MessageKey::default())
+            .unpin_message_raw(jid.clone(), wa::MessageKey::default())
             .await;
         let _ = client
-            .send_reaction(jid.clone(), wa::MessageKey::default(), "x")
+            .send_reaction_raw(jid.clone(), wa::MessageKey::default(), "x")
             .await;
         let _ = client
-            .keep_message(jid, wa::MessageKey::default(), true)
+            .keep_message_raw(jid, wa::MessageKey::default(), true)
             .await;
     }
 }
@@ -9711,7 +10896,7 @@ mod future_size_tests {
     /// The public send futures embed in every event-handler and spawned-task
     /// frame, so their size is a per-event heap cost. Keep them pointer-scale
     /// (measured 64-128 B; the bound leaves slack only for layout drift).
-    /// Budget: rebaseline per [layout asserts](../../agent_docs/layout_asserts.md).
+    /// Budget: rebaseline per [layout asserts](../../agent_docs/testing.md).
     #[tokio::test]
     async fn send_futures_stay_small() {
         let client = crate::test_utils::create_test_client().await;
@@ -9739,10 +10924,10 @@ mod future_size_tests {
             size_of_val(&f)
         );
         drop(f);
-        let f = client.send_message_with_options(jid, msg, Default::default());
+        let f = client.send(super::SendRequest::new(&jid, msg));
         assert!(
             size_of_val(&f) <= 192,
-            "send_message_with_options future grew to {} B (budget 192)",
+            "canonical send future grew to {} B (budget 192)",
             size_of_val(&f)
         );
         drop(f);
@@ -9872,7 +11057,7 @@ mod clock_budget_tests {
             reads.monotonic
         );
 
-        client.disconnect().await;
+        client.shutdown().await;
     }
 
     /// One send, one instant: the message id, the biz node, the privacy-token
@@ -9899,7 +11084,7 @@ mod clock_budget_tests {
             .get_msg_secret(
                 &peer.to_non_ad_string(),
                 &format!("{OWN_PN}@s.whatsapp.net"),
-                &sent.message_id,
+                sent.message_id.as_str(),
             )
             .await
             .expect("msg secret lookup");
@@ -9908,7 +11093,7 @@ mod clock_budget_tests {
             "the send persisted an outbound secret under the measured instant"
         );
 
-        client.disconnect().await;
+        client.shutdown().await;
     }
 
     /// The wire timestamp is the one thing the budget must never buy: the
@@ -9949,6 +11134,6 @@ mod clock_budget_tests {
             "wire timestamp {stamped} outside [{before}, {after}]"
         );
 
-        client.disconnect().await;
+        client.shutdown().await;
     }
 }

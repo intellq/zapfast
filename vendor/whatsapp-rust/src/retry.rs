@@ -6,7 +6,6 @@ use crate::types::events::Receipt;
 use log::{debug, info, warn};
 use wacore::types::message::MessageCategory;
 
-use scopeguard;
 use std::sync::Arc;
 use wacore::iq::prekeys::{OneTimePreKeyNode, SignedPreKeyNode};
 use wacore::libsignal::protocol::{PreKeyBundle, PublicKey};
@@ -60,6 +59,146 @@ impl RetransmissionRoute {
 fn is_own_account_jid(jid: &Jid, own_pn: Option<&Jid>, own_lid: Option<&Jid>) -> bool {
     own_pn.is_some_and(|pn| jid.is_same_user_as(pn))
         || own_lid.is_some_and(|lid| jid.is_same_user_as(lid))
+}
+
+#[cfg(test)]
+#[test]
+fn group_history_retry_audience_requires_opt_in_and_membership() {
+    let opted: Jid = "10001@s.whatsapp.net".parse().unwrap();
+    let other: Jid = "10002@s.whatsapp.net".parse().unwrap();
+    let own: Jid = "10003:1@s.whatsapp.net".parse().unwrap();
+    let peer: Jid = "10003:2@s.whatsapp.net".parse().unwrap();
+    let metadata = {
+        let mut proto = wa::message::MessageHistoryMetadata::default();
+        proto.history_receivers = vec![opted.to_string()];
+        proto
+    };
+    let mut group = wacore::client::context::GroupRoutingInfo::new(
+        vec![opted.clone(), other.clone(), own.to_non_ad()],
+        wacore::types::message::AddressingMode::Pn,
+    );
+    assert!(history_retry_recipient_allowed(
+        &metadata,
+        &opted,
+        &group,
+        Some(&own),
+        None
+    ));
+    assert!(!history_retry_recipient_allowed(
+        &metadata,
+        &other,
+        &group,
+        Some(&own),
+        None
+    ));
+    assert!(history_retry_recipient_allowed(
+        &metadata,
+        &peer,
+        &group,
+        Some(&own),
+        None
+    ));
+    assert!(!history_retry_recipient_allowed(
+        &metadata,
+        &own,
+        &group,
+        Some(&own),
+        None
+    ));
+    group.participants.clear();
+    assert!(!history_retry_recipient_allowed(
+        &metadata,
+        &opted,
+        &group,
+        Some(&own),
+        None
+    ));
+    assert!(history_retry_recipient_allowed(
+        &metadata,
+        &peer,
+        &group,
+        Some(&own),
+        None
+    ));
+}
+
+fn history_retry_recipient_allowed(
+    metadata: &wa::message::MessageHistoryMetadata,
+    requester: &Jid,
+    group: &wacore::client::context::GroupRoutingInfo,
+    own_pn: Option<&Jid>,
+    own_lid: Option<&Jid>,
+) -> bool {
+    let is_member = |jid: &Jid| {
+        group
+            .participants
+            .iter()
+            .any(|member| crate::send::same_group_user(member, jid, group))
+    };
+    // The sender's membership is verified from full metadata by the current
+    // policy gate; the routing participant list may omit the sender itself.
+    if requester.is_hosted()
+        || (!is_member(requester) && !is_own_account_jid(requester, own_pn, own_lid))
+    {
+        return false;
+    }
+    if is_own_account_jid(requester, own_pn, own_lid) {
+        return !own_pn
+            .into_iter()
+            .chain(own_lid)
+            .any(|own| requester.is_same_user_as(own) && requester.device == own.device);
+    }
+    metadata.history_receivers.iter().any(|receiver| {
+        receiver
+            .parse::<Jid>()
+            .is_ok_and(|receiver| crate::send::same_group_user(&receiver, requester, group))
+    })
+}
+
+/// Minimal classification of a sent history payload by its stanza message
+/// ID, so retry handling can tell pairwise bundles from sender-key traffic
+/// without the cached message bytes. A history bundle is pairwise
+/// encrypted and must never trigger sender-key repair; a history notice
+/// travels the normal group sender-key path and keeps it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HistoryPayloadKind {
+    Bundle,
+    Notice,
+}
+
+/// Bounded registry of sent history message IDs. Entries are small
+/// (one ID plus a tag each) and history shares are rare, so a fixed cap
+/// with oldest-first eviction bounds memory without new cache plumbing.
+/// A missing entry fails closed toward the ordinary path: the retry is
+/// treated as a normal sender-key message, which is the safe direction
+/// for an unknown payload.
+#[derive(Debug, Default)]
+pub(crate) struct HistoryPayloadRegistry {
+    kinds: std::collections::HashMap<String, HistoryPayloadKind>,
+    order: std::collections::VecDeque<String>,
+}
+
+impl HistoryPayloadRegistry {
+    pub(crate) const CAPACITY: usize = 1024;
+
+    pub(crate) fn insert(&mut self, id: String, kind: HistoryPayloadKind) {
+        if self.kinds.insert(id.clone(), kind).is_none() {
+            self.order.push_back(id);
+            while self.order.len() > Self::CAPACITY {
+                if let Some(oldest) = self.order.pop_front() {
+                    self.kinds.remove(&oldest);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn kind_of(&self, id: &str) -> Option<HistoryPayloadKind> {
+        self.kinds.get(id).copied()
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.kinds.len()
+    }
 }
 
 pub(crate) struct PreparedRetransmission {
@@ -298,6 +437,19 @@ fn build_retry_processing_key(chat: &Jid, message_id: &str, participant_jid: &Ji
 }
 
 impl Client {
+    pub(crate) fn history_payload_kind(&self, message_id: &str) -> Option<HistoryPayloadKind> {
+        self.history_payload_ids
+            .lock()
+            .ok()
+            .and_then(|registry| registry.kind_of(message_id))
+    }
+
+    pub(crate) fn note_history_payload(&self, message_id: String, kind: HistoryPayloadKind) {
+        if let Ok(mut registry) = self.history_payload_ids.lock() {
+            registry.insert(message_id, kind);
+        }
+    }
+
     async fn resolve_retransmission_encryption_jid(
         &self,
         route: RetransmissionRoute,
@@ -332,7 +484,7 @@ impl Client {
         let route = validate_retransmission(
             &request.chat,
             &request.requester,
-            &request.message_id,
+            request.message_id.as_str(),
             request.retry_count,
             request.recipient.as_ref(),
         )?;
@@ -383,7 +535,7 @@ impl Client {
             .resolve_retransmission_encryption_jid(route, &request.requester)
             .await
             .map_err(SendError::from_anyhow)?;
-        if route.uses_sender_key() {
+        if route.uses_sender_key() && request.message.message_history_bundle.is_unset() {
             let chat_key = request.chat.to_string();
             self.mark_forget_sender_key(&chat_key, std::slice::from_ref(&encryption_jid))
                 .await
@@ -399,6 +551,7 @@ impl Client {
             recipient,
             group_metadata_freshness: _,
         } = request;
+        let message_id = message_id.into_string();
         let pre_encoded = Arc::new(waproto::codec::message_to_vec(&message));
         self.add_recent_message(&chat, &message_id, &message, Some(Arc::clone(&pre_encoded)))
             .await;
@@ -574,12 +727,9 @@ impl Client {
             return Ok(());
         }
 
-        // Direct is the only route the lookup can still re-address, through the
-        // alternate PN/LID rewrite below. Every other route's encryption JID is
-        // settled here, so its repair need not wait for a message that may be
-        // gone: a send marks its whole distribution list warm, so the cold mark
-        // is the only way back, and the receipt's own bundle is the only
-        // recovery for a device the server has no prekeys for.
+        // Direct is the only route the lookup can still re-address. Install
+        // the retry keys here, but defer sender-key repair until after reading
+        // the cached message: history bundles were sent pairwise.
         let settled_jid = if matches!(route, RetransmissionRoute::Direct) {
             None
         } else {
@@ -591,14 +741,6 @@ impl Client {
                 .await
             {
                 return Ok(());
-            }
-            // The cold mark goes last, and under the distribution guard, so a
-            // device is only ever published as cold once its session can carry
-            // the SKDM. A send that took the guard first sees it still warm and
-            // skips it, rather than distributing to a device it cannot encrypt
-            // for and marking the whole list warm again on the way out.
-            if uses_sender_key {
-                self.mark_requester_for_fresh_skdm(&info, &jid).await;
             }
             Some(jid)
         };
@@ -618,6 +760,18 @@ impl Client {
                     result
                 }
                 None => {
+                    // The cache cannot say whether this ID was a pairwise
+                    // history bundle, so consult the ID registry: bundles
+                    // must never trigger sender-key repair, while unknown
+                    // IDs fail closed toward the ordinary repair path.
+                    let is_history_bundle =
+                        self.history_payload_kind(&message_id) == Some(HistoryPayloadKind::Bundle);
+                    if !is_history_bundle
+                        && uses_sender_key
+                        && let Some(jid) = settled_jid.as_ref()
+                    {
+                        self.mark_requester_for_fresh_skdm(&info, jid).await;
+                    }
                     log::debug!(
                         "Ignoring retry for message {message_id}: already handled or not found in cache."
                     );
@@ -651,6 +805,12 @@ impl Client {
                 .await?
         };
 
+        let is_history_bundle = !original_msg.message_history_bundle.is_unset();
+        if uses_sender_key && !is_history_bundle {
+            self.mark_requester_for_fresh_skdm(&info, &resolved_jid)
+                .await;
+        }
+
         // Fetch group info (cache-first, server on miss) — used for SKDM rotation + addressing_mode.
         // Without this, a cold cache would silently default to PN semantics for LID groups.
         let cached_group_info = if info.chat.is_group() {
@@ -673,7 +833,10 @@ impl Client {
         // force full sender key rotation by clearing all sender key device tracking.
         // This is separate from updateLocalSignalSession and specific to group retries.
         let mut rotated_sender_key = false;
-        if matches!(route, RetransmissionRoute::Group) && !info.requester.is_lid() {
+        if matches!(route, RetransmissionRoute::Group)
+            && !is_history_bundle
+            && !info.requester.is_lid()
+        {
             let group_jid = info.chat.to_string();
             let is_known_participant = cached_group_info
                 .as_ref()
@@ -841,9 +1004,89 @@ impl Client {
             message_id,
             retry_count,
             recipient,
-            group_info,
+            mut group_info,
             pre_encoded,
         } = request;
+        let history = !message.message_history_bundle.is_unset()
+            || !message.message_history_notice.is_unset();
+        let history_recipients = history.then(|| (wire_requester.clone(), encryption_jid.clone()));
+        let history_generation = self
+            .connection_generation
+            .load(std::sync::atomic::Ordering::Acquire);
+
+        if history {
+            if !matches!(route, RetransmissionRoute::Group) || !chat.is_group() {
+                anyhow::bail!("history retransmission requires its group route");
+            }
+            let groups = self.groups();
+            let (_, current_limits) =
+                groups
+                    .group_history_context(&chat)
+                    .await
+                    .map_err(|reason| {
+                        anyhow::anyhow!(
+                            "group history retransmission is no longer authorized: {reason:?}"
+                        )
+                    })?;
+            if !message.message_history_bundle.is_unset()
+                && !crate::features::group_history_bundle_fits_current_limits(
+                    &message,
+                    current_limits,
+                    wacore::time::now_secs().max(0) as u64,
+                )
+            {
+                anyhow::bail!(
+                    "group history bundle no longer fits current count and time-window limits"
+                );
+            }
+            let current_group = groups
+                .routing_info_with_freshness(&chat, crate::cache::Freshness::Refresh)
+                .await?;
+            group_info = Some(Arc::clone(&current_group));
+            let own = self.persistence_manager.get_device_snapshot();
+            let bundle = message
+                .message_history_bundle
+                .as_option()
+                .map(|bundle| bundle.message_history_metadata.as_option());
+            let notice = message
+                .message_history_notice
+                .as_option()
+                .map(|notice| notice.message_history_metadata.as_option());
+            if let Some(metadata) = bundle {
+                let Some(metadata) = metadata else {
+                    anyhow::bail!("history retransmission lacks audience metadata");
+                };
+                if !history_retry_recipient_allowed(
+                    metadata,
+                    &wire_requester,
+                    &current_group,
+                    own.pn.as_ref(),
+                    own.lid.as_ref(),
+                ) || !history_retry_recipient_allowed(
+                    metadata,
+                    &encryption_jid,
+                    &current_group,
+                    own.pn.as_ref(),
+                    own.lid.as_ref(),
+                ) {
+                    anyhow::bail!(
+                        "history retransmission requester is outside the authorized audience"
+                    );
+                }
+            }
+            if let Some(metadata) = notice
+                && (metadata.is_none()
+                    || ![&wire_requester, &encryption_jid]
+                        .into_iter()
+                        .all(|requester| {
+                            current_group.participants.iter().any(|member| {
+                                crate::send::same_group_user(member, requester, &current_group)
+                            })
+                        }))
+            {
+                anyhow::bail!("history notice retransmission requires current group members");
+            }
+        }
 
         if matches!(route, RetransmissionRoute::Status) {
             return self
@@ -879,14 +1122,14 @@ impl Client {
                     .map(|info| info.addressing_mode)
                     .unwrap_or_default();
                 wacore::send::PairwiseRetryDestination::Participant {
-                    to: chat,
+                    to: chat.clone(),
                     participant: wire_requester,
                     addressing_mode: Some(addressing_mode),
                 }
             }
             RetransmissionRoute::BroadcastList => {
                 wacore::send::PairwiseRetryDestination::Participant {
-                    to: chat,
+                    to: chat.clone(),
                     participant: wire_requester,
                     addressing_mode: None,
                 }
@@ -912,6 +1155,45 @@ impl Client {
         // Persistence may need the processing permit, whose holder may in turn
         // need this session lock. Release it before the durability gate.
         drop(session_guard);
+        if history {
+            self.persist_signal_state_pre_wire().await?;
+            let groups = self.groups();
+            let (metadata, current_limits) =
+                groups
+                    .group_history_context(&chat)
+                    .await
+                    .map_err(|reason| {
+                        anyhow::anyhow!("history retransmission policy changed: {reason:?}")
+                    })?;
+            if !history_recipients
+                .as_ref()
+                .is_some_and(|(wire, encryption)| {
+                    crate::features::group_history_audience_is_current(
+                        &metadata.participants,
+                        &[wire.clone(), encryption.clone()],
+                    )
+                })
+            {
+                anyhow::bail!("history retransmission recipient left the group");
+            }
+            if !message.message_history_bundle.is_unset()
+                && !crate::features::group_history_bundle_fits_current_limits(
+                    &message,
+                    current_limits,
+                    wacore::time::now_secs_u64(),
+                )
+            {
+                anyhow::bail!("history bundle expired before retransmission");
+            }
+            if self
+                .connection_generation
+                .load(std::sync::atomic::Ordering::Acquire)
+                != history_generation
+            {
+                anyhow::bail!("connection changed while preparing history retransmission");
+            }
+            return self.send_node(stanza).await.map_err(Into::into);
+        }
         self.send_retry_stanza(stanza).await
     }
 
@@ -1903,6 +2185,282 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retry_metadata_reaches_transport_and_matches_decrypted_payload() {
+        use crate::store::commands::DeviceCommand;
+        use wacore::libsignal::protocol::{
+            PreKeyBundle, PreKeySignalMessage, SessionStore, SignalMessage, UsePQRatchet,
+            message_decrypt_prekey, message_decrypt_signal, process_prekey_bundle,
+        };
+
+        let client = retry_repair_client("retry_metadata_sender").await;
+        let receiver = retry_repair_client("retry_metadata_receiver").await;
+        attach_mock_noise_socket(&client).await;
+        let sender: Jid = "15550000001:1@s.whatsapp.net".parse().unwrap();
+        let requester: Jid = "15550000002@s.whatsapp.net".parse().unwrap();
+        client
+            .persistence_manager
+            .process_command(DeviceCommand::SetId(Some(sender.clone())))
+            .await;
+        client
+            .persistence_manager
+            .process_command(DeviceCommand::SetAccount(Some({
+                let mut proto = wa::ADVSignedDeviceIdentity::default();
+                proto.details = Some(vec![0; 32]);
+                proto.account_signature_key = Some(vec![0; 32]);
+                proto.account_signature = Some(vec![0; 64]);
+                proto.device_signature = Some(vec![0; 64]);
+                proto
+            })))
+            .await;
+        let (prekey_id, prekey) = receiver.get_or_gen_single_pre_key().await.unwrap();
+        let snapshot = receiver.persistence_manager.get_device_snapshot();
+        let bundle = PreKeyBundle::new(
+            snapshot.registration_id,
+            1u32.into(),
+            Some((prekey_id.into(), prekey)),
+            snapshot.signed_pre_key_id.into(),
+            snapshot.signed_pre_key.public_key,
+            snapshot.signed_pre_key_signature.to_vec(),
+            wacore::libsignal::protocol::IdentityKey::new(snapshot.identity_key.public_key),
+        )
+        .unwrap();
+        let mut rng = rand::make_rng::<rand::rngs::StdRng>();
+        let mut adapter = client.signal_adapter();
+        process_prekey_bundle(
+            &requester.to_protocol_address(),
+            &mut adapter.session_store,
+            &mut adapter.identity_store,
+            &bundle,
+            &mut rng,
+            UsePQRatchet::No,
+        )
+        .await
+        .unwrap();
+        drop(adapter);
+        let image = {
+            let mut proto = wa::Message::default();
+            proto.image_message = Some({
+                let mut proto = wa::message::ImageMessage::default();
+                proto.view_once = Some(true);
+                proto.caption = Some("synthetic view-once retry".into());
+                proto
+            })
+            .into();
+            proto
+        };
+
+        // The public API supplies canonical bytes; the receipt path has only the
+        // cached semantic message. Both must meet the same publication boundary.
+        for automatic in [false, true] {
+            let id = if automatic {
+                "AUTO_META"
+            } else {
+                "PUBLIC_META"
+            };
+            if automatic {
+                let address = requester.to_protocol_address();
+                let mut adapter = client.signal_adapter();
+                let mut session = adapter
+                    .session_store
+                    .load_session(&address)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                session
+                    .session_state_mut()
+                    .unwrap()
+                    .clear_unacknowledged_pre_key_message();
+                adapter
+                    .session_store
+                    .store_session(&address, session)
+                    .await
+                    .unwrap();
+                client
+                    .add_recent_message(&requester, id, &image, None)
+                    .await;
+            }
+            let waiter =
+                client.wait_for_sent_node(crate::client::NodeFilter::tag("message").attr("id", id));
+            if automatic {
+                drive_retry(&client, &requester, None, id, "1", false, [])
+                    .await
+                    .unwrap();
+            } else {
+                client
+                    .retransmit_message(MessageRetransmission::new(
+                        requester.clone(),
+                        requester.clone(),
+                        image.clone(),
+                        crate::MessageId::new(id).unwrap(),
+                        1,
+                    ))
+                    .await
+                    .unwrap();
+            }
+            let sent = waiter.await.unwrap();
+            let node = sent.as_node_ref();
+            assert_eq!(node.get_children_by_tag("meta").count(), 1);
+            assert_eq!(
+                node.get_optional_child("meta")
+                    .unwrap()
+                    .attrs()
+                    .required_string("view_once")
+                    .unwrap(),
+                "true"
+            );
+            assert!(node.get_optional_child("participants").is_none());
+            assert_eq!(node.attrs().required_jid("to").unwrap(), requester);
+            let enc = node.get_optional_child("enc").unwrap();
+            assert_eq!(enc.attrs().required_string("mediatype").unwrap(), "image");
+            assert_eq!(enc.attrs().required_string("count").unwrap(), "1");
+            assert_eq!(
+                node.get_optional_child("device-identity").is_some(),
+                !automatic
+            );
+            let bytes = enc.content_bytes().unwrap();
+            let mut adapter = receiver.signal_adapter();
+            let address = sender.to_protocol_address();
+            let plaintext = if automatic {
+                message_decrypt_signal(
+                    &SignalMessage::try_from(bytes).unwrap(),
+                    &address,
+                    &mut adapter.session_store,
+                    &mut adapter.identity_store,
+                    &mut rng,
+                )
+                .await
+                .unwrap()
+                .plaintext
+            } else {
+                message_decrypt_prekey(
+                    &PreKeySignalMessage::try_from(bytes).unwrap(),
+                    &address,
+                    &mut adapter.session_store,
+                    &mut adapter.identity_store,
+                    &mut adapter.pre_key_store,
+                    &adapter.signed_pre_key_store,
+                    &mut rng,
+                    UsePQRatchet::No,
+                )
+                .await
+                .unwrap()
+                .plaintext
+            };
+            assert_eq!(
+                wacore::messages::decode_plaintext(&plaintext, 2).unwrap(),
+                image
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn self_device_retry_classifies_dsm_content_without_changing_routing() {
+        use crate::store::commands::DeviceCommand;
+        let client = retry_repair_client("self_device_meta").await;
+        attach_mock_noise_socket(&client).await;
+        let own: Jid = "15550000001:1@s.whatsapp.net".parse().unwrap();
+        let requester = own.with_device(7);
+        let chat: Jid = "15550000002@s.whatsapp.net".parse().unwrap();
+        client
+            .persistence_manager
+            .process_command(DeviceCommand::SetId(Some(own)))
+            .await;
+        client
+            .persistence_manager
+            .process_command(DeviceCommand::SetAccount(Some({
+                let mut proto = wa::ADVSignedDeviceIdentity::default();
+                proto.details = Some(vec![0; 32]);
+                proto.account_signature_key = Some(vec![0; 32]);
+                proto.account_signature = Some(vec![0; 64]);
+                proto.device_signature = Some(vec![0; 64]);
+                proto
+            })))
+            .await;
+        crate::test_utils::seed_peer_session(&client, &requester).await;
+        let message = {
+            let mut proto = wa::Message::default();
+            proto.device_sent_message = Some({
+                let mut proto = wa::message::DeviceSentMessage::default();
+                proto.destination_jid = Some(chat.to_string());
+                proto.message = Some({
+                    let mut proto = wa::Message::default();
+                    proto.ephemeral_message = Some({
+                        let mut proto = wa::message::FutureProofMessage::default();
+                        proto.message = Some({
+                            let mut proto = wa::Message::default();
+                            proto.view_once_message_v2 = Some({
+                                let mut proto = wa::message::FutureProofMessage::default();
+                                proto.message = Some({
+                                    let mut proto = wa::Message::default();
+                                    proto.video_message = Some(Default::default()).into();
+                                    proto
+                                })
+                                .into();
+                                proto
+                            })
+                            .into();
+                            proto
+                        })
+                        .into();
+                        proto
+                    })
+                    .into();
+                    proto
+                })
+                .into();
+                proto
+            })
+            .into();
+            proto
+        };
+        let id = "SELF_DSM_META";
+        let waiter =
+            client.wait_for_sent_node(crate::client::NodeFilter::tag("message").attr("id", id));
+        client
+            .retransmit_message(
+                MessageRetransmission::new(
+                    chat.clone(),
+                    requester.clone(),
+                    message,
+                    crate::MessageId::new(id).unwrap(),
+                    1,
+                )
+                .with_recipient(chat.clone()),
+            )
+            .await
+            .unwrap();
+        let sent = waiter.await.unwrap();
+        assert_eq!(sent.attrs().required_jid("to").unwrap(), requester);
+        assert_eq!(sent.attrs().required_jid("recipient").unwrap(), chat);
+        assert!(sent.get_optional_child("participants").is_none());
+        assert_eq!(sent.get_children_by_tag("meta").count(), 1);
+        assert_eq!(
+            sent.get_optional_child("meta")
+                .unwrap()
+                .attrs()
+                .required_string("view_once")
+                .unwrap(),
+            "true"
+        );
+        assert_eq!(
+            sent.get_optional_child("enc")
+                .unwrap()
+                .attrs()
+                .required_string("mediatype")
+                .unwrap(),
+            "video"
+        );
+        assert_eq!(
+            sent.get_optional_child("enc")
+                .unwrap()
+                .attrs()
+                .required_string("count")
+                .unwrap(),
+            "1"
+        );
+    }
+
+    #[tokio::test]
     async fn recent_message_cache_insert_and_take() {
         let _ = env_logger::builder().is_test(true).try_init();
 
@@ -1915,23 +2473,27 @@ mod tests {
         // Enable L1 cache so MockBackend (which doesn't persist) works for this test
         let mut config = crate::cache_config::CacheConfig::default();
         config.recent_messages.capacity = 1_000;
-        let (client, _sync_rx) = Client::new_with_cache_config(
-            Arc::new(crate::runtime_impl::TokioRuntime),
-            pm.clone(),
-            Arc::new(crate::transport::mock::MockTransportFactory::new()),
-            Arc::new(MockHttpClient),
-            None,
-            config,
-        )
-        .await;
+        let (client, _sync_rx) = Client::builder()
+            .with_runtime_arc(Arc::new(crate::runtime_impl::TokioRuntime))
+            .with_persistence_manager(pm.clone())
+            .with_transport_factory_arc(Arc::new(
+                crate::transport::mock::MockTransportFactory::new(),
+            ))
+            .with_http_client_arc(Arc::new(MockHttpClient))
+            .with_cache_config(config)
+            .build()
+            .await
+            .expect("test client should build")
+            .into_parts();
 
         let chat: Jid = "120363021033254949@g.us"
             .parse()
             .expect("test JID should be valid");
         let msg_id = "ABC123".to_string();
-        let msg = wa::Message {
-            conversation: Some("hello".into()),
-            ..Default::default()
+        let msg = {
+            let mut proto = wa::Message::default();
+            proto.conversation = Some("hello".into());
+            proto
         };
 
         // Insert via the new async API
@@ -1969,23 +2531,27 @@ mod tests {
             config.recent_messages.capacity, 0,
             "this test asserts the DB-only (capacity 0) path"
         );
-        let (client, _sync_rx) = Client::new_with_cache_config(
-            Arc::new(crate::runtime_impl::TokioRuntime),
-            pm.clone(),
-            Arc::new(crate::transport::mock::MockTransportFactory::new()),
-            Arc::new(MockHttpClient),
-            None,
-            config,
-        )
-        .await;
+        let (client, _sync_rx) = Client::builder()
+            .with_runtime_arc(Arc::new(crate::runtime_impl::TokioRuntime))
+            .with_persistence_manager(pm.clone())
+            .with_transport_factory_arc(Arc::new(
+                crate::transport::mock::MockTransportFactory::new(),
+            ))
+            .with_http_client_arc(Arc::new(MockHttpClient))
+            .with_cache_config(config)
+            .build()
+            .await
+            .expect("test client should build")
+            .into_parts();
 
         let chat: Jid = "120363021033254949@g.us"
             .parse()
             .expect("test JID should be valid");
         let msg_id = "DBONLY1".to_string();
-        let msg = wa::Message {
-            conversation: Some("db-only".into()),
-            ..Default::default()
+        let msg = {
+            let mut proto = wa::Message::default();
+            proto.conversation = Some("db-only".into());
+            proto
         };
 
         client.add_recent_message(&chat, &msg_id, &msg, None).await;
@@ -2014,21 +2580,25 @@ mod tests {
         );
         let mut config = crate::cache_config::CacheConfig::default();
         config.recent_messages.capacity = 1_000;
-        let (client, _sync_rx) = Client::new_with_cache_config(
-            Arc::new(crate::runtime_impl::TokioRuntime),
-            pm.clone(),
-            Arc::new(crate::transport::mock::MockTransportFactory::new()),
-            Arc::new(MockHttpClient),
-            None,
-            config,
-        )
-        .await;
+        let (client, _sync_rx) = Client::builder()
+            .with_runtime_arc(Arc::new(crate::runtime_impl::TokioRuntime))
+            .with_persistence_manager(pm.clone())
+            .with_transport_factory_arc(Arc::new(
+                crate::transport::mock::MockTransportFactory::new(),
+            ))
+            .with_http_client_arc(Arc::new(MockHttpClient))
+            .with_cache_config(config)
+            .build()
+            .await
+            .expect("test client should build")
+            .into_parts();
 
         let chat: Jid = "120363021033254949@g.us".parse().unwrap();
         let msg_id = "PEEK1".to_string();
-        let msg = wa::Message {
-            conversation: Some("hi".into()),
-            ..Default::default()
+        let msg = {
+            let mut proto = wa::Message::default();
+            proto.conversation = Some("hi".into());
+            proto
         };
         client.add_recent_message(&chat, &msg_id, &msg, None).await;
 
@@ -2525,20 +3095,22 @@ mod tests {
         use wacore::libsignal::protocol::{SessionRecord, SessionState};
         use waproto::whatsapp::SessionStructure;
 
-        let state = SessionState::from_session_structure(SessionStructure {
-            session_version: Some(3),
-            local_identity_public: None,
-            remote_identity_public: None,
-            root_key: None,
-            previous_counter: Some(0),
-            sender_chain: buffa::MessageField::default(),
-            receiver_chains: vec![],
-            pending_pre_key: buffa::MessageField::default(),
-            remote_registration_id: Some(remote_regid),
-            local_registration_id: Some(0),
-            alice_base_key: Some(base_key),
-            needs_refresh: None,
-            pending_key_exchange: buffa::MessageField::default(),
+        let state = SessionState::from_session_structure({
+            let mut proto = SessionStructure::default();
+            proto.session_version = Some(3);
+            proto.local_identity_public = None;
+            proto.remote_identity_public = None;
+            proto.root_key = None;
+            proto.previous_counter = Some(0);
+            proto.sender_chain = buffa::MessageField::default();
+            proto.receiver_chains = vec![];
+            proto.pending_pre_key = buffa::MessageField::default();
+            proto.remote_registration_id = Some(remote_regid);
+            proto.local_registration_id = Some(0);
+            proto.alice_base_key = Some(base_key);
+            proto.needs_refresh = None;
+            proto.pending_key_exchange = buffa::MessageField::default();
+            proto
         });
         SessionRecord::new(state)
             .serialize()
@@ -2973,15 +3545,18 @@ mod tests {
         let pm = Arc::new(PersistenceManager::new(backend).await.unwrap());
         let mut config = crate::cache_config::CacheConfig::default();
         config.recent_messages.capacity = 1_000;
-        let (client, _rx) = Client::new_with_cache_config(
-            Arc::new(crate::runtime_impl::TokioRuntime),
-            pm,
-            Arc::new(crate::transport::mock::MockTransportFactory::new()),
-            Arc::new(MockHttpClient),
-            None,
-            config,
-        )
-        .await;
+        let (client, _rx) = Client::builder()
+            .with_runtime_arc(Arc::new(crate::runtime_impl::TokioRuntime))
+            .with_persistence_manager(pm)
+            .with_transport_factory_arc(Arc::new(
+                crate::transport::mock::MockTransportFactory::new(),
+            ))
+            .with_http_client_arc(Arc::new(MockHttpClient))
+            .with_cache_config(config)
+            .build()
+            .await
+            .expect("test client should build")
+            .into_parts();
 
         let group: Jid = "120363021033254949@g.us".parse().unwrap();
         let msg_id = "RLMSG001";
@@ -2989,9 +3564,10 @@ mod tests {
             .add_recent_message(
                 &group,
                 msg_id,
-                &wa::Message {
-                    conversation: Some("hi".into()),
-                    ..Default::default()
+                &{
+                    let mut proto = wa::Message::default();
+                    proto.conversation = Some("hi".into());
+                    proto
                 },
                 None,
             )
@@ -3162,20 +3738,35 @@ mod tests {
     }
 
     fn hello() -> wa::Message {
-        wa::Message {
-            conversation: Some("hi".into()),
-            ..Default::default()
+        {
+            let mut proto = wa::Message::default();
+            proto.conversation = Some("hi".into());
+            proto
         }
     }
 
-    /// A send marks its whole distribution list warm, so a device whose SKDM
-    /// never encrypted is only ever repaired by this cold mark. Gate the mark
-    /// behind the recent-message lookup and an expired message (default TTL is
-    /// two hours) makes the warm mark absorbing: no future send distributes to
-    /// the device, and no later retry can undo it either.
     #[tokio::test]
-    async fn group_retry_un_warms_the_device_even_without_the_cached_message() {
-        for cached in [true, false] {
+    async fn group_retry_repairs_sender_key_only_for_cached_sender_key_messages() {
+        for (message, stays_warm) in [
+            (None, false),
+            (Some(hello()), false),
+            (
+                Some({
+                    let mut proto = wa::Message::default();
+                    proto.message_history_bundle = Some(Default::default()).into();
+                    proto
+                }),
+                true,
+            ),
+            (
+                Some({
+                    let mut proto = wa::Message::default();
+                    proto.message_history_notice = Some(Default::default()).into();
+                    proto
+                }),
+                false,
+            ),
+        ] {
             let client = retry_repair_client("retry_repair_cache_miss").await;
             let group: Jid = "120363021033254951@g.us".parse().unwrap();
             let group_key = group.to_string();
@@ -3187,9 +3778,9 @@ mod tests {
                 .set_sender_key_status(&group_key, &[(participant, true)])
                 .await
                 .unwrap();
-            if cached {
+            if let Some(message) = message {
                 client
-                    .add_recent_message(&group, msg_id, &hello(), None)
+                    .add_recent_message(&group, msg_id, &message, None)
                     .await;
             }
 
@@ -3201,17 +3792,72 @@ mod tests {
                     .get_sender_key_devices(&group_key)
                     .await
                     .unwrap(),
-                vec![(participant.to_string(), false)],
-                "cached={cached}: the retrying device must end up keyless either way"
+                vec![(participant.to_string(), stays_warm)],
+                "a missing or sender-key message must mark the device cold"
             );
         }
     }
 
-    /// The symptom the report describes: every message from the bot stuck on
-    /// "waiting for this message" for one member, across restarts. Repairing on a
-    /// cache miss is what puts the device back in the next send's SKDM set.
+    #[test]
+    fn history_payload_registry_borrows_nothing_and_evicts_oldest_first() {
+        let mut registry = HistoryPayloadRegistry::default();
+        assert_eq!(registry.kind_of("unknown"), None);
+        registry.insert("bundle-1".into(), HistoryPayloadKind::Bundle);
+        registry.insert("notice-1".into(), HistoryPayloadKind::Notice);
+        assert_eq!(
+            registry.kind_of("bundle-1"),
+            Some(HistoryPayloadKind::Bundle)
+        );
+        assert_eq!(
+            registry.kind_of("notice-1"),
+            Some(HistoryPayloadKind::Notice)
+        );
+        for index in 0..HistoryPayloadRegistry::CAPACITY {
+            registry.insert(format!("filler-{index}"), HistoryPayloadKind::Notice);
+        }
+        assert_eq!(registry.len(), HistoryPayloadRegistry::CAPACITY);
+        assert_eq!(registry.kind_of("bundle-1"), None);
+        assert_eq!(registry.kind_of("notice-1"), None);
+    }
+
     #[tokio::test]
-    async fn repaired_device_returns_to_the_skdm_target_set_after_a_cache_miss() {
+    async fn group_retry_cache_miss_skips_repair_for_known_history_bundles() {
+        for (kind, stays_warm) in [
+            (Some(HistoryPayloadKind::Bundle), true),
+            (Some(HistoryPayloadKind::Notice), false),
+            (None, false),
+        ] {
+            let client = retry_repair_client("retry_repair_history_miss").await;
+            let group: Jid = "120363021033254952@g.us".parse().unwrap();
+            let group_key = group.to_string();
+            let participant = "555000222@lid";
+            let msg_id = "HISTORYMISS001";
+
+            client
+                .persistence_manager
+                .set_sender_key_status(&group_key, &[(participant, true)])
+                .await
+                .unwrap();
+            if let Some(kind) = kind {
+                client.note_history_payload(msg_id.into(), kind);
+            }
+
+            drive_group_retry(&client, &group, participant, msg_id, false).await;
+
+            assert_eq!(
+                client
+                    .persistence_manager
+                    .get_sender_key_devices(&group_key)
+                    .await
+                    .unwrap(),
+                vec![(participant.to_string(), stays_warm)],
+                "cache miss with {kind:?} must skip sender-key repair only for bundles"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn repaired_device_returns_to_the_skdm_target_set_after_a_cached_retry() {
         use crate::sender_key_device_cache::SenderKeyDeviceMap;
 
         let client = retry_repair_client("retry_repair_skdm_targets").await;
@@ -3240,7 +3886,9 @@ mod tests {
             "a warm device is excluded from SKDM, which is what makes a missed repair absorbing"
         );
 
-        // No add_recent_message: the retry arrives after the message expired.
+        client
+            .add_recent_message(&group, "SKDMTARGET001", &hello(), None)
+            .await;
         drive_group_retry(&client, &group, participant, "SKDMTARGET001", false).await;
 
         let repaired = SenderKeyDeviceMap::from_db_rows(
@@ -3267,6 +3915,10 @@ mod tests {
         let group: Jid = "120363021033254954@g.us".parse().unwrap();
         let group_key = group.to_string();
         let participant = "555000555@lid";
+
+        client
+            .add_recent_message(&group, "LOCKED001", &hello(), None)
+            .await;
 
         client
             .persistence_manager
@@ -3534,6 +4186,10 @@ mod tests {
         let group: Jid = "120363021033254961@g.us".parse().unwrap();
         let group_key = group.to_string();
         let participant: Jid = "555003333@lid".parse().unwrap();
+
+        client
+            .add_recent_message(&group, "MARKORDER001", &hello(), None)
+            .await;
 
         client
             .persistence_manager
@@ -3985,15 +4641,18 @@ mod tests {
         let pm = Arc::new(PersistenceManager::new(backend.clone()).await.unwrap());
         let mut config = crate::cache_config::CacheConfig::default();
         config.recent_messages.capacity = 1_000;
-        let (client, _rx) = Client::new_with_cache_config(
-            Arc::new(crate::runtime_impl::TokioRuntime),
-            pm,
-            Arc::new(crate::transport::mock::MockTransportFactory::new()),
-            Arc::new(MockHttpClient),
-            None,
-            config,
-        )
-        .await;
+        let (client, _rx) = Client::builder()
+            .with_runtime_arc(Arc::new(crate::runtime_impl::TokioRuntime))
+            .with_persistence_manager(pm)
+            .with_transport_factory_arc(Arc::new(
+                crate::transport::mock::MockTransportFactory::new(),
+            ))
+            .with_http_client_arc(Arc::new(MockHttpClient))
+            .with_cache_config(config)
+            .build()
+            .await
+            .expect("test client should build")
+            .into_parts();
 
         let own_lid: Jid = "100000000001040:13@lid".parse().unwrap();
         client
@@ -4037,9 +4696,10 @@ mod tests {
             .add_recent_message(
                 &group,
                 msg_id,
-                &wa::Message {
-                    conversation: Some("hi".into()),
-                    ..Default::default()
+                &{
+                    let mut proto = wa::Message::default();
+                    proto.conversation = Some("hi".into());
+                    proto
                 },
                 None,
             )
@@ -4185,10 +4845,11 @@ mod tests {
             .unwrap();
         for (jid, hosted_device) in test_util::device_cases() {
             for device_type in test_util::ENCRYPTION_TYPES {
-                let details = wa::ADVDeviceIdentity {
-                    key_index: Some(0),
-                    device_type,
-                    ..Default::default()
+                let details = {
+                    let mut proto = wa::ADVDeviceIdentity::default();
+                    proto.key_index = Some(0);
+                    proto.device_type = device_type;
+                    proto
                 }
                 .encode_to_vec();
                 let acct_prefix = test_util::account_prefix(device_type);
@@ -4296,14 +4957,17 @@ mod tests {
                 .await
                 .expect("persistence manager should initialize"),
         );
-        let (client, _sync_rx) = Client::new(
-            Arc::new(crate::runtime_impl::TokioRuntime),
-            pm,
-            Arc::new(crate::transport::mock::MockTransportFactory::new()),
-            Arc::new(MockHttpClient),
-            None,
-        )
-        .await;
+        let (client, _sync_rx) = Client::builder()
+            .with_runtime_arc(Arc::new(crate::runtime_impl::TokioRuntime))
+            .with_persistence_manager(pm)
+            .with_transport_factory_arc(Arc::new(
+                crate::transport::mock::MockTransportFactory::new(),
+            ))
+            .with_http_client_arc(Arc::new(MockHttpClient))
+            .build()
+            .await
+            .expect("test client should build")
+            .into_parts();
 
         let mut rng = rand::make_rng::<rand::rngs::StdRng>();
         let remote_identity = IdentityKeyPair::generate(&mut rng);
@@ -4536,7 +5200,7 @@ mod tests {
             chat,
             requester,
             wa::Message::default(),
-            "PEER-RETRY-1".to_string(),
+            crate::MessageId::new("PEER-RETRY-1").unwrap(),
             1,
         );
 
@@ -4560,14 +5224,14 @@ mod tests {
                 chat.clone(),
                 requester,
                 wa::Message::default(),
-                "DIRECT-CHAT-MISMATCH-1".to_string(),
+                crate::MessageId::new("DIRECT-CHAT-MISMATCH-1").unwrap(),
                 1,
             ),
             MessageRetransmission::new(
                 chat.clone(),
                 bot_requester,
                 wa::Message::default(),
-                "DIRECT-RECIPIENT-MISMATCH-1".to_string(),
+                crate::MessageId::new("DIRECT-RECIPIENT-MISMATCH-1").unwrap(),
                 1,
             )
             .with_recipient(Jid::pn("12025550106")),
@@ -4589,7 +5253,7 @@ mod tests {
             chat.clone(),
             Jid::pn_device("12025550109", 7),
             wa::Message::default(),
-            "DIRECT-RECIPIENT-SOURCE-1".to_string(),
+            crate::MessageId::new("DIRECT-RECIPIENT-SOURCE-1").unwrap(),
             1,
         )
         .with_recipient(chat);
@@ -4635,9 +5299,10 @@ mod tests {
         let chat = Jid::pn("12025550103");
         let requester = chat.with_device(7);
         crate::test_utils::seed_peer_session(&client, &requester).await;
-        let message = wa::Message {
-            conversation: Some("retry me".into()),
-            ..Default::default()
+        let message = {
+            let mut proto = wa::Message::default();
+            proto.conversation = Some("retry me".into());
+            proto
         };
         let message_id = "PUBLIC-RETRY-CACHE-1";
 
@@ -4649,7 +5314,7 @@ mod tests {
                 chat.clone(),
                 requester,
                 message,
-                message_id.to_string(),
+                crate::MessageId::new(message_id).unwrap(),
                 1,
             ))
             .await;
@@ -4974,22 +5639,27 @@ mod tests {
         // Enable L1 cache so MockBackend (which doesn't persist) works for this test
         let mut config = crate::cache_config::CacheConfig::default();
         config.recent_messages.capacity = 1_000;
-        let (client, _sync_rx) = Client::new_with_cache_config(
-            Arc::new(crate::runtime_impl::TokioRuntime),
-            pm.clone(),
-            Arc::new(crate::transport::mock::MockTransportFactory::new()),
-            Arc::new(MockHttpClient),
-            None,
-            config,
-        )
-        .await;
+        let (client, _sync_rx) = Client::builder()
+            .with_runtime_arc(Arc::new(crate::runtime_impl::TokioRuntime))
+            .with_persistence_manager(pm.clone())
+            .with_transport_factory_arc(Arc::new(
+                crate::transport::mock::MockTransportFactory::new(),
+            ))
+            .with_http_client_arc(Arc::new(MockHttpClient))
+            .with_cache_config(config)
+            .build()
+            .await
+            .expect("test client should build")
+            .into_parts();
 
-        let msg = wa::Message {
-            extended_text_message: buffa::MessageField::some(wa::message::ExtendedTextMessage {
-                text: Some("status text".to_string()),
-                ..Default::default()
-            }),
-            ..Default::default()
+        let msg = {
+            let mut proto = wa::Message::default();
+            proto.extended_text_message = buffa::MessageField::some({
+                let mut proto = wa::message::ExtendedTextMessage::default();
+                proto.text = Some("status text".to_string());
+                proto
+            });
+            proto
         };
 
         for (chat, msg_id) in [
@@ -5039,21 +5709,25 @@ mod tests {
         );
         let mut config = crate::cache_config::CacheConfig::default();
         config.recent_messages.capacity = 1_000;
-        let (client, _sync_rx) = Client::new_with_cache_config(
-            Arc::new(crate::runtime_impl::TokioRuntime),
-            pm.clone(),
-            Arc::new(crate::transport::mock::MockTransportFactory::new()),
-            Arc::new(MockHttpClient),
-            None,
-            config,
-        )
-        .await;
+        let (client, _sync_rx) = Client::builder()
+            .with_runtime_arc(Arc::new(crate::runtime_impl::TokioRuntime))
+            .with_persistence_manager(pm.clone())
+            .with_transport_factory_arc(Arc::new(
+                crate::transport::mock::MockTransportFactory::new(),
+            ))
+            .with_http_client_arc(Arc::new(MockHttpClient))
+            .with_cache_config(config)
+            .build()
+            .await
+            .expect("test client should build")
+            .into_parts();
 
         let bare_jid: Jid = "5511999999999@s.whatsapp.net".parse().unwrap();
         let msg_id = "RETRY_MSG_001";
-        let msg = wa::Message {
-            conversation: Some("test dm".into()),
-            ..Default::default()
+        let msg = {
+            let mut proto = wa::Message::default();
+            proto.conversation = Some("test dm".into());
+            proto
         };
 
         // Store under bare JID (how send_message stores it)
@@ -5095,22 +5769,26 @@ mod tests {
         );
         let mut config = crate::cache_config::CacheConfig::default();
         config.recent_messages.capacity = 1_000;
-        let (client, _sync_rx) = Client::new_with_cache_config(
-            Arc::new(crate::runtime_impl::TokioRuntime),
-            pm.clone(),
-            Arc::new(crate::transport::mock::MockTransportFactory::new()),
-            Arc::new(MockHttpClient),
-            None,
-            config,
-        )
-        .await;
+        let (client, _sync_rx) = Client::builder()
+            .with_runtime_arc(Arc::new(crate::runtime_impl::TokioRuntime))
+            .with_persistence_manager(pm.clone())
+            .with_transport_factory_arc(Arc::new(
+                crate::transport::mock::MockTransportFactory::new(),
+            ))
+            .with_http_client_arc(Arc::new(MockHttpClient))
+            .with_cache_config(config)
+            .build()
+            .await
+            .expect("test client should build")
+            .into_parts();
 
         let pn_jid: Jid = "5511999999999@s.whatsapp.net".parse().unwrap();
         let lid_jid: Jid = "236395184570386@lid".parse().unwrap();
         let msg_id = "RETRY_ALT_001";
-        let msg = wa::Message {
-            conversation: Some("alternate key test".into()),
-            ..Default::default()
+        let msg = {
+            let mut proto = wa::Message::default();
+            proto.conversation = Some("alternate key test".into());
+            proto
         };
 
         // Store under PN (no LID mapping existed at send time)
@@ -5154,14 +5832,17 @@ mod tests {
                 .await
                 .expect("persistence manager should initialize"),
         );
-        let (client, _sync_rx) = Client::new(
-            Arc::new(crate::runtime_impl::TokioRuntime),
-            pm.clone(),
-            Arc::new(crate::transport::mock::MockTransportFactory::new()),
-            Arc::new(MockHttpClient),
-            None,
-        )
-        .await;
+        let (client, _sync_rx) = Client::builder()
+            .with_runtime_arc(Arc::new(crate::runtime_impl::TokioRuntime))
+            .with_persistence_manager(pm.clone())
+            .with_transport_factory_arc(Arc::new(
+                crate::transport::mock::MockTransportFactory::new(),
+            ))
+            .with_http_client_arc(Arc::new(MockHttpClient))
+            .build()
+            .await
+            .expect("test client should build")
+            .into_parts();
 
         let pn_jid: Jid = "5511999999999@s.whatsapp.net".parse().unwrap();
         let lid_jid: Jid = "236395184570386@lid".parse().unwrap();
@@ -5212,22 +5893,26 @@ mod tests {
         );
         let mut config = crate::cache_config::CacheConfig::default();
         config.recent_messages.capacity = 1_000;
-        let (client, _sync_rx) = Client::new_with_cache_config(
-            Arc::new(crate::runtime_impl::TokioRuntime),
-            pm.clone(),
-            Arc::new(crate::transport::mock::MockTransportFactory::new()),
-            Arc::new(MockHttpClient),
-            None,
-            config,
-        )
-        .await;
+        let (client, _sync_rx) = Client::builder()
+            .with_runtime_arc(Arc::new(crate::runtime_impl::TokioRuntime))
+            .with_persistence_manager(pm.clone())
+            .with_transport_factory_arc(Arc::new(
+                crate::transport::mock::MockTransportFactory::new(),
+            ))
+            .with_http_client_arc(Arc::new(MockHttpClient))
+            .with_cache_config(config)
+            .build()
+            .await
+            .expect("test client should build")
+            .into_parts();
 
         let pn_jid: Jid = "5511999999999@s.whatsapp.net".parse().unwrap();
         let lid_jid: Jid = "236395184570386@lid".parse().unwrap();
         let msg_id = "RETRY_ALT_PN";
-        let msg = wa::Message {
-            conversation: Some("pn input alternate".into()),
-            ..Default::default()
+        let msg = {
+            let mut proto = wa::Message::default();
+            proto.conversation = Some("pn input alternate".into());
+            proto
         };
 
         // Store under PN (no mapping at send time)
@@ -5274,21 +5959,25 @@ mod tests {
         );
         let mut config = crate::cache_config::CacheConfig::default();
         config.recent_messages.capacity = 1_000;
-        let (client, _sync_rx) = Client::new_with_cache_config(
-            Arc::new(crate::runtime_impl::TokioRuntime),
-            pm.clone(),
-            Arc::new(crate::transport::mock::MockTransportFactory::new()),
-            Arc::new(MockHttpClient),
-            None,
-            config,
-        )
-        .await;
+        let (client, _sync_rx) = Client::builder()
+            .with_runtime_arc(Arc::new(crate::runtime_impl::TokioRuntime))
+            .with_persistence_manager(pm.clone())
+            .with_transport_factory_arc(Arc::new(
+                crate::transport::mock::MockTransportFactory::new(),
+            ))
+            .with_http_client_arc(Arc::new(MockHttpClient))
+            .with_cache_config(config)
+            .build()
+            .await
+            .expect("test client should build")
+            .into_parts();
 
         let lid_jid: Jid = "236395184570386@lid".parse().unwrap();
         let msg_id = "RETRY_NO_ALT";
-        let msg = wa::Message {
-            conversation: Some("no alternate".into()),
-            ..Default::default()
+        let msg = {
+            let mut proto = wa::Message::default();
+            proto.conversation = Some("no alternate".into());
+            proto
         };
 
         // Store under LID, no PN mapping exists
@@ -5320,15 +6009,18 @@ mod tests {
         );
         let mut config = crate::cache_config::CacheConfig::default();
         config.recent_messages.capacity = 1_000;
-        let (client, _sync_rx) = Client::new_with_cache_config(
-            Arc::new(crate::runtime_impl::TokioRuntime),
-            pm.clone(),
-            Arc::new(crate::transport::mock::MockTransportFactory::new()),
-            Arc::new(MockHttpClient),
-            None,
-            config,
-        )
-        .await;
+        let (client, _sync_rx) = Client::builder()
+            .with_runtime_arc(Arc::new(crate::runtime_impl::TokioRuntime))
+            .with_persistence_manager(pm.clone())
+            .with_transport_factory_arc(Arc::new(
+                crate::transport::mock::MockTransportFactory::new(),
+            ))
+            .with_http_client_arc(Arc::new(MockHttpClient))
+            .with_cache_config(config)
+            .build()
+            .await
+            .expect("test client should build")
+            .into_parts();
 
         let pn_jid: Jid = "5511999999999@s.whatsapp.net".parse().unwrap();
         let lid_jid: Jid = "236395184570386@lid".parse().unwrap();

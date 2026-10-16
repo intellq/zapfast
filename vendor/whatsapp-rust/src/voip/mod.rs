@@ -33,6 +33,7 @@ compile_error!(
 
 pub mod audio;
 pub mod driver;
+mod events;
 pub mod facade;
 pub mod registry;
 pub mod session;
@@ -46,6 +47,7 @@ pub use state::collections;
 pub(crate) use state::Voip;
 
 pub use audio::{AudioSink, AudioSource, EncodedAudioSink, EncodedAudioSource};
+pub use events::CallEvents;
 pub use facade::{
     AcceptCall, CallHandle, CallLinkCall, CallTermination, GroupBoundCall, OutgoingCall,
     OutgoingGroupCall, VIDEO_UPGRADE_TIMEOUT,
@@ -76,7 +78,7 @@ pub use wacore::voip_control::transport::{
     RelayEndpointParams, RelayTransport, RelayTransportEvent, RelayTransportFactory,
     RelayTransportProvider,
 };
-// `CallEvent::VideoStateChanged` carries this; surface it next to CallEvent (it lives in wacore).
+// `CallEvent::PeerVideoStateChanged` carries this; surface it next to CallEvent (it lives in wacore).
 pub use wacore::types::call::VideoState;
 pub use wacore::types::group_call::{
     CallLink, CallLinkJoin, CallLinkMedia, CallLinkPreview, GROUP_CALL_MAX_PARTICIPANTS,

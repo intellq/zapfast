@@ -59,10 +59,11 @@ fn lid_pn_write_policy(source: LearningSource, lid_unseen: bool, exact: bool) ->
         // Device-list usync: authoritative for a new LID and for correcting a
         // known LID whose phone drifted.
         LearningSource::Usync => (lid_unseen || lid_known_mismatch, false),
+        // A peer-device message may carry an old association. WA Web seeds
+        // only unseen LIDs for these sources, without querying on conflicts.
+        LearningSource::PeerPnMessage | LearningSource::PeerLidMessage => (lid_unseen, false),
         // Directed sources: overwrite on any difference from what's cached.
-        LearningSource::PeerPnMessage
-        | LearningSource::PeerLidMessage
-        | LearningSource::RecipientLatestLid
+        LearningSource::RecipientLatestLid
         | LearningSource::MigrationSyncLatest
         | LearningSource::MigrationSyncOld
         | LearningSource::BlocklistActive
@@ -128,6 +129,7 @@ impl Client {
         )
     )]
     pub(crate) async fn warm_up_lid_pn_cache(&self) -> Result<(), anyhow::Error> {
+        let _startup = self.lid_pn_cache.warm_up_guard();
         let backend = self.persistence_manager.backend();
         let entries = backend.get_all_lid_mappings().await?;
 
@@ -421,16 +423,20 @@ impl Client {
         guard: &crate::lid_pn_cache::LidPnMutationGuard<'_>,
     ) -> BatchRecordOutcome {
         let cap = mappings.len();
-        let mut deduped: std::collections::HashMap<String, String> =
-            std::collections::HashMap::with_capacity(cap);
-        for (lid, phone_number) in mappings {
-            deduped.insert(phone_number, lid);
+        let mut deduped = std::collections::HashMap::with_capacity(cap);
+        for (position, (lid, phone_number)) in mappings.into_iter().enumerate() {
+            deduped.insert(phone_number, (position, lid));
         }
+        // Retain the existing last-LID-per-phone policy, but apply retained
+        // observations in their input order. Other must never choose a LID's
+        // first PN through randomized HashMap iteration.
+        let mut deduped: Vec<_> = deduped.into_iter().collect();
+        deduped.sort_unstable_by_key(|(_, (position, _))| *position);
 
         let mut entries: Vec<LidPnEntry> = Vec::with_capacity(deduped.len());
         let mut migration_flags: Vec<bool> = Vec::with_capacity(deduped.len());
         let mut usync_phones: Vec<String> = Vec::new();
-        for (phone_number, lid) in deduped {
+        for (phone_number, (_, lid)) in deduped {
             match self
                 .record_lid_pn_in_memory_guarded(&lid, &phone_number, source, guard)
                 .await
@@ -1145,9 +1151,9 @@ impl Client {
     /// (`Ok(None)`) from "lookup failed" (`Err(_)`).
     #[cfg_attr(feature = "tracing", tracing::instrument(name = "wa.session.get_lid_pn_entry", level = "trace", skip_all, fields(peer = %jid.observe()), err(Debug)))]
     pub async fn get_lid_pn_entry(&self, jid: &Jid) -> Result<Option<LidPnEntry>> {
-        let is_lid = if jid.is_lid() {
+        let is_lid = if jid.server.is_lid_family() {
             true
-        } else if jid.is_pn() {
+        } else if jid.server.is_pn_family() {
             false
         } else {
             return Ok(None);
@@ -1358,6 +1364,131 @@ mod tests {
     use wacore::store::traits::SignalStore;
     use wacore_binary::Server;
 
+    #[cfg(feature = "bench-harness")]
+    async fn startup_snapshot_preserves_usync(delayed: bool) {
+        use crate::store::release::tests::ProbeBackend;
+        use wacore::store::traits::ProtocolStore;
+
+        let lid = "100000001";
+        let old_pn = "12025550112";
+        let new_pn = "12025550111";
+        let (mut backend, _dropped) = ProbeBackend::new();
+        backend
+            .backend
+            .put_lid_mapping(&LidPnMappingEntry {
+                lid: lid.into(),
+                phone_number: old_pn.into(),
+                created_at: 1,
+                updated_at: 1,
+                learning_source: LearningSource::Other.as_str().into(),
+            })
+            .await
+            .unwrap();
+        let (unpark, parked) = async_channel::bounded(1);
+        let (entered, entry) = async_channel::bounded(1);
+        backend.gate_method = "after:get_all_lid_mappings";
+        backend.gate = Some(parked);
+        backend.entered = Some(entered);
+        let backend = Arc::new(backend);
+        let client = create_test_client_with_backend(backend.clone()).await;
+        tokio::time::timeout(std::time::Duration::from_secs(5), entry.recv())
+            .await
+            .unwrap()
+            .unwrap();
+
+        let update = client.add_lid_pn_mapping(lid, new_pn, LearningSource::Usync);
+        tokio::pin!(update);
+        // The backend has captured the old row but has not returned it.
+        // Poll the live writer while that snapshot is parked, without sleeps.
+        let completed = delayed
+            && match futures::poll!(update.as_mut()) {
+                std::task::Poll::Ready(result) => {
+                    result.unwrap();
+                    true
+                }
+                std::task::Poll::Pending => false,
+            };
+        unpark.send(()).await.unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            client.bench_startup.wait(),
+        )
+        .await
+        .unwrap();
+        if !delayed {
+            assert_eq!(
+                client.lid_pn_cache.get_phone_number(lid).await.as_deref(),
+                Some(old_pn)
+            );
+        }
+        if !completed {
+            update.await.unwrap();
+        }
+
+        assert_eq!(
+            client.lid_pn_cache.get_phone_number(lid).await.as_deref(),
+            Some(new_pn)
+        );
+        assert_eq!(
+            client.lid_pn_cache.get_current_lid(new_pn).await.as_deref(),
+            Some(lid)
+        );
+        assert_eq!(
+            backend
+                .get_lid_mapping(lid)
+                .await
+                .unwrap()
+                .unwrap()
+                .phone_number,
+            new_pn
+        );
+    }
+
+    #[cfg(feature = "bench-harness")]
+    #[tokio::test]
+    async fn delayed_startup_snapshot_preserves_usync() {
+        startup_snapshot_preserves_usync(true).await;
+    }
+
+    #[cfg(feature = "bench-harness")]
+    #[tokio::test]
+    async fn startup_snapshot_before_usync_control() {
+        startup_snapshot_preserves_usync(false).await;
+    }
+
+    #[tokio::test]
+    async fn lid_pn_batch_preserves_observation_order_after_phone_deduplication() {
+        let client = create_test_client().await;
+        let mappings: Vec<_> = (1..=32)
+            .map(|n| (format!("100000{n:03}"), format!("1202555{n:04}")))
+            .collect();
+        let outcome = client
+            .record_lid_pn_batch_in_memory(mappings.clone(), LearningSource::Other)
+            .await;
+        let observed: Vec<_> = outcome
+            .entries
+            .iter()
+            .map(|e| (e.lid.to_string(), e.phone_number.to_string()))
+            .collect();
+        assert_eq!(observed, mappings);
+    }
+
+    #[tokio::test]
+    async fn lid_pn_batch_does_not_replace_the_first_observation_of_a_lid() {
+        let client = create_test_client().await;
+        let outcome = client
+            .record_lid_pn_batch_in_memory(
+                vec![
+                    ("100000001".into(), "12025550111".into()),
+                    ("100000001".into(), "12025550112".into()),
+                ],
+                LearningSource::Other,
+            )
+            .await;
+        assert_eq!(outcome.entries[0].phone_number.as_ref(), "12025550111");
+        assert_eq!(outcome.usync_phones, ["12025550112"]);
+    }
+
     /// Fixture: test client with one cached peer LID-PN mapping.
     async fn client_with_peer_mapping() -> (Arc<Client>, &'static str, &'static str) {
         let client = create_test_client().await;
@@ -1415,8 +1546,6 @@ mod tests {
         // observational sources refuse and request a live re-resolve.
         let directed = [
             LearningSource::Usync,
-            LearningSource::PeerPnMessage,
-            LearningSource::PeerLidMessage,
             LearningSource::RecipientLatestLid,
             LearningSource::MigrationSyncLatest,
             LearningSource::MigrationSyncOld,
@@ -1429,6 +1558,12 @@ mod tests {
                 (true, false),
                 "a directed source overwrites a conflicting known LID ({src:?})"
             );
+        }
+        for src in [
+            LearningSource::PeerPnMessage,
+            LearningSource::PeerLidMessage,
+        ] {
+            assert_eq!(lid_pn_write_policy(src, false, false), (false, false));
         }
         for src in [
             LearningSource::Other,
@@ -1531,8 +1666,7 @@ mod tests {
         );
     }
 
-    /// A directed source (`PeerPnMessage`) does overwrite a conflicting known
-    /// LID — the WA Web `!y` branch.
+    /// A latest-LID source can replace an existing mapping.
     #[tokio::test]
     async fn test_record_directed_overwrites_conflicting_known_lid() {
         let client = create_test_client().await;
@@ -1549,7 +1683,7 @@ mod tests {
             .unwrap();
 
         let outcome = client
-            .record_lid_pn_in_memory(lid_new, phone, LearningSource::PeerPnMessage)
+            .record_lid_pn_in_memory(lid_new, phone, LearningSource::RecipientLatestLid)
             .await;
 
         assert!(matches!(
@@ -1564,6 +1698,48 @@ mod tests {
             Some(lid_new),
             "a directed source must overwrite a conflicting known LID"
         );
+    }
+
+    #[tokio::test]
+    async fn peer_message_mapping_preserves_known_lid_conflicts() {
+        for source in [
+            LearningSource::PeerPnMessage,
+            LearningSource::PeerLidMessage,
+        ] {
+            let client = create_test_client().await;
+            let lid = "100000000000071";
+            let pn = "15550000071";
+            client
+                .add_lid_pn_mapping(lid, pn, LearningSource::Usync)
+                .await
+                .unwrap();
+            let outcome = client
+                .record_lid_pn_in_memory(lid, "15550000072", source)
+                .await;
+            assert!(matches!(outcome, RecordOutcome::Skipped));
+            assert_eq!(
+                client.lid_pn_cache.get_phone_number(lid).await.as_deref(),
+                Some(pn)
+            );
+            assert!(
+                client
+                    .lid_pn_cache
+                    .get_current_lid("15550000072")
+                    .await
+                    .is_none()
+            );
+            assert_eq!(
+                client
+                    .persistence_manager
+                    .backend()
+                    .get_lid_mapping(lid)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .phone_number,
+                pn
+            );
+        }
     }
 
     /// Even an observational source seeds a *brand-new* LID for an existing
@@ -1943,16 +2119,22 @@ mod tests {
         use waproto::whatsapp as wa;
 
         let client: Arc<Client> = create_test_client().await;
-        let payload = wa::LIDMigrationMappingSyncPayload {
-            pn_to_lid_mappings: vec![wa::LIDMigrationMapping {
-                pn: 5511987650001,
-                assigned_lid: 111000011112222,
-                latest_lid: None,
-            }],
-            chat_db_migration_timestamp: None,
+        let payload = {
+            let mut proto = wa::LIDMigrationMappingSyncPayload::default();
+            proto.pn_to_lid_mappings = vec![{
+                let mut proto = wa::LIDMigrationMapping::default();
+                proto.pn = 5511987650001;
+                proto.assigned_lid = 111000011112222;
+                proto.latest_lid = None;
+                proto
+            }];
+            proto.chat_db_migration_timestamp = None;
+            proto
         };
-        let sync = wa::LIDMigrationMappingSyncMessage {
-            encoded_mapping_payload: Some(payload.encode_to_vec()),
+        let sync = {
+            let mut proto = wa::LIDMigrationMappingSyncMessage::default();
+            proto.encoded_mapping_payload = Some(payload.encode_to_vec());
+            proto
         };
 
         // Prop off: mappings are learned but the account stays unmigrated,
@@ -2024,8 +2206,10 @@ mod tests {
 
         // Missing payload: WA Web treats this as malformed; nothing is
         // learned and the account must not flip to migrated.
-        let missing = wa::LIDMigrationMappingSyncMessage {
-            encoded_mapping_payload: None,
+        let missing = {
+            let mut proto = wa::LIDMigrationMappingSyncMessage::default();
+            proto.encoded_mapping_payload = None;
+            proto
         };
         client.handle_lid_migration_mapping_sync(&missing).await;
         assert!(
@@ -2035,8 +2219,10 @@ mod tests {
                 .lid_migrated
         );
 
-        let malformed = wa::LIDMigrationMappingSyncMessage {
-            encoded_mapping_payload: Some(vec![0xFF, 0xFF, 0xFF]),
+        let malformed = {
+            let mut proto = wa::LIDMigrationMappingSyncMessage::default();
+            proto.encoded_mapping_payload = Some(vec![0xFF, 0xFF, 0xFF]);
+            proto
         };
         client.handle_lid_migration_mapping_sync(&malformed).await;
         assert!(
@@ -2053,16 +2239,22 @@ mod tests {
         use waproto::whatsapp as wa;
 
         let client: Arc<Client> = create_test_client().await;
-        let payload = wa::LIDMigrationMappingSyncPayload {
-            pn_to_lid_mappings: vec![wa::LIDMigrationMapping {
-                pn: 5511987650001,
-                assigned_lid: 111000011112222,
-                latest_lid: Some(999000099990000),
-            }],
-            chat_db_migration_timestamp: None,
+        let payload = {
+            let mut proto = wa::LIDMigrationMappingSyncPayload::default();
+            proto.pn_to_lid_mappings = vec![{
+                let mut proto = wa::LIDMigrationMapping::default();
+                proto.pn = 5511987650001;
+                proto.assigned_lid = 111000011112222;
+                proto.latest_lid = Some(999000099990000);
+                proto
+            }];
+            proto.chat_db_migration_timestamp = None;
+            proto
         };
-        let sync = wa::LIDMigrationMappingSyncMessage {
-            encoded_mapping_payload: Some(payload.encode_to_vec()),
+        let sync = {
+            let mut proto = wa::LIDMigrationMappingSyncMessage::default();
+            proto.encoded_mapping_payload = Some(payload.encode_to_vec());
+            proto
         };
 
         client.handle_lid_migration_mapping_sync(&sync).await;
@@ -2490,20 +2682,22 @@ mod tests {
         use wacore::libsignal::protocol::{SessionRecord, SessionState};
         use waproto::whatsapp::SessionStructure;
 
-        let state = SessionState::from_session_structure(SessionStructure {
-            session_version: Some(3),
-            local_identity_public: None,
-            remote_identity_public: None,
-            root_key: None,
-            previous_counter: Some(0),
-            sender_chain: buffa::MessageField::none(),
-            receiver_chains: vec![],
-            pending_pre_key: buffa::MessageField::none(),
-            remote_registration_id: Some(remote_regid),
-            local_registration_id: Some(0),
-            alice_base_key: Some(vec![]),
-            needs_refresh: None,
-            pending_key_exchange: buffa::MessageField::none(),
+        let state = SessionState::from_session_structure({
+            let mut proto = SessionStructure::default();
+            proto.session_version = Some(3);
+            proto.local_identity_public = None;
+            proto.remote_identity_public = None;
+            proto.root_key = None;
+            proto.previous_counter = Some(0);
+            proto.sender_chain = buffa::MessageField::none();
+            proto.receiver_chains = vec![];
+            proto.pending_pre_key = buffa::MessageField::none();
+            proto.remote_registration_id = Some(remote_regid);
+            proto.local_registration_id = Some(0);
+            proto.alice_base_key = Some(vec![]);
+            proto.needs_refresh = None;
+            proto.pending_key_exchange = buffa::MessageField::none();
+            proto
         });
         SessionRecord::new(state)
             .serialize()
@@ -3180,7 +3374,7 @@ mod tests {
             .unwrap()
             .insert(key.clone());
 
-        client.disconnect().await;
+        client.shutdown().await;
 
         assert!(
             client.pending_lid_refreshes.lock().unwrap().contains(&key),

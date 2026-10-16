@@ -125,7 +125,7 @@ impl Text {
                 Some(HydratedButton::QuickReplyButton(button)) => button.display_text.as_deref(),
                 Some(HydratedButton::UrlButton(button)) => button.display_text.as_deref(),
                 Some(HydratedButton::CallButton(button)) => button.display_text.as_deref(),
-                None => None,
+                _ => None,
             };
             let url = match &button.hydrated_button {
                 Some(HydratedButton::UrlButton(button)) => button.url.as_deref(),
@@ -185,9 +185,10 @@ impl Text {
                     .map(|child| {
                         let mut text = Text::default();
                         text.interactive(child, 1);
-                        let base = wa::Message {
-                            interactive_message: super::MessageField::some(child.clone()),
-                            ..Default::default()
+                        let base = {
+                            let mut proto = wa::Message::default();
+                            proto.interactive_message = super::MessageField::some(child.clone());
+                            proto
                         };
                         let picture = image_at(&base, None);
                         // Local actions need no carousel reply envelope. Keep other
@@ -565,26 +566,32 @@ mod tests {
 
     fn buttons() -> wa::Message {
         use wa::message::buttons_message::{Button, Header, button::ButtonText};
-        wa::Message {
-            buttons_message: MessageField::some(wa::message::ButtonsMessage {
-                header: Some(Header::Text("Order ready 📦".into())),
-                content_text: Some("Collect *today*".into()),
-                footer_text: Some("Thank you".into()),
-                buttons: vec![Button {
-                    button_id: Some("hidden-button-id".into()),
-                    button_text: MessageField::some(ButtonText {
-                        display_text: Some("View order".into()),
-                    }),
-                    ..Default::default()
-                }],
-                context_info: MessageField::some(wa::ContextInfo {
-                    mentioned_jid: vec![PEER.into()],
-                    is_forwarded: Some(true),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            }),
-            ..Default::default()
+        {
+            let mut proto4 = wa::Message::default();
+            proto4.buttons_message = MessageField::some({
+                let mut proto3 = wa::message::ButtonsMessage::default();
+                proto3.header = Some(Header::Text("Order ready 📦".into()));
+                proto3.content_text = Some("Collect *today*".into());
+                proto3.footer_text = Some("Thank you".into());
+                proto3.buttons = vec![{
+                    let mut proto2 = Button::default();
+                    proto2.button_id = Some("hidden-button-id".into());
+                    proto2.button_text = MessageField::some({
+                        let mut proto = ButtonText::default();
+                        proto.display_text = Some("View order".into());
+                        proto
+                    });
+                    proto2
+                }];
+                proto3.context_info = MessageField::some({
+                    let mut proto = wa::ContextInfo::default();
+                    proto.mentioned_jid = vec![PEER.into()];
+                    proto.is_forwarded = Some(true);
+                    proto
+                });
+                proto3
+            });
+            proto4
         }
     }
 
@@ -602,21 +609,27 @@ mod tests {
     #[test]
     fn lists_keep_sections_and_descriptions() {
         use wa::message::list_message::{Row, Section};
-        let message = wa::Message {
-            list_message: MessageField::some(wa::message::ListMessage {
-                title: Some("Pickup".into()),
-                description: Some("Choose a time".into()),
-                sections: vec![Section {
-                    title: Some("Today".into()),
-                    rows: vec![Row {
-                        title: Some("Morning".into()),
-                        description: Some("09:00 to 12:00".into()),
-                        row_id: Some("hidden-row-id".into()),
-                    }],
-                }],
-                ..Default::default()
-            }),
-            ..Default::default()
+        let message = {
+            let mut proto4 = wa::Message::default();
+            proto4.list_message = MessageField::some({
+                let mut proto3 = wa::message::ListMessage::default();
+                proto3.title = Some("Pickup".into());
+                proto3.description = Some("Choose a time".into());
+                proto3.sections = vec![{
+                    let mut proto2 = Section::default();
+                    proto2.title = Some("Today".into());
+                    proto2.rows = vec![{
+                        let mut proto = Row::default();
+                        proto.title = Some("Morning".into());
+                        proto.description = Some("09:00 to 12:00".into());
+                        proto.row_id = Some("hidden-row-id".into());
+                        proto
+                    }];
+                    proto2
+                }];
+                proto3
+            });
+            proto4
         };
         assert_eq!(
             readable(&message),
@@ -630,32 +643,38 @@ mod tests {
         use wa::message::template_message::{
             Format, HydratedFourRowTemplate, hydrated_four_row_template::Title,
         };
-        let template = HydratedFourRowTemplate {
-            title: Some(Title::HydratedTitleText("Appointment".into())),
-            hydrated_content_text: Some("Tomorrow at 10:00".into()),
-            hydrated_footer_text: Some("Clinic".into()),
-            hydrated_buttons: vec![wa::HydratedTemplateButton {
-                hydrated_button: Some(HydratedButton::UrlButton(Box::new(HydratedURLButton {
-                    display_text: Some("Manage booking".into()),
-                    url: Some("https://example.com/private-token".into()),
-                    ..Default::default()
-                }))),
-                ..Default::default()
-            }],
-            ..Default::default()
+        let template = {
+            let mut proto3 = HydratedFourRowTemplate::default();
+            proto3.title = Some(Title::HydratedTitleText("Appointment".into()));
+            proto3.hydrated_content_text = Some("Tomorrow at 10:00".into());
+            proto3.hydrated_footer_text = Some("Clinic".into());
+            proto3.hydrated_buttons = vec![{
+                let mut proto2 = wa::HydratedTemplateButton::default();
+                proto2.hydrated_button = Some(HydratedButton::UrlButton(Box::new({
+                    let mut proto = HydratedURLButton::default();
+                    proto.display_text = Some("Manage booking".into());
+                    proto.url = Some("https://example.com/private-token".into());
+                    proto
+                })));
+                proto2
+            }];
+            proto3
         };
         for hydrated in [false, true] {
-            let message = wa::Message {
-                template_message: MessageField::some(wa::message::TemplateMessage {
-                    hydrated_template: if hydrated {
+            let message = {
+                let mut proto2 = wa::Message::default();
+                proto2.template_message = MessageField::some({
+                    let mut proto = wa::message::TemplateMessage::default();
+                    proto.hydrated_template = if hydrated {
                         MessageField::some(template.clone())
                     } else {
                         MessageField::none()
-                    },
-                    format: Some(Format::HydratedFourRowTemplate(Box::new(template.clone()))),
-                    ..Default::default()
-                }),
-                ..Default::default()
+                    };
+                    proto.format =
+                        Some(Format::HydratedFourRowTemplate(Box::new(template.clone())));
+                    proto
+                });
+                proto2
             };
             assert_eq!(
                 readable(&message),
@@ -670,40 +689,51 @@ mod tests {
             Body, CarouselMessage, InteractiveMessage as Payload, NativeFlowMessage,
             native_flow_message::NativeFlowButton,
         };
-        let card = wa::message::InteractiveMessage {
-            body: MessageField::some(Body {
-                text: Some("Choose an item 🛍️".into()),
-            }),
-            interactive_message: Some(Payload::NativeFlowMessage(Box::new(NativeFlowMessage {
-                buttons: vec![NativeFlowButton {
-                    name: Some("quick_reply".into()),
-                    button_params_json: Some(
-                        r#"{"display_text":"Select","id":"hidden","token":"secret"}"#.into(),
-                    ),
-                }],
-                ..Default::default()
-            }))),
-            ..Default::default()
+        let card = {
+            let mut proto3 = wa::message::InteractiveMessage::default();
+            proto3.body = MessageField::some({
+                let mut proto = Body::default();
+                proto.text = Some("Choose an item 🛍️".into());
+                proto
+            });
+            proto3.interactive_message = Some(Payload::NativeFlowMessage(Box::new({
+                let mut proto2 = NativeFlowMessage::default();
+                proto2.buttons = vec![{
+                    let mut proto = NativeFlowButton::default();
+                    proto.name = Some("quick_reply".into());
+                    proto.button_params_json =
+                        Some(r#"{"display_text":"Select","id":"hidden","token":"secret"}"#.into());
+                    proto
+                }];
+                proto2
+            })));
+            proto3
         };
-        let message = wa::Message {
-            view_once_message: MessageField::some(wa::message::FutureProofMessage {
-                message: MessageField::some(wa::Message {
-                    interactive_message: MessageField::some(wa::message::InteractiveMessage {
-                        body: MessageField::some(Body {
-                            text: Some("Catalog".into()),
-                        }),
-                        interactive_message: Some(Payload::CarouselMessage(Box::new(
-                            CarouselMessage {
-                                cards: vec![card],
-                                ..Default::default()
-                            },
-                        ))),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                }),
-            }),
-            ..Default::default()
+        let message = {
+            let mut proto5 = wa::Message::default();
+            proto5.view_once_message = MessageField::some({
+                let mut proto4 = wa::message::FutureProofMessage::default();
+                proto4.message = MessageField::some({
+                    let mut proto3 = wa::Message::default();
+                    proto3.interactive_message = MessageField::some({
+                        let mut proto2 = wa::message::InteractiveMessage::default();
+                        proto2.body = MessageField::some({
+                            let mut proto = Body::default();
+                            proto.text = Some("Catalog".into());
+                            proto
+                        });
+                        proto2.interactive_message = Some(Payload::CarouselMessage(Box::new({
+                            let mut proto = CarouselMessage::default();
+                            proto.cards = vec![card];
+                            proto
+                        })));
+                        proto2
+                    });
+                    proto3
+                });
+                proto4
+            });
+            proto5
         };
         assert_eq!(
             readable(&message),
@@ -715,42 +745,47 @@ mod tests {
     fn interactive_replies_show_only_the_selected_display_text() {
         use wa::message::buttons_response_message::Response;
         let messages = [
-            wa::Message {
-                buttons_response_message: MessageField::some(wa::message::ButtonsResponseMessage {
-                    response: Some(Response::SelectedDisplayText("Morning".into())),
-                    selected_button_id: Some("hidden".into()),
-                    ..Default::default()
-                }),
-                ..Default::default()
+            {
+                let mut proto2 = wa::Message::default();
+                proto2.buttons_response_message = MessageField::some({
+                    let mut proto = wa::message::ButtonsResponseMessage::default();
+                    proto.response = Some(Response::SelectedDisplayText("Morning".into()));
+                    proto.selected_button_id = Some("hidden".into());
+                    proto
+                });
+                proto2
             },
-            wa::Message {
-                list_response_message: MessageField::some(wa::message::ListResponseMessage {
-                    title: Some("Morning".into()),
-                    ..Default::default()
-                }),
-                ..Default::default()
+            {
+                let mut proto2 = wa::Message::default();
+                proto2.list_response_message = MessageField::some({
+                    let mut proto = wa::message::ListResponseMessage::default();
+                    proto.title = Some("Morning".into());
+                    proto
+                });
+                proto2
             },
-            wa::Message {
-                template_button_reply_message: MessageField::some(
-                    wa::message::TemplateButtonReplyMessage {
-                        selected_display_text: Some("Morning".into()),
-                        selected_id: Some("hidden".into()),
-                        ..Default::default()
-                    },
-                ),
-                ..Default::default()
+            {
+                let mut proto2 = wa::Message::default();
+                proto2.template_button_reply_message = MessageField::some({
+                    let mut proto = wa::message::TemplateButtonReplyMessage::default();
+                    proto.selected_display_text = Some("Morning".into());
+                    proto.selected_id = Some("hidden".into());
+                    proto
+                });
+                proto2
             },
-            wa::Message {
-                interactive_response_message: MessageField::some(
-                    wa::message::InteractiveResponseMessage {
-                        body: MessageField::some(wa::message::interactive_response_message::Body {
-                            text: Some("Morning".into()),
-                            ..Default::default()
-                        }),
-                        ..Default::default()
-                    },
-                ),
-                ..Default::default()
+            {
+                let mut proto3 = wa::Message::default();
+                proto3.interactive_response_message = MessageField::some({
+                    let mut proto2 = wa::message::InteractiveResponseMessage::default();
+                    proto2.body = MessageField::some({
+                        let mut proto = wa::message::interactive_response_message::Body::default();
+                        proto.text = Some("Morning".into());
+                        proto
+                    });
+                    proto2
+                });
+                proto3
             },
         ];
         for message in messages {
@@ -760,12 +795,14 @@ mod tests {
 
     #[test]
     fn missing_or_unrenderable_text_has_a_phone_fallback() {
-        let message = wa::Message {
-            template_message: MessageField::some(wa::message::TemplateMessage {
-                template_id: Some("hidden-template-id".into()),
-                ..Default::default()
-            }),
-            ..Default::default()
+        let message = {
+            let mut proto2 = wa::Message::default();
+            proto2.template_message = MessageField::some({
+                let mut proto = wa::message::TemplateMessage::default();
+                proto.template_id = Some("hidden-template-id".into());
+                proto
+            });
+            proto2
         };
         assert_eq!(readable(&message), "Interactive message");
         let mut text = Text::default();
@@ -873,44 +910,53 @@ mod tests {
             interactive_message::{Header as InteractiveHeader, header::Media},
             template_message::{HydratedFourRowTemplate, hydrated_four_row_template::Title},
         };
-        let picture = wa::message::ImageMessage {
-            mimetype: Some("image/jpeg".into()),
-            width: Some(640),
-            height: Some(480),
-            file_length: Some(1234),
-            media_key: Some(vec![7; 32]),
-            direct_path: Some("/synthetic/image".into()),
-            jpeg_thumbnail: Some(vec![1, 2, 3]),
-            ..Default::default()
+        let picture = {
+            let mut proto = wa::message::ImageMessage::default();
+            proto.mimetype = Some("image/jpeg".into());
+            proto.width = Some(640);
+            proto.height = Some(480);
+            proto.file_length = Some(1234);
+            proto.media_key = Some(vec![7; 32]);
+            proto.direct_path = Some("/synthetic/image".into());
+            proto.jpeg_thumbnail = Some(vec![1, 2, 3]);
+            proto
         };
         let messages = [
-            wa::Message {
-                buttons_message: MessageField::some(wa::message::ButtonsMessage {
-                    header: Some(Header::ImageMessage(Box::new(picture.clone()))),
-                    content_text: Some("Picture".into()),
-                    ..Default::default()
-                }),
-                ..Default::default()
+            {
+                let mut proto2 = wa::Message::default();
+                proto2.buttons_message = MessageField::some({
+                    let mut proto = wa::message::ButtonsMessage::default();
+                    proto.header = Some(Header::ImageMessage(Box::new(picture.clone())));
+                    proto.content_text = Some("Picture".into());
+                    proto
+                });
+                proto2
             },
-            wa::Message {
-                interactive_message: MessageField::some(wa::message::InteractiveMessage {
-                    header: MessageField::some(InteractiveHeader {
-                        media: Some(Media::ImageMessage(Box::new(picture.clone()))),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                }),
-                ..Default::default()
+            {
+                let mut proto3 = wa::Message::default();
+                proto3.interactive_message = MessageField::some({
+                    let mut proto2 = wa::message::InteractiveMessage::default();
+                    proto2.header = MessageField::some({
+                        let mut proto = InteractiveHeader::default();
+                        proto.media = Some(Media::ImageMessage(Box::new(picture.clone())));
+                        proto
+                    });
+                    proto2
+                });
+                proto3
             },
-            wa::Message {
-                template_message: MessageField::some(wa::message::TemplateMessage {
-                    hydrated_template: MessageField::some(HydratedFourRowTemplate {
-                        title: Some(Title::ImageMessage(Box::new(picture.clone()))),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                }),
-                ..Default::default()
+            {
+                let mut proto3 = wa::Message::default();
+                proto3.template_message = MessageField::some({
+                    let mut proto2 = wa::message::TemplateMessage::default();
+                    proto2.hydrated_template = MessageField::some({
+                        let mut proto = HydratedFourRowTemplate::default();
+                        proto.title = Some(Title::ImageMessage(Box::new(picture.clone())));
+                        proto
+                    });
+                    proto2
+                });
+                proto3
             },
         ];
         for base in messages {
@@ -1129,33 +1175,74 @@ mod tests {
             Body, CarouselMessage, Header, InteractiveMessage as Payload, NativeFlowMessage,
             header::Media as HeaderMedia, native_flow_message::NativeFlowButton,
         };
-        let cards = (0..2).map(|index| wa::message::InteractiveMessage {
-            body: MessageField::some(Body { text: Some(format!("Card {index}")) }),
-            header: MessageField::some(Header {
-                media: Some(HeaderMedia::ImageMessage(Box::new(wa::message::ImageMessage {
-                    direct_path: Some(format!("/image-{index}")), media_key: Some(vec![index as u8; 32]), jpeg_thumbnail: Some(vec![index as u8]), ..Default::default()
-                }))), ..Default::default()
-            }),
-            interactive_message: Some(Payload::NativeFlowMessage(Box::new(NativeFlowMessage {
-                buttons: vec![
-                    NativeFlowButton { name: Some("cta_copy".into()), button_params_json: Some(format!(r#"{{"display_text":"Copy","copy_code":"CODE{index}"}}"#)) },
-                    NativeFlowButton { name: Some("cta_url".into()), button_params_json: Some(format!(r#"{{"display_text":"Open","url":"https://example.com/{index}"}}"#)) },
-                    NativeFlowButton { name: Some("quick_reply".into()), button_params_json: Some(r#"{"display_text":"Reply","id":"hidden"}"#.into()) },
-                ], ..Default::default()
-            }))), ..Default::default()
-        }).collect();
-        let raw = wa::Message {
-            interactive_message: MessageField::some(wa::message::InteractiveMessage {
-                body: MessageField::some(Body {
-                    text: Some("Collection".into()),
-                }),
-                interactive_message: Some(Payload::CarouselMessage(Box::new(CarouselMessage {
-                    cards,
-                    ..Default::default()
-                }))),
-                ..Default::default()
-            }),
-            ..Default::default()
+        let cards = (0..2)
+            .map(|index| {
+                let mut proto3 = wa::message::InteractiveMessage::default();
+                proto3.body = MessageField::some({
+                    let mut proto = Body::default();
+                    proto.text = Some(format!("Card {index}"));
+                    proto
+                });
+                proto3.header = MessageField::some({
+                    let mut proto2 = Header::default();
+                    proto2.media = Some(HeaderMedia::ImageMessage(Box::new({
+                        let mut proto = wa::message::ImageMessage::default();
+                        proto.direct_path = Some(format!("/image-{index}"));
+                        proto.media_key = Some(vec![index as u8; 32]);
+                        proto.jpeg_thumbnail = Some(vec![index as u8]);
+                        proto
+                    })));
+                    proto2
+                });
+                proto3.interactive_message = Some(Payload::NativeFlowMessage(Box::new({
+                    let mut proto2 = NativeFlowMessage::default();
+                    proto2.buttons = vec![
+                        {
+                            let mut proto = NativeFlowButton::default();
+                            proto.name = Some("cta_copy".into());
+                            proto.button_params_json = Some(format!(
+                                r#"{{"display_text":"Copy","copy_code":"CODE{index}"}}"#
+                            ));
+                            proto
+                        },
+                        {
+                            let mut proto = NativeFlowButton::default();
+                            proto.name = Some("cta_url".into());
+                            proto.button_params_json = Some(format!(
+                                r#"{{"display_text":"Open","url":"https://example.com/{index}"}}"#
+                            ));
+                            proto
+                        },
+                        {
+                            let mut proto = NativeFlowButton::default();
+                            proto.name = Some("quick_reply".into());
+                            proto.button_params_json =
+                                Some(r#"{"display_text":"Reply","id":"hidden"}"#.into());
+                            proto
+                        },
+                    ];
+                    proto2
+                })));
+                proto3
+            })
+            .collect();
+        let raw = {
+            let mut proto3 = wa::Message::default();
+            proto3.interactive_message = MessageField::some({
+                let mut proto2 = wa::message::InteractiveMessage::default();
+                proto2.body = MessageField::some({
+                    let mut proto = Body::default();
+                    proto.text = Some("Collection".into());
+                    proto
+                });
+                proto2.interactive_message = Some(Payload::CarouselMessage(Box::new({
+                    let mut proto = CarouselMessage::default();
+                    proto.cards = cards;
+                    proto
+                })));
+                proto2
+            });
+            proto3
         };
         let content = classify(&raw).unwrap();
         let Content::Interactive {
@@ -1230,23 +1317,29 @@ mod tests {
 
     #[test]
     fn list_choices_belong_to_the_menu_not_the_message_body() {
-        let raw = wa::Message {
-            list_message: MessageField::some(wa::message::ListMessage {
-                title: Some("Workshop sessions".into()),
-                description: Some("Choose a session".into()),
-                button_text: Some("Browse".into()),
-                list_type: Some(wa::message::list_message::ListType::SINGLE_SELECT),
-                sections: vec![wa::message::list_message::Section {
-                    title: Some("Morning".into()),
-                    rows: vec![wa::message::list_message::Row {
-                        title: Some("Drawing".into()),
-                        description: Some("Materials included".into()),
-                        row_id: Some("private".into()),
-                    }],
-                }],
-                ..Default::default()
-            }),
-            ..Default::default()
+        let raw = {
+            let mut proto4 = wa::Message::default();
+            proto4.list_message = MessageField::some({
+                let mut proto3 = wa::message::ListMessage::default();
+                proto3.title = Some("Workshop sessions".into());
+                proto3.description = Some("Choose a session".into());
+                proto3.button_text = Some("Browse".into());
+                proto3.list_type = Some(wa::message::list_message::ListType::SINGLE_SELECT);
+                proto3.sections = vec![{
+                    let mut proto2 = wa::message::list_message::Section::default();
+                    proto2.title = Some("Morning".into());
+                    proto2.rows = vec![{
+                        let mut proto = wa::message::list_message::Row::default();
+                        proto.title = Some("Drawing".into());
+                        proto.description = Some("Materials included".into());
+                        proto.row_id = Some("private".into());
+                        proto
+                    }];
+                    proto2
+                }];
+                proto3
+            });
+            proto4
         };
         let Content::Interactive {
             text,

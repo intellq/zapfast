@@ -169,6 +169,8 @@ pub struct AcceptCall<'a> {
     pub(crate) incoming: &'a IncomingCall,
     audio: Option<AudioEndpoints>,
     video: Option<VideoEndpoints>,
+    #[cfg(test)]
+    cleanup_completed: Option<async_channel::Sender<()>>,
 }
 
 async fn wait_for_group_relay(
@@ -198,7 +200,15 @@ impl<'a> AcceptCall<'a> {
             incoming,
             audio: None,
             video: None,
+            #[cfg(test)]
+            cleanup_completed: None,
         }
+    }
+
+    #[cfg(test)]
+    fn observe_cleanup(mut self, completed: async_channel::Sender<()>) -> Self {
+        self.cleanup_completed = Some(completed);
+        self
     }
 
     impl_media_builder_methods!();
@@ -299,27 +309,6 @@ impl<'a> AcceptCall<'a> {
             ),
             None => None,
         };
-        if self.incoming.group.is_some()
-            && self.incoming.media().is_none()
-            && group
-                .as_ref()
-                .and_then(|update| update.relay.as_ref())
-                .is_none()
-            && let Some(generation) = group_generation
-        {
-            group = Some(
-                match wacore::runtime::timeout(
-                    &*self.client.runtime,
-                    OFFER_ACK_RELAY_TIMEOUT,
-                    wait_for_group_relay(&registry, call_id, generation),
-                )
-                .await
-                {
-                    Ok(result) => result?,
-                    Err(_) => return Err(CallError::ResponseTimeout),
-                },
-            );
-        }
         if group
             .as_ref()
             .is_some_and(|group| (group.media == "video") != *offered_video)
@@ -329,7 +318,14 @@ impl<'a> AcceptCall<'a> {
             ));
         }
         let is_group = group.is_some();
-        if self.incoming.media().is_none()
+        let mut needs_group_relay = is_group
+            && self.incoming.media().is_none()
+            && group
+                .as_ref()
+                .and_then(|group| group.relay.as_ref())
+                .is_none();
+        if !needs_group_relay
+            && self.incoming.media().is_none()
             && group
                 .as_ref()
                 .and_then(|group| group.relay.as_ref())
@@ -361,11 +357,36 @@ impl<'a> AcceptCall<'a> {
             (announcer, orientation)
         });
         session.group = group.clone();
-        // Register BEFORE the decrypt await. A peer <terminate> can now reap this generation during
+        if is_group {
+            session.transition_to(CallPhase::Connecting);
+        }
+        // Register BEFORE any invitation response or the decrypt await. A peer <terminate> can now reap this generation during
         // setup, instead of falling through terminate_call as an unknown call and letting us accept
         // a call that has already ended.
         let mut registration = if let Some(generation) = group_generation {
             let _answer_transition = self.client.lock_answer_transition(call_id).await;
+            // Claim once under the same lane as teardown/replacement, before any response is sent.
+            if registry.ringing_group_generation(call_id, call_creator) != Some(generation) {
+                return Err(CallError::CallEndedDuringSetup);
+            }
+            group = registry
+                .group_state_if_current(call_id, generation)
+                .and_then(|state| state.snapshot().cloned());
+            if group
+                .as_ref()
+                .is_some_and(|group| (group.media == "video") != *offered_video)
+            {
+                return Err(CallError::Response(
+                    "group offer signaling and roster media modes differ".to_string(),
+                ));
+            }
+            // The transition lane may have waited while a relay arrived. A now-known context
+            // follows normal prepare-before-accept ordering instead of the relay-trigger path.
+            needs_group_relay = self.incoming.media().is_none()
+                && group
+                    .as_ref()
+                    .and_then(|group| group.relay.as_ref())
+                    .is_none();
             if !registry.promote_ringing_group_if_current(session, generation) {
                 return Err(CallError::CallEndedDuringSetup);
             }
@@ -374,6 +395,10 @@ impl<'a> AcceptCall<'a> {
             RegisteredCall::new(self.client, session).await
         };
         let mut teardown = AnswerTeardown::new(self.client, &registration);
+        #[cfg(test)]
+        {
+            teardown.cleanup_completed = self.cleanup_completed.take();
+        }
         let preaccept_id = self.client.generate_request_id();
         let accept_id = self.client.generate_request_id();
         let (preaccept, accept) = build_answer_signaling(
@@ -384,6 +409,39 @@ impl<'a> AcceptCall<'a> {
             &preaccept_id,
             &accept_id,
         )?;
+        // Transfer removal ownership to the generation-aware teardown before the first ambiguous
+        // write. RegisteredCall::drop must not reap the generation before teardown can claim it.
+        teardown.arm();
+        registration.disarm();
+        let (preaccept, accept) = if needs_group_relay {
+            // An invitation with no relay must answer first to trigger the relay allocation. Use
+            // the selected media answer once, rather than sending a second pair after the wait.
+            send_answer_node(self.client, &registration, &mut teardown, preaccept).await?;
+            send_answer_node(self.client, &registration, &mut teardown, accept).await?;
+            group = Some(
+                match wacore::runtime::timeout(
+                    &*self.client.runtime,
+                    OFFER_ACK_RELAY_TIMEOUT,
+                    wait_for_group_relay(&registry, call_id, registration.generation),
+                )
+                .await
+                {
+                    Ok(result) => result?,
+                    Err(_) => return Err(CallError::ResponseTimeout),
+                },
+            );
+            if group
+                .as_ref()
+                .is_some_and(|group| (group.media == "video") != *offered_video)
+            {
+                return Err(CallError::Response(
+                    "group offer signaling and roster media modes differ".to_string(),
+                ));
+            }
+            (None, None)
+        } else {
+            (Some(preaccept), Some(accept))
+        };
         let (spec, built_call_id) = send_preaccept_then_prepare(
             self.client,
             &registration,
@@ -396,13 +454,15 @@ impl<'a> AcceptCall<'a> {
         // The decrypt above may await on the network (prekey fetch). If the connection dropped
         // meanwhile, cleanup_connection_state reaped the pending registration. Preserve the
         // connection-specific error before checking the generation.
-        if !self.client.is_connected() {
+        if !self.client.is_socket_connected() {
             return Err(CallError::Connect(ERR_DISCONNECTED_DURING_SETUP.into()));
         }
         registration.ensure_current()?;
         // Final acceptance waits until media setup succeeded and the registered generation is still
         // current; only then may the caller apply the participant keys and enter the call.
-        send_answer_node(self.client, &registration, &mut teardown, accept).await?;
+        if let Some(accept) = accept {
+            send_answer_node(self.client, &registration, &mut teardown, accept).await?;
+        }
         let result = open_registered_media(
             self.client,
             &registration,
@@ -992,7 +1052,7 @@ impl<'a> OutgoingGroupCall<'a> {
         };
         drop(transition_guard);
 
-        if !self.client.is_connected() {
+        if !self.client.is_socket_connected() {
             return Err(CallError::Connect(ERR_DISCONNECTED_DURING_SETUP.into()));
         }
         let handle = open_registered_media(
@@ -1190,7 +1250,7 @@ impl<'a> CallLinkCall<'a> {
                 .build(),
         );
 
-        if !self.client.is_connected() {
+        if !self.client.is_socket_connected() {
             return Err(CallError::Connect(ERR_DISCONNECTED_DURING_SETUP.into()));
         }
         let handle =
@@ -1527,12 +1587,13 @@ async fn send_preaccept_then_prepare<T>(
     client: &Client,
     registration: &RegisteredCall,
     teardown: &mut AnswerTeardown,
-    preaccept: wacore_binary::Node,
+    preaccept: Option<wacore_binary::Node>,
     prepare: impl Future<Output = Result<T, CallError>>,
 ) -> Result<T, CallError> {
-    // Preaccept is the early device-selection response: send it before Signal decrypt/prekey I/O
-    // so the caller stops ringing sibling devices while this answer prepares its media.
-    send_answer_node(client, registration, teardown, preaccept).await?;
+    // Preaccept precedes Signal decrypt/prekey I/O unless the relay-less group path sent it already.
+    if let Some(preaccept) = preaccept {
+        send_answer_node(client, registration, teardown, preaccept).await?;
+    }
     match prepare.await {
         Ok(prepared) => Ok(prepared),
         Err(error) => {
@@ -1627,12 +1688,14 @@ async fn fanout_group_epoch_for_generation(
     ensure_group_rekey_generation(client, &update.call_id, generation)?;
 
     let raw_epoch = Zeroizing::new(rand::random::<[u8; 32]>().to_vec());
-    let mut message = wa::Message {
-        call: buffa::MessageField::some(wa::message::Call {
-            call_key: Some(raw_epoch.to_vec()),
-            ..Default::default()
-        }),
-        ..Default::default()
+    let mut message = {
+        let mut proto = wa::Message::default();
+        proto.call = buffa::MessageField::some({
+            let mut proto = wa::message::Call::default();
+            proto.call_key = Some(raw_epoch.to_vec());
+            proto
+        });
+        proto
     };
     let padded = Zeroizing::new(MessageUtils::encode_and_pad(&message));
     if let Some(call) = message.call.as_option_mut()
@@ -1827,12 +1890,14 @@ async fn place_call(
     // The callKey we generate is what the engine and SFrame key from; the peer learns it by
     // decrypting the per-device <enc> we send below.
     let call_key = rand::random::<[u8; 32]>();
-    let padded = MessageUtils::encode_and_pad(&wa::Message {
-        call: buffa::MessageField::some(wa::message::Call {
-            call_key: Some(call_key.to_vec()),
-            ..Default::default()
-        }),
-        ..Default::default()
+    let padded = MessageUtils::encode_and_pad(&{
+        let mut proto = wa::Message::default();
+        proto.call = buffa::MessageField::some({
+            let mut proto = wa::message::Call::default();
+            proto.call_key = Some(call_key.to_vec());
+            proto
+        });
+        proto
     });
 
     // Encrypt the callKey for each peer device, reusing the message send path's per-device encrypt
@@ -2053,7 +2118,7 @@ async fn place_call(
         client: client_weak(client),
         muted,
         video: video_shared,
-        events: ev_rx,
+        events: Arc::new(std::sync::Mutex::new(Some(ev_rx))),
         ended,
         media: Some(media),
     })
@@ -2656,6 +2721,8 @@ struct AnswerTeardown {
     armed: bool,
     claimed: bool,
     transition: Option<async_lock::MutexGuardArc<()>>,
+    #[cfg(test)]
+    cleanup_completed: Option<async_channel::Sender<()>>,
 }
 
 struct GroupOfferTeardown {
@@ -2827,6 +2894,8 @@ impl AnswerTeardown {
             armed: false,
             claimed: false,
             transition: None,
+            #[cfg(test)]
+            cleanup_completed: None,
         }
     }
 
@@ -2838,6 +2907,10 @@ impl AnswerTeardown {
         self.armed = false;
         self.claimed = false;
         self.transition = None;
+        #[cfg(test)]
+        if let Some(completed) = self.cleanup_completed.take() {
+            let _ = completed.try_send(());
+        }
     }
 
     async fn terminate(&mut self, client: &Client) {
@@ -2873,6 +2946,8 @@ impl Drop for AnswerTeardown {
         let generation = self.generation;
         let claimed = self.claimed;
         let transition = self.transition.take();
+        #[cfg(test)]
+        let completed = self.cleanup_completed.take();
         let runtime = client.runtime.clone();
         runtime
             .spawn(Box::pin(async move {
@@ -2882,6 +2957,10 @@ impl Drop for AnswerTeardown {
                 };
                 if claimed || registry.remove_if_current(&call_id, generation) {
                     send_answer_terminate(&client, &call_id, &peer_jid, &call_creator).await;
+                }
+                #[cfg(test)]
+                if let Some(completed) = completed {
+                    let _ = completed.try_send(());
                 }
             }))
             .detach();
@@ -3050,7 +3129,7 @@ async fn open_registered_media(
         client: client_weak(client),
         muted,
         video: video_shared,
-        events: ev_rx,
+        events: Arc::new(std::sync::Mutex::new(Some(ev_rx))),
         ended: registration.ended.clone(),
         media: Some(session),
     })
@@ -3468,7 +3547,8 @@ pub struct CallHandle {
     client: std::sync::Weak<Client>,
     muted: Arc<AtomicBool>,
     video: Arc<VideoShared>,
-    events: async_channel::Receiver<CallEvent>,
+    // Acquisition belongs to the call, not to any one handle clone.
+    events: Arc<std::sync::Mutex<Option<async_channel::Receiver<CallEvent>>>>,
     ended: Arc<EndedFlag>,
     /// The media session this call reserved. Held so counters are read through the seam
     /// (`VoipMediaSession::stats`) rather than a parallel cell, and so the handle can steer video
@@ -4034,7 +4114,7 @@ impl CallHandle {
     /// UPGRADE the call to video (we initiate): attaches the endpoints, enables the media plane,
     /// and sends `<video state=11 dec="H264" device_orientation="0" voip_settings="video">`.
     /// The peer answers with
-    /// `UpgradeAccept`/`Enabled` (surfaced as [`CallEvent::VideoStateChanged`]); media flows as
+    /// `UpgradeAccept`/`Enabled` (surfaced as [`CallEvent::PeerVideoStateChanged`]); media flows as
     /// soon as both planes are up. Also the way to start media on a `.video()` call whose builder
     /// endpoints you skipped.
     pub async fn start_video<S, K>(&self, source: S, sink: K) -> Result<(), CallError>
@@ -4046,7 +4126,7 @@ impl CallHandle {
             .await
     }
 
-    /// ACCEPT the peer's video upgrade request (a `VideoStateChanged { state: UpgradeRequestV2 }`
+    /// ACCEPT the peer's video upgrade request (a `PeerVideoStateChanged { state: UpgradeRequestV2, .. }`
     /// event): the token binds this action to that exact request, then the method attaches the
     /// endpoints, enables the media plane, and answers
     /// `<video state=4 dec="H264,AV1" device_orientation="0">` followed by
@@ -4711,13 +4791,40 @@ impl CallHandle {
         }
     }
 
-    /// Subscribe to call lifecycle and media diagnostics.
+    /// Take ownership of the call's lifecycle and media diagnostic receiver.
     ///
-    /// All receivers returned here (and across cloned handles) share ONE queue: each event is
-    /// delivered to exactly one receiver, competitively. Drive a single consumer loop per call;
-    /// polling two receivers concurrently splits the events between them rather than broadcasting.
-    pub fn events(&self) -> async_channel::Receiver<CallEvent> {
-        self.events.clone()
+    /// Only the first acquisition returns `Some`, across **all** clones of this handle. Later
+    /// attempts return `None`, including after the acquired receiver is dropped or the call ends.
+    /// Dropping it does not end the call or restore acquisition; retain it for the consumer loop.
+    /// Acquisition is synchronous, so cancelling a subsequent `recv()` does not restore it either.
+    /// Queued events remain available if the receiver is first taken after the call ends.
+    ///
+    /// The owned [`super::CallEvents`] cannot be cloned and receives with exclusive access.
+    /// This is not broadcast or a durable subscription. Backend capacity and overflow policies
+    /// are unchanged; there is no exactly-once processing or redelivery guarantee. Use
+    /// [`wait_ended`](Self::wait_ended) for sticky completion independent of event consumption.
+    ///
+    /// ```no_run
+    /// # fn consume(call: &whatsapp_rust::voip::CallHandle) {
+    /// let Some(events) = call.take_events() else {
+    ///     return; // another owner already acquired this call's receiver
+    /// };
+    /// // Move `events` into one consumer task; keep `call` for control operations.
+    /// # }
+    /// ```
+    ///
+    /// The former cloning accessor is intentionally unavailable:
+    /// ```compile_fail
+    /// # fn legacy(call: &whatsapp_rust::voip::CallHandle) {
+    /// let independent_observer = call.events();
+    /// # }
+    /// ```
+    pub fn take_events(&self) -> Option<super::CallEvents> {
+        self.events
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+            .map(super::CallEvents::new)
     }
 
     /// Resolve once the call's media task has finished (relay disconnect, send failure, or hangup).
@@ -4726,6 +4833,183 @@ impl CallHandle {
         // same-call-id replacement, whose task already ended and set the flag) never parks on a
         // one-shot notification that already fired.
         self.ended.wait().await;
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod event_ownership_tests {
+    use super::*;
+
+    fn handle() -> (CallHandle, async_channel::Sender<CallEvent>) {
+        let (sender, receiver) = async_channel::bounded(8);
+        (
+            CallHandle {
+                call_id: "CALL-EVENT-OWNERSHIP".into(),
+                generation: 1,
+                peer_jid: Jid::lid("123456"),
+                call_creator: Jid::lid("654321"),
+                client_registry: Arc::new(wacore::voip_control::registry::CallRegistry::new()),
+                pending_outgoing_calls: Arc::new(std::sync::Mutex::new(Default::default())),
+                client: std::sync::Weak::new(),
+                muted: Arc::new(AtomicBool::new(false)),
+                video: Arc::new(VideoShared::new()),
+                events: Arc::new(std::sync::Mutex::new(Some(receiver))),
+                ended: Arc::new(EndedFlag::default()),
+                media: None,
+            },
+            sender,
+        )
+    }
+
+    #[test]
+    fn concurrent_handle_clones_acquire_only_one_receiver() {
+        let (handle, sender) = handle();
+        sender.try_send(CallEvent::RelayAllocated).unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(8));
+        let workers: Vec<_> = (0..8)
+            .map(|_| {
+                let clone = handle.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    clone.take_events()
+                })
+            })
+            .collect();
+        let mut receivers: Vec<_> = workers
+            .into_iter()
+            .filter_map(|worker| worker.join().unwrap())
+            .collect();
+        assert_eq!(receivers.len(), 1);
+        assert_eq!(receivers[0].try_recv(), Ok(CallEvent::RelayAllocated));
+        assert!(handle.take_events().is_none());
+        assert!(handle.clone().take_events().is_none());
+    }
+
+    #[test]
+    fn drop_does_not_restore_acquisition_or_retain_hidden_receiver() {
+        let (handle, sender) = handle();
+        let clone = handle.clone();
+        let receiver = handle.take_events().unwrap();
+        drop(receiver);
+        assert!(handle.take_events().is_none());
+        assert!(clone.take_events().is_none());
+        assert!(
+            sender.is_closed(),
+            "handles retain no hidden receiver after take"
+        );
+        assert!(
+            !handle.ended.done.load(Ordering::SeqCst),
+            "receiver Drop is not hangup"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_and_recv_share_order_and_drain_before_closed() {
+        use futures::StreamExt;
+
+        let (handle, sender) = handle();
+        let mut events = handle.take_events().unwrap();
+        assert!(futures::poll!(std::pin::pin!(events.next())).is_pending());
+        sender.try_send(CallEvent::RelayAllocated).unwrap();
+        sender
+            .try_send(CallEvent::MediaSetupFailed("synthetic".into()))
+            .unwrap();
+        sender.close();
+        assert_eq!(events.next().await, Some(CallEvent::RelayAllocated));
+        assert_eq!(
+            events.recv().await,
+            Ok(CallEvent::MediaSetupFailed("synthetic".into()))
+        );
+        assert_eq!(events.next().await, None);
+        assert_eq!(events.recv().await, Err(async_channel::RecvError));
+        assert_eq!(events.next().await, None);
+        assert!(handle.take_events().is_none());
+    }
+
+    #[tokio::test]
+    async fn cancelled_recv_does_not_restore_acquisition() {
+        let (handle, sender) = handle();
+        let mut receiver = handle.take_events().unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1), receiver.recv())
+                .await
+                .is_err()
+        );
+        assert!(handle.clone().take_events().is_none());
+        sender.try_send(CallEvent::RelayAllocated).unwrap();
+        assert_eq!(receiver.recv().await.unwrap(), CallEvent::RelayAllocated);
+    }
+
+    #[tokio::test]
+    async fn late_acquisition_and_wait_ended_are_independent_and_sticky() {
+        let (handle, sender) = handle();
+        sender.try_send(CallEvent::RelayAllocated).unwrap();
+        sender.close();
+        handle.ended.notify();
+        let clone = handle.clone();
+        let mut receiver = clone.take_events().unwrap();
+        for _ in 0..2 {
+            tokio::time::timeout(Duration::from_secs(1), handle.wait_ended())
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(1), clone.wait_ended())
+                .await
+                .unwrap();
+        }
+        assert_eq!(receiver.try_recv(), Ok(CallEvent::RelayAllocated));
+        assert_eq!(
+            receiver.try_recv(),
+            Err(async_channel::TryRecvError::Closed)
+        );
+        assert!(handle.take_events().is_none());
+    }
+
+    #[test]
+    fn bounded_queue_overflow_policy_is_unchanged() {
+        let (handle, sender) = handle();
+        let mut events = handle.take_events().unwrap();
+        for _ in 0..8 {
+            sender.try_send(CallEvent::RelayAllocated).unwrap();
+        }
+        assert!(matches!(
+            sender.try_send(CallEvent::RelayAllocated),
+            Err(async_channel::TrySendError::Full(_))
+        ));
+        for _ in 0..8 {
+            assert_eq!(events.try_recv(), Ok(CallEvent::RelayAllocated));
+        }
+        assert_eq!(events.try_recv(), Err(async_channel::TryRecvError::Empty));
+    }
+
+    #[tokio::test]
+    async fn producer_close_wakes_pending_stream() {
+        use futures::StreamExt;
+
+        let (handle, sender) = handle();
+        let mut events = handle.take_events().unwrap();
+        let mut pending = std::pin::pin!(events.next());
+        assert!(futures::poll!(pending.as_mut()).is_pending());
+        sender.close();
+        assert_eq!(pending.await, None);
+    }
+
+    #[test]
+    fn retained_receiver_does_not_retain_call_state() {
+        let (handle, _sender) = handle();
+        let slot = Arc::downgrade(&handle.events);
+        let ended = Arc::downgrade(&handle.ended);
+        let registry = Arc::downgrade(&handle.client_registry);
+        let video = Arc::downgrade(&handle.video);
+        let clone = handle.clone();
+        let receiver = handle.take_events().unwrap();
+        drop(handle);
+        drop(clone);
+        assert!(slot.upgrade().is_none());
+        assert!(ended.upgrade().is_none());
+        assert!(registry.upgrade().is_none());
+        assert!(video.upgrade().is_none());
+        drop(receiver);
     }
 }
 
@@ -5759,6 +6043,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn relayless_group_invite_is_answered_before_waiting_for_the_relay() {
+        let (client, _sent) = make_sending_client().await;
+        let transport = Arc::new(crate::transport::mock::CapturingMockTransport::new());
+        install_noise_transport(&client, transport.clone()).await;
+        let mut incoming = incoming_offer(false);
+        let call_id = incoming.action.call_id().to_string();
+        incoming.group = Some(Box::new(
+            GroupCallUpdate::builder()
+                .call_id(call_id.clone())
+                .call_creator(caller())
+                .transaction_id(1)
+                .media("audio".to_string())
+                .connected_limit(32)
+                .joinable(true)
+                .av_upgradable(true)
+                .rekey_requested(false)
+                .participants(Vec::new())
+                .build(),
+        ));
+        let mut session = wacore::voip_control::CallSession::new_incoming(
+            incoming.action.call_id(),
+            incoming.from.clone(),
+            incoming.action.call_creator().clone(),
+        );
+        session.group = incoming.group.as_deref().cloned();
+        let generation = client
+            .call_registry()
+            .insert_ringing_group_if_inactive(session)
+            .expect("valid group snapshot")
+            .expect("ringing group generation");
+        incoming.set_ringing_generation(generation);
+        let call_service = Jid::new(&call_id, Server::Call).to_string();
+        let (_source_tx, source_rx) = async_channel::unbounded::<Bytes>();
+        let (sink_tx, _sink_rx) = async_channel::unbounded::<EncodedAudioFrame>();
+        let voip = client.voip();
+        let start = voip
+            .accept(&incoming)
+            .encoded_audio(AudioFormat::MLOW_16KHZ_60MS, source_rx, sink_tx)
+            .start();
+        tokio::pin!(start);
+
+        // Both responses can be sent in one polling burst. A second one-shot observer installed
+        // after the first response loses that accept; the transport retains the entire wire stream.
+        tokio::select! {
+            _ = async {
+                while transport.sent_count() < 2 {
+                    tokio::task::yield_now().await;
+                }
+            } => {},
+            _ = &mut start => panic!("start must not finish before the invitation is answered"),
+        }
+        let frames = crate::test_utils::decrypt_wire_frames(&transport.sent(), &[0; 32]);
+        assert_eq!(frames.len(), 2);
+        for (frame, expected) in frames.iter().zip(["preaccept", "accept"]) {
+            let bytes = wacore_binary::util::unpack(frame).expect("frame");
+            let node = wacore_binary::OwnedNodeRef::new(bytes.into_owned()).expect("node");
+            assert_eq!(
+                node.get().get_attr("to").map(ToString::to_string),
+                Some(call_service.clone())
+            );
+            assert_eq!(
+                node.get().children().expect("action")[0].tag.as_ref(),
+                expected
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn incoming_group_offer_rejects_conflicting_roster_media() {
         let client = make_client().await;
         let mut incoming = incoming_offer(true);
@@ -6189,8 +6541,13 @@ mod tests {
             }
         };
 
-        let answer =
-            send_preaccept_then_prepare(&client, &registration, &mut teardown, preaccept, prepare);
+        let answer = send_preaccept_then_prepare(
+            &client,
+            &registration,
+            &mut teardown,
+            Some(preaccept),
+            prepare,
+        );
         let observe = async {
             preaccept_waiter.await.expect("preaccept waiter");
             assert!(
@@ -6226,10 +6583,16 @@ mod tests {
         let (prepare_tx, prepare_rx) = async_channel::bounded(1);
 
         let answer = async {
-            send_preaccept_then_prepare(&client, &registration, &mut teardown, preaccept, async {
-                prepare_rx.recv().await.expect("release preparation");
-                Ok::<_, CallError>(())
-            })
+            send_preaccept_then_prepare(
+                &client,
+                &registration,
+                &mut teardown,
+                Some(preaccept),
+                async {
+                    prepare_rx.recv().await.expect("release preparation");
+                    Ok::<_, CallError>(())
+                },
+            )
             .await?;
             registration.ensure_current()?;
             send_answer_node(&client, &registration, &mut teardown, accept).await
@@ -6353,7 +6716,7 @@ mod tests {
             client: std::sync::Weak::new(),
             muted: Arc::new(AtomicBool::new(false)),
             video: Arc::new(VideoShared::new()),
-            events: ev_rx,
+            events: Arc::new(Mutex::new(Some(ev_rx))),
             ended: Arc::new(EndedFlag::default()),
             media: None,
         };
@@ -6737,14 +7100,12 @@ mod tests {
         // is the one that has to hold when nothing else ends the call, which is exactly an
         // `accept()` awaiting its own setup.
         let client = make_client().await;
-        let (_mic_tx, mic_rx) = async_channel::unbounded::<Vec<i16>>();
-        let (spk_tx, _spk_rx) = async_channel::unbounded::<Vec<i16>>();
 
         let error = match spawn_call_via_backend(
             &client,
             mk_session(),
             Arc::new(NeverConnects),
-            pcm_audio(Arc::new(mic_rx), Arc::new(spk_tx)),
+            encoded_audio(AudioFormat::OPUS_16KHZ_60MS),
             None,
         )
         .await
@@ -6858,7 +7219,8 @@ mod tests {
         );
 
         // Whatever the stream carries, none of it may claim the media setup failed.
-        while let Ok(event) = handle.events().try_recv() {
+        let mut events = handle.take_events().expect("first acquisition");
+        while let Ok(event) = events.try_recv() {
             assert!(
                 !matches!(event, CallEvent::MediaSetupFailed(_)),
                 "a hangup published a setup failure: {event:?}"
@@ -6907,7 +7269,12 @@ mod tests {
         }
 
         let (client, _count) = make_sending_client().await;
-        let (handle, call_id) = place_dormant_outgoing(&client).await;
+        let (handle, call_id) = place_dormant_outgoing_with_media(
+            &client,
+            encoded_audio(AudioFormat::OPUS_16KHZ_60MS),
+            None,
+        )
+        .await;
         client.set_relay_transport_provider(Arc::new(Hands));
 
         let res = attach_outgoing_relay(&client, &call_id, &sample_relay()).await;
@@ -6916,7 +7283,8 @@ mod tests {
             "a dial that refuses must fail the attach, got {res:?}"
         );
 
-        let event = tokio::time::timeout(Duration::from_secs(2), handle.events().recv())
+        let mut events = handle.take_events().expect("first acquisition");
+        let event = tokio::time::timeout(Duration::from_secs(2), events.recv())
             .await
             .expect("the dial's reason must reach the handle, not only its caller")
             .expect("the event stream must carry it before it closes");
@@ -6976,13 +7344,11 @@ mod tests {
             &sample_relay(),
         )
         .expect("sample spec");
-        let (_mic_tx, mic_rx) = async_channel::unbounded::<Vec<i16>>();
-        let (spk_tx, _spk_rx) = async_channel::unbounded::<Vec<i16>>();
         let drive = open_registered_media(
             &client,
             &registration,
             spec,
-            pcm_audio(Arc::new(mic_rx), Arc::new(spk_tx)),
+            encoded_audio(AudioFormat::OPUS_16KHZ_60MS),
             None,
             None,
             None,
@@ -7096,14 +7462,12 @@ mod tests {
             relay_rx: Mutex::new(Some(relay_rx)),
             connects: connects.clone(),
         };
-        let (_mic_tx, mic_rx) = async_channel::unbounded::<Vec<i16>>();
-        let (spk_tx, _spk_rx) = async_channel::unbounded::<Vec<i16>>();
 
         let handle = spawn_call_via_backend(
             &client,
             mk_session(),
             Arc::new(factory),
-            pcm_audio(Arc::new(mic_rx), Arc::new(spk_tx)),
+            encoded_audio(AudioFormat::OPUS_16KHZ_60MS),
             None,
         )
         .await
@@ -7158,8 +7522,6 @@ mod tests {
             relay_rx: Mutex::new(Some(relay_rx)),
             connects: Arc::new(AtomicUsize::new(0)),
         };
-        let (_mic_tx, mic_rx) = async_channel::unbounded::<Vec<i16>>();
-        let (spk_tx, _spk_rx) = async_channel::unbounded::<Vec<i16>>();
 
         let mut session =
             wacore::voip_control::CallSession::new_outgoing("CID-FACADE", caller(), caller());
@@ -7169,7 +7531,7 @@ mod tests {
             &client,
             session,
             Arc::new(factory),
-            pcm_audio(Arc::new(mic_rx), Arc::new(spk_tx)),
+            encoded_audio(AudioFormat::OPUS_16KHZ_60MS),
             None,
         )
         .await
@@ -7214,13 +7576,12 @@ mod tests {
             relay_rx: Mutex::new(Some(relay_rx)),
             connects: Arc::new(AtomicUsize::new(0)),
         };
-        let (_mic_tx, mic_rx) = async_channel::unbounded::<Vec<i16>>();
-        let (spk_tx, _spk_rx) = async_channel::unbounded::<Vec<i16>>();
+
         let handle = spawn_call_via_backend(
             &client,
             mk_session(),
             Arc::new(factory),
-            pcm_audio(Arc::new(mic_rx), Arc::new(spk_tx)),
+            encoded_audio(AudioFormat::OPUS_16KHZ_60MS),
             None,
         )
         .await
@@ -7248,7 +7609,7 @@ mod tests {
             client: Arc::downgrade(client),
             muted: Arc::new(AtomicBool::new(false)),
             video: Arc::new(VideoShared::new()),
-            events: ev_rx,
+            events: Arc::new(Mutex::new(Some(ev_rx))),
             ended: Arc::new(EndedFlag::default()),
             media: None,
         }
@@ -7275,7 +7636,7 @@ mod tests {
             client: std::sync::Weak::new(),
             muted: Arc::new(AtomicBool::new(false)),
             video: Arc::new(VideoShared::new()),
-            events: ev_rx,
+            events: Arc::new(Mutex::new(Some(ev_rx))),
             ended: Arc::new(EndedFlag::default()),
             media: client
                 .call_registry()
@@ -8082,33 +8443,30 @@ mod tests {
         let client = make_client().await;
         let spawn = |_client: &Client| {
             let (_relay_tx, relay_rx) = async_channel::unbounded();
-            let factory = MockFactory {
+            MockFactory {
                 sent: Arc::new(Mutex::new(Vec::new())),
                 relay_rx: Mutex::new(Some(relay_rx)),
                 connects: Arc::new(AtomicUsize::new(0)),
-            };
-            let (_mic_tx, mic_rx) = async_channel::unbounded::<Vec<i16>>();
-            let (spk_tx, _spk_rx) = async_channel::unbounded::<Vec<i16>>();
-            (factory, Arc::new(mic_rx), Arc::new(spk_tx))
+            }
         };
 
-        let (f1, mic1, spk1) = spawn(&client);
+        let f1 = spawn(&client);
         let stale = spawn_call_via_backend(
             &client,
             mk_session(),
             Arc::new(f1),
-            pcm_audio(mic1, spk1),
+            encoded_audio(AudioFormat::OPUS_16KHZ_60MS),
             None,
         )
         .await
         .expect("first spawn_call");
         // A same-call-id re-offer replaces the first (new generation, aborts its task).
-        let (f2, mic2, spk2) = spawn(&client);
+        let f2 = spawn(&client);
         let live = spawn_call_via_backend(
             &client,
             mk_session(),
             Arc::new(f2),
-            pcm_audio(mic2, spk2),
+            encoded_audio(AudioFormat::OPUS_16KHZ_60MS),
             None,
         )
         .await
@@ -8154,32 +8512,29 @@ mod tests {
         let client = make_client().await;
         let spawn = |_client: &Client| {
             let (_relay_tx, relay_rx) = async_channel::unbounded();
-            let factory = MockFactory {
+            MockFactory {
                 sent: Arc::new(Mutex::new(Vec::new())),
                 relay_rx: Mutex::new(Some(relay_rx)),
                 connects: Arc::new(AtomicUsize::new(0)),
-            };
-            let (_mic_tx, mic_rx) = async_channel::unbounded::<Vec<i16>>();
-            let (spk_tx, _spk_rx) = async_channel::unbounded::<Vec<i16>>();
-            (factory, Arc::new(mic_rx), Arc::new(spk_tx))
+            }
         };
 
-        let (f1, mic1, spk1) = spawn(&client);
+        let f1 = spawn(&client);
         let stale = spawn_call_via_backend(
             &client,
             mk_session(),
             Arc::new(f1),
-            pcm_audio(mic1, spk1),
+            encoded_audio(AudioFormat::OPUS_16KHZ_60MS),
             None,
         )
         .await
         .expect("first spawn_call");
-        let (f2, mic2, spk2) = spawn(&client);
+        let f2 = spawn(&client);
         let _live = spawn_call_via_backend(
             &client,
             mk_session(),
             Arc::new(f2),
-            pcm_audio(mic2, spk2),
+            encoded_audio(AudioFormat::OPUS_16KHZ_60MS),
             None,
         )
         .await
@@ -8204,14 +8559,13 @@ mod tests {
             relay_rx: Mutex::new(Some(relay_rx)),
             connects: Arc::new(AtomicUsize::new(0)),
         };
-        let (_mic_tx, mic_rx) = async_channel::unbounded::<Vec<i16>>();
-        let (spk_tx, _spk_rx) = async_channel::unbounded::<Vec<i16>>();
+
         let handle = Arc::new(
             spawn_call_via_backend(
                 &client,
                 mk_session(),
                 Arc::new(factory),
-                pcm_audio(Arc::new(mic_rx), Arc::new(spk_tx)),
+                encoded_audio(AudioFormat::OPUS_16KHZ_60MS),
                 None,
             )
             .await
@@ -8319,24 +8673,25 @@ mod tests {
         )))
         .await;
         // Set the ADV account so a pkmsg offer attaches a <device-identity> (as the send path does).
-        pm.process_command(crate::store::commands::DeviceCommand::SetAccount(Some(
-            wa::ADVSignedDeviceIdentity {
-                details: Some(vec![0u8; 32]),
-                account_signature_key: Some(vec![0u8; 32]),
-                account_signature: Some(vec![0u8; 64]),
-                device_signature: Some(vec![0u8; 64]),
-            },
-        )))
+        pm.process_command(crate::store::commands::DeviceCommand::SetAccount(Some({
+            let mut proto = wa::ADVSignedDeviceIdentity::default();
+            proto.details = Some(vec![0u8; 32]);
+            proto.account_signature_key = Some(vec![0u8; 32]);
+            proto.account_signature = Some(vec![0u8; 64]);
+            proto.device_signature = Some(vec![0u8; 64]);
+            proto
+        })))
         .await;
         let transport = Arc::new(crate::transport::mock::MockTransportFactory::new());
-        let (client, _rx) = Client::new(
-            Arc::new(crate::runtime_impl::TokioRuntime),
-            Arc::new(pm),
-            transport,
-            Arc::new(MockHttpClient),
-            None,
-        )
-        .await;
+        let (client, _rx) = Client::builder()
+            .with_runtime_arc(Arc::new(crate::runtime_impl::TokioRuntime))
+            .with_persistence_manager(Arc::new(pm))
+            .with_transport_factory_arc(transport)
+            .with_http_client_arc(Arc::new(MockHttpClient))
+            .build()
+            .await
+            .expect("test client should build")
+            .into_parts();
 
         let count = Arc::new(AtomicUsize::new(0));
         struct CountingTransport {
@@ -9151,19 +9506,19 @@ mod tests {
     /// Place a dormant outgoing call (offer sent, relay not yet arrived) and return its handle. Shares
     /// the place_call machinery the offer-send test uses; the call lands in pending_outgoing_calls.
     async fn place_dormant_outgoing(client: &Arc<Client>) -> (CallHandle, String) {
-        place_dormant_outgoing_with_video(client, None).await
+        place_dormant_outgoing_with_media(client, encoded_audio(AudioFormat::OPUS_16KHZ_60MS), None)
+            .await
     }
 
-    async fn place_dormant_outgoing_with_video(
+    async fn place_dormant_outgoing_with_media(
         client: &Arc<Client>,
+        audio: AudioEndpoints,
         video: Option<VideoEndpoints>,
     ) -> (CallHandle, String) {
         let peer_user = Jid::new("333333333333333", Server::Lid);
         let device = peer_lid();
         seed_peer_session(client, &device).await;
         let own_lid = client.lid().expect("own lid");
-        let (_mic_tx, mic_rx) = async_channel::unbounded::<Vec<i16>>();
-        let (spk_tx, _spk_rx) = async_channel::unbounded::<Vec<i16>>();
         let call_id = "00abcdef0123456789abcdef0123beef".to_string();
         let handle = place_call(
             client,
@@ -9173,7 +9528,7 @@ mod tests {
             &own_lid,
             std::slice::from_ref(&device),
             std::slice::from_ref(&device),
-            pcm_audio(Arc::new(mic_rx), Arc::new(spk_tx)),
+            audio,
             video,
         )
         .await
@@ -9311,8 +9666,6 @@ mod tests {
             relay_rx: Mutex::new(Some(relay_rx)),
             sent: Arc::new(Mutex::new(Vec::new())),
         };
-        let (_mic_tx, mic_rx) = async_channel::unbounded::<Vec<i16>>();
-        let (spk_tx, _spk_rx) = async_channel::unbounded::<Vec<i16>>();
 
         // The bridge registers the entry, then the production open parks inside the gated connect().
         let drive = tokio::spawn({
@@ -9322,7 +9675,7 @@ mod tests {
                     &client,
                     mk_session(),
                     Arc::new(factory),
-                    pcm_audio(Arc::new(mic_rx), Arc::new(spk_tx)),
+                    encoded_audio(AudioFormat::OPUS_16KHZ_60MS),
                     None,
                 )
                 .await
@@ -9393,8 +9746,6 @@ mod tests {
             relay_rx: Mutex::new(Some(relay_rx)),
             sent: Arc::new(Mutex::new(Vec::new())),
         };
-        let (_mic_tx, mic_rx) = async_channel::unbounded::<Vec<i16>>();
-        let (spk_tx, _spk_rx) = async_channel::unbounded::<Vec<i16>>();
 
         // Disconnect clears is_connected before the connect path runs.
         client.set_connected_for_test(false);
@@ -9403,7 +9754,7 @@ mod tests {
             &client,
             mk_session(),
             Arc::new(factory),
-            pcm_audio(Arc::new(mic_rx), Arc::new(spk_tx)),
+            encoded_audio(AudioFormat::OPUS_16KHZ_60MS),
             None,
         )
         .await;
@@ -9432,8 +9783,6 @@ mod tests {
             relay_rx: Mutex::new(Some(relay_rx)),
             sent: Arc::new(Mutex::new(Vec::new())),
         });
-        let (_mic_tx, mic_rx) = async_channel::unbounded::<Vec<i16>>();
-        let (spk_tx, _spk_rx) = async_channel::unbounded::<Vec<i16>>();
 
         // Drive the production open in the background; it parks in the gated connect.
         let drive = tokio::spawn({
@@ -9444,7 +9793,7 @@ mod tests {
                     &client,
                     mk_session(),
                     factory,
-                    pcm_audio(Arc::new(mic_rx), Arc::new(spk_tx)),
+                    encoded_audio(AudioFormat::OPUS_16KHZ_60MS),
                     None,
                 )
                 .await
@@ -9493,8 +9842,6 @@ mod tests {
             relay_rx: Mutex::new(Some(relay_rx)),
             sent: Arc::new(Mutex::new(Vec::new())),
         });
-        let (_mic_tx, mic_rx) = async_channel::unbounded::<Vec<i16>>();
-        let (spk_tx, _spk_rx) = async_channel::unbounded::<Vec<i16>>();
 
         // Drive the production open in the background; it parks in the gated connect.
         let drive = tokio::spawn({
@@ -9505,7 +9852,7 @@ mod tests {
                     &client,
                     mk_session(),
                     factory,
-                    pcm_audio(Arc::new(mic_rx), Arc::new(spk_tx)),
+                    encoded_audio(AudioFormat::OPUS_16KHZ_60MS),
                     None,
                 )
                 .await
@@ -9559,8 +9906,6 @@ mod tests {
             relay_rx: Mutex::new(Some(relay_rx)),
             sent: Arc::new(Mutex::new(Vec::new())),
         });
-        let (_mic_tx, mic_rx) = async_channel::unbounded::<Vec<i16>>();
-        let (spk_tx, _spk_rx) = async_channel::unbounded::<Vec<i16>>();
 
         // Drive the production open in the background; it parks in the gated connect.
         let drive = tokio::spawn({
@@ -9571,7 +9916,7 @@ mod tests {
                     &client,
                     mk_session(),
                     factory,
-                    pcm_audio(Arc::new(mic_rx), Arc::new(spk_tx)),
+                    encoded_audio(AudioFormat::OPUS_16KHZ_60MS),
                     None,
                 )
                 .await
@@ -9641,14 +9986,13 @@ mod tests {
     #[tokio::test]
     async fn connect_failure_reaps_registry_and_resolves_wait_ended() {
         let client = make_client().await;
-        let (_mic_tx, mic_rx) = async_channel::unbounded::<Vec<i16>>();
-        let (spk_tx, _spk_rx) = async_channel::unbounded::<Vec<i16>>();
+
         // CallHandle has no Debug, so match on the Result rather than expect_err.
         let res = spawn_call_via_backend(
             &client,
             mk_session(),
             Arc::new(FailingFactory),
-            pcm_audio(Arc::new(mic_rx), Arc::new(spk_tx)),
+            encoded_audio(AudioFormat::OPUS_16KHZ_60MS),
             None,
         )
         .await;
@@ -9669,15 +10013,13 @@ mod tests {
         let mut registration = RegisteredCall::new(&client, mk_session()).await;
         let mut teardown = AnswerTeardown::new(&client, &registration);
         teardown.arm();
-        let (_mic_tx, mic_rx) = async_channel::unbounded::<Vec<i16>>();
-        let (spk_tx, _spk_rx) = async_channel::unbounded::<Vec<i16>>();
 
         let result = spawn_answered_via_backend(
             &client,
             &mut registration,
             teardown,
             Arc::new(FailingFactory),
-            pcm_audio(Arc::new(mic_rx), Arc::new(spk_tx)),
+            encoded_audio(AudioFormat::OPUS_16KHZ_60MS),
             None,
         )
         .await;
@@ -10306,15 +10648,13 @@ mod tests {
             relay_rx: Mutex::new(Some(relay_rx)),
             sent: Arc::new(Mutex::new(Vec::new())),
         };
-        let (_mic_tx, mic_rx) = async_channel::unbounded::<Vec<i16>>();
-        let (spk_tx, _spk_rx) = async_channel::unbounded::<Vec<i16>>();
 
         let spawn = spawn_answered_via_backend(
             &client,
             &mut registration,
             teardown,
             Arc::new(factory),
-            pcm_audio(Arc::new(mic_rx), Arc::new(spk_tx)),
+            encoded_audio(AudioFormat::OPUS_16KHZ_60MS),
             None,
         );
         let replace = async {
@@ -10398,8 +10738,7 @@ mod tests {
             relay_rx: Mutex::new(Some(relay_rx)),
             sent: Arc::new(Mutex::new(Vec::new())),
         };
-        let (_mic_tx, mic_rx) = async_channel::unbounded::<Vec<i16>>();
-        let (spk_tx, _spk_rx) = async_channel::unbounded::<Vec<i16>>();
+
         let terminate_waiter = client.wait_for_sent_node(crate::client::NodeFilter::tag("call"));
 
         let result = tokio::time::timeout(
@@ -10409,7 +10748,7 @@ mod tests {
                 &mut registration,
                 teardown,
                 Arc::new(factory),
-                pcm_audio(Arc::new(mic_rx), Arc::new(spk_tx)),
+                encoded_audio(AudioFormat::OPUS_16KHZ_60MS),
                 None,
             ),
         )
@@ -10442,24 +10781,25 @@ mod tests {
             Jid::new("111111111111111", Server::Lid),
         )))
         .await;
-        pm.process_command(crate::store::commands::DeviceCommand::SetAccount(Some(
-            wa::ADVSignedDeviceIdentity {
-                details: Some(vec![0u8; 32]),
-                account_signature_key: Some(vec![0u8; 32]),
-                account_signature: Some(vec![0u8; 64]),
-                device_signature: Some(vec![0u8; 64]),
-            },
-        )))
+        pm.process_command(crate::store::commands::DeviceCommand::SetAccount(Some({
+            let mut proto = wa::ADVSignedDeviceIdentity::default();
+            proto.details = Some(vec![0u8; 32]);
+            proto.account_signature_key = Some(vec![0u8; 32]);
+            proto.account_signature = Some(vec![0u8; 64]);
+            proto.device_signature = Some(vec![0u8; 64]);
+            proto
+        })))
         .await;
         let transport = Arc::new(crate::transport::mock::MockTransportFactory::new());
-        let (client, _rx) = Client::new(
-            Arc::new(crate::runtime_impl::TokioRuntime),
-            Arc::new(pm),
-            transport,
-            Arc::new(MockHttpClient),
-            None,
-        )
-        .await;
+        let (client, _rx) = Client::builder()
+            .with_runtime_arc(Arc::new(crate::runtime_impl::TokioRuntime))
+            .with_persistence_manager(Arc::new(pm))
+            .with_transport_factory_arc(transport)
+            .with_http_client_arc(Arc::new(MockHttpClient))
+            .build()
+            .await
+            .expect("test client should build")
+            .into_parts();
         // Intentionally leave noise_socket unset so send_node errors.
         client.set_connected_for_test(true);
         client
@@ -10577,7 +10917,8 @@ mod tests {
             "a refusing provider must surface as a Setup error, got {res:?}"
         );
 
-        let event = tokio::time::timeout(Duration::from_secs(2), handle.events().recv())
+        let mut events = handle.take_events().expect("first acquisition");
+        let event = tokio::time::timeout(Duration::from_secs(2), events.recv())
             .await
             .expect("the reason must reach the handle rather than only the log")
             .expect("the event stream must carry it before it closes");
@@ -10629,7 +10970,7 @@ mod tests {
     // stanza-id waiter is gone.
     #[tokio::test]
     async fn relay_waiter_no_ack_removes_response_waiter() {
-        // make_client's Client::new already sets self_weak, so spawn_outgoing_relay_waiter can upgrade
+        // make_client's builder already sets self_weak, so spawn_outgoing_relay_waiter can upgrade
         // an owned Arc<Client>.
         let client = make_client().await;
 
@@ -10684,14 +11025,15 @@ mod tests {
         )))
         .await;
         let transport = Arc::new(crate::transport::mock::MockTransportFactory::new());
-        let (client, _rx) = Client::new(
-            Arc::new(crate::runtime_impl::TokioRuntime),
-            Arc::new(pm),
-            transport,
-            Arc::new(MockHttpClient),
-            None,
-        )
-        .await;
+        let (client, _rx) = Client::builder()
+            .with_runtime_arc(Arc::new(crate::runtime_impl::TokioRuntime))
+            .with_persistence_manager(Arc::new(pm))
+            .with_transport_factory_arc(transport)
+            .with_http_client_arc(Arc::new(MockHttpClient))
+            .build()
+            .await
+            .expect("test client should build")
+            .into_parts();
         client.set_connected_for_test(true);
         client
     }
@@ -10819,6 +11161,7 @@ mod tests {
 
     /// A live handle over a mock relay + a sending client, for the video handshake tests. The
     /// returned relay sender is a keepalive: dropping it disconnects the relay and ends the call.
+    /// Encoded audio keeps these control tests independent of the optional PCM codec.
     async fn sending_handle() -> (
         Arc<Client>,
         Arc<AtomicUsize>,
@@ -10832,13 +11175,12 @@ mod tests {
             relay_rx: Mutex::new(Some(relay_rx)),
             connects: Arc::new(AtomicUsize::new(0)),
         };
-        let (_mic_tx, mic_rx) = async_channel::unbounded::<Vec<i16>>();
-        let (spk_tx, _spk_rx) = async_channel::unbounded::<Vec<i16>>();
+
         let handle = spawn_call_via_backend(
             &client,
             mk_session(),
             Arc::new(factory),
-            pcm_audio(Arc::new(mic_rx), Arc::new(spk_tx)),
+            encoded_audio(AudioFormat::OPUS_16KHZ_60MS),
             None,
         )
         .await
@@ -11013,32 +11355,29 @@ mod tests {
         let client = make_client().await;
         let spawn = |_client: &Client| {
             let (_relay_tx, relay_rx) = async_channel::unbounded();
-            let factory = MockFactory {
+            MockFactory {
                 sent: Arc::new(Mutex::new(Vec::new())),
                 relay_rx: Mutex::new(Some(relay_rx)),
                 connects: Arc::new(AtomicUsize::new(0)),
-            };
-            let (_mic_tx, mic_rx) = async_channel::unbounded::<Vec<i16>>();
-            let (spk_tx, _spk_rx) = async_channel::unbounded::<Vec<i16>>();
-            (factory, Arc::new(mic_rx), Arc::new(spk_tx))
+            }
         };
 
-        let (f1, mic1, spk1) = spawn(&client);
+        let f1 = spawn(&client);
         let stale = spawn_call_via_backend(
             &client,
             mk_session(),
             Arc::new(f1),
-            pcm_audio(mic1, spk1),
+            encoded_audio(AudioFormat::OPUS_16KHZ_60MS),
             None,
         )
         .await
         .expect("first spawn_call");
-        let (f2, mic2, spk2) = spawn(&client);
+        let f2 = spawn(&client);
         let live = spawn_call_via_backend(
             &client,
             mk_session(),
             Arc::new(f2),
-            pcm_audio(mic2, spk2),
+            encoded_audio(AudioFormat::OPUS_16KHZ_60MS),
             None,
         )
         .await
@@ -11461,7 +11800,7 @@ mod tests {
             client: Arc::downgrade(&client),
             muted: Arc::new(AtomicBool::new(false)),
             video: video_shared.clone(),
-            events: ev_rx,
+            events: Arc::new(Mutex::new(Some(ev_rx))),
             ended: Arc::new(EndedFlag::default()),
             media: None,
         };
@@ -11542,7 +11881,7 @@ mod tests {
             client: Arc::downgrade(&client),
             muted: Arc::new(AtomicBool::new(false)),
             video: video.clone(),
-            events,
+            events: Arc::new(Mutex::new(Some(events))),
             ended: Arc::new(EndedFlag::default()),
             media: None,
         };
@@ -11633,7 +11972,7 @@ mod tests {
             client: Arc::downgrade(&client),
             muted: Arc::new(AtomicBool::new(false)),
             video: video.clone(),
-            events,
+            events: Arc::new(Mutex::new(Some(events))),
             ended: Arc::new(EndedFlag::default()),
             media: None,
         };
@@ -11767,7 +12106,7 @@ mod tests {
             client: Arc::downgrade(&client),
             muted: Arc::new(AtomicBool::new(false)),
             video: video.clone(),
-            events,
+            events: Arc::new(Mutex::new(Some(events))),
             ended: Arc::new(EndedFlag::default()),
             media: None,
         };
@@ -12005,7 +12344,7 @@ mod tests {
             client: Arc::downgrade(&client),
             muted: Arc::new(AtomicBool::new(false)),
             video: video.clone(),
-            events,
+            events: Arc::new(Mutex::new(Some(events))),
             ended: Arc::new(EndedFlag::default()),
             media: None,
         };
@@ -12111,9 +12450,12 @@ mod tests {
     async fn dormant_stop_video_clears_pending_endpoints() {
         let (client, _sent) = make_sending_client().await;
         let (source, sink) = video_endpoints();
-        let (handle, call_id) =
-            place_dormant_outgoing_with_video(&client, Some(VideoEndpoints::new(source, sink)))
-                .await;
+        let (handle, call_id) = place_dormant_outgoing_with_media(
+            &client,
+            encoded_audio(AudioFormat::OPUS_16KHZ_60MS),
+            Some(VideoEndpoints::new(source, sink)),
+        )
+        .await;
         assert!(
             client
                 .voip_state()
@@ -12416,6 +12758,9 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod invited_group_tests;
+
 /// The control-plane vertical slice: a real `Client` with an injected `FakeMediaBackend`, compiled
 /// **without** the resident engine. This is the architectural gate for the seam — if any production
 /// path it exercises reached for `CallEngine` or the engine feature, this module would not build.
@@ -12447,14 +12792,14 @@ mod control_only_tests {
             Jid::new("111111111111111", Server::Lid),
         )))
         .await;
-        pm.process_command(crate::store::commands::DeviceCommand::SetAccount(Some(
-            wa::ADVSignedDeviceIdentity {
-                details: Some(vec![0u8; 32]),
-                account_signature_key: Some(vec![0u8; 32]),
-                account_signature: Some(vec![0u8; 64]),
-                device_signature: Some(vec![0u8; 64]),
-            },
-        )))
+        pm.process_command(crate::store::commands::DeviceCommand::SetAccount(Some({
+            let mut proto = wa::ADVSignedDeviceIdentity::default();
+            proto.details = Some(vec![0u8; 32]);
+            proto.account_signature_key = Some(vec![0u8; 32]);
+            proto.account_signature = Some(vec![0u8; 64]);
+            proto.device_signature = Some(vec![0u8; 64]);
+            proto
+        })))
         .await;
         let peer = Jid::new("333333333333333", Server::Lid).with_device(0);
         crate::test_utils::seed_peer_session(&client, &peer).await;
@@ -12797,7 +13142,8 @@ mod control_only_tests {
             generation,
             peer_video.clone()
         ));
-        assert_eq!(handle.events().try_recv(), Ok(peer_video));
+        let mut events = handle.take_events().expect("first acquisition");
+        assert_eq!(events.try_recv(), Ok(peer_video));
 
         // Counters the backend sets are what the handle reports.
         media.set_stats(
@@ -12818,10 +13164,7 @@ mod control_only_tests {
             Some(wacore::voip_control::MediaCloseReason::Local)
         );
         assert!(
-            matches!(
-                handle.events().try_recv(),
-                Err(async_channel::TryRecvError::Closed)
-            ),
+            matches!(events.try_recv(), Err(async_channel::TryRecvError::Closed)),
             "the closed stream ends the consumer instead of parking it"
         );
         assert!(

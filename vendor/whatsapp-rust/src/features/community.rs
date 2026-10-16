@@ -16,8 +16,9 @@ use log::warn;
 use thiserror::Error;
 use wacore::iq::groups::{
     CommunityParticipatingIq, CommunityParticipatingOverviewIq, DeleteCommunityIq,
-    GetLinkedGroupsParticipantsIq, GroupCreateOptions, JoinGroupResult, JoinLinkedGroupIq,
-    LinkSubgroup, LinkSubgroupsIq, QueryLinkedGroupIq, UnlinkSubgroupsIq,
+    GetLinkedGroupsParticipantsIq, GroupCreateOptions, GroupDescription, GroupSubject,
+    JoinGroupResult, JoinLinkedGroupIq, LinkSubgroup, LinkSubgroupsIq, QueryLinkedGroupIq,
+    UnlinkSubgroupsIq,
 };
 use wacore::iq::mex_operations::{fetch_all_subgroups, query_subgroup_participant_count};
 use wacore_binary::Jid;
@@ -46,31 +47,32 @@ pub enum CommunityError {
     /// caller is not in the group yet.
     #[error("subgroup join requires membership approval: {0}")]
     MembershipApprovalRequired(Jid),
+    /// Creation succeeded, but a follow-up configuration step failed.
+    /// Resume configuration on `created_jid`; do not create another community.
+    #[error("community {created_jid} created, but {step:?} failed: {source}")]
+    ConfigurationFailed {
+        created_jid: Jid,
+        step: CommunityConfigurationStep,
+        #[source]
+        source: Box<GroupError>,
+    },
+}
+
+/// A follow-up step after remote community creation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CommunityConfigurationStep {
+    SetDescription,
 }
 
 // Types
 
-/// Classification of a group within the community hierarchy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum GroupType {
-    /// Regular standalone group (not part of a community).
-    Default,
-    /// Community parent group.
-    Community,
-    /// A subgroup linked to a community.
-    LinkedSubgroup,
-    /// The default announcement subgroup of a community.
-    LinkedAnnouncementGroup,
-    /// The general chat subgroup of a community.
-    LinkedGeneralGroup,
-}
-
 /// Options for creating a new community.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct CreateCommunityOptions {
-    pub name: String,
-    pub description: Option<String>,
+    pub name: GroupSubject,
+    pub description: Option<GroupDescription>,
     /// Whether the community is closed (requires approval to join).
     pub closed: bool,
     /// Allow non-admin members to create subgroups.
@@ -80,14 +82,35 @@ pub struct CreateCommunityOptions {
 }
 
 impl CreateCommunityOptions {
-    pub fn new(name: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
+    /// Validate the name and select the default community configuration.
+    pub fn new(name: impl Into<String>) -> Result<Self, CommunityError> {
+        let name = GroupSubject::new(name)
+            .map_err(|error| CommunityError::InvalidRequest(error.to_string()))?;
+        Ok(Self {
+            name,
             description: None,
             closed: false,
             allow_non_admin_sub_group_creation: false,
             create_general_chat: true,
+        })
+    }
+
+    /// Supply a description validated by the same contract as group updates.
+    pub fn with_description(mut self, description: GroupDescription) -> Self {
+        self.description = Some(description);
+        self
+    }
+
+    fn validate(&self) -> Result<(), CommunityError> {
+        // Response parsing exposes unchecked constructors on these newtypes;
+        // revalidate public inputs so they cannot bypass the preflight boundary.
+        GroupSubject::new(self.name.as_str())
+            .map_err(|error| CommunityError::InvalidRequest(error.to_string()))?;
+        if let Some(description) = &self.description {
+            GroupDescription::new(description.as_str())
+                .map_err(|error| CommunityError::InvalidRequest(error.to_string()))?;
         }
+        Ok(())
     }
 }
 
@@ -173,12 +196,31 @@ pub struct CommunitySubgroup {
     pub is_hidden_group: bool,
 }
 
+/// A server-reported failure for one subgroup in a batch operation.
+/// Numeric codes are preserved, including codes unknown to this library.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SubgroupFailure {
+    pub jid: Jid,
+    pub code: u32,
+}
+
+impl SubgroupFailure {
+    /// Construct a failure for mocks or host adapters.
+    pub fn new(jid: impl Into<Jid>, code: u32) -> Self {
+        Self {
+            jid: jid.into(),
+            code,
+        }
+    }
+}
+
 /// Result of linking subgroups to a community.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct LinkSubgroupsResult {
     pub linked_jids: Vec<Jid>,
-    pub failed_groups: Vec<(Jid, u32)>,
+    pub failed_groups: Vec<SubgroupFailure>,
 }
 
 /// Result of unlinking subgroups from a community.
@@ -186,34 +228,7 @@ pub struct LinkSubgroupsResult {
 #[non_exhaustive]
 pub struct UnlinkSubgroupsResult {
     pub unlinked_jids: Vec<Jid>,
-    pub failed_groups: Vec<(Jid, u32)>,
-}
-
-/// Determine the group type from metadata fields.
-///
-/// A pure projection of [`GroupHierarchy`](crate::GroupHierarchy):
-/// the classification runs through the single canonical normalizer, so this
-/// and overview hierarchies agree by construction instead of reimplementing
-/// flag precedence.
-pub fn group_type(metadata: &GroupMetadata) -> GroupType {
-    // from_metadata is the canonical normalizer; match on its output rather
-    // than re-reading the flags so precedence lives in exactly one place.
-    let hierarchy = crate::features::groups::GroupHierarchy::from_metadata(metadata);
-    // Exhaustive on purpose: this match lives in the crate that defines the
-    // enums, so `#[non_exhaustive]` does not require a wildcard here. Leaving
-    // one out means a future `GroupHierarchy`/`SubgroupKind` variant forces a
-    // classification decision instead of silently defaulting.
-    match hierarchy {
-        crate::features::groups::GroupHierarchy::Standalone => GroupType::Default,
-        crate::features::groups::GroupHierarchy::Community => GroupType::Community,
-        crate::features::groups::GroupHierarchy::Subgroup { kind, .. } => match kind {
-            crate::features::groups::SubgroupKind::Announcement => {
-                GroupType::LinkedAnnouncementGroup
-            }
-            crate::features::groups::SubgroupKind::General => GroupType::LinkedGeneralGroup,
-            crate::features::groups::SubgroupKind::Regular => GroupType::LinkedSubgroup,
-        },
-    }
+    pub failed_groups: Vec<SubgroupFailure>,
 }
 
 // Feature handle
@@ -229,22 +244,29 @@ impl<'a> Community<'a> {
 
     /// Create a new community.
     ///
-    /// If a description is provided, it is set via a follow-up IQ after creation
-    /// (the group create stanza does not support inline descriptions for communities).
+    /// All local inputs are validated before the create IQ. A description is
+    /// configured via a follow-up IQ; this is not an atomic operation and has
+    /// no rollback or automatic retry. [`CommunityError::ConfigurationFailed`]
+    /// preserves the created JID, failed step and cause. Resume with
+    /// [`crate::features::groups::Groups::set_description`] on that JID and
+    /// [`PreviousDescription::Resolve`] to observe the current description token.
+    /// Cancellation after creation is not covered by this returned-error contract.
     pub async fn create(
         &self,
         options: CreateCommunityOptions,
     ) -> Result<CreateCommunityResult, CommunityError> {
-        let description = options.description.clone();
+        options.validate()?;
+        let description = options.description;
 
-        let create_options = GroupCreateOptions {
-            subject: options.name,
-            is_parent: true,
-            closed: options.closed,
-            allow_non_admin_sub_group_creation: options.allow_non_admin_sub_group_creation,
-            create_general_chat: options.create_general_chat,
-            ..Default::default()
-        };
+        // Preserve the existing two-stage community wire flow. Generic group
+        // creation also has an inline description option; adopting it here is
+        // a protocol-sequencing change, not part of this input/error fix.
+        let mut create_options = GroupCreateOptions::new(options.name.into_string());
+        create_options.is_parent = true;
+        create_options.closed = options.closed;
+        create_options.allow_non_admin_sub_group_creation =
+            options.allow_non_admin_sub_group_creation;
+        create_options.create_general_chat = options.create_general_chat;
 
         let mut metadata = self
             .client
@@ -253,15 +275,19 @@ impl<'a> Community<'a> {
             .await?
             .metadata;
 
-        if let Some(desc_text) = description
-            && let Ok(desc) = wacore::iq::groups::GroupDescription::new(&desc_text)
-        {
+        if let Some(description) = description {
+            let desc_text = description.as_str().to_owned();
             self.client
                 .groups()
-                // The group was just created, so nothing can have set a
-                // description ahead of us.
-                .set_description(&metadata.id, Some(desc), PreviousDescription::Absent)
-                .await?;
+                // No description was supplied on the create IQ. Use the
+                // optimistic absence check for this first configuration attempt.
+                .set_description(&metadata.id, Some(description), PreviousDescription::Absent)
+                .await
+                .map_err(|source| CommunityError::ConfigurationFailed {
+                    created_jid: metadata.id.clone(),
+                    step: CommunityConfigurationStep::SetDescription,
+                    source: Box::new(source),
+                })?;
             metadata.description = Some(desc_text);
         }
 
@@ -288,18 +314,17 @@ impl<'a> Community<'a> {
         &self,
         options: CreateSubgroupOptions,
     ) -> Result<CreateCommunityResult, CommunityError> {
-        let create_options = GroupCreateOptions {
-            subject: options.name,
-            participants: options
+        let name = GroupSubject::new(options.name)
+            .map_err(|error| CommunityError::InvalidRequest(error.to_string()))?;
+        let mut create_options = GroupCreateOptions::new(name.into_string()).with_participants(
+            options
                 .participants
-                .iter()
-                .cloned()
+                .into_iter()
                 .map(GroupParticipantOptions::new)
                 .collect(),
-            linked_parent: Some(options.parent_jid),
-            hidden_group: options.visibility == SubgroupVisibility::Hidden,
-            ..Default::default()
-        };
+        );
+        create_options.linked_parent = Some(options.parent_jid);
+        create_options.hidden_group = options.visibility == SubgroupVisibility::Hidden;
         let metadata = self
             .client
             .groups()
@@ -371,7 +396,7 @@ impl<'a> Community<'a> {
 
         for group in response.groups {
             if let Some(error) = group.error {
-                failed_groups.push((group.jid, error));
+                failed_groups.push(SubgroupFailure::new(group.jid, error));
             } else {
                 linked_jids.push(group.jid);
             }
@@ -405,7 +430,7 @@ impl<'a> Community<'a> {
 
         for group in response.groups {
             if let Some(error) = group.error {
-                failed_groups.push((group.jid, error));
+                failed_groups.push(SubgroupFailure::new(group.jid, error));
             } else {
                 unlinked_jids.push(group.jid);
             }
@@ -425,7 +450,7 @@ impl<'a> Community<'a> {
         let response = self
             .client
             .mex()
-            .query(mex_request!(fetch_all_subgroups {
+            .execute(mex_request!(fetch_all_subgroups {
                 group_id: Some(community_jid.to_string()),
                 query_context: Some(SUBGROUP_QUERY_CONTEXT.to_string()),
                 // WA Web names a subgroup the user has already joined here, to
@@ -515,7 +540,7 @@ impl<'a> Community<'a> {
         let response = self
             .client
             .mex()
-            .query(mex_request!(query_subgroup_participant_count {
+            .execute(mex_request!(query_subgroup_participant_count {
                 input: Some(query_subgroup_participant_count::Input {
                     group_jid: Some(community_jid.to_string()),
                     query_context: Some(SUBGROUP_QUERY_CONTEXT.to_string()),
@@ -706,6 +731,332 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn invalid_description_sends_no_create_iq() {
+        let (client, transport) = crate::test_utils::create_iq_test_client().await;
+        let mut options = CreateCommunityOptions::new("Fictitious community").unwrap();
+        options.description = Some(GroupDescription::new_unchecked("a".repeat(2049)));
+        use futures::FutureExt;
+        let result = client.community().create(options).now_or_never();
+        assert_eq!(transport.sent_count(), 0, "invalid input must send no IQ");
+        assert!(matches!(
+            result.expect("preflight must finish on first poll"),
+            Err(CommunityError::InvalidRequest(_))
+        ));
+    }
+
+    #[test]
+    fn community_options_validate_and_preserve_defaults() {
+        let options = CreateCommunityOptions::new("Fictitious community").unwrap();
+        assert!(!options.closed);
+        assert!(!options.allow_non_admin_sub_group_creation);
+        assert!(options.create_general_chat);
+        assert!(options.description.is_none());
+        assert!(CreateCommunityOptions::new("a".repeat(101)).is_err());
+        assert!(GroupDescription::new("a".repeat(2049)).is_err());
+        assert!(GroupDescription::new("").is_ok());
+    }
+
+    #[tokio::test]
+    async fn unchecked_invalid_name_sends_no_create_iq() {
+        let (client, transport) = crate::test_utils::create_iq_test_client().await;
+        let mut options = CreateCommunityOptions::new("Fictitious community").unwrap();
+        options.name = GroupSubject::new_unchecked("a".repeat(101));
+        use futures::FutureExt;
+        assert!(matches!(
+            client
+                .community()
+                .create(options)
+                .now_or_never()
+                .expect("preflight must finish on first poll"),
+            Err(CommunityError::InvalidRequest(_))
+        ));
+        assert_eq!(transport.sent_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn invalid_subgroup_name_sends_no_create_iq() {
+        use futures::FutureExt;
+        let (client, transport) = crate::test_utils::create_iq_test_client().await;
+        let result = client
+            .community()
+            .create_subgroup("a".repeat(101), &[], community_jid())
+            .now_or_never()
+            .expect("preflight must finish on first poll");
+        assert!(matches!(result, Err(CommunityError::InvalidRequest(_))));
+        assert_eq!(transport.sent_count(), 0);
+    }
+
+    fn iq_response(id: &str, children: Vec<wacore_binary::Node>) -> wacore_binary::Node {
+        wacore_binary::builder::NodeBuilder::new("iq")
+            .attr("id", id)
+            .attr("type", "result")
+            .attr("from", community_jid())
+            .children(children)
+            .build()
+    }
+
+    async fn complete_creation(
+        client: &std::sync::Arc<Client>,
+        transport: &std::sync::Arc<crate::transport::mock::CapturingMockTransport>,
+    ) {
+        use wacore_binary::builder::NodeBuilder;
+        let sent = crate::test_utils::decode_sent_iq(transport, 0).await;
+        let sent = sent.get();
+        let create = sent.get_optional_child("create").unwrap();
+        assert!(create.get_optional_child("parent").is_some());
+        assert!(create.get_optional_child("description").is_none());
+        let id = sent.attrs().optional_string("id").unwrap().into_owned();
+        crate::test_utils::answer_iq(
+            client,
+            &id,
+            &iq_response(
+                &id,
+                vec![
+                    NodeBuilder::new("group")
+                        .attr("id", community_jid())
+                        .attr("subject", "Fictitious community")
+                        .build(),
+                ],
+            ),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn valid_description_creates_then_configures() {
+        let (client, transport) = crate::test_utils::create_iq_test_client().await;
+        let task = {
+            let client = client.clone();
+            tokio::spawn(async move {
+                client
+                    .community()
+                    .create(
+                        CreateCommunityOptions::new("Fictitious community")
+                            .unwrap()
+                            .with_description(
+                                GroupDescription::new("Requested description").unwrap(),
+                            ),
+                    )
+                    .await
+            })
+        };
+        complete_creation(&client, &transport).await;
+        let set = crate::test_utils::decode_sent_iq(&transport, 1).await;
+        let set = set.get();
+        let description = set.get_optional_child("description").unwrap();
+        assert!(description.attrs().optional_string("prev").is_none());
+        assert_eq!(
+            description
+                .get_optional_child("body")
+                .unwrap()
+                .content_as_string()
+                .as_deref(),
+            Some("Requested description")
+        );
+        let id = set.attrs().optional_string("id").unwrap().into_owned();
+        crate::test_utils::answer_iq(&client, &id, &iq_response(&id, vec![])).await;
+        let result = task.await.unwrap().unwrap();
+        assert_eq!(result.metadata.id, community_jid());
+        assert_eq!(
+            result.metadata.description.as_deref(),
+            Some("Requested description")
+        );
+        assert_eq!(transport.sent_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn description_failure_preserves_created_jid_step_and_cause_and_can_resume() {
+        use wacore_binary::builder::NodeBuilder;
+        let (client, transport) = crate::test_utils::create_iq_test_client().await;
+        let task = {
+            let client = client.clone();
+            tokio::spawn(async move {
+                client
+                    .community()
+                    .create(
+                        CreateCommunityOptions::new("Fictitious community")
+                            .unwrap()
+                            .with_description(
+                                GroupDescription::new("Requested description").unwrap(),
+                            ),
+                    )
+                    .await
+            })
+        };
+        complete_creation(&client, &transport).await;
+        let set = crate::test_utils::decode_sent_iq(&transport, 1).await;
+        let id = set
+            .get()
+            .attrs()
+            .optional_string("id")
+            .unwrap()
+            .into_owned();
+        let failure = NodeBuilder::new("iq")
+            .attr("id", &id)
+            .attr("type", "error")
+            .attr("from", community_jid())
+            .children([NodeBuilder::new("error")
+                .attr("code", "403")
+                .attr("text", "denied")
+                .build()])
+            .build();
+        crate::test_utils::answer_iq(&client, &id, &failure).await;
+        let error = task.await.unwrap().unwrap_err();
+        assert!(std::error::Error::source(&error).is_some());
+        let CommunityError::ConfigurationFailed {
+            created_jid,
+            step,
+            source,
+        } = error
+        else {
+            panic!("expected partial creation error");
+        };
+        assert_eq!(created_jid, community_jid());
+        assert_eq!(step, CommunityConfigurationStep::SetDescription);
+        assert!(
+            matches!(*source, GroupError::Iq(IqError::ServerError { code: 403, ref text, .. }) if text == "denied")
+        );
+
+        let resume = {
+            let client = client.clone();
+            tokio::spawn(async move {
+                client
+                    .groups()
+                    .set_description(
+                        &created_jid,
+                        Some(GroupDescription::new("Requested description").unwrap()),
+                        PreviousDescription::Resolve,
+                    )
+                    .await
+            })
+        };
+        let query = crate::test_utils::decode_sent_iq(&transport, 2).await;
+        assert!(query.get().get_optional_child("query").is_some());
+        let id = query
+            .get()
+            .attrs()
+            .optional_string("id")
+            .unwrap()
+            .into_owned();
+        crate::test_utils::answer_iq(
+            &client,
+            &id,
+            &iq_response(
+                &id,
+                vec![
+                    NodeBuilder::new("group")
+                        .attr("id", community_jid())
+                        .attr("subject", "Fictitious community")
+                        .children([NodeBuilder::new("description")
+                            .attr("id", "OBSERVED")
+                            .children([NodeBuilder::new("body")
+                                .string_content("Observed description")
+                                .build()])
+                            .build()])
+                        .build(),
+                ],
+            ),
+        )
+        .await;
+        let set = crate::test_utils::decode_sent_iq(&transport, 3).await;
+        assert_eq!(
+            set.get()
+                .get_optional_child("description")
+                .unwrap()
+                .attrs()
+                .optional_string("prev")
+                .as_deref(),
+            Some("OBSERVED")
+        );
+        let id = set
+            .get()
+            .attrs()
+            .optional_string("id")
+            .unwrap()
+            .into_owned();
+        crate::test_utils::answer_iq(&client, &id, &iq_response(&id, vec![])).await;
+        resume.await.unwrap().unwrap();
+        assert_eq!(
+            transport.sent_count(),
+            4,
+            "resume must not issue another create"
+        );
+    }
+
+    #[tokio::test]
+    async fn link_and_unlink_preserve_all_batch_results_and_unknown_codes() {
+        use wacore_binary::builder::NodeBuilder;
+        for unlink in [false, true] {
+            let (client, transport) = crate::test_utils::create_iq_test_client().await;
+            let ids: Vec<Jid> = (2..=5)
+                .map(|n| format!("12036300000000000{n}@g.us").parse().unwrap())
+                .collect();
+            let task = {
+                let client = client.clone();
+                let ids = ids.clone();
+                tokio::spawn(async move {
+                    if unlink {
+                        let result = client
+                            .community()
+                            .unlink_subgroups(community_jid(), &ids, false)
+                            .await
+                            .unwrap();
+                        (result.unlinked_jids, result.failed_groups)
+                    } else {
+                        let result = client
+                            .community()
+                            .link_subgroups(community_jid(), &ids)
+                            .await
+                            .unwrap();
+                        (result.linked_jids, result.failed_groups)
+                    }
+                })
+            };
+            let sent = crate::test_utils::decode_sent_iq(&transport, 0).await;
+            let id = sent
+                .get()
+                .attrs()
+                .optional_string("id")
+                .unwrap()
+                .into_owned();
+            let entries = vec![
+                NodeBuilder::new("group").attr("jid", &ids[0]).build(),
+                NodeBuilder::new("group")
+                    .attr("jid", &ids[1])
+                    .attr("error", "403")
+                    .build(),
+                NodeBuilder::new("group").attr("jid", &ids[2]).build(),
+                NodeBuilder::new("group")
+                    .attr("jid", &ids[3])
+                    .attr("error", u32::MAX)
+                    .build(),
+                NodeBuilder::new("group")
+                    .attr("jid", &ids[1])
+                    .attr("error", "0")
+                    .build(),
+            ];
+            let batch = if unlink {
+                NodeBuilder::new("unlink").children(entries).build()
+            } else {
+                NodeBuilder::new("links")
+                    .children([NodeBuilder::new("link").children(entries).build()])
+                    .build()
+            };
+            crate::test_utils::answer_iq(&client, &id, &iq_response(&id, vec![batch])).await;
+            let (successes, failures) = task.await.unwrap();
+            assert_eq!(successes, vec![ids[0].clone(), ids[2].clone()]);
+            assert_eq!(
+                failures,
+                vec![
+                    SubgroupFailure::new(&ids[1], 403),
+                    SubgroupFailure::new(&ids[3], u32::MAX),
+                    SubgroupFailure::new(&ids[1], 0)
+                ]
+            );
+        }
+    }
 
     fn community_jid() -> Jid {
         "120363000000000001@g.us"

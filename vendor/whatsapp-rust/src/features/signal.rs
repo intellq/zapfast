@@ -46,7 +46,10 @@ impl From<crate::client::SignalMaintenanceError> for SignalError {
 }
 
 /// Read-only information from a currently open pairwise session.
+/// Additional session metadata may be exposed in future releases. Obtain this
+/// result through [`Signal::session_info`] and read the fields needed by the host.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SignalSessionInfo {
     /// Local base key identifying the active session state.
     pub base_key: Vec<u8>,
@@ -1324,9 +1327,10 @@ mod tests {
         client
             .signal_flush_test_block
             .store(true, Ordering::Release);
-        let message = waproto::whatsapp::Message {
-            conversation: Some("fanout".into()),
-            ..Default::default()
+        let message = {
+            let mut proto_ = waproto::whatsapp::Message::default();
+            proto_.conversation = Some("fanout".into());
+            proto_
         };
         let (nodes, _) = client
             .signal()

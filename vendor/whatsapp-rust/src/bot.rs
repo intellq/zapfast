@@ -1,25 +1,26 @@
 use crate::cache_config::CacheConfig;
-use crate::client::{Client, ClientBuilderError};
+use crate::client::{Client, ClientBuilder, ClientBuilderError, ClientOptions};
 use crate::features::PresencePolicy;
 use crate::pair_code::PairCodeOptions;
 #[cfg(feature = "plugins")]
-use crate::plugins::{ClientPlugin, PluginHostConfig, PluginRegistration, UntypedClientPlugin};
+use crate::plugins::{ClientPlugin, PluginHostConfig, UntypedClientPlugin};
 use crate::store::commands::DeviceCommand;
 use crate::store::error::StoreError;
 use crate::store::persistence_manager::PersistenceManager;
 use crate::store::traits::Backend;
-use crate::types::durability_hook::InboundDurabilityHook;
+use crate::types::connect_admission::ConnectAdmission;
+use crate::types::durability_hook::{HistorySyncCaptureHook, InboundDurabilityHook};
 use crate::types::enc_handler::EncHandler;
-use crate::types::events::{Event, EventHandler, EventInterest, EventKind};
+use crate::types::events::{Event, EventHandler, EventInterest, EventKind, Subscription};
+use crate::types::group_notification_durability::GroupNotificationDurabilityHook;
 use crate::types::history_sync_admission::HistorySyncAdmission;
 use crate::types::message::MessageInfo;
-use futures::FutureExt;
 use log::{info, warn};
-use std::collections::HashMap;
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
-use std::sync::{Arc, Weak};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use thiserror::Error;
 use wacore::handshake::NoiseCertPolicy;
 use wacore::proto_helpers::MessageBuilderExt;
@@ -107,7 +108,8 @@ pub enum BotBuilderError {
 /// `message` is `Arc` so cloning the context across spawned tasks only bumps a
 /// refcount, matching the pattern used by serenity's `Context` and matrix-sdk's
 /// `Room`/`Client`.
-#[derive(Clone)]
+#[derive(Clone, bon::Builder)]
+#[non_exhaustive]
 pub struct MessageContext {
     pub message: Arc<wa::Message>,
     pub info: MessageInfo,
@@ -199,18 +201,41 @@ impl MessageContext {
         )
     }
 
+    /// Borrow the received message's addressing and inbound metadata. No
+    /// protobuf or origin metadata is cloned.
+    pub fn message_ref(&self) -> Result<crate::MessageRef<'_>, crate::MessageRefError> {
+        crate::MessageRef::from_info(&self.info).map(|r| {
+            r.with_inbound_metadata(self.ephemeral_expiration, self.comment_target.as_deref())
+        })
+    }
+
+    /// Borrow newsletter addressing; client and server ids remain independent.
+    pub fn newsletter_ref(
+        &self,
+    ) -> Result<crate::NewsletterMessageRef<'_>, crate::MessageRefError> {
+        crate::NewsletterMessageRef::new(
+            &self.info.source.chat,
+            (!self.info.id.is_empty())
+                .then(|| crate::MessageId::new(self.info.id.as_str()))
+                .transpose()?,
+            self.info
+                .newsletter_server_id
+                .map(crate::ServerMessageId::new),
+        )
+    }
+
     /// Referential [`wa::MessageKey`] for [`wa::message::ReactionMessage::key`].
     /// Sender-side revokes have a different shape; use [`Client::revoke_message`].
     pub fn message_key(&self) -> wa::MessageKey {
         use wacore_binary::JidExt;
         let needs_participant =
             self.info.source.is_group || self.info.source.chat.is_status_broadcast();
-        wa::MessageKey {
-            remote_jid: Some(self.info.source.chat.to_string()),
-            from_me: Some(self.info.source.is_from_me),
-            id: Some(self.info.id.to_string()),
-            participant: needs_participant.then(|| self.info.source.sender.to_string()),
-        }
+        let mut key = wa::MessageKey::default();
+        key.remote_jid = Some(self.info.source.chat.to_string());
+        key.from_me = Some(self.info.source.is_from_me);
+        key.id = Some(self.info.id.to_string());
+        key.participant = needs_participant.then(|| self.info.source.sender.to_string());
+        key
     }
 
     #[cfg_attr(feature = "tracing", tracing::instrument(name = "wa.bot.edit_message", level = "debug", skip_all, fields(chat = %self.info.source.chat.observe()), err(Debug)))]
@@ -218,215 +243,139 @@ impl MessageContext {
     /// what the returned result describes.
     pub async fn edit_message(
         &self,
-        original_message_id: impl Into<String>,
+        original_message_id: crate::MessageId,
         new_message: wa::Message,
     ) -> Result<crate::send::SendResult, crate::send::SendError> {
+        let target =
+            crate::MessageRef::new(&self.info.source.chat, original_message_id, None, true)?;
         self.client
-            .edit_message(&self.info.source.chat, original_message_id, new_message)
+            .edit_message(crate::EditRequest::new(target, new_message))
             .await
     }
 
-    /// Delete a message for everyone in the chat.
-    #[cfg_attr(feature = "tracing", tracing::instrument(name = "wa.bot.revoke_message", level = "debug", skip_all, fields(chat = %self.info.source.chat.observe()), err(Debug)))]
+    /// Revoke the addressed message using its original author/from-me scope.
+    /// To revoke this context's message, pass `&self.message_ref()?`.
+    #[cfg_attr(feature = "tracing", tracing::instrument(name = "wa.bot.revoke_message", level = "debug", skip_all, fields(chat = %target.chat().observe()), err(Debug)))]
     pub async fn revoke_message(
+        &self,
+        target: &crate::MessageRef<'_>,
+    ) -> Result<crate::send::SendResult, crate::send::SendError> {
+        self.client.revoke_message(target).await
+    }
+
+    /// Explicit raw content id and revoke scope in this context's chat.
+    #[cfg_attr(feature = "tracing", tracing::instrument(name = "wa.bot.revoke_message_raw", level = "debug", skip_all, fields(chat = %self.info.source.chat.observe()), err(Debug)))]
+    pub async fn revoke_message_raw(
         &self,
         message_id: impl Into<String>,
         revoke_type: crate::send::RevokeType,
     ) -> Result<crate::send::SendResult, crate::send::SendError> {
         self.client
-            .revoke_message(&self.info.source.chat, message_id, revoke_type)
+            .revoke_message_raw(&self.info.source.chat, message_id, revoke_type)
             .await
     }
 
     /// React to the incoming message. An empty `emoji` removes a previous
     /// reaction. The target key (including the group/status participant) is
-    /// taken from [`MessageContext::message_key`].
+    /// taken from [`MessageContext::message_ref`].
     #[cfg_attr(feature = "tracing", tracing::instrument(name = "wa.bot.react", level = "debug", skip_all, fields(chat = %self.info.source.chat.observe()), err(Debug)))]
     pub async fn react(
         &self,
         emoji: &str,
     ) -> Result<crate::send::SendResult, crate::send::SendError> {
-        self.client
-            .send_reaction(&self.info.source.chat, self.message_key(), emoji)
-            .await
+        self.client.send_reaction(&self.message_ref()?, emoji).await
     }
 }
 
-type EventHandlerCallback =
-    Arc<dyn Fn(Arc<Event>, Arc<Client>) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+mod event_delivery;
+use CallbackEventHandler as CallbackBusAdapter;
+use event_delivery::RegisteredHandler;
+pub use event_delivery::{CallbackEventHandler, EventDelivery, EventDeliveryStats};
+#[cfg(test)]
+use event_delivery::{EventHandlerCallback, combined_interest};
 
-/// The user callback bundled with the set of event kinds it wants. Carrying the
-/// interest here lets the bus skip materializing (and boxing) events the
-/// callback ignores.
-struct RegisteredHandler {
-    callback: EventHandlerCallback,
-    interest: EventInterest,
-}
-
-/// Union of every registered callback's interest, so the bus only materializes
-/// events at least one callback wants.
-fn combined_interest(handlers: &[RegisteredHandler]) -> EventInterest {
-    handlers
-        .iter()
-        .fold(EventInterest::none(), |acc, h| acc.union(h.interest))
-}
-
-/// How a bot's registered callbacks receive events off the core event bus.
-#[derive(Clone, Copy, Debug, Default)]
+/// Observed background supervision exit, or why no run result is available.
+#[derive(Debug)]
 #[non_exhaustive]
-pub enum EventDelivery {
-    /// Each event is delivered to each interested callback on its own spawned
-    /// task (default). A slow callback stalls neither the bus nor its siblings,
-    /// but ordering across events is not guaranteed and a persistently slow
-    /// consumer can accumulate unbounded in-flight tasks.
-    #[default]
-    Concurrent,
-    /// Events are delivered to the callbacks strictly in arrival order through a
-    /// single bounded mailbox drained by one task — the ordered `messages.upsert`
-    /// contract used by interoperable clients. Bounds
-    /// memory: when the mailbox is full the event is dropped and counted in
-    /// [`StatsSnapshot::events_dropped`](wacore::stats::StatsSnapshot::events_dropped)
-    /// instead of blocking the receive pipeline or growing without limit.
-    /// Register an inbound durability hook when no drop is acceptable
-    /// (at-least-once via redelivery).
-    Ordered {
-        /// Mailbox capacity — events buffered before drops begin. Clamped to ≥1.
-        capacity: usize,
-    },
+pub enum BotRunOutcome {
+    Completed(crate::RunCompletionReason),
+    /// This handle requested abort. Not an executor acknowledgement that the
+    /// task has stopped: custom runtimes may defer or ignore cancellation.
+    AbortRequested,
+    /// The result sender disappeared without an observed run exit or abort
+    /// request. Runtime cancellation, panic and executor loss are not inferred.
+    Unobserved,
 }
 
-/// Bridges the registered closures onto the core event bus per the chosen
-/// [`EventDelivery`] strategy.
-enum Delivery {
-    /// Fan each event out to every interested callback on its own spawned task.
-    Concurrent { handlers: Arc<[RegisteredHandler]> },
-    /// Hand each event to a single ordered drainer via a bounded mailbox.
-    Ordered {
-        tx: async_channel::Sender<Arc<Event>>,
-    },
+/// Graceful client cleanup and the separately observed background run outcome.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct BotShutdownReport {
+    pub shutdown: crate::ShutdownReport,
+    pub run: BotRunOutcome,
 }
 
-struct CallbackBusAdapter {
-    // Weak: the bus lives inside `client.core`, so a strong ref here would pin
-    // the client for its whole lifetime. Upgraded per dispatch.
-    client: Weak<Client>,
-    delivery: Delivery,
-    interest: EventInterest,
+// Builder callbacks belong to the driver, not the Client's event bus lifetime.
+// Either guard can close this shared registration, including an unpolled driver.
+// Take it out of the mutex before bus removal or worker aborts (both can reenter).
+struct CallbackRegistration {
+    subscription: Subscription,
+    handler: Arc<CallbackEventHandler>,
 }
 
-impl CallbackBusAdapter {
-    fn new(client: Arc<Client>, handlers: Vec<RegisteredHandler>, delivery: EventDelivery) -> Self {
-        let interest = combined_interest(&handlers);
-        let delivery = match delivery {
-            EventDelivery::Concurrent => Delivery::Concurrent {
-                handlers: handlers.into(),
-            },
-            EventDelivery::Ordered { capacity } => {
-                let (tx, rx) = async_channel::bounded::<Arc<Event>>(capacity.max(1));
-                let handlers: Arc<[RegisteredHandler]> = handlers.into();
-                // Single drainer preserves arrival order; within an event the
-                // callbacks run in registration order. Weak so a dropped client
-                // exits the loop.
-                let drain_client = Arc::downgrade(&client);
-                let drain_handlers = Arc::clone(&handlers);
-                client
-                    .runtime
-                    .spawn(Box::pin(async move {
-                        while let Ok(event) = rx.recv().await {
-                            let Some(client) = drain_client.upgrade() else {
-                                break;
-                            };
-                            let kind = event.kind();
-                            for handler in drain_handlers.iter() {
-                                if handler.interest.wants(kind) {
-                                    // Keep the lone drainer alive across a faulty
-                                    // callback. catch_unwind guards only poll, so
-                                    // build the future inside the awaited block
-                                    // too — a panic while creating it is caught as
-                                    // well, not just one while polling.
-                                    let cb = handler.callback.clone();
-                                    let ev = Arc::clone(&event);
-                                    let cl = client.clone();
-                                    let ran =
-                                        std::panic::AssertUnwindSafe(
-                                            async move { cb(ev, cl).await },
-                                        )
-                                        .catch_unwind()
-                                        .await;
-                                    if ran.is_err() {
-                                        warn!(
-                                            "ordered event delivery callback panicked; continuing"
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }))
-                    .detach();
-                Delivery::Ordered { tx }
-            }
-        };
+#[derive(Clone, Default)]
+struct BotCallbackGuard {
+    registration: Option<Arc<Mutex<Option<CallbackRegistration>>>>,
+}
+
+impl BotCallbackGuard {
+    fn new(subscription: Subscription, handler: Arc<CallbackEventHandler>) -> Self {
         Self {
-            client: Arc::downgrade(&client),
-            delivery,
-            interest,
+            registration: Some(Arc::new(Mutex::new(Some(CallbackRegistration {
+                subscription,
+                handler,
+            })))),
+        }
+    }
+
+    fn cancel(&self) {
+        let registration = self.registration.as_ref().and_then(|registration| {
+            registration
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+        });
+        if let Some(CallbackRegistration {
+            subscription,
+            handler,
+        }) = registration
+        {
+            drop(subscription);
+            handler.cancel();
         }
     }
 }
 
-impl EventHandler for CallbackBusAdapter {
-    fn handle_event(&self, event: Arc<Event>) {
-        match &self.delivery {
-            Delivery::Concurrent { handlers } => {
-                let Some(client) = self.client.upgrade() else {
-                    return;
-                };
-                let kind = event.kind();
-                for handler in handlers.iter() {
-                    if !handler.interest.wants(kind) {
-                        continue;
-                    }
-                    let callback = handler.callback.clone();
-                    let cb_client = client.clone();
-                    let event = Arc::clone(&event);
-                    client.runtime.spawn_detached(Box::pin(async move {
-                        callback(event, cb_client).await;
-                    }));
-                }
-            }
-            // Non-blocking on purpose: dropping on a full mailbox keeps a slow
-            // consumer from ever backpressuring the receive pipeline. Only a
-            // full mailbox is a capacity drop; a closed channel means the drainer
-            // is gone (teardown/panic) and must not be masked as one.
-            Delivery::Ordered { tx } => match tx.try_send(event) {
-                Ok(()) => {}
-                Err(async_channel::TrySendError::Full(_)) => {
-                    if let Some(client) = self.client.upgrade() {
-                        client.stats.record_event_dropped();
-                    }
-                }
-                Err(async_channel::TrySendError::Closed(_)) => {
-                    log::debug!("ordered event delivery channel closed; dropping event");
-                }
-            },
-        }
-    }
-
-    fn interest(&self) -> EventInterest {
-        self.interest
+impl Drop for BotCallbackGuard {
+    fn drop(&mut self) {
+        self.cancel();
     }
 }
 
 /// Handle to a bot started in the background via [`Bot::spawn`]. Awaiting it
-/// resolves once the run loop exits (logout, [`BotHandle::shutdown`], or abort).
+/// preserves the run outcome, or reports an abort request / unobserved exit.
 ///
-/// Dropping the handle aborts the bot task. Keep it alive for as long as the
+/// Dropping the handle aborts the bot task and its builder callback delivery,
+/// without joining or draining callbacks. Keep it alive for as long as the
 /// bot should run, and prefer [`BotHandle::shutdown`] to stop it.
 #[must_use = "dropping the handle aborts the bot; bind it and await it, or call .shutdown()"]
 pub struct BotHandle {
     client: Arc<Client>,
-    done_rx: futures::channel::oneshot::Receiver<()>,
+    callbacks: BotCallbackGuard,
+    done_rx: futures::channel::oneshot::Receiver<crate::RunCompletionReason>,
     abort_handle: wacore::runtime::AbortHandle,
+    abort_requested: AtomicBool,
+    abort_waker: futures::task::AtomicWaker,
 }
 
 impl BotHandle {
@@ -436,31 +385,47 @@ impl BotHandle {
 
     /// Gracefully stop the bot: disconnects (flushing the device snapshot,
     /// buffered receipts and message secrets) and waits for the run loop to
-    /// exit.
-    pub async fn shutdown(self) {
-        self.client.disconnect().await;
-        let mut done_rx = self.done_rx;
-        let _ = (&mut done_rx).await;
+    /// exit. This does not join detached owners or imply storage release; obtain
+    /// [`Client::store_release`] before consuming this handle to observe that
+    /// separate ownership boundary.
+    pub async fn shutdown(self) -> BotShutdownReport {
+        let shutdown = self.client.shutdown().await;
+        let run = self.await;
+        BotShutdownReport { shutdown, run }
     }
 
     /// Abort the bot task immediately. Skips the flush work
     /// [`BotHandle::shutdown`] performs, so recently captured state may be
-    /// lost; escape hatch only.
+    /// lost; escape hatch only. Also cancels builder callbacks without draining
+    /// or waiting for the runtime to acknowledge driver cancellation.
     pub fn abort(&self) {
+        self.abort_requested.store(true, Ordering::Release);
+        self.abort_waker.wake();
+        self.callbacks.cancel();
         self.abort_handle.abort();
     }
 }
 
 impl std::future::Future for BotHandle {
-    type Output = ();
+    type Output = BotRunOutcome;
 
     fn poll(
         mut self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
-        // Canceled only happens when the run task was aborted; both outcomes
-        // mean "the bot is no longer running", which is all awaiters care about.
-        Pin::new(&mut self.done_rx).poll(cx).map(|_| ())
+        use std::task::Poll;
+        self.abort_waker.register(cx.waker());
+        // An already-sent run verdict wins over a later abort request. A
+        // request with no verdict must not wait for an executor to drop its
+        // sender (custom runtimes are allowed to delay that indefinitely).
+        match Pin::new(&mut self.done_rx).poll(cx) {
+            Poll::Ready(Ok(reason)) => Poll::Ready(BotRunOutcome::Completed(reason)),
+            _ if self.abort_requested.load(Ordering::Acquire) => {
+                Poll::Ready(BotRunOutcome::AbortRequested)
+            }
+            Poll::Ready(Err(_)) => Poll::Ready(BotRunOutcome::Unobserved),
+            Poll::Pending => Poll::Pending,
+        }
     }
 }
 
@@ -500,7 +465,7 @@ async fn run_metered<F: std::future::Future>(
 /// # use whatsapp_rust::prelude::*;
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let bot = Bot::builder()
-///     .with_backend(SqliteStore::new("whatsapp.db").await?)
+///     .with_backend(SqliteStore::open("whatsapp.db").await?)
 ///     .on_message(|ctx| async move {
 ///         let _ = ctx.reply("pong").await;
 ///     })
@@ -515,7 +480,10 @@ async fn run_metered<F: std::future::Future>(
 /// Handlers registered through the builder (`on_message`, `on_event`, …)
 /// receive typed [`Event`] payloads. Anything the
 /// builder does not expose is reachable on the underlying client via
-/// [`Bot::client`], which stays valid after the bot is started.
+/// [`Bot::client`], which stays valid after the bot is started. Builder callback
+/// delivery ends with the driver, including foreground future cancellation;
+/// accepted callbacks are aborted, not drained or joined. Independent Client
+/// subscriptions and raw handlers keep their existing ownership policies.
 pub struct Bot {
     client: Arc<Client>,
     sync_task_receiver: Option<async_channel::Receiver<crate::sync_task::MajorSyncTask>>,
@@ -555,7 +523,7 @@ impl Bot {
     }
 
     /// Run the bot on the current task until it shuts down (logout, or
-    /// [`Client::disconnect`] called on [`Bot::client`] from another task).
+    /// [`Client::shutdown`] called on [`Bot::client`] from another task).
     ///
     /// To run in the background instead, use [`Bot::spawn`].
     ///
@@ -564,13 +532,7 @@ impl Bot {
     /// own binary. The boxed barrier below type-erases the graph in a plain
     /// (linker-shared) function, so callers poll through a vtable and the
     /// graph is compiled once, here. One allocation per process.
-    pub async fn run(self) {
-        let _ = self.run_with_reason().await;
-    }
-
-    /// Run the bot and report why its client supervision ended. Existing
-    /// callers can continue using [`Self::run`], which returns `()`.
-    pub async fn run_with_reason(self) -> crate::RunCompletionReason {
+    pub async fn run(self) -> crate::RunCompletionReason {
         self.run_boxed().await
     }
 
@@ -585,32 +547,38 @@ impl Bot {
     )]
     async fn run_graph(self) -> crate::RunCompletionReason {
         let instrument = self.task_instrument.clone();
-        let client = self.start_background();
-        run_metered(client.run_with_reason(), instrument).await
+        let (client, _callbacks) = self.start_background();
+        run_metered(client.run(), instrument).await
     }
 
     /// Start the bot on its runtime and return a [`BotHandle`] to await,
     /// gracefully shut down, or abort it.
     pub fn spawn(self) -> BotHandle {
-        let client = self.start_background();
+        let (client, callbacks) = self.start_background();
 
         let run_client = client.clone();
-        let (done_tx, done_rx) = futures::channel::oneshot::channel::<()>();
+        let driver_callbacks = callbacks.clone();
+        let (done_tx, done_rx) = futures::channel::oneshot::channel();
         let abort_handle = client.runtime.spawn(Box::pin(async move {
-            run_client.run_with_reason().await;
-            let _ = done_tx.send(());
+            let callbacks = driver_callbacks;
+            let reason = run_client.run().await;
+            drop(callbacks);
+            let _ = done_tx.send(reason);
         }));
 
         BotHandle {
             client,
+            callbacks,
             done_rx,
             abort_handle,
+            abort_requested: AtomicBool::new(false),
+            abort_waker: futures::task::AtomicWaker::new(),
         }
     }
 
     /// Wires the background workers and event handlers, returning the client
     /// that drives the connection. Shared by [`Bot::run`] and [`Bot::spawn`].
-    fn start_background(self) -> Arc<Client> {
+    fn start_background(self) -> (Arc<Client>, BotCallbackGuard) {
         let Bot {
             client,
             sync_task_receiver,
@@ -625,17 +593,17 @@ impl Bot {
             client.start_sync_task_worker(receiver);
         }
 
-        if !event_handlers.is_empty() {
-            client
-                .core
-                .event_bus
-                .subscribe_handler(Arc::new(CallbackBusAdapter::new(
-                    client.clone(),
-                    event_handlers,
-                    event_delivery,
-                )))
-                .detach();
-        }
+        let callbacks = if event_handlers.is_empty() {
+            BotCallbackGuard::default()
+        } else {
+            let handler = Arc::new(CallbackBusAdapter::new(
+                client.clone(),
+                event_handlers,
+                event_delivery,
+            ));
+            let subscription = client.subscribe_handler(handler.clone());
+            BotCallbackGuard::new(subscription, handler)
+        };
         for handler in raw_handlers {
             client.core.event_bus.subscribe_handler(handler).detach();
         }
@@ -646,7 +614,7 @@ impl Bot {
             client.runtime.spawn(Box::pin(async move {
                 // Wait for socket to be ready (before login) with 30 second timeout
                 if let Err(e) = client_for_pair
-                    .wait_for_socket(std::time::Duration::from_secs(30))
+                    .wait_for_socket_ready(std::time::Duration::from_secs(30))
                     .await
                 {
                     warn!(target: "Bot/PairCode", "Timeout waiting for socket: {}", e);
@@ -685,7 +653,7 @@ impl Bot {
             })).detach();
         }
 
-        client
+        (client, callbacks)
     }
 }
 
@@ -696,7 +664,13 @@ impl Bot {
 /// only available once all four are [`Provided`], turning missing-field errors
 /// into compile-time errors. With the default cargo features, transport, HTTP
 /// client and runtime start [`Provided`] (Tokio WebSocket, ureq, Tokio), so
-/// only the backend is required.
+/// only the backend is required. Shared options never satisfy required dependencies:
+///
+/// ```compile_fail
+/// use whatsapp_rust::bot::Bot;
+/// use whatsapp_rust::ClientOptions;
+/// let _ = Bot::builder().with_client_options(ClientOptions::default()).build();
+/// ```
 #[must_use = "call .build() to produce the Bot; the builder does nothing on its own"]
 pub struct BotBuilder<
     B = MissingBackend,
@@ -706,68 +680,39 @@ pub struct BotBuilder<
 > {
     // Required fields (guaranteed present when B/T/H/R = Provided)
     backend: Option<Arc<dyn Backend>>,
-    transport_factory: Option<Arc<dyn crate::transport::TransportFactory>>,
-    http_client: Option<Arc<dyn crate::http::HttpClient>>,
-    runtime: Option<Arc<dyn Runtime>>,
+    client_builder: ClientBuilder,
     // Optional fields
     event_handlers: Vec<RegisteredHandler>,
     event_delivery: EventDelivery,
     raw_handlers: Vec<Arc<dyn EventHandler>>,
-    custom_enc_handlers: HashMap<String, Arc<dyn EncHandler>>,
-    inbound_durability_hook: Option<Arc<dyn InboundDurabilityHook>>,
-    history_sync_admission: Option<Arc<dyn HistorySyncAdmission>>,
-    override_version: Option<(u32, u32, u32)>,
     device_props_override: Option<DevicePropsOverride>,
     pair_code_options: Option<PairCodeOptions>,
-    skip_history_sync: bool,
-    ab_props_fetch: bool,
-    watched_ab_props: Vec<wacore::iq::abprops::AbProp>,
-    presence_policy: PresencePolicy,
-    noise_cert_policy: NoiseCertPolicy,
     initial_push_name: Option<String>,
-    cache_config: CacheConfig,
-    wanted_pre_key_count: Option<usize>,
-    resend_rate_limit: Option<(u32, u32)>,
-    task_instrument: Option<Arc<dyn wacore::stats::TaskInstrument>>,
-    alloc_meter: Option<Arc<wacore::stats::AllocMeter>>,
-    #[cfg(feature = "plugins")]
-    plugins: Vec<PluginRegistration>,
-    #[cfg(feature = "plugins")]
-    plugin_host_config: PluginHostConfig,
     _marker: PhantomData<(B, T, H, R)>,
 }
 
 impl BotBuilder<MissingBackend, DefaultTransportState, DefaultHttpState, DefaultRuntimeState> {
     fn new() -> Self {
+        let mut client_builder =
+            ClientBuilder::new().with_background_saver_interval(std::time::Duration::from_secs(30));
+        if let Some(factory) = default_transport_factory() {
+            client_builder = client_builder.with_transport_factory_arc(factory);
+        }
+        if let Some(http) = default_http_client() {
+            client_builder = client_builder.with_http_client_arc(http);
+        }
+        if let Some(runtime) = default_runtime() {
+            client_builder = client_builder.with_runtime_arc(runtime);
+        }
         Self {
             backend: None,
-            transport_factory: default_transport_factory(),
-            http_client: default_http_client(),
-            runtime: default_runtime(),
+            client_builder,
             event_handlers: Vec::new(),
             event_delivery: EventDelivery::default(),
             raw_handlers: Vec::new(),
-            custom_enc_handlers: HashMap::new(),
-            inbound_durability_hook: None,
-            history_sync_admission: None,
-            override_version: None,
             device_props_override: None,
             pair_code_options: None,
-            skip_history_sync: false,
-            ab_props_fetch: true,
-            watched_ab_props: Vec::new(),
-            presence_policy: PresencePolicy::default(),
-            noise_cert_policy: NoiseCertPolicy::default(),
             initial_push_name: None,
-            cache_config: CacheConfig::default(),
-            wanted_pre_key_count: None,
-            resend_rate_limit: None,
-            task_instrument: None,
-            alloc_meter: None,
-            #[cfg(feature = "plugins")]
-            plugins: Vec::new(),
-            #[cfg(feature = "plugins")]
-            plugin_host_config: PluginHostConfig::default(),
             _marker: PhantomData,
         }
     }
@@ -779,35 +724,62 @@ impl<B, T, H, R> BotBuilder<B, T, H, R> {
     fn cast<B2, T2, H2, R2>(self) -> BotBuilder<B2, T2, H2, R2> {
         BotBuilder {
             backend: self.backend,
-            transport_factory: self.transport_factory,
-            http_client: self.http_client,
-            runtime: self.runtime,
+            client_builder: self.client_builder,
             event_handlers: self.event_handlers,
             event_delivery: self.event_delivery,
             raw_handlers: self.raw_handlers,
-            custom_enc_handlers: self.custom_enc_handlers,
-            inbound_durability_hook: self.inbound_durability_hook,
-            history_sync_admission: self.history_sync_admission,
-            override_version: self.override_version,
             device_props_override: self.device_props_override,
             pair_code_options: self.pair_code_options,
-            skip_history_sync: self.skip_history_sync,
-            ab_props_fetch: self.ab_props_fetch,
-            watched_ab_props: self.watched_ab_props,
-            presence_policy: self.presence_policy,
-            noise_cert_policy: self.noise_cert_policy,
             initial_push_name: self.initial_push_name,
-            cache_config: self.cache_config,
-            wanted_pre_key_count: self.wanted_pre_key_count,
-            resend_rate_limit: self.resend_rate_limit,
-            task_instrument: self.task_instrument,
-            alloc_meter: self.alloc_meter,
-            #[cfg(feature = "plugins")]
-            plugins: self.plugins,
-            #[cfg(feature = "plugins")]
-            plugin_host_config: self.plugin_host_config,
             _marker: PhantomData,
         }
+    }
+
+    /// Replace the shared configuration, including the background saver policy.
+    /// Passing [`ClientOptions::default()`] disables Bot's default 30-second saver.
+    /// Injected dependencies and callbacks are unchanged.
+    pub fn with_client_options(mut self, options: ClientOptions) -> Self {
+        self.client_builder = self.client_builder.with_options(options);
+        self
+    }
+
+    /// Borrow the effective shared construction options.
+    pub fn client_options(&self) -> &ClientOptions {
+        self.client_builder.options()
+    }
+
+    /// Share an already-erased transport without wrapping it in another Arc.
+    pub fn with_transport_factory_arc(
+        mut self,
+        factory: Arc<dyn crate::transport::TransportFactory>,
+    ) -> BotBuilder<B, Provided, H, R> {
+        self.client_builder = self.client_builder.with_transport_factory_arc(factory);
+        self.cast()
+    }
+
+    /// Share an already-erased runtime across sessions.
+    pub fn with_runtime_arc(mut self, runtime: Arc<dyn Runtime>) -> BotBuilder<B, T, H, Provided> {
+        self.client_builder = self.client_builder.with_runtime_arc(runtime);
+        self.cast()
+    }
+
+    /// Register an already-shared encrypted-payload handler.
+    pub fn with_enc_handler_arc(
+        mut self,
+        enc_type: impl Into<String>,
+        handler: Arc<dyn EncHandler>,
+    ) -> Self {
+        self.client_builder = self.client_builder.with_enc_handler_arc(enc_type, handler);
+        self
+    }
+
+    /// Register an already-shared durability hook.
+    pub fn with_inbound_durability_hook_arc(
+        mut self,
+        hook: Arc<dyn InboundDurabilityHook>,
+    ) -> Self {
+        self.client_builder = self.client_builder.with_inbound_durability_hook_arc(hook);
+        self
     }
 
     // ── Required-field setters (each transitions one type parameter) ──────
@@ -821,14 +793,14 @@ impl<B, T, H, R> BotBuilder<B, T, H, R> {
     /// A bot that pairs once and stays connected for weeks is the
     /// single-long-lived-session profile, and `SqliteStore`'s defaults are tuned
     /// for the opposite one (many small per-session stores in a process). See
-    /// the `SqliteStoreConfig` docs for the cache size, reader count and mmap
+    /// the `SqliteDatabaseConfig` docs for the cache size, reader count and mmap
     /// setting that profile wants, and pass them with
-    /// `SqliteStore::with_config`.
+    /// `SqliteDatabase::open(..., config).await?.store(1)`.
     ///
     /// # Example
     /// ```rust,ignore
     /// let bot = Bot::builder()
-    ///     .with_backend(SqliteStore::new("whatsapp.db").await?)
+    ///     .with_backend(SqliteStore::open("whatsapp.db").await?)
     ///     .build()
     ///     .await?;
     /// ```
@@ -848,7 +820,7 @@ impl<B, T, H, R> BotBuilder<B, T, H, R> {
     where
         F: crate::transport::TransportFactory + 'static,
     {
-        self.transport_factory = Some(Arc::new(factory));
+        self.client_builder = self.client_builder.with_transport_factory(factory);
         self.cast()
     }
 
@@ -928,7 +900,7 @@ impl<B, T, H, R> BotBuilder<B, T, H, R> {
     /// for db in session_databases {
     ///     bots.push(
     ///         Bot::builder()
-    ///             .with_backend(SqliteStore::new(db).await?)
+    ///             .with_backend(SqliteStore::open(db).await?)
     ///             .with_http_client_arc(http.clone())
     ///             .build()
     ///             .await?,
@@ -939,14 +911,14 @@ impl<B, T, H, R> BotBuilder<B, T, H, R> {
         mut self,
         client: Arc<dyn crate::http::HttpClient>,
     ) -> BotBuilder<B, T, Provided, R> {
-        self.http_client = Some(client);
+        self.client_builder = self.client_builder.with_http_client_arc(client);
         self.cast()
     }
 
     /// Set the async runtime implementation, replacing the `tokio-runtime`
     /// default when that feature is enabled.
     pub fn with_runtime<Rt: Runtime>(mut self, runtime: Rt) -> BotBuilder<B, T, H, Provided> {
-        self.runtime = Some(Arc::new(runtime));
+        self.client_builder = self.client_builder.with_runtime(runtime);
         self.cast()
     }
 
@@ -992,11 +964,7 @@ impl<B, T, H, R> BotBuilder<B, T, H, R> {
         mut self,
         instrument: Arc<dyn wacore::stats::TaskInstrument>,
     ) -> Self {
-        self.task_instrument = Some(instrument);
-        // Clear any alloc-meter handle: only the last instrument set is driven by
-        // the poll hooks, so a stale handle would make resource_report() report a
-        // never-updated all-zero snapshot instead of `None`.
-        self.alloc_meter = None;
+        self.client_builder = self.client_builder.with_task_instrument(instrument);
         self
     }
 
@@ -1013,8 +981,7 @@ impl<B, T, H, R> BotBuilder<B, T, H, R> {
     /// [`AllocMeter::on_alloc`]: wacore::stats::AllocMeter::on_alloc
     /// [`AllocMeter::on_dealloc`]: wacore::stats::AllocMeter::on_dealloc
     pub fn with_alloc_meter(mut self, meter: Arc<wacore::stats::AllocMeter>) -> Self {
-        self.task_instrument = Some(meter.clone());
-        self.alloc_meter = Some(meter);
+        self.client_builder = self.client_builder.with_alloc_meter(meter);
         self
     }
 
@@ -1022,7 +989,7 @@ impl<B, T, H, R> BotBuilder<B, T, H, R> {
     #[cfg(feature = "plugins")]
     #[cfg_attr(docsrs, doc(cfg(feature = "plugins")))]
     pub fn with_plugin<P: ClientPlugin>(mut self, plugin: P) -> Self {
-        self.plugins.push(PluginRegistration::new(plugin));
+        self.client_builder = self.client_builder.with_plugin(plugin);
         self
     }
 
@@ -1030,7 +997,7 @@ impl<B, T, H, R> BotBuilder<B, T, H, R> {
     #[cfg(feature = "plugins")]
     #[cfg_attr(docsrs, doc(cfg(feature = "plugins")))]
     pub fn with_plugin_arc<P: ClientPlugin>(mut self, plugin: Arc<P>) -> Self {
-        self.plugins.push(PluginRegistration::new_arc(plugin));
+        self.client_builder = self.client_builder.with_plugin_arc(plugin);
         self
     }
 
@@ -1038,7 +1005,7 @@ impl<B, T, H, R> BotBuilder<B, T, H, R> {
     #[cfg(feature = "plugins")]
     #[cfg_attr(docsrs, doc(cfg(feature = "plugins")))]
     pub fn with_untyped_plugin<P: UntypedClientPlugin>(mut self, plugin: P) -> Self {
-        self.plugins.push(PluginRegistration::new_untyped(plugin));
+        self.client_builder = self.client_builder.with_untyped_plugin(plugin);
         self
     }
 
@@ -1049,8 +1016,7 @@ impl<B, T, H, R> BotBuilder<B, T, H, R> {
         mut self,
         plugin: Arc<P>,
     ) -> Self {
-        self.plugins
-            .push(PluginRegistration::new_untyped_arc(plugin));
+        self.client_builder = self.client_builder.with_untyped_plugin_arc(plugin);
         self
     }
 
@@ -1058,7 +1024,7 @@ impl<B, T, H, R> BotBuilder<B, T, H, R> {
     #[cfg(feature = "plugins")]
     #[cfg_attr(docsrs, doc(cfg(feature = "plugins")))]
     pub fn with_plugin_host_config(mut self, config: PluginHostConfig) -> Self {
-        self.plugin_host_config = config;
+        self.client_builder = self.client_builder.with_plugin_host_config(config);
         self
     }
 
@@ -1266,7 +1232,8 @@ impl<B, T, H, R> BotBuilder<B, T, H, R> {
     }
 
     /// Choose how registered callbacks receive events. Defaults to
-    /// [`EventDelivery::Concurrent`]; use [`EventDelivery::Ordered`] for
+    /// [`EventDelivery::BoundedConcurrent`] (256 queued events, 16 workers);
+    /// use [`EventDelivery::Ordered`] for
     /// in-arrival-order, bounded delivery. Only affects the closure-based
     /// callbacks, not raw
     /// [`with_event_handler`](Self::with_event_handler) handlers, which always
@@ -1287,8 +1254,7 @@ impl<B, T, H, R> BotBuilder<B, T, H, R> {
     where
         Eh: EncHandler + 'static,
     {
-        self.custom_enc_handlers
-            .insert(enc_type.into(), Arc::new(handler));
+        self.client_builder = self.client_builder.with_enc_handler(enc_type, handler);
         self
     }
 
@@ -1305,7 +1271,49 @@ impl<B, T, H, R> BotBuilder<B, T, H, R> {
     where
         Dh: InboundDurabilityHook + 'static,
     {
-        self.inbound_durability_hook = Some(Arc::new(hook));
+        self.client_builder = self.client_builder.with_inbound_durability_hook(hook);
+        self
+    }
+
+    /// Persist each complete group notification before effects and ACK.
+    /// See [`GroupNotificationDurabilityHook`] for cancellation and replay limits.
+    pub fn with_group_notification_durability_hook<Gh>(mut self, hook: Gh) -> Self
+    where
+        Gh: GroupNotificationDurabilityHook + 'static,
+    {
+        self.client_builder = self
+            .client_builder
+            .with_group_notification_durability_hook(hook);
+        self
+    }
+
+    /// Register an already-shared hook. The last registration wins.
+    pub fn with_group_notification_durability_hook_arc(
+        mut self,
+        hook: Arc<dyn GroupNotificationDurabilityHook>,
+    ) -> Self {
+        self.client_builder = self
+            .client_builder
+            .with_group_notification_durability_hook_arc(hook);
+        self
+    }
+
+    /// Await history capture before its receipt, independently of message durability.
+    /// See [`HistorySyncCaptureHook`] for input, cancellation and replay limits.
+    pub fn with_history_sync_capture_hook<Hc>(mut self, hook: Hc) -> Self
+    where
+        Hc: HistorySyncCaptureHook + 'static,
+    {
+        self.client_builder = self.client_builder.with_history_sync_capture_hook(hook);
+        self
+    }
+
+    /// Register an already-shared history capture hook.
+    pub fn with_history_sync_capture_hook_arc(
+        mut self,
+        hook: Arc<dyn HistorySyncCaptureHook>,
+    ) -> Self {
+        self.client_builder = self.client_builder.with_history_sync_capture_hook_arc(hook);
         self
     }
 
@@ -1315,7 +1323,7 @@ impl<B, T, H, R> BotBuilder<B, T, H, R> {
     where
         A: HistorySyncAdmission + 'static,
     {
-        self.history_sync_admission = Some(Arc::new(admission));
+        self.client_builder = self.client_builder.with_history_sync_admission(admission);
         self
     }
 
@@ -1324,7 +1332,25 @@ impl<B, T, H, R> BotBuilder<B, T, H, R> {
         mut self,
         admission: Arc<dyn HistorySyncAdmission>,
     ) -> Self {
-        self.history_sync_admission = Some(admission);
+        self.client_builder = self
+            .client_builder
+            .with_history_sync_admission_arc(admission);
+        self
+    }
+
+    /// Pace first and reconnect run-loop dials with a synchronous host policy.
+    /// See [`ConnectAdmission`] for cancellation and reservation limits.
+    pub fn with_connect_admission<A>(mut self, admission: A) -> Self
+    where
+        A: ConnectAdmission + 'static,
+    {
+        self.client_builder = self.client_builder.with_connect_admission(admission);
+        self
+    }
+
+    /// Share a host's dial budget across bots. Manual `connect()` is unaffected.
+    pub fn with_connect_admission_arc(mut self, admission: Arc<dyn ConnectAdmission>) -> Self {
+        self.client_builder = self.client_builder.with_connect_admission_arc(admission);
         self
     }
 
@@ -1336,7 +1362,7 @@ impl<B, T, H, R> BotBuilder<B, T, H, R> {
     /// # Arguments
     /// * `version` - A tuple of (primary, secondary, tertiary) version numbers
     pub fn with_version(mut self, version: (u32, u32, u32)) -> Self {
-        self.override_version = Some(version);
+        self.client_builder = self.client_builder.with_version_override(version);
         self
     }
 
@@ -1413,7 +1439,7 @@ impl<B, T, H, R> BotBuilder<B, T, H, R> {
     ///
     /// Default: `false` (history sync is processed normally).
     pub fn skip_history_sync(mut self) -> Self {
-        self.skip_history_sync = true;
+        self.client_builder = self.client_builder.with_skip_history_sync(true);
         self
     }
 
@@ -1421,7 +1447,7 @@ impl<B, T, H, R> BotBuilder<B, T, H, R> {
     /// default; see [`ClientBuilder::with_ab_props_fetch`](crate::client::ClientBuilder::with_ab_props_fetch) for what turning
     /// it off costs and which targets would want to.
     pub fn with_ab_props_fetch(mut self, enabled: bool) -> Self {
-        self.ab_props_fetch = enabled;
+        self.client_builder = self.client_builder.with_ab_props_fetch(enabled);
         self
     }
 
@@ -1432,7 +1458,7 @@ impl<B, T, H, R> BotBuilder<B, T, H, R> {
         mut self,
         props: impl IntoIterator<Item = wacore::iq::abprops::AbProp>,
     ) -> Self {
-        self.watched_ab_props.extend(props);
+        self.client_builder = self.client_builder.with_watched_ab_props(props);
         self
     }
 
@@ -1441,7 +1467,7 @@ impl<B, T, H, R> BotBuilder<B, T, H, R> {
     /// Default: [`PresencePolicy::Automatic`], which matches WhatsApp Web. See
     /// [`PresencePolicy::Manual`] for the host that has to own it.
     pub fn with_presence_policy(mut self, policy: PresencePolicy) -> Self {
-        self.presence_policy = policy;
+        self.client_builder = self.client_builder.with_presence_policy(policy);
         self
     }
 
@@ -1452,7 +1478,7 @@ impl<B, T, H, R> BotBuilder<B, T, H, R> {
     /// against a mock server that cannot produce a WhatsApp-rooted chain.
     /// Fixed at build time and applied to every connect, including reconnects.
     pub fn with_noise_cert_policy(mut self, policy: NoiseCertPolicy) -> Self {
-        self.noise_cert_policy = policy;
+        self.client_builder = self.client_builder.with_noise_cert_policy(policy);
         self
     }
 
@@ -1462,7 +1488,7 @@ impl<B, T, H, R> BotBuilder<B, T, H, R> {
     /// protocol-safe range at upload time. Useful for memory-constrained or
     /// embedded consumers that want a smaller batch.
     pub fn with_wanted_pre_key_count(mut self, count: usize) -> Self {
-        self.wanted_pre_key_count = Some(count);
+        self.client_builder = self.client_builder.with_wanted_pre_key_count(count);
         self
     }
 
@@ -1478,7 +1504,9 @@ impl<B, T, H, R> BotBuilder<B, T, H, R> {
     /// calling this. Can also be retuned live via
     /// [`Client::set_resend_rate_limit`](crate::Client::set_resend_rate_limit).
     pub fn with_resend_rate_limit(mut self, burst: u32, refill_per_min: u32) -> Self {
-        self.resend_rate_limit = Some((burst, refill_per_min));
+        self.client_builder = self
+            .client_builder
+            .with_resend_rate_limit(burst, refill_per_min);
         self
     }
 
@@ -1504,16 +1532,16 @@ impl<B, T, H, R> BotBuilder<B, T, H, R> {
     /// // Disable TTL for group and device caches (good for bots with few groups)
     /// let bot = Bot::builder()
     ///     .with_backend(backend)
-    ///     .with_cache_config(CacheConfig {
-    ///         group_cache: CacheEntryConfig::new(None, 1_000),
-    ///         device_registry_cache: CacheEntryConfig::new(None, 5_000),
-    ///         ..Default::default()
-    ///     })
+    ///     .with_cache_config(
+    ///         CacheConfig::default()
+    ///             .with_group_cache(CacheEntryConfig::new(None, 1_000))
+    ///             .with_device_registry_cache(CacheEntryConfig::new(None, 5_000)),
+    ///     )
     ///     .build()
     ///     .await?;
     /// ```
     pub fn with_cache_config(mut self, config: CacheConfig) -> Self {
-        self.cache_config = config;
+        self.client_builder = self.client_builder.with_cache_config(config);
         self
     }
 }
@@ -1538,20 +1566,14 @@ impl BotBuilder<Provided, Provided, Provided, Provided> {
         tracing::instrument(name = "wa.bot.build", level = "debug", skip_all, err(Debug))
     )]
     async fn build_graph(self) -> Result<Bot, BotBuilderError> {
-        // Destructure to extract required fields — typestate guarantees all are Some.
-        let (Some(runtime), Some(backend), Some(transport_factory), Some(http_client)) = (
-            self.runtime,
-            self.backend,
-            self.transport_factory,
-            self.http_client,
-        ) else {
+        // Typestate guarantees the backend and embedded platform dependencies are present.
+        let Some(backend) = self.backend else {
             unreachable!("typestate guarantees all required fields are Provided")
         };
 
-        let task_instrument = self.task_instrument;
-        let alloc_meter = self.alloc_meter;
+        let task_instrument = self.client_builder.task_instrument();
 
-        // Note: For multi-account mode, create the backend with SqliteStore::new_for_device()
+        // Note: For multi-account mode, select the backend with SqliteDatabase::store()
         // before passing it to with_backend_arc()
         let persistence_manager = Arc::new(PersistenceManager::new(backend).await?);
 
@@ -1592,47 +1614,9 @@ impl BotBuilder<Provided, Provided, Provided, Provided> {
         }
 
         info!("Creating client...");
-        let client_builder = Client::builder()
-            .with_runtime_arc(runtime)
-            .with_persistence_manager(persistence_manager)
-            .with_transport_factory_arc(transport_factory)
-            .with_http_client_arc(http_client)
-            .with_cache_config(self.cache_config)
-            .with_noise_cert_policy(self.noise_cert_policy)
-            .with_custom_enc_handlers(self.custom_enc_handlers)
-            .with_skip_history_sync(self.skip_history_sync)
-            .with_ab_props_fetch(self.ab_props_fetch)
-            .with_watched_ab_props(self.watched_ab_props)
-            .with_presence_policy(self.presence_policy)
-            .with_background_saver_interval(std::time::Duration::from_secs(30));
-        #[cfg(feature = "plugins")]
-        let client_builder = client_builder
-            .with_plugin_registrations(self.plugins)
-            .with_plugin_host_config(self.plugin_host_config);
-        let mut client_builder = client_builder;
-
-        if let Some(version) = self.override_version {
-            client_builder = client_builder.with_version_override(version);
-        }
-        if let Some(hook) = self.inbound_durability_hook {
-            client_builder = client_builder.with_inbound_durability_hook_arc(hook);
-        }
-        if let Some(admission) = self.history_sync_admission {
-            client_builder = client_builder.with_history_sync_admission_arc(admission);
-        }
-        if let Some(count) = self.wanted_pre_key_count {
-            client_builder = client_builder.with_wanted_pre_key_count(count);
-        }
-        if let Some((burst, refill_per_min)) = self.resend_rate_limit {
-            client_builder = client_builder.with_resend_rate_limit(burst, refill_per_min);
-        }
-        client_builder = match alloc_meter {
-            Some(meter) => client_builder.with_alloc_meter(meter),
-            None => match task_instrument.clone() {
-                Some(instrument) => client_builder.with_task_instrument(instrument),
-                None => client_builder,
-            },
-        };
+        let client_builder = self
+            .client_builder
+            .with_persistence_manager(persistence_manager);
 
         let (client, sync_task_receiver) = client_builder.build().await?.into_parts();
 
@@ -1665,10 +1649,7 @@ mod tests {
     impl HttpClient for MockHttpClient {
         async fn execute(&self, _request: HttpRequest) -> Result<HttpResponse> {
             // Return a mock response for version fetching
-            Ok(HttpResponse {
-                status_code: 200,
-                body: br#"self.__swData=JSON.parse(/*BTDS*/"{\"dynamic_data\":{\"SiteData\":{\"server_revision\":1026131876,\"client_revision\":1026131876}}}");"#.to_vec(),
-            })
+            Ok(HttpResponse::new(200, br#"self.__swData=JSON.parse(/*BTDS*/"{\"dynamic_data\":{\"SiteData\":{\"server_revision\":1026131876,\"client_revision\":1026131876}}}");"#.to_vec()))
         }
     }
 
@@ -1678,7 +1659,7 @@ mod tests {
             uuid::Uuid::new_v4()
         );
         Arc::new(
-            SqliteStore::new(&temp_db)
+            SqliteStore::open(&temp_db)
                 .await
                 .expect("Failed to create test SqliteStore"),
         ) as Arc<dyn Backend>
@@ -1690,9 +1671,10 @@ mod tests {
             uuid::Uuid::new_v4()
         );
         Arc::new(
-            SqliteStore::new_for_device(&temp_db, device_id)
+            whatsapp_rust_sqlite_storage::SqliteDatabase::open(&temp_db, Default::default())
                 .await
-                .expect("Failed to create test SqliteStore"),
+                .expect("Failed to create test SqliteStore")
+                .store(device_id),
         ) as Arc<dyn Backend>
     }
 
@@ -1743,7 +1725,7 @@ mod tests {
             bot.client().plugin::<BotBuilderPlugin>().as_deref(),
             Some(&"installed")
         );
-        bot.client().disconnect().await;
+        bot.client().shutdown().await;
     }
 
     #[tokio::test]
@@ -1762,7 +1744,7 @@ mod tests {
             default_bot.client().noise_cert_policy,
             NoiseCertPolicy::default()
         );
-        default_bot.client().disconnect().await;
+        default_bot.client().shutdown().await;
 
         let bypass_bot = Bot::builder()
             .with_backend_arc(create_test_sqlite_backend().await)
@@ -1777,7 +1759,7 @@ mod tests {
             bypass_bot.client().noise_cert_policy,
             NoiseCertPolicy::DangerSkipCertChainVerify
         );
-        bypass_bot.client().disconnect().await;
+        bypass_bot.client().shutdown().await;
 
         // Explicit Strict is distinct from the default only when the
         // default changes: the setter, not a build flag, decides.
@@ -1794,7 +1776,7 @@ mod tests {
             strict_bot.client().noise_cert_policy,
             NoiseCertPolicy::Strict
         );
-        strict_bot.client().disconnect().await;
+        strict_bot.client().shutdown().await;
     }
 
     fn pairing_code_event(code: &str) -> Arc<Event> {
@@ -2090,7 +2072,7 @@ mod tests {
             "file:memdb_bot_{}?mode=memory&cache=shared",
             uuid::Uuid::new_v4()
         );
-        let store = SqliteStore::new(&temp_db)
+        let store = SqliteStore::open(&temp_db)
             .await
             .expect("Failed to create test SqliteStore");
 
@@ -2135,11 +2117,12 @@ mod tests {
         let http_client = MockHttpClient;
 
         let custom_os = "CustomOS".to_string();
-        let custom_version = wa::device_props::AppVersion {
-            primary: Some(99),
-            secondary: Some(88),
-            tertiary: Some(77),
-            ..Default::default()
+        let custom_version = {
+            let mut proto_fixture = wa::device_props::AppVersion::default();
+            proto_fixture.primary = Some(99);
+            proto_fixture.secondary = Some(88);
+            proto_fixture.tertiary = Some(77);
+            proto_fixture
         };
 
         let bot = Bot::builder()
@@ -2205,11 +2188,12 @@ mod tests {
         let transport = TokioWebSocketTransportFactory::new();
         let http_client = MockHttpClient;
 
-        let custom_version = wa::device_props::AppVersion {
-            primary: Some(99),
-            secondary: Some(88),
-            tertiary: Some(77),
-            ..Default::default()
+        let custom_version = {
+            let mut proto_fixture = wa::device_props::AppVersion::default();
+            proto_fixture.primary = Some(99);
+            proto_fixture.secondary = Some(88);
+            proto_fixture.tertiary = Some(77);
+            proto_fixture
         };
 
         let bot = Bot::builder()
@@ -2284,11 +2268,12 @@ mod tests {
         let http_client = MockHttpClient;
 
         let custom_os = "macOS".to_string();
-        let custom_version = wa::device_props::AppVersion {
-            primary: Some(2),
-            secondary: Some(0),
-            tertiary: Some(0),
-            ..Default::default()
+        let custom_version = {
+            let mut proto_fixture = wa::device_props::AppVersion::default();
+            proto_fixture.primary = Some(2);
+            proto_fixture.secondary = Some(0);
+            proto_fixture.tertiary = Some(0);
+            proto_fixture
         };
         let custom_platform = wa::device_props::PlatformType::SAFARI;
 
@@ -2358,6 +2343,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_bot_builder_history_capture_is_independent_and_preserves_arc() {
+        struct Capture;
+        #[async_trait::async_trait]
+        impl HistorySyncCaptureHook for Capture {
+            async fn on_history_sync(
+                &self,
+                _: Arc<Client>,
+                _: &str,
+                _: Option<wa::message::HistorySyncType>,
+                _: &[u8],
+            ) -> Result<()> {
+                Ok(())
+            }
+        }
+        let hook: Arc<dyn HistorySyncCaptureHook> = Arc::new(Capture);
+        let bot = Bot::builder()
+            .with_backend_arc(create_test_sqlite_backend().await)
+            .with_runtime(TokioRuntime)
+            .with_history_sync_capture_hook(Capture)
+            .with_history_sync_capture_hook_arc(hook.clone())
+            .build()
+            .await
+            .unwrap();
+        let client = bot.client();
+        assert!(client.inbound_durability_hook.get().is_none());
+        assert!(Arc::ptr_eq(
+            client.history_sync_capture_hook.get().unwrap(),
+            &hook
+        ));
+    }
+
+    #[tokio::test]
     async fn test_bot_builder_history_sync_admission_reaches_client() {
         let backend = create_test_sqlite_backend().await;
         let decisions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -2370,8 +2387,7 @@ mod tests {
                 &self,
                 _metadata: &crate::HistorySyncMetadata<'_>,
             ) -> crate::HistorySyncDecision {
-                self.decisions
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.decisions.fetch_add(1, Ordering::SeqCst);
                 crate::HistorySyncDecision::Accept
             }
         }
@@ -2402,7 +2418,7 @@ mod tests {
             }),
             crate::HistorySyncDecision::Accept
         );
-        assert_eq!(decisions.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(decisions.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -2526,9 +2542,10 @@ mod tests {
             .await
             .expect("Failed to build bot");
 
-        let original = Arc::new(wa::Message {
-            conversation: Some("ping".to_string()),
-            ..Default::default()
+        let original = Arc::new({
+            let mut proto_fixture = wa::Message::default();
+            proto_fixture.conversation = Some("ping".to_string());
+            proto_fixture
         });
         let original_ptr = Arc::as_ptr(&original);
 
@@ -2567,11 +2584,9 @@ mod tests {
         assert!(ctx.comment_target.is_none());
 
         // A newsletter comment: the parent post key rides the same way.
-        let parent = wa::MessageKey {
-            remote_jid: Some("120363000000000001@newsletter".to_string()),
-            id: Some("POSTID01".to_string()),
-            ..Default::default()
-        };
+        let mut parent = wa::MessageKey::default();
+        parent.remote_jid = Some("120363000000000001@newsletter".to_string());
+        parent.id = Some("POSTID01".to_string());
         let comment = wacore::types::events::InboundMessage::builder()
             .message(Arc::new(wa::Message::default()))
             .info(Arc::new(react_info(
@@ -2681,6 +2696,253 @@ mod tests {
             key.participant.as_deref(),
             Some("15551112222@s.whatsapp.net")
         );
+    }
+
+    fn background_handle_for_test(
+        client: Arc<Client>,
+        done_rx: futures::channel::oneshot::Receiver<crate::RunCompletionReason>,
+        abort_handle: wacore::runtime::AbortHandle,
+    ) -> BotHandle {
+        BotHandle {
+            client,
+            callbacks: BotCallbackGuard::default(),
+            done_rx,
+            abort_handle,
+            abort_requested: AtomicBool::new(false),
+            abort_waker: futures::task::AtomicWaker::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn background_driver_preserves_actual_stopped_reason() {
+        let bot = Bot::builder()
+            .with_backend_arc(create_test_sqlite_backend().await)
+            .with_transport_factory(TokioWebSocketTransportFactory::new())
+            .with_http_client(MockHttpClient)
+            .with_runtime(TokioRuntime)
+            .build()
+            .await
+            .unwrap();
+        let client = bot.client();
+        client.pause().await;
+        let handle = bot.spawn();
+        crate::test_utils::wait_for_notifier_listeners(&client.session_state_notifier, 1).await;
+        client.stop_supervision_loop();
+        assert!(matches!(
+            handle.await,
+            BotRunOutcome::Completed(crate::RunCompletionReason::Stopped)
+        ));
+        client.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn background_outcome_preserves_typed_protocol_conflict() {
+        let client = crate::test_utils::create_test_client().await;
+        for kind in [
+            crate::ConflictKind::Replaced,
+            crate::ConflictKind::DeviceRemoved,
+            crate::ConflictKind::Unknown,
+        ] {
+            let (sender, receiver) = futures::channel::oneshot::channel();
+            sender
+                .send(crate::RunCompletionReason::AutoReconnectDisabled {
+                    connection: None,
+                    connect_error: None,
+                    protocol_error: Some(crate::ProtocolTerminalReason::Conflict(kind)),
+                })
+                .unwrap();
+            let handle = background_handle_for_test(
+                client.clone(),
+                receiver,
+                wacore::runtime::AbortHandle::noop(),
+            );
+            match handle.await {
+                BotRunOutcome::Completed(crate::RunCompletionReason::AutoReconnectDisabled {
+                    protocol_error: Some(crate::ProtocolTerminalReason::Conflict(observed)),
+                    ..
+                }) => assert_eq!(observed, kind),
+                other => panic!("lost typed protocol cause: {other:?}"),
+            }
+        }
+        client.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn explicit_abort_does_not_wait_for_a_retained_sender() {
+        let client = crate::test_utils::create_test_client().await;
+        let (_retained_sender, receiver) = futures::channel::oneshot::channel();
+        let handle =
+            background_handle_for_test(client, receiver, wacore::runtime::AbortHandle::noop());
+        handle.abort();
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), handle)
+                .await
+                .unwrap(),
+            BotRunOutcome::AbortRequested
+        ));
+    }
+
+    #[tokio::test]
+    async fn lost_sender_is_unobserved_not_abort_or_panic() {
+        let client = crate::test_utils::create_test_client().await;
+        let (sender, receiver) = futures::channel::oneshot::channel();
+        drop(sender);
+        let handle =
+            background_handle_for_test(client, receiver, wacore::runtime::AbortHandle::noop());
+        assert!(matches!(handle.await, BotRunOutcome::Unobserved));
+    }
+
+    #[tokio::test]
+    async fn observed_run_exit_wins_over_late_abort() {
+        let client = crate::test_utils::create_test_client().await;
+        let (sender, receiver) = futures::channel::oneshot::channel();
+        sender.send(crate::RunCompletionReason::Stopped).unwrap();
+        let handle =
+            background_handle_for_test(client, receiver, wacore::runtime::AbortHandle::noop());
+        handle.abort();
+        assert!(matches!(
+            handle.await,
+            BotRunOutcome::Completed(crate::RunCompletionReason::Stopped)
+        ));
+    }
+
+    #[tokio::test]
+    async fn drop_still_aborts_even_when_client_arc_is_retained() {
+        let client = crate::test_utils::create_test_client().await;
+        let (_sender, receiver) = futures::channel::oneshot::channel();
+        let aborted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = aborted.clone();
+        let handle = background_handle_for_test(
+            client.clone(),
+            receiver,
+            wacore::runtime::AbortHandle::new(move || {
+                counter.fetch_add(1, Ordering::Relaxed);
+            }),
+        );
+        drop(handle);
+        assert_eq!(aborted.load(Ordering::Relaxed), 1);
+        client.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn bot_driver_guard_preserves_queue_and_active_cancellation_accounting() {
+        let (entered_tx, entered_rx) = async_channel::bounded(1);
+        let bot = Bot::builder()
+            .with_backend_arc(create_test_sqlite_backend().await)
+            .with_transport_factory(TokioWebSocketTransportFactory::new())
+            .with_http_client(MockHttpClient)
+            .with_runtime(TokioRuntime)
+            .with_event_delivery(EventDelivery::Ordered { capacity: 2 })
+            .on_event_for(&[EventKind::Connected], move |_, client| {
+                let entered = entered_tx.clone();
+                async move {
+                    entered.try_send(()).unwrap();
+                    std::future::pending::<()>().await;
+                    drop(client);
+                }
+            })
+            .build()
+            .await
+            .unwrap();
+        let client = bot.client();
+        client.pause().await;
+        let handle = bot.spawn();
+        let adapter = handle
+            .callbacks
+            .registration
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .handler
+            .clone();
+        let connected = || Event::Connected(crate::types::events::Connected::builder().build());
+        client.core.event_bus.dispatch(connected());
+        tokio::time::timeout(std::time::Duration::from_secs(5), entered_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        for _ in 0..3 {
+            client.core.event_bus.dispatch(connected());
+        }
+        assert_eq!(adapter.stats().accepted, 3);
+        assert_eq!(adapter.stats().dropped_full, 1);
+        assert_eq!(adapter.stats().callbacks_active, 1);
+        handle.abort();
+        assert!(!client.shutdown_signal().is_fired());
+        client
+            .core
+            .event_bus
+            .dispatch_with(EventKind::Connected, || {
+                panic!("closed builder registration still constructs payloads")
+            });
+        crate::test_utils::poll_until("scoped callback cancellation", || {
+            adapter.stats().callbacks_active == 0 && adapter.stats().discarded == 2
+        })
+        .await;
+        assert_eq!(adapter.stats().accepted, 3);
+        assert_eq!(adapter.stats().callbacks_started, 1);
+        assert_eq!(adapter.stats().callbacks_cancelled, 1);
+        assert_eq!(adapter.stats().callbacks_completed, 0);
+        assert_eq!(client.stats().events_dropped, 1);
+        drop(handle);
+        let weak = Arc::downgrade(&client);
+        drop(client);
+        crate::test_utils::poll_until("scoped Client released", || weak.upgrade().is_none()).await;
+    }
+
+    #[tokio::test]
+    async fn unpolled_bot_driver_guard_discards_queue_without_starting_callbacks() {
+        let bot = Bot::builder()
+            .with_backend_arc(create_test_sqlite_backend().await)
+            .with_transport_factory(TokioWebSocketTransportFactory::new())
+            .with_http_client(MockHttpClient)
+            .with_runtime(TokioRuntime)
+            .with_event_delivery(EventDelivery::Ordered { capacity: 1 })
+            .on_event_for(&[EventKind::Connected], |_, _| async {
+                panic!("callback started after unpolled driver cancellation")
+            })
+            .build()
+            .await
+            .unwrap();
+        let client = bot.client();
+        let handle = bot.spawn();
+        let adapter = handle
+            .callbacks
+            .registration
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .handler
+            .clone();
+        let event = Arc::new(Event::Connected(
+            crate::types::events::Connected::builder().build(),
+        ));
+        let weak_event = Arc::downgrade(&event);
+        adapter.handle_event(event);
+        assert_eq!(adapter.stats().callbacks_started, 0);
+        drop(handle);
+        assert!(!client.core.event_bus.has_handler_for(EventKind::Connected));
+        assert!(!client.shutdown_signal().is_fired());
+        crate::test_utils::poll_until("unpolled driver queue released", || {
+            weak_event.upgrade().is_none() && adapter.stats().discarded == 1
+        })
+        .await;
+        assert_eq!(adapter.stats().accepted, 1);
+        assert_eq!(adapter.stats().callbacks_started, 0);
+        assert_eq!(adapter.stats().callbacks_active, 0);
+        assert_eq!(adapter.stats().callbacks_cancelled, 0);
+        let weak = Arc::downgrade(&client);
+        drop(client);
+        crate::test_utils::poll_until("unpolled driver Client released", || {
+            weak.upgrade().is_none()
+        })
+        .await;
     }
 
     #[tokio::test]

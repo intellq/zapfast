@@ -11,14 +11,16 @@ fn present(value: Option<&str>) -> Option<&str> {
 
 pub(super) fn buttons(id: Option<&str>, label: Option<&str>) -> Option<wa::Message> {
     use wa::message::buttons_response_message::{Response, Type};
-    Some(wa::Message {
-        buttons_response_message: MessageField::some(wa::message::ButtonsResponseMessage {
-            selected_button_id: Some(present(id)?.into()),
-            response: Some(Response::SelectedDisplayText(present(label)?.into())),
-            r#type: Some(Type::DISPLAY_TEXT),
-            ..Default::default()
-        }),
-        ..Default::default()
+    Some({
+        let mut proto2 = wa::Message::default();
+        proto2.buttons_response_message = MessageField::some({
+            let mut proto = wa::message::ButtonsResponseMessage::default();
+            proto.selected_button_id = Some(present(id)?.into());
+            proto.response = Some(Response::SelectedDisplayText(present(label)?.into()));
+            proto.r#type = Some(Type::DISPLAY_TEXT);
+            proto
+        });
+        proto2
     })
 }
 
@@ -27,16 +29,16 @@ pub(super) fn template(
     label: Option<&str>,
     index: Option<u32>,
 ) -> Option<wa::Message> {
-    Some(wa::Message {
-        template_button_reply_message: MessageField::some(
-            wa::message::TemplateButtonReplyMessage {
-                selected_id: Some(present(id)?.into()),
-                selected_display_text: Some(present(label)?.into()),
-                selected_index: Some(index?),
-                ..Default::default()
-            },
-        ),
-        ..Default::default()
+    Some({
+        let mut proto2 = wa::Message::default();
+        proto2.template_button_reply_message = MessageField::some({
+            let mut proto = wa::message::TemplateButtonReplyMessage::default();
+            proto.selected_id = Some(present(id)?.into());
+            proto.selected_display_text = Some(present(label)?.into());
+            proto.selected_index = Some(index?);
+            proto
+        });
+        proto2
     })
 }
 
@@ -44,24 +46,29 @@ fn native_reply(name: &str, id: &str, label: &str) -> wa::Message {
     use wa::message::interactive_response_message::{
         Body, InteractiveResponseMessage, NativeFlowResponseMessage,
     };
-    wa::Message {
-        interactive_response_message: MessageField::some(wa::message::InteractiveResponseMessage {
-            body: MessageField::some(Body {
-                text: Some(label.into()),
-                format: Some(wa::message::interactive_response_message::body::Format::EXTENSIONS_1),
-            }),
-            interactive_response_message: Some(
-                InteractiveResponseMessage::NativeFlowResponseMessage(Box::new(
-                    NativeFlowResponseMessage {
-                        name: Some(name.into()),
-                        params_json: Some(serde_json::json!({"id": id}).to_string()),
-                        version: Some(1),
-                    },
-                )),
-            ),
-            ..Default::default()
-        }),
-        ..Default::default()
+    {
+        let mut proto3 = wa::Message::default();
+        proto3.interactive_response_message = MessageField::some({
+            let mut proto2 = wa::message::InteractiveResponseMessage::default();
+            proto2.body = MessageField::some({
+                let mut proto = Body::default();
+                proto.text = Some(label.into());
+                proto.format =
+                    Some(wa::message::interactive_response_message::body::Format::EXTENSIONS_1);
+                proto
+            });
+            proto2.interactive_response_message = Some(
+                InteractiveResponseMessage::NativeFlowResponseMessage(Box::new({
+                    let mut proto = NativeFlowResponseMessage::default();
+                    proto.name = Some(name.into());
+                    proto.params_json = Some(serde_json::json!({"id": id}).to_string());
+                    proto.version = Some(1);
+                    proto
+                })),
+            );
+            proto2
+        });
+        proto3
     }
 }
 
@@ -152,19 +159,21 @@ pub(super) fn list(
                 title: title.into(),
                 description: row.description.clone().unwrap_or_default(),
             });
-            replies.push(wa::Message {
-                list_response_message: MessageField::some(wa::message::ListResponseMessage {
-                    title: Some(title.into()),
-                    description: row.description.clone(),
-                    list_type: Some(list_response_message::ListType::SINGLE_SELECT),
-                    single_select_reply: MessageField::some(
-                        list_response_message::SingleSelectReply {
-                            selected_row_id: Some(id.into()),
-                        },
-                    ),
-                    ..Default::default()
-                }),
-                ..Default::default()
+            replies.push({
+                let mut proto3 = wa::Message::default();
+                proto3.list_response_message = MessageField::some({
+                    let mut proto2 = wa::message::ListResponseMessage::default();
+                    proto2.title = Some(title.into());
+                    proto2.description = row.description.clone();
+                    proto2.list_type = Some(list_response_message::ListType::SINGLE_SELECT);
+                    proto2.single_select_reply = MessageField::some({
+                        let mut proto = list_response_message::SingleSelectReply::default();
+                        proto.selected_row_id = Some(id.into());
+                        proto
+                    });
+                    proto2
+                });
+                proto3
             });
         }
     }
@@ -244,7 +253,7 @@ impl Worker {
             return;
         };
         let expiration = self.apply_ephemeral(&chat, &mut message);
-        let id = client.generate_message_id();
+        let id = client.generate_message_id().to_string();
         let content = classify(&message).expect("validated interactive reply");
         let row = Message {
             id: id.clone(),
@@ -301,23 +310,29 @@ mod tests {
         use wa::message::interactive_message::{
             InteractiveMessage, NativeFlowMessage, native_flow_message::NativeFlowButton,
         };
-        wa::Message {
-            interactive_message: MessageField::some(wa::message::InteractiveMessage {
-                body: MessageField::some(wa::message::interactive_message::Body {
-                    text: Some("Choose an option".into()),
-                }),
-                interactive_message: Some(InteractiveMessage::NativeFlowMessage(Box::new(
-                    NativeFlowMessage {
-                        buttons: vec![NativeFlowButton {
-                            name: Some(name.into()),
-                            button_params_json: Some(json.into()),
-                        }],
-                        ..Default::default()
-                    },
-                ))),
-                ..Default::default()
-            }),
-            ..Default::default()
+        {
+            let mut proto4 = wa::Message::default();
+            proto4.interactive_message = MessageField::some({
+                let mut proto3 = wa::message::InteractiveMessage::default();
+                proto3.body = MessageField::some({
+                    let mut proto = wa::message::interactive_message::Body::default();
+                    proto.text = Some("Choose an option".into());
+                    proto
+                });
+                proto3.interactive_message =
+                    Some(InteractiveMessage::NativeFlowMessage(Box::new({
+                        let mut proto2 = NativeFlowMessage::default();
+                        proto2.buttons = vec![{
+                            let mut proto = NativeFlowButton::default();
+                            proto.name = Some(name.into());
+                            proto.button_params_json = Some(json.into());
+                            proto
+                        }];
+                        proto2
+                    })));
+                proto3
+            });
+            proto4
         }
     }
 
@@ -326,45 +341,54 @@ mod tests {
         use wa::message::{buttons_message, list_message, template_message};
         vec![
             (
-                wa::Message {
-                    buttons_message: MessageField::some(wa::message::ButtonsMessage {
-                        content_text: Some("Choose".into()),
-                        buttons: vec![buttons_message::Button {
-                            button_id: Some("private-choice".into()),
-                            button_text: MessageField::some(buttons_message::button::ButtonText {
-                                display_text: Some("Continue".into()),
-                            }),
-                            r#type: Some(buttons_message::button::Type::RESPONSE),
-                            ..Default::default()
-                        }],
-                        ..Default::default()
-                    }),
-                    ..Default::default()
+                {
+                    let mut proto4 = wa::Message::default();
+                    proto4.buttons_message = MessageField::some({
+                        let mut proto3 = wa::message::ButtonsMessage::default();
+                        proto3.content_text = Some("Choose".into());
+                        proto3.buttons = vec![{
+                            let mut proto2 = buttons_message::Button::default();
+                            proto2.button_id = Some("private-choice".into());
+                            proto2.button_text = MessageField::some({
+                                let mut proto = buttons_message::button::ButtonText::default();
+                                proto.display_text = Some("Continue".into());
+                                proto
+                            });
+                            proto2.r#type = Some(buttons_message::button::Type::RESPONSE);
+                            proto2
+                        }];
+                        proto3
+                    });
+                    proto4
                 },
                 None,
                 Some("buttons_response"),
             ),
             (
-                wa::Message {
-                    template_message: MessageField::some(wa::message::TemplateMessage {
-                        hydrated_template: MessageField::some(
-                            template_message::HydratedFourRowTemplate {
-                                hydrated_content_text: Some("Choose".into()),
-                                hydrated_buttons: vec![wa::HydratedTemplateButton {
-                                    index: Some(7),
-                                    hydrated_button: Some(HydratedButton::QuickReplyButton(
-                                        Box::new(HydratedQuickReplyButton {
-                                            id: Some("private-choice".into()),
-                                            display_text: Some("Continue".into()),
-                                        }),
-                                    )),
-                                }],
-                                ..Default::default()
-                            },
-                        ),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
+                {
+                    let mut proto5 = wa::Message::default();
+                    proto5.template_message = MessageField::some({
+                        let mut proto4 = wa::message::TemplateMessage::default();
+                        proto4.hydrated_template = MessageField::some({
+                            let mut proto3 = template_message::HydratedFourRowTemplate::default();
+                            proto3.hydrated_content_text = Some("Choose".into());
+                            proto3.hydrated_buttons = vec![{
+                                let mut proto2 = wa::HydratedTemplateButton::default();
+                                proto2.index = Some(7);
+                                proto2.hydrated_button =
+                                    Some(HydratedButton::QuickReplyButton(Box::new({
+                                        let mut proto = HydratedQuickReplyButton::default();
+                                        proto.id = Some("private-choice".into());
+                                        proto.display_text = Some("Continue".into());
+                                        proto
+                                    })));
+                                proto2
+                            }];
+                            proto3
+                        });
+                        proto4
+                    });
+                    proto5
                 },
                 None,
                 None,
@@ -386,28 +410,34 @@ mod tests {
                 Some("native_flow_response"),
             ),
             (
-                wa::Message {
-                    list_message: MessageField::some(wa::message::ListMessage {
-                        title: Some("Choose".into()),
-                        button_text: Some("Choose a time".into()),
-                        list_type: Some(list_message::ListType::SINGLE_SELECT),
-                        sections: vec![list_message::Section {
-                            title: Some("Schedule".into()),
-                            rows: vec![
-                                list_message::Row {
-                                    title: Some("Invalid choice".into()),
-                                    ..Default::default()
+                {
+                    let mut proto4 = wa::Message::default();
+                    proto4.list_message = MessageField::some({
+                        let mut proto3 = wa::message::ListMessage::default();
+                        proto3.title = Some("Choose".into());
+                        proto3.button_text = Some("Choose a time".into());
+                        proto3.list_type = Some(list_message::ListType::SINGLE_SELECT);
+                        proto3.sections = vec![{
+                            let mut proto2 = list_message::Section::default();
+                            proto2.title = Some("Schedule".into());
+                            proto2.rows = vec![
+                                {
+                                    let mut proto = list_message::Row::default();
+                                    proto.title = Some("Invalid choice".into());
+                                    proto
                                 },
-                                list_message::Row {
-                                    title: Some("Continue".into()),
-                                    row_id: Some("private-choice".into()),
-                                    ..Default::default()
+                                {
+                                    let mut proto = list_message::Row::default();
+                                    proto.title = Some("Continue".into());
+                                    proto.row_id = Some("private-choice".into());
+                                    proto
                                 },
-                            ],
-                        }],
-                        ..Default::default()
-                    }),
-                    ..Default::default()
+                            ];
+                            proto2
+                        }];
+                        proto3
+                    });
+                    proto4
                 },
                 Some(0),
                 Some("list_response"),
@@ -418,11 +448,14 @@ mod tests {
     #[test]
     fn replies_preserve_choice_and_quote_for_the_library_sender() {
         for (request, choice, media_type) in requests() {
-            let request = wa::Message {
-                view_once_message: MessageField::some(wa::message::FutureProofMessage {
-                    message: MessageField::some(request),
-                }),
-                ..Default::default()
+            let request = {
+                let mut proto2 = wa::Message::default();
+                proto2.view_once_message = MessageField::some({
+                    let mut proto = wa::message::FutureProofMessage::default();
+                    proto.message = MessageField::some(request);
+                    proto
+                });
+                proto2
             };
             let mut source = own_message("original", 123);
             source.from_me = false;
@@ -530,15 +563,15 @@ mod tests {
         let (mut worker, _, _, _) = worker();
         worker.archive.ensure_chat(PEER, "Demo").unwrap();
         let mut request = requests().remove(0).0;
-        request.buttons_message.as_option_mut().unwrap().header =
-            Some(wa::message::buttons_message::Header::ImageMessage(
-                Box::new(wa::message::ImageMessage {
-                    mimetype: Some("image/jpeg".into()),
-                    width: Some(640),
-                    height: Some(480),
-                    ..Default::default()
-                }),
-            ));
+        request.buttons_message.as_option_mut().unwrap().header = Some(
+            wa::message::buttons_message::Header::ImageMessage(Box::new({
+                let mut proto = wa::message::ImageMessage::default();
+                proto.mimetype = Some("image/jpeg".into());
+                proto.width = Some(640);
+                proto.height = Some(480);
+                proto
+            })),
+        );
         let raw = request.encode_to_vec();
         let mut source = own_message("original", 123);
         source.content = classify(&request).unwrap();

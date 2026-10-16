@@ -4,6 +4,41 @@ use super::*;
 use crate::features::{AppStateError, AppStateResyncMode, AppStateResyncReport};
 use crate::request::DEFAULT_IQ_TIMEOUT;
 use std::borrow::Cow;
+use wacore::appstate_sync::AppStateMutationPersistence;
+
+struct AppStateClientPersistence {
+    client: std::sync::Weak<Client>,
+    persistence: Arc<PersistenceManager>,
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+impl AppStateMutationPersistence for AppStateClientPersistence {
+    async fn persist_status_privacy(
+        &self,
+        action: &wa::sync_action_value::StatusPrivacyAction,
+    ) -> wacore::store::error::Result<()> {
+        self.persistence.persist_status_privacy(action).await
+    }
+
+    async fn persist_lid_pn_mappings(
+        &self,
+        mappings: Vec<(String, String)>,
+    ) -> wacore::store::error::Result<()> {
+        let client = self.client.upgrade().ok_or_else(|| {
+            wacore::store::error::StoreError::Io(std::io::Error::other(
+                "app-state client dropped before mapping persistence",
+            ))
+        })?;
+        client
+            .add_lid_pn_mappings(mappings, crate::lid_pn_cache::LearningSource::Other)
+            .await
+            .map(|_| ())
+            .map_err(|error| {
+                wacore::store::error::StoreError::Io(std::io::Error::other(error.to_string()))
+            })
+    }
+}
 
 /// Concurrency cap for pre-downloading app-state external blobs (independent CDN
 /// GETs, keyed by directPath — LTHash ordering is in patch application, not blob
@@ -818,10 +853,13 @@ impl Client {
     pub(crate) fn get_app_state_processor(&self) -> &Arc<AppStateProcessor> {
         self.app_state_processor.get_or_init(|| {
             debug!("Initializing AppStateProcessor for the first time.");
-            Arc::new(AppStateProcessor::new(
-                self.persistence_manager.backend(),
-                self.runtime.clone(),
-            ))
+            Arc::new(
+                AppStateProcessor::new(self.persistence_manager.backend(), self.runtime.clone())
+                    .with_mutation_persistence(Arc::new(AppStateClientPersistence {
+                        client: self.self_weak.get().cloned().unwrap_or_default(),
+                        persistence: self.persistence_manager.clone(),
+                    })),
+            )
         })
     }
 
@@ -876,7 +914,7 @@ impl Client {
 
         let mut pre_downloaded = HashMap::with_capacity(jobs.len());
         let results = futures::stream::iter(jobs.into_iter().map(|(ext, kind)| async move {
-            let bytes = self.download(&ext).await;
+            let bytes = self.download(&ext, Default::default()).await;
             // directPath presence was checked when the job was built.
             (ext.direct_path, kind, bytes)
         }))
@@ -2262,8 +2300,7 @@ impl Client {
                             target: "Client/AppState",
                             "Batched sync: apply failed for {name:?}: {e}"
                         );
-                        self.escalate_to_snapshot_recovery(name, &e).await;
-                        apply_error = Some(e);
+                        apply_error = Some((name, e));
                         break;
                     }
                 }
@@ -2435,8 +2472,13 @@ impl Client {
             // what the deferral buys is not a report but the dispatch itself:
             // mutations already persisted reach their consumer instead of being
             // stranded behind a cursor that has moved past them.
-            if let Some(e) = apply_error {
-                return Err(e);
+            if let Some((name, error)) = apply_error {
+                let full_sync = replaying_snapshot.contains(&name);
+                let error = self
+                    .dispatch_committed_mutations_from_error(error, full_sync, full_sync)
+                    .await;
+                self.escalate_to_snapshot_recovery(name, &error).await;
+                return Err(error);
             }
 
             pending = needs_refetch;
@@ -2608,13 +2650,16 @@ impl Client {
             let (mutations, new_state, list) =
                 match proc.process_parsed_patch_list(pl, &download, true).await {
                     Ok(applied) => applied,
-                    Err(e) => {
+                    Err(error) => {
                         // The single-collection path fails the same way the batched
                         // one does and deserves the same escalation; without it, a
                         // collection would recover only when its failure happened to
                         // arrive in a batch.
-                        self.escalate_to_snapshot_recovery(name, &e).await;
-                        return Err(e);
+                        let error = self
+                            .dispatch_committed_mutations_from_error(error, full_sync, full_sync)
+                            .await;
+                        self.escalate_to_snapshot_recovery(name, &error).await;
+                        return Err(error);
                     }
                 };
             let decode_elapsed = _decode_start.elapsed();
@@ -2927,19 +2972,25 @@ impl Client {
         let peers = self.app_state_key_request_peers().await?;
         let key_ids: Vec<wa::message::AppStateSyncKeyId> = raw_key_ids
             .iter()
-            .map(|k| wa::message::AppStateSyncKeyId {
-                key_id: Some(k.to_vec()),
+            .map(|k| {
+                let mut proto = wa::message::AppStateSyncKeyId::default();
+                proto.key_id = Some(k.to_vec());
+                proto
             })
             .collect();
-        let msg = wa::Message {
-            protocol_message: buffa::MessageField::some(wa::message::ProtocolMessage {
-                r#type: Some(wa::message::protocol_message::Type::AppStateSyncKeyRequest),
-                app_state_sync_key_request: buffa::MessageField::some(
-                    wa::message::AppStateSyncKeyRequest { key_ids },
-                ),
-                ..Default::default()
-            }),
-            ..Default::default()
+        let msg = {
+            let mut proto_ = wa::Message::default();
+            proto_.protocol_message = buffa::MessageField::some({
+                let mut proto_ = wa::message::ProtocolMessage::default();
+                proto_.r#type = Some(wa::message::protocol_message::Type::AppStateSyncKeyRequest);
+                proto_.app_state_sync_key_request = buffa::MessageField::some({
+                    let mut proto = wa::message::AppStateSyncKeyRequest::default();
+                    proto.key_ids = key_ids;
+                    proto
+                });
+                proto_
+            });
+            proto_
         };
 
         let requests = futures::stream::FuturesUnordered::new();
@@ -2950,7 +3001,7 @@ impl Client {
                 let result = async {
                     self.ensure_e2e_sessions(std::slice::from_ref(&peer))
                         .await?;
-                    let request_id = self.generate_message_id();
+                    let request_id = self.generate_message_id_at(wacore::time::now_secs_u64());
                     self.send_message_impl(
                         peer,
                         msg,
@@ -3218,6 +3269,7 @@ impl Client {
                     .cloned()
                     .ok_or_else(|| anyhow::anyhow!("external blob not pre-downloaded: {path}"))
             };
+            let replaying_snapshot = list.snapshot.is_some() || list.snapshot_ref.is_some();
             let proc = self.get_app_state_processor();
             match proc.process_parsed_patch_list(list, &download, true).await {
                 // The third element is the processor's own verdict, and it is
@@ -3240,7 +3292,6 @@ impl Client {
                     // `event_full_sync=false` (the base passed `false`
                     // here unconditionally), so the split args below must
                     // not be reunited into one `full_sync`.
-                    let replaying_snapshot = list.snapshot.is_some() || list.snapshot_ref.is_some();
                     let total = mutations.len();
                     for (position, mut m) in mutations.into_iter().enumerate() {
                         self.dispatch_app_state_mutation_inner(
@@ -3262,10 +3313,13 @@ impl Client {
                         true
                     }
                 }
-                Err(e) => {
+                Err(error) => {
+                    let error = self
+                        .dispatch_committed_mutations_from_error(error, false, replaying_snapshot)
+                        .await;
                     warn!(
                         target: "Client/AppState",
-                        "Failed to apply the patches {collection_name} conflicted with: {e:#}"
+                        "Failed to apply the patches {collection_name} conflicted with: {error:#}"
                     );
                     false
                 }
@@ -3348,6 +3402,12 @@ impl Client {
         generation: u64,
         recovery: waproto::whatsapp::SyncdSnapshotRecovery,
     ) {
+        if self.connection_generation.load(Ordering::Acquire) != generation {
+            self.get_app_state_processor()
+                .take_recovery_request_by_id(request_id)
+                .await;
+            return;
+        }
         // `WAPatchName::from_str` is infallible: every unrecognised name maps to
         // `Unknown`, which is one shared reservation slot and one collection
         // this side has no rules for. Rejecting it explicitly is the difference
@@ -3470,11 +3530,15 @@ impl Client {
         // expired and been replaced. Taking by name would consume the
         // replacement's marker, apply the older reply, and have the newer one
         // refused as unsolicited.
-        if proc.take_recovery_request_by_id(request_id).await.is_none() {
-            debug!(
-                target: "Client/AppState",
-                "The recovery request for {name} is no longer outstanding; dropping this reply"
-            );
+        let Some((_, asked_on)) = proc
+            .take_recovery_request_with_generation_by_id(request_id)
+            .await
+        else {
+            debug!(target: "Client/AppState", "The recovery request for {name} is no longer outstanding; dropping this reply");
+            return;
+        };
+        if asked_on != generation {
+            debug!(target: "Client/AppState", "Dropping the {name} recovery from a retired request generation");
             return;
         }
 
@@ -3501,7 +3565,7 @@ impl Client {
         // held across the awaits inside the apply, and `Client` carries trait
         // objects that are neither on wasm.
         let live = Arc::clone(&self.connection_generation);
-        let still_current = move || live.load(Ordering::Acquire) == generation;
+        let still_current = move || live.load(Ordering::Acquire) == asked_on;
         // The recovery's own version, read before `apply_snapshot_recovery`
         // moves `recovery`: it is the post-apply cursor for the semantic
         // context below. `apply_snapshot_recovery` refuses a version-less
@@ -3936,6 +4000,7 @@ fn redacted_index(
         | "nct_salt_sync"
         | "setting_pushName"
         | "setting_disableLinkPreviews"
+        | "setting_unarchiveChats"
         | "favoriteSticker"
         | "removeRecentSticker" => &[Opaque],
         _ => &[],
@@ -3957,7 +4022,7 @@ fn redacted_index(
         "label_edit" => &["label"],
         "nct_salt_sync" => &["salt"],
         "setting_pushName" => &["push_name"],
-        "setting_disableLinkPreviews" => &["setting"],
+        "setting_disableLinkPreviews" | "setting_unarchiveChats" => &["setting"],
         _ => &[],
     };
     fn render(kind: IndexLogKind, label: &str, arg: &str) -> String {
@@ -4192,6 +4257,11 @@ fn mutation_effect_detail(m: &crate::appstate_sync::Mutation) -> Option<Mutation
             .as_option()
             .and_then(|a| a.is_previews_disabled)
             .map(|b| MutationEffectDetail::Bool("disabled", b)),
+        "setting_unarchiveChats" => v
+            .unarchive_chats_setting
+            .as_option()
+            .and_then(|a| a.unarchive_chats)
+            .map(|b| MutationEffectDetail::Bool("unarchive", b)),
         "label_edit" => v
             .label_edit_action
             .as_option()
@@ -4258,6 +4328,7 @@ fn log_mutation_dispatched(
     let op = match m.operation {
         wa::syncd_mutation::SyncdOperation::SET => "SET",
         wa::syncd_mutation::SyncdOperation::REMOVE => "REMOVE",
+        _ => "UNKNOWN",
     };
     let command = m.index.first().map(String::as_str).unwrap_or("");
     // `cursor=` names the page end cursor explicitly: the page concatenates
@@ -4308,6 +4379,31 @@ fn log_mutation_dispatched(
 }
 
 impl Client {
+    async fn dispatch_committed_mutations_from_error(
+        &self,
+        error: anyhow::Error,
+        event_full_sync: bool,
+        log_full_sync: bool,
+    ) -> anyhow::Error {
+        let committed = match error.downcast::<wacore::appstate_sync::CommittedMutationsError>() {
+            Ok(committed) => committed,
+            Err(error) => return error,
+        };
+        let (mutations, state, collection, source) = committed.into_parts();
+        wacore::telemetry::appstate_mutations(mutations.len() as u64);
+        let total = mutations.len();
+        for (position, mut mutation) in mutations.into_iter().enumerate() {
+            self.dispatch_app_state_mutation_inner(
+                &mut mutation,
+                event_full_sync,
+                log_full_sync,
+                Some((collection, state.version, position + 1, total)),
+            )
+            .await;
+        }
+        source
+    }
+
     /// Dispatch one app-state mutation, returning its [`AppStateDispatchOutcome`].
     ///
     /// `&mut` so a dispatcher can move the action out of the mutation into
@@ -4475,9 +4571,64 @@ impl Client {
             return report("chat_actions", m, chat_outcome, effect_detail);
         }
 
+        // Labels have their own index shape. Sublist deletion is a Remove,
+        // so this handler must also run before the Set-only gate.
+        let outcome = crate::features::labels::dispatch_label_mutation_outcome(
+            &self.core.event_bus,
+            m,
+            event_full_sync,
+        );
+        if outcome != AppStateDispatchOutcome::Unclaimed {
+            return report("labels", m, outcome, effect_detail);
+        }
+
         // All remaining mutations only care about Set operations
         if m.operation != wa::syncd_mutation::SyncdOperation::Set {
             return report("none", m, AppStateDispatchOutcome::Unclaimed, effect_detail);
+        }
+
+        if m.index[0] == wacore::appstate::schemas::PN_FOR_LID_CHAT.name {
+            // The processor's mutation hook already made these pairs durable
+            // before committing the cursor. Dispatch only reports their effect.
+            let outcome = if wacore::appstate_sync::pn_for_lid_chat_pair(m).is_some() {
+                AppStateDispatchOutcome::Event("LidPnMappingStored")
+            } else {
+                AppStateDispatchOutcome::Malformed("LidPnMappingStored")
+            };
+            return report("pn_for_lid_chat", m, outcome, effect_detail);
+        }
+
+        // WA Web's WAWebStatusPrivacySettingSync (whatspec .wa-cache,
+        // 1N0AcCuvvZU.js, build 2.3000.1044770897) applies only a single
+        // Set with a present mode. Keep the full action rather than guessing
+        // an audience from the three legacy status_setting wire values.
+        if m.index.len() == 1 && m.index[0] == wacore::appstate::schemas::STATUS_PRIVACY.name {
+            let outcome = if wacore::appstate_sync::status_privacy_action(m).is_some() {
+                let action_timestamp = m
+                    .action_value
+                    .as_ref()
+                    .and_then(|v| v.timestamp)
+                    .and_then(chrono::DateTime::from_timestamp_millis);
+                let action = m
+                    .action_value
+                    .as_mut()
+                    .and_then(|v| v.status_privacy.take())
+                    .expect("validated status privacy action");
+                self.core.event_bus.dispatch(Event::StatusPrivacyUpdate(
+                    wacore::types::events::StatusPrivacyUpdate::builder()
+                        .timestamp(action_timestamp.unwrap_or_else(|| {
+                            wacore::time::from_millis_or_now(wacore::time::now_millis())
+                        }))
+                        .maybe_action_timestamp(action_timestamp)
+                        .action(Box::new(action))
+                        .from_full_sync(event_full_sync)
+                        .build(),
+                ));
+                AppStateDispatchOutcome::Event("StatusPrivacyUpdate")
+            } else {
+                AppStateDispatchOutcome::Malformed("StatusPrivacyUpdate")
+            };
+            return report("status_privacy", m, outcome, effect_detail);
         }
 
         // A call's direction is its creator compared against this account; the
@@ -4491,17 +4642,6 @@ impl Client {
         );
         if outcome != AppStateDispatchOutcome::Unclaimed {
             return report("call_log", m, outcome, effect_detail);
-        }
-
-        // Label mutations have their own index shape (labelId, not a chat JID at
-        // index[1]), so they are dispatched separately from chat actions.
-        let outcome = crate::features::labels::dispatch_label_mutation_outcome(
-            &self.core.event_bus,
-            m,
-            event_full_sync,
-        );
-        if outcome != AppStateDispatchOutcome::Unclaimed {
-            return report("labels", m, outcome, effect_detail);
         }
 
         // Quick replies and account-level syncd settings key on their own index
@@ -4615,6 +4755,61 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn recovery_from_retired_request_generation_does_not_advance_state() {
+        let client = crate::test_utils::create_test_client_with_name("retired-recovery").await;
+        client
+            .persistence_manager
+            .backend()
+            .set_version(
+                "regular_low",
+                wacore::appstate::hash::HashState {
+                    version: 7,
+                    bootstrapped: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let generation = client.connection_generation.load(Ordering::Acquire);
+        let proc = client.get_app_state_processor();
+        assert!(
+            proc.mark_recovery_requested_on_generation("regular_low", generation)
+                .await
+        );
+        proc.note_recovery_request_id("regular_low", "old-request")
+            .await;
+        client
+            .connection_generation
+            .store(generation + 1, Ordering::Release);
+        let mut recovery = wa::SyncdSnapshotRecovery::default();
+        recovery.collection_name = Some("regular_low".to_string());
+        let mut version = wa::SyncdVersion::default();
+        version.version = Some(8);
+        recovery.version = buffa::MessageField::some(version);
+        recovery.collection_lthash = Some(vec![0; 128]);
+        client
+            .apply_recovered_collection("regular_low", "old-request", generation + 1, recovery)
+            .await;
+        assert_eq!(
+            client
+                .persistence_manager
+                .backend()
+                .get_version("regular_low")
+                .await
+                .unwrap()
+                .unwrap()
+                .version,
+            7
+        );
+        assert!(!proc.has_recovery_request("regular_low").await);
+        assert!(
+            proc.mark_recovery_requested_on_generation("regular_low", generation + 1)
+                .await,
+            "retired answer does not suppress retries"
+        );
+    }
 
     /// JID redaction keeps routing answerable without leaking accounts:
     /// a value that parses as a JID with a known server redacts to
@@ -5075,34 +5270,30 @@ mod tests {
             operation: wa::syncd_mutation::SyncdOperation::SET,
             action_value: Some(value),
         };
-        let archived = scalar(
-            &["archive", "120363000000000042@g.us"],
-            wa::SyncActionValue {
-                archive_chat_action: buffa::MessageField::some(
-                    wa::sync_action_value::ArchiveChatAction {
-                        archived: Some(true),
-                        ..Default::default()
-                    },
-                ),
-                ..Default::default()
-            },
-        );
+        let archived = scalar(&["archive", "120363000000000042@g.us"], {
+            let mut proto = wa::SyncActionValue::default();
+            proto.archive_chat_action = buffa::MessageField::some({
+                let mut proto = wa::sync_action_value::ArchiveChatAction::default();
+                proto.archived = Some(true);
+                proto
+            });
+            proto
+        });
         assert_eq!(
             mutation_effect_detail(&archived),
             Some(MutationEffectDetail::Bool("archived", true))
         );
 
-        let muted = scalar(
-            &["mute", "5511999990042@s.whatsapp.net"],
-            wa::SyncActionValue {
-                mute_action: buffa::MessageField::some(wa::sync_action_value::MuteAction {
-                    muted: Some(true),
-                    mute_end_timestamp: Some(1_789_834_000_000),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            },
-        );
+        let muted = scalar(&["mute", "5511999990042@s.whatsapp.net"], {
+            let mut proto = wa::SyncActionValue::default();
+            proto.mute_action = buffa::MessageField::some({
+                let mut proto = wa::sync_action_value::MuteAction::default();
+                proto.muted = Some(true);
+                proto.mute_end_timestamp = Some(1_789_834_000_000);
+                proto
+            });
+            proto
+        });
         assert_eq!(
             mutation_effect_detail(&muted),
             Some(MutationEffectDetail::BoolUntil(
@@ -5125,17 +5316,16 @@ mod tests {
 
         // Contact carries names: the detail is None, so the log line shows the
         // redacted target and the event name but no PII.
-        let contact = scalar(
-            &["contact", "5511999990042@s.whatsapp.net"],
-            wa::SyncActionValue {
-                contact_action: buffa::MessageField::some(wa::sync_action_value::ContactAction {
-                    full_name: Some("Alex Doe".to_string()),
-                    first_name: Some("Alex".to_string()),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            },
-        );
+        let contact = scalar(&["contact", "5511999990042@s.whatsapp.net"], {
+            let mut proto = wa::SyncActionValue::default();
+            proto.contact_action = buffa::MessageField::some({
+                let mut proto = wa::sync_action_value::ContactAction::default();
+                proto.full_name = Some("Alex Doe".to_string());
+                proto.first_name = Some("Alex".to_string());
+                proto
+            });
+            proto
+        });
         assert_eq!(mutation_effect_detail(&contact), None);
         assert_eq!(
             mutation_target(&contact),
@@ -5171,17 +5361,17 @@ mod tests {
             operation: wa::syncd_mutation::SyncdOperation::SET,
             action_value: Some(value),
         };
-        let delete_chat = || wa::SyncActionValue {
-            delete_chat_action: buffa::MessageField::some(
-                wa::sync_action_value::DeleteChatAction::default(),
-            ),
-            ..Default::default()
+        let delete_chat = || {
+            let mut proto = wa::SyncActionValue::default();
+            proto.delete_chat_action =
+                buffa::MessageField::some(wa::sync_action_value::DeleteChatAction::default());
+            proto
         };
-        let clear_chat = || wa::SyncActionValue {
-            clear_chat_action: buffa::MessageField::some(
-                wa::sync_action_value::ClearChatAction::default(),
-            ),
-            ..Default::default()
+        let clear_chat = || {
+            let mut proto = wa::SyncActionValue::default();
+            proto.clear_chat_action =
+                buffa::MessageField::some(wa::sync_action_value::ClearChatAction::default());
+            proto
         };
         assert_eq!(
             mutation_effect_detail(&scalar(
@@ -5237,18 +5427,22 @@ mod tests {
         let favorites = |ids: &[&str]| Mutation {
             index: vec!["favorites".to_string()],
             operation: wa::syncd_mutation::SyncdOperation::SET,
-            action_value: Some(wa::SyncActionValue {
-                favorites_action: buffa::MessageField::some(
-                    wa::sync_action_value::FavoritesAction {
-                        favorites: ids
-                            .iter()
-                            .map(|id| wa::sync_action_value::favorites_action::Favorite {
-                                id: Some((*id).to_string()),
-                            })
-                            .collect(),
-                    },
-                ),
-                ..Default::default()
+            action_value: Some({
+                let mut proto = wa::SyncActionValue::default();
+                proto.favorites_action = buffa::MessageField::some({
+                    let mut proto = wa::sync_action_value::FavoritesAction::default();
+                    proto.favorites = ids
+                        .iter()
+                        .map(|id| {
+                            let mut proto =
+                                wa::sync_action_value::favorites_action::Favorite::default();
+                            proto.id = Some((*id).to_string());
+                            proto
+                        })
+                        .collect();
+                    proto
+                });
+                proto
             }),
         };
         let detail = mutation_effect_detail(&favorites(&[
@@ -5278,14 +5472,14 @@ mod tests {
                 "0".to_string(),
             ],
             operation: wa::syncd_mutation::SyncdOperation::SET,
-            action_value: Some(wa::SyncActionValue {
-                delete_message_for_me_action: buffa::MessageField::some(
-                    wa::sync_action_value::DeleteMessageForMeAction {
-                        delete_media,
-                        ..Default::default()
-                    },
-                ),
-                ..Default::default()
+            action_value: Some({
+                let mut proto = wa::SyncActionValue::default();
+                proto.delete_message_for_me_action = buffa::MessageField::some({
+                    let mut proto = wa::sync_action_value::DeleteMessageForMeAction::default();
+                    proto.delete_media = delete_media;
+                    proto
+                });
+                proto
             }),
         };
         assert_eq!(
@@ -5951,6 +6145,24 @@ mod send_patch_response_tests {
     async fn send_after_an_empty_sync(
         version: Option<wacore::appstate::hash::HashState>,
     ) -> (Result<()>, bool, usize) {
+        send_named_after_an_empty_sync(COLLECTION, version).await
+    }
+
+    #[tokio::test]
+    async fn every_catalog_collection_bootstraps_and_sends_under_its_wire_name() {
+        for collection in wacore::appstate::schemas::COLLECTIONS {
+            let (result, first_was_patch, patches) =
+                send_named_after_an_empty_sync(collection.as_str(), None).await;
+            result.expect("catalog collection should bootstrap and send");
+            assert!(!first_was_patch);
+            assert!(patches > 0);
+        }
+    }
+
+    async fn send_named_after_an_empty_sync(
+        collection: &'static str,
+        version: Option<wacore::appstate::hash::HashState>,
+    ) -> (Result<()>, bool, usize) {
         let (client, transport) = crate::test_utils::create_iq_test_client().await;
         client.is_logged_in.store(true, Ordering::Relaxed);
         client.authenticated_generation.store(
@@ -5970,7 +6182,7 @@ mod send_patch_response_tests {
             .expect("test backend should accept a sync key");
         if let Some(version) = version {
             backend
-                .set_version(COLLECTION, version)
+                .set_version(collection, version)
                 .await
                 .expect("test backend should accept a version");
         }
@@ -5982,7 +6194,7 @@ mod send_patch_response_tests {
             let client = Arc::clone(&client);
             tokio::spawn(async move {
                 client
-                    .send_app_state_patch(COLLECTION, vec![wa::SyncdMutation::default()])
+                    .send_app_state_patch(collection, vec![wa::SyncdMutation::default()])
                     .await
             })
         };
@@ -6002,6 +6214,17 @@ mod send_patch_response_tests {
                         .optional_string("id")
                         .expect("every IQ carries an id")
                         .into_owned();
+                    let requested = node
+                        .get_optional_child_by_tag(&["sync", "collection"])
+                        .expect("sync request collection")
+                        .attrs()
+                        .optional_string("name")
+                        .unwrap()
+                        .into_owned();
+                    assert_eq!(
+                        requested, collection,
+                        "bootstrap and patch must retain the catalog name"
+                    );
                     let is_patch = node
                         .get_optional_child_by_tag(&["sync", "collection", "patch"])
                         .is_some();
@@ -6015,7 +6238,7 @@ mod send_patch_response_tests {
                     // nothing in it -- WA Web writes version 0 with an empty
                     // ltHash and the collection is synced from then on -- and
                     // what it sends a collection already at its head.
-                    let response = empty_sync_result(&id, COLLECTION);
+                    let response = empty_sync_result(&id, collection);
                     crate::test_utils::answer_iq(&client, &id, &response).await;
                     frame += 1;
                 }
@@ -7569,7 +7792,7 @@ mod connection_guard_tests {
         client.is_running.store(true, Ordering::Relaxed);
         client.set_connected_for_test(true);
 
-        assert!(!client.is_terminal() && client.is_connected());
+        assert!(!client.is_terminal() && client.is_socket_connected());
 
         // The state `reconnect_immediately()` leaves behind.
         client.expected_disconnect.store(true, Ordering::Relaxed);
@@ -7899,7 +8122,7 @@ mod sync_outcome_tests {
         // admits the window on the very first connection.
         client.is_logged_in.store(true, Ordering::Relaxed);
         assert!(
-            client.is_logged_in() && client.is_connected(),
+            client.is_logged_in() && client.is_socket_connected(),
             "which is why the flags alone said yes"
         );
         assert!(
@@ -8077,7 +8300,7 @@ mod retiring_socket_tests {
         client.expected_disconnect.store(true, Ordering::Relaxed);
 
         assert!(
-            client.is_connected() && client.is_logged_in(),
+            client.is_socket_connected() && client.is_logged_in(),
             "and every other signal still says the socket is fine"
         );
         assert!(
@@ -8677,6 +8900,417 @@ mod critical_bootstrap_tests {
         );
     }
 
+    fn pn_for_lid_mutation(lid: Option<&str>, pn: Option<&str>) -> crate::appstate_sync::Mutation {
+        let mut value = wa::SyncActionValue::default();
+        value.pn_for_lid_chat_action.get_or_insert_default().pn_jid = pn.map(str::to_owned);
+        let mut index = vec!["pnForLidChat".into()];
+        if let Some(lid) = lid {
+            index.push(lid.into());
+        }
+        crate::appstate_sync::Mutation {
+            index,
+            operation: wa::syncd_mutation::SyncdOperation::Set,
+            action_value: Some(value),
+        }
+    }
+
+    #[tokio::test]
+    async fn pn_for_lid_chat_rejects_malformed_and_non_set_mutations() {
+        let client = crate::test_utils::create_test_client().await;
+        for (lid, pn) in [
+            (None, Some("12025550111@s.whatsapp.net")),
+            (Some("100000001@lid"), None),
+            (Some("not a jid"), Some("12025550111@s.whatsapp.net")),
+            (
+                Some("12025550111@s.whatsapp.net"),
+                Some("12025550112@s.whatsapp.net"),
+            ),
+            (Some("100000001@lid"), Some("100000002@lid")),
+            (Some("100000001@lid"), Some("123-456@g.us")),
+            (Some("@lid"), Some("12025550111@s.whatsapp.net")),
+            (Some("100000001@lid"), Some("abc@s.whatsapp.net")),
+            (Some("100000001@lid"), Some("0@s.whatsapp.net")),
+            (Some("100000001:7@lid"), Some("12025550111@s.whatsapp.net")),
+            (Some("100000001@lid"), Some("12025550111:7@s.whatsapp.net")),
+            (Some("100000001@lid"), Some("12025550111.1@s.whatsapp.net")),
+        ] {
+            let mut mutation = pn_for_lid_mutation(lid, pn);
+            assert_eq!(
+                client
+                    .dispatch_app_state_mutation(
+                        &mut mutation,
+                        false,
+                        (WAPatchName::Regular, 8, 1, 1)
+                    )
+                    .await,
+                AppStateDispatchOutcome::Malformed("LidPnMappingStored")
+            );
+        }
+        let mut missing_action = pn_for_lid_mutation(Some("100000001@lid"), None);
+        missing_action.action_value = None;
+        assert_eq!(
+            client
+                .dispatch_app_state_mutation(
+                    &mut missing_action,
+                    false,
+                    (WAPatchName::Regular, 8, 1, 1)
+                )
+                .await,
+            AppStateDispatchOutcome::Malformed("LidPnMappingStored")
+        );
+        let mut mutation =
+            pn_for_lid_mutation(Some("100000001@lid"), Some("12025550111@s.whatsapp.net"));
+        mutation.operation = wa::syncd_mutation::SyncdOperation::Remove;
+        assert_eq!(
+            client
+                .dispatch_app_state_mutation(&mut mutation, false, (WAPatchName::Regular, 8, 1, 1))
+                .await,
+            AppStateDispatchOutcome::Unclaimed
+        );
+        assert!(
+            client
+                .get_lid_pn_entry(&Jid::lid("100000001"))
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn pn_for_lid_chat_page_reuses_the_observational_conflict_policy() {
+        use crate::lid_pn_cache::LearningSource;
+        let client = crate::test_utils::create_test_client().await;
+        client
+            .add_lid_pn_mapping("100000001", "12025550111", LearningSource::Usync)
+            .await
+            .unwrap();
+        let mutations = [
+            pn_for_lid_mutation(Some("100000001@lid"), Some("12025550112@s.whatsapp.net")),
+            pn_for_lid_mutation(Some("100000002@lid"), Some("12025550113@s.whatsapp.net")),
+            pn_for_lid_mutation(Some("100000002@lid"), Some("12025550113@s.whatsapp.net")),
+            pn_for_lid_mutation(Some("100000003@lid"), None),
+        ];
+        let pairs = mutations
+            .iter()
+            .filter_map(wacore::appstate_sync::pn_for_lid_chat_pair)
+            .map(|(lid, pn)| (lid.user.to_string(), pn.user.to_string()))
+            .collect();
+        AppStateClientPersistence {
+            client: Arc::downgrade(&client),
+            persistence: client.persistence_manager.clone(),
+        }
+        .persist_lid_pn_mappings(pairs)
+        .await
+        .unwrap();
+        let known = client
+            .get_lid_pn_entry(&Jid::lid("100000001"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(known.phone_number.as_ref(), "12025550111");
+        let fresh = client
+            .get_lid_pn_entry(&Jid::lid("100000002"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(fresh.phone_number.as_ref(), "12025550113");
+        assert_eq!(fresh.learning_source, LearningSource::Other);
+        assert!(
+            client
+                .get_lid_pn_entry(&Jid::lid("100000003"))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            client
+                .persistence_manager
+                .backend()
+                .get_lid_mapping("100000002")
+                .await
+                .unwrap()
+                .unwrap()
+                .phone_number,
+            "12025550113"
+        );
+    }
+
+    #[tokio::test]
+    async fn pn_for_lid_chat_learns_durable_public_mapping() {
+        let client = crate::test_utils::create_test_client().await;
+        let mut value = wa::SyncActionValue::default();
+        value.pn_for_lid_chat_action.get_or_insert_default().pn_jid =
+            Some("12025550111@s.whatsapp.net".into());
+        let mut mutation = crate::appstate_sync::Mutation {
+            index: vec!["pnForLidChat".into(), "100000001@lid".into()],
+            operation: wa::syncd_mutation::SyncdOperation::Set,
+            action_value: Some(value),
+        };
+        let (lid, pn) = wacore::appstate_sync::pn_for_lid_chat_pair(&mutation).unwrap();
+        AppStateClientPersistence {
+            client: Arc::downgrade(&client),
+            persistence: client.persistence_manager.clone(),
+        }
+        .persist_lid_pn_mappings(vec![(lid.user.to_string(), pn.user.to_string())])
+        .await
+        .unwrap();
+        for full_sync in [true, false] {
+            assert_eq!(
+                client
+                    .dispatch_app_state_mutation(
+                        &mut mutation,
+                        full_sync,
+                        (WAPatchName::Regular, 8, 1, 1)
+                    )
+                    .await,
+                AppStateDispatchOutcome::Event("LidPnMappingStored")
+            );
+            let mapping = client
+                .get_lid_pn_entry(&"100000001@lid".parse().unwrap())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(mapping.phone_number.as_ref(), "12025550111");
+            assert_eq!(
+                mapping.learning_source,
+                crate::lid_pn_cache::LearningSource::Other
+            );
+            client.lid_pn_cache.clear().await;
+            assert_eq!(
+                client
+                    .get_lid_pn_entry(&Jid::pn("12025550111"))
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .lid
+                    .as_ref(),
+                "100000001"
+            );
+            assert_eq!(
+                client
+                    .persistence_manager
+                    .backend()
+                    .get_lid_mapping("100000001")
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .phone_number,
+                "12025550111"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn label_sublist_set_and_remove_reach_the_event_bus() {
+        use std::sync::{Arc, Mutex};
+        use wacore::types::events::{Event, EventHandler, EventInterest};
+
+        struct Recorder(Mutex<Vec<Arc<Event>>>);
+        impl EventHandler for Recorder {
+            fn handle_event(&self, event: Arc<Event>) {
+                self.0.lock().unwrap().push(event);
+            }
+            fn interest(&self) -> EventInterest {
+                EventInterest::ALL
+            }
+        }
+
+        let client = crate::test_utils::create_test_client().await;
+        let recorder = Arc::new(Recorder(Mutex::new(Vec::new())));
+        let _subscription = client.core.event_bus.subscribe_handler(recorder.clone());
+        for operation in [
+            wa::syncd_mutation::SyncdOperation::Set,
+            wa::syncd_mutation::SyncdOperation::Remove,
+        ] {
+            let mut value = wa::SyncActionValue::default().with_timestamp(0);
+            if operation == wa::syncd_mutation::SyncdOperation::Set {
+                value
+                    .label_sublist_action
+                    .get_or_insert_default()
+                    .sub_list_id = Some(2);
+            }
+            let mut mutation = crate::appstate_sync::Mutation {
+                index: vec![
+                    "label_sublist".into(),
+                    "11".into(),
+                    "12025550111@s.whatsapp.net".into(),
+                ],
+                operation,
+                action_value: Some(value),
+            };
+            // Recovery may log a snapshot at TRACE without claiming full-sync
+            // event provenance. The label handler must use event_full_sync.
+            let outcome = client
+                .dispatch_app_state_mutation_inner(&mut mutation, false, true, None)
+                .await;
+            assert_eq!(
+                outcome,
+                AppStateDispatchOutcome::Event("LabelSublistUpdate")
+            );
+        }
+        let events = recorder.0.lock().unwrap();
+        assert_eq!(events.len(), 2);
+        let set = serde_json::to_value(&*events[0]).unwrap();
+        let remove = serde_json::to_value(&*events[1]).unwrap();
+        assert_eq!(
+            set["LabelSublistUpdate"]["change"],
+            serde_json::json!({"Upsert": {"sub_list_id": 2}})
+        );
+        assert_eq!(remove["LabelSublistUpdate"]["change"], "Remove");
+        for event in [set, remove] {
+            let update = &event["LabelSublistUpdate"];
+            assert_eq!(update["predefined_id"], 11);
+            assert_eq!(update["action_timestamp"], "1970-01-01T00:00:00Z");
+            assert_eq!(update["from_full_sync"], false);
+        }
+    }
+
+    #[tokio::test]
+    async fn status_privacy_sync_persists_and_emits_full_action() {
+        use std::sync::{Arc, Mutex};
+        use wa::sync_action_value::status_privacy_action::{
+            CustomList, StatusDistributionMode as Mode,
+        };
+        use wacore::types::events::{Event, EventHandler, EventInterest};
+
+        struct Recorder(Mutex<Vec<Arc<Event>>>);
+        impl EventHandler for Recorder {
+            fn handle_event(&self, event: Arc<Event>) {
+                self.0.lock().expect("recorder mutex").push(event);
+            }
+            fn interest(&self) -> EventInterest {
+                EventInterest::ALL
+            }
+        }
+
+        let client = crate::test_utils::create_test_client_with_name("status_privacy_sync").await;
+        let recorder = Arc::new(Recorder(Mutex::new(Vec::new())));
+        let _subscription = client
+            .core
+            .event_bus
+            .subscribe_handler(Arc::clone(&recorder) as _);
+        assert!(client.status().audience().is_none());
+
+        let action = {
+            let mut proto = wa::sync_action_value::StatusPrivacyAction::default();
+            proto.mode = Some(Mode::CUSTOM_LIST.into());
+            proto.user_jid = vec!["120363000000000042@lid".into()];
+            proto.custom_lists = vec![{
+                let mut proto = CustomList::default();
+                proto.list_id = Some("friends".into());
+                proto.name = Some("Friends".into());
+                proto.user_jid = vec!["120363000000000043@lid".into()];
+                proto.is_selected = Some(true);
+                proto
+            }];
+            proto.modes = vec![Mode::CLOSE_FRIENDS.into(), Mode::CUSTOM_LIST.into()];
+            proto.share_to_fb = Some(false);
+            proto.share_to_ig = Some(true);
+            proto
+        };
+        let make_mutation =
+            |action: wa::sync_action_value::StatusPrivacyAction| crate::appstate_sync::Mutation {
+                index: vec!["status_privacy".into()],
+                operation: wa::syncd_mutation::SyncdOperation::Set,
+                action_value: Some({
+                    let mut proto = wa::SyncActionValue::default();
+                    proto.status_privacy = buffa::MessageField::some(action);
+                    proto.timestamp = Some(1_700_000_000_000);
+                    proto
+                }),
+            };
+        let mut mutation = make_mutation(action.clone());
+        client
+            .persistence_manager
+            .persist_status_privacy(&action)
+            .await
+            .unwrap();
+        let outcome = client
+            .dispatch_app_state_mutation(&mut mutation, true, (WAPatchName::RegularHigh, 7, 1, 1))
+            .await;
+        assert_eq!(
+            outcome,
+            AppStateDispatchOutcome::Event("StatusPrivacyUpdate")
+        );
+        assert_eq!(client.status().audience().as_deref(), Some(&action));
+        let held_audience = client.status().audience().expect("stored audience");
+        let memory = client.memory_report().await;
+        assert_eq!(memory.status_privacy.entries, 3);
+        assert!(memory.status_privacy.bytes > 0);
+        assert_eq!(
+            client.memory_report().await.status_privacy.bytes,
+            memory.status_privacy.bytes,
+            "sharing the audience must not count its payload twice"
+        );
+        drop(held_audience);
+        {
+            let events = recorder.0.lock().expect("recorder mutex");
+            assert_eq!(events.len(), 1);
+            match &*events[0] {
+                Event::StatusPrivacyUpdate(update) => {
+                    assert_eq!(update.action.as_ref(), &action);
+                    assert!(update.from_full_sync);
+                }
+                other => panic!("expected StatusPrivacyUpdate, got {other:?}"),
+            }
+        }
+
+        let unknown = waproto::codec::status_privacy_action_decode(&[0x08, 0x63])
+            .expect("decode unknown status privacy mode");
+        let mut unknown_mode = make_mutation(unknown.clone());
+        client
+            .persistence_manager
+            .persist_status_privacy(&unknown)
+            .await
+            .unwrap();
+        assert_eq!(
+            client
+                .dispatch_app_state_mutation(
+                    &mut unknown_mode,
+                    false,
+                    (WAPatchName::RegularHigh, 8, 1, 1)
+                )
+                .await,
+            AppStateDispatchOutcome::Event("StatusPrivacyUpdate")
+        );
+        assert_eq!(
+            client.status().audience().as_deref(),
+            Some(&unknown),
+            "unknown mode must replace the previous allowed audience"
+        );
+        let unknown_memory = client.memory_report().await.status_privacy;
+        assert_eq!(unknown_memory.entries, 0);
+        assert!(unknown_memory.bytes > 0);
+        {
+            let events = recorder.0.lock().expect("recorder mutex");
+            assert_eq!(events.len(), 2);
+            match &*events[1] {
+                Event::StatusPrivacyUpdate(update) => {
+                    assert_eq!(update.action.as_ref(), &unknown);
+                }
+                other => panic!("expected StatusPrivacyUpdate, got {other:?}"),
+            }
+        }
+
+        let mut missing_mode = make_mutation({
+            let mut proto = wa::sync_action_value::StatusPrivacyAction::default();
+            proto.mode = None;
+            proto
+        });
+        assert_eq!(
+            client
+                .dispatch_app_state_mutation(
+                    &mut missing_mode,
+                    false,
+                    (WAPatchName::RegularHigh, 9, 1, 1)
+                )
+                .await,
+            AppStateDispatchOutcome::Malformed("StatusPrivacyUpdate")
+        );
+        assert_eq!(client.status().audience().as_deref(), Some(&unknown));
+        assert_eq!(recorder.0.lock().expect("recorder mutex").len(), 2);
+    }
+
     /// A 409 conflict absorb replays a snapshot's worth of mutations at TRACE
     /// volume — but the events it emits are conflict resolutions, not a full
     /// sync. The base passed `event_full_sync=false` here unconditionally,
@@ -8712,15 +9346,15 @@ mod critical_bootstrap_tests {
         let mut m = crate::appstate_sync::Mutation {
             index: vec!["archive".to_string(), "120363000000000042@g.us".to_string()],
             operation: wa::syncd_mutation::SyncdOperation::SET,
-            action_value: Some(wa::SyncActionValue {
-                archive_chat_action: buffa::MessageField::some(
-                    wa::sync_action_value::ArchiveChatAction {
-                        archived: Some(true),
-                        ..Default::default()
-                    },
-                ),
-                timestamp: Some(1_700_000_000_000),
-                ..Default::default()
+            action_value: Some({
+                let mut proto = wa::SyncActionValue::default();
+                proto.archive_chat_action = buffa::MessageField::some({
+                    let mut proto = wa::sync_action_value::ArchiveChatAction::default();
+                    proto.archived = Some(true);
+                    proto
+                });
+                proto.timestamp = Some(1_700_000_000_000);
+                proto
             }),
         };
         let outcome = client

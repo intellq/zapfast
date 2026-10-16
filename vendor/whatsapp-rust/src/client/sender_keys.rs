@@ -89,12 +89,27 @@ impl Client {
 
     /// Redistribution must not inherit delivery marks from an earlier pass.
     pub(crate) async fn reset_sender_key_device_tracking(&self, group_jid: &str) -> Result<()> {
+        self.reset_sender_key_device_tracking_scoped(group_jid, None)
+            .await
+    }
+
+    async fn reset_sender_key_device_tracking_scoped(
+        &self,
+        group_jid: &str,
+        scope: Option<super::NotificationScope<'_>>,
+    ) -> Result<()> {
+        if scope.is_some_and(|scope| !scope.is_current(self)) {
+            return Ok(());
+        }
         if let Err(clear_error) = self
             .persistence_manager
             .clear_sender_key_devices(group_jid)
             .await
         {
             // Cold marks preserve the reset when row deletion is unavailable.
+            if scope.is_some_and(|scope| !scope.is_current(self)) {
+                return Ok(());
+            }
             let rows = self
                 .persistence_manager
                 .get_sender_key_devices(group_jid)
@@ -106,6 +121,9 @@ impl Client {
                     )
                 })?;
             if !rows.is_empty() {
+                if scope.is_some_and(|scope| !scope.is_current(self)) {
+                    return Ok(());
+                }
                 let entries: Vec<(&str, bool)> = rows
                     .iter()
                     .map(|(device_jid, _)| (device_jid.as_str(), false))
@@ -126,7 +144,9 @@ impl Client {
                 rows.len()
             );
         }
-        self.sender_key_device_cache.invalidate(group_jid).await;
+        if scope.is_none_or(|scope| scope.is_current(self)) {
+            self.sender_key_device_cache.invalidate(group_jid).await;
+        }
         Ok(())
     }
 
@@ -136,18 +156,60 @@ impl Client {
     /// the group and wipe `sender_key_devices` so the next send takes the
     /// `force_skdm=true` path (`!key_exists`) and redistributes to all
     /// remaining participants.
-    #[cfg_attr(feature = "tracing", tracing::instrument(name = "wa.session.rotate_sender_key_on_remove", level = "debug", skip_all, fields(removed = removed_user_ids.len())))]
     pub(crate) async fn rotate_sender_key_on_participant_remove(
         &self,
         group_jid: &Jid,
         removed_user_ids: &[&str],
     ) {
+        self.rotate_sender_key_on_participant_remove_scoped(group_jid, removed_user_ids, None)
+            .await;
+    }
+
+    #[cfg_attr(feature = "tracing", tracing::instrument(name = "wa.session.rotate_sender_key_on_remove", level = "debug", skip_all, fields(removed = removed_user_ids.len())))]
+    pub(crate) async fn rotate_sender_key_on_participant_remove_scoped(
+        &self,
+        group_jid: &Jid,
+        removed_user_ids: &[&str],
+        scope: Option<super::NotificationScope<'_>>,
+    ) {
         if removed_user_ids.is_empty() {
             return;
         }
-        let group_id = group_jid.to_string();
-        let distribution_guard = self.group_distribution_lock(group_jid).await;
+        let distribution_guard = if let Some(scope) = scope {
+            let Some(guard) = scope
+                .run(self, self.group_distribution_lock(group_jid))
+                .await
+            else {
+                return;
+            };
+            guard
+        } else {
+            self.group_distribution_lock(group_jid).await
+        };
+        if scope.is_some_and(|scope| !scope.is_current(self)) {
+            return;
+        }
 
+        if let Err(error) = self
+            .rotate_sender_key_on_participant_remove_locked(group_jid, removed_user_ids)
+            .await
+        {
+            log::warn!("Failed to retire group sender keys for {group_jid}: {error}");
+        }
+        drop(distribution_guard);
+    }
+
+    /// Caller holds the group's metadata/distribution lock. Once admitted,
+    /// membership and both identities' key retirement are one transition.
+    pub(crate) async fn rotate_sender_key_on_participant_remove_locked(
+        &self,
+        group_jid: &Jid,
+        removed_user_ids: &[&str],
+    ) -> Result<()> {
+        if removed_user_ids.is_empty() {
+            return Ok(());
+        }
+        let group_id = group_jid.to_string();
         // Read failure → rotate anyway. Better to pay the redistribute cost
         // than leave the sender key in place after a removal we couldn't audit.
         let (rows, read_failed) = match self
@@ -173,13 +235,10 @@ impl Client {
                     .is_some_and(|jid| removed_user_ids.iter().any(|u| *u == jid.user.as_str()))
         });
         if !read_failed && !any_had_key {
-            return;
+            return Ok(());
         }
 
-        self.rotate_own_sender_key_state(&group_id).await;
-        drop(distribution_guard);
-        self.flush_signal_cache_batch_safe_logged("rotate_on_participant_remove", None)
-            .await;
+        self.rotate_own_sender_key_state(&group_id).await
     }
 
     /// Unconditional forward-secrecy rotation: delete the bot's own sender key
@@ -187,6 +246,13 @@ impl Client {
     /// `force_skdm=true` path and regenerates + redistributes a fresh key.
     /// Used by the removal audit and by the `<modify>` (number/LID migration)
     /// path, which WA Web (`modifyParticipantInfo`) rotates unconditionally.
+    #[cfg(test)]
+    pub(crate) async fn force_rotate_own_sender_key(&self, group_jid: &Jid) {
+        self.force_rotate_own_sender_key_scoped(group_jid, None)
+            .await;
+    }
+
+    #[cfg(test)]
     #[cfg_attr(
         feature = "tracing",
         tracing::instrument(
@@ -195,31 +261,61 @@ impl Client {
             skip_all
         )
     )]
-    pub(crate) async fn force_rotate_own_sender_key(&self, group_jid: &Jid) {
-        let group_id = group_jid.to_string();
-        let distribution_guard = self.group_distribution_lock(group_jid).await;
-        self.rotate_own_sender_key_state(&group_id).await;
+    pub(crate) async fn force_rotate_own_sender_key_scoped(
+        &self,
+        group_jid: &Jid,
+        scope: Option<super::NotificationScope<'_>>,
+    ) {
+        let distribution_guard = if let Some(scope) = scope {
+            let Some(guard) = scope
+                .run(self, self.group_distribution_lock(group_jid))
+                .await
+            else {
+                return;
+            };
+            guard
+        } else {
+            self.group_distribution_lock(group_jid).await
+        };
+        if scope.is_some_and(|scope| !scope.is_current(self)) {
+            return;
+        }
+        if let Err(error) = self.force_rotate_own_sender_key_locked(group_jid).await {
+            log::warn!("Failed to retire group sender keys for {group_jid}: {error}");
+        }
         drop(distribution_guard);
-
-        self.flush_signal_cache_batch_safe_logged("force_rotate_own_sender_key", None)
-            .await;
     }
 
-    /// A send must not publish a new distribution between the audit and reset.
-    async fn rotate_own_sender_key_state(&self, group_id: &str) {
+    pub(crate) async fn force_rotate_own_sender_key_locked(&self, group_jid: &Jid) -> Result<()> {
+        self.rotate_own_sender_key_state(&group_jid.to_string())
+            .await
+    }
+
+    /// Retire only these outbound chains. A global flush would take the drain's
+    /// message permit while this caller holds the group lock, which a message
+    /// holder can itself need. It would also flush unrelated inbound state.
+    async fn rotate_own_sender_key_state(&self, group_id: &str) -> Result<()> {
         use wacore::libsignal::store::sender_key_name::SenderKeyName;
         use wacore::types::jid::JidExt;
         let snapshot = self.persistence_manager.get_device_snapshot();
+        let backend = self.persistence_manager.backend();
+        let mut failure = None;
         for own_jid in snapshot.lid.iter().chain(snapshot.pn.iter()) {
-            let sk_name =
-                SenderKeyName::from_parts(group_id, own_jid.to_protocol_address().as_str());
-            self.signal_cache
-                .delete_sender_key(sk_name.cache_key())
-                .await;
+            let name = SenderKeyName::from_parts(group_id, own_jid.to_protocol_address().as_str());
+            if let Err(error) = self
+                .signal_cache
+                .delete_sender_key_durable(&name, backend.as_ref())
+                .await
+            {
+                failure.get_or_insert(error);
+            }
         }
-
-        if let Err(e) = self.reset_sender_key_device_tracking(group_id).await {
-            log::warn!("rotate_own_sender_key_state: reset failed for {group_id}: {e}");
+        // Keep warm rows until every deletion is confirmed. Otherwise a
+        // redelivered remove would see no recipient with the retired chain
+        // and skip retrying a backend deletion that may not have committed.
+        match failure {
+            Some(error) => Err(error),
+            None => self.reset_sender_key_device_tracking(group_id).await,
         }
     }
 
@@ -280,7 +376,7 @@ impl Client {
         if has_l1_cache && let Some(bytes) = self.recent_messages.remove(key).await {
             if let Ok(msg) = waproto::codec::message_decode(bytes.as_slice()) {
                 // Cache hit — consume the DB row in the background to avoid orphans.
-                let backend = self.persistence_manager.backend();
+                let backend = self.persistence_manager.backend_lease();
                 let mid = key.id.clone();
                 self.runtime
                     .spawn(Box::pin(async move {
@@ -465,7 +561,7 @@ impl Client {
             self.recent_messages
                 .insert(key, std::sync::Arc::clone(&shared))
                 .await;
-            let backend = self.persistence_manager.backend();
+            let backend = self.persistence_manager.backend_lease();
             self.runtime
                 .spawn(Box::pin(async move {
                     if let Err(e) = backend
@@ -906,6 +1002,96 @@ mod tests {
             map.generation(),
             gen_before,
             "excluding all named devices leaves the map untouched"
+        );
+    }
+    #[tokio::test]
+    async fn completed_sender_key_deletion_resets_tracking_after_retirement() {
+        use std::sync::atomic::Ordering;
+        use wacore::libsignal::protocol::SenderKeyRecord;
+        use wacore::libsignal::store::sender_key_name::SenderKeyName;
+        use wacore::types::jid::JidExt;
+        let client = create_test_client().await;
+        let lid: Jid = "888000888000888:3@lid".parse().unwrap();
+        let pn: Jid = "12025550101:3@s.whatsapp.net".parse().unwrap();
+        client
+            .persistence_manager
+            .process_command(crate::store::commands::DeviceCommand::SetLid(Some(
+                lid.clone(),
+            )))
+            .await;
+        client
+            .persistence_manager
+            .process_command(crate::store::commands::DeviceCommand::SetId(Some(
+                pn.clone(),
+            )))
+            .await;
+        let group: Jid = "120363000000000001@g.us".parse().unwrap();
+        let group_id = group.to_string();
+        let member: Jid = "12025550102:0@s.whatsapp.net".parse().unwrap();
+        client
+            .set_sender_key_status_for_devices(&group_id, &[member], true, false)
+            .await
+            .unwrap();
+        let pn_key = SenderKeyName::from_parts(&group_id, pn.to_protocol_address().as_str());
+        let lid_key = SenderKeyName::from_parts(&group_id, lid.to_protocol_address().as_str());
+        client
+            .signal_cache
+            .put_sender_key(&lid_key, SenderKeyRecord::new_empty())
+            .await;
+        client
+            .signal_cache
+            .put_sender_key(&pn_key, SenderKeyRecord::new_empty())
+            .await;
+        let lock = client.signal_cache.sender_key_lock(&lid_key).await;
+        let guard = lock.lock().await;
+        let baseline = Arc::strong_count(&lock);
+        let task = tokio::spawn({
+            let client = client.clone();
+            let group = group.clone();
+            async move {
+                let shutdown = client.connection_shutdown_signal();
+                let scope = super::super::NotificationScope::new(
+                    client.connection_generation.load(Ordering::Acquire),
+                    &shutdown,
+                );
+                client
+                    .force_rotate_own_sender_key_scoped(&group, Some(scope))
+                    .await;
+            }
+        });
+        crate::test_utils::wait_for_lock_waiter(&lock, baseline).await;
+        client.notify_connection_shutdown();
+        drop(guard);
+        tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap();
+        let backend = client.persistence_manager.backend();
+        assert!(
+            client
+                .signal_cache
+                .get_sender_key(&lid_key, &*backend)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            client
+                .signal_cache
+                .get_sender_key(&pn_key, &*backend)
+                .await
+                .unwrap()
+                .is_none(),
+            "retirement must not leave a surviving PN sender key"
+        );
+        let rows = client
+            .persistence_manager
+            .get_sender_key_devices(&group_id)
+            .await
+            .unwrap();
+        assert!(
+            rows.iter().all(|(_, has_key)| !has_key),
+            "completed deletion requires fresh SKDM even after retirement"
         );
     }
 }

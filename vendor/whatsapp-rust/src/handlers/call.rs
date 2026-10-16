@@ -50,7 +50,7 @@ pub(crate) mod pending_offers;
 /// learns caller identity and dispatches. On `Offer` it emits the `<receipt><offer/></receipt>`
 /// ack-of-offer so the caller's signaling layer knows the device received the ring.
 #[derive(Default)]
-pub struct CallHandler;
+pub(crate) struct CallHandler;
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -179,6 +179,7 @@ impl StanzaHandler for CallHandler {
                             &routed_call_sender(&call),
                         )
                     })
+                    && !is_call_service_sender(&routed_call_sender(&call), call.action.call_id())
                 {
                     warn!(
                         "call: rejected group terminate from non-creator sender for {}",
@@ -203,15 +204,17 @@ impl StanzaHandler for CallHandler {
                     // dead (no relay, not connectable). Don't ack or ring it -- surface a non-ringing
                     // missed-call so a consumer can't auto-accept it (WA Web drops the stale notice
                     // rather than ringing; its cancel_call + missed_call for offerReceivedWhileOffline).
-                    client
-                        .core
-                        .event_bus
-                        .dispatch(Event::MissedCall(MissedCall::new(
-                            call.from.clone(),
-                            call.action.call_id().to_string(),
-                            call.timestamp,
-                            MissedReason::Offline,
-                        )));
+                    if let Some(timestamp) = call.timestamp {
+                        client
+                            .core
+                            .event_bus
+                            .dispatch(Event::MissedCall(MissedCall::new(
+                                call.from.clone(),
+                                call.action.call_id().to_string(),
+                                timestamp,
+                                MissedReason::Offline,
+                            )));
+                    }
                 } else {
                     // Signal-only clients have no VoIP registry; keep the offer's
                     // liveness through the receipt and identity-learning awaits.
@@ -506,11 +509,11 @@ impl StanzaHandler for CallHandler {
                     #[cfg(feature = "voip-control")]
                     if let CallAction::Terminate { reason, .. } = &call.action
                         && client.call_registry().take_ringing(call.action.call_id())
+                        && let Some(ts) = call.timestamp
                     {
                         // Shared provenance for whichever outcome this reason maps to.
                         let from = call.from.clone();
                         let cid = call.action.call_id().to_string();
-                        let ts = call.timestamp;
                         let outcome = match reason.as_deref() {
                             None
                             | Some(TERMINATE_REASON_TIMEOUT)
@@ -1028,21 +1031,13 @@ impl StanzaHandler for CallHandler {
                                 );
                             }
                             let event_delivered = event_permit.as_ref().is_some_and(|permit| {
-                                let sourced = permit.send(CallEvent::PeerVideoStateChanged {
+                                permit.send(CallEvent::PeerVideoStateChanged {
                                     source: routed_call_sender(&call),
                                     call_creator: call.action.call_creator().clone(),
                                     state: *state,
                                     orientation: *orientation,
                                     upgrade_token,
-                                });
-                                // Keep the legacy event last so a custom single-slot queue retains
-                                // its previous behavior. Normal handles have room for both events.
-                                let legacy = permit.send(CallEvent::VideoStateChanged {
-                                    state: *state,
-                                    orientation: *orientation,
-                                    upgrade_token,
-                                });
-                                sourced && legacy
+                                })
                             });
                             if !event_delivered {
                                 warn!("call: video state event receiver closed after typed ack");
@@ -1277,19 +1272,35 @@ async fn apply_group_control(client: &Client, call: &IncomingCall, generation: u
                 generation,
                 &update.call_creator,
                 &sender,
-            ) {
+            ) && !is_call_service_sender(&sender, &update.call_id)
+            {
                 warn!(
                     "call: rejected group snapshot from non-creator sender for {}",
                     update.call_id
                 );
                 return false;
             }
-            match registry.apply_group_update_if_current(update.as_ref().clone(), generation) {
+            let (applied, roster) = registry
+                .apply_group_update_if_current_with_roster(update.as_ref().clone(), generation);
+            match applied {
                 GroupStateApply::Applied => {
+                    // Media follows the committed snapshot, not the raw update: the committed one
+                    // keeps the relay and the pids a roster-only update leaves out.
+                    let Some(committed) = registry
+                        .group_state_if_current(&update.call_id, generation)
+                        .and_then(|group| group.snapshot().cloned())
+                    else {
+                        // A concurrently ended/replaced generation has no snapshot to publish.
+                        // Never substitute the raw roster that omits inherited relay/PID state.
+                        debug!(
+                            "committed group snapshot no longer available for call generation {generation}"
+                        );
+                        return false;
+                    };
                     if !registry.send_group_update_if_current(
                         &update.call_id,
                         generation,
-                        update.as_ref().clone(),
+                        committed,
                     ) {
                         warn!(
                             "call: terminating {} after its committed group snapshot could not reach media",
@@ -1298,8 +1309,12 @@ async fn apply_group_control(client: &Client, call: &IncomingCall, generation: u
                         registry.remove_if_current(&update.call_id, generation);
                         return false;
                     }
-                    if update.rekey_requested {
-                        match crate::voip::facade::fanout_group_epoch(client, update).await {
+                    // A late relay is not a new roster epoch. Only a fresh committed roster may
+                    // fan out a key, with inherited PIDs included and its original transaction.
+                    if update.rekey_requested
+                        && let Some(roster) = roster
+                    {
+                        match crate::voip::facade::fanout_group_epoch(client, &roster).await {
                             Ok(fanout) => {
                                 let fanout_generation = fanout.generation();
                                 if let Err(error) = fanout.commit(|epoch| {
@@ -1458,6 +1473,14 @@ fn validate_group_epoch_key(raw_epoch: &[u8]) -> anyhow::Result<()> {
         anyhow::bail!("call key must contain exactly 32 bytes");
     }
     Ok(())
+}
+
+/// The call service's own address for this call, `<call_id>@call`. Live group calls deliver the
+/// authoritative `group_update` snapshots (including the relay an invited device needs to join)
+/// and the final `terminate` from it rather than from the creator's device.
+#[cfg(feature = "voip-control")]
+fn is_call_service_sender(sender: &Jid, call_id: &str) -> bool {
+    sender.server == Server::Call && sender.device == 0 && sender.user.as_str() == call_id
 }
 
 #[cfg(feature = "voip-control")]
@@ -1676,18 +1699,6 @@ mod tests {
         Jid::new("111111111111111", Server::Lid)
     }
 
-    #[cfg(feature = "voip-control")]
-    fn next_legacy_event(
-        events: &async_channel::Receiver<CallEvent>,
-    ) -> Result<CallEvent, async_channel::TryRecvError> {
-        loop {
-            let event = events.try_recv()?;
-            if !matches!(event, CallEvent::PeerVideoStateChanged { .. }) {
-                return Ok(event);
-            }
-        }
-    }
-
     fn offer_stanza() -> wacore_binary::Node {
         NodeBuilder::new("call")
             .attr("from", fake_caller_lid())
@@ -1702,6 +1713,28 @@ mod tests {
                     .build()])
                 .build()])
             .build()
+    }
+
+    #[cfg(feature = "voip-control")]
+    #[test]
+    fn call_service_sender_is_the_exact_call_address() {
+        let call_id = "GROUP-CALL";
+        assert!(is_call_service_sender(
+            &Jid::new(call_id, Server::Call),
+            call_id
+        ));
+        assert!(!is_call_service_sender(
+            &Jid::new("OTHER-CALL", Server::Call),
+            call_id
+        ));
+        assert!(!is_call_service_sender(
+            &Jid::new(call_id, Server::Lid),
+            call_id
+        ));
+        assert!(!is_call_service_sender(
+            &Jid::new(call_id, Server::Call).with_device(2),
+            call_id
+        ));
     }
 
     #[cfg(feature = "voip-control")]
@@ -1730,6 +1763,121 @@ mod tests {
         assert!(validate_group_epoch_key(&[0; 32]).is_ok());
         assert!(validate_group_epoch_key(&[0; 31]).is_err());
         assert!(validate_group_epoch_key(&[0; 33]).is_err());
+    }
+
+    #[cfg(feature = "voip-engine-wacore")]
+    #[tokio::test]
+    async fn timestampless_rekey_decrypts_and_reaches_group_media() {
+        use wacore::libsignal::protocol::{
+            GenericSignedPreKey, IdentityKey, PreKeyBundle, SignedPreKeyStore, UsePQRatchet,
+            process_prekey_bundle,
+        };
+        use wacore::types::jid::JidExt;
+        use wacore::voip_control::{CallSession, control::GroupControl};
+
+        let client = make_client().await;
+        let sender_client = make_client().await;
+        let creator = fake_caller_lid();
+        let sender = creator.clone().with_device(1);
+        let recipient = Jid::new("222222222222222", Server::Lid).with_device(2);
+        let snapshot = client.persistence_manager.get_device_snapshot();
+        let receiver_adapter = client.signal_adapter();
+        let signed = receiver_adapter
+            .signed_pre_key_store
+            .get_signed_pre_key(1.into())
+            .await
+            .expect("receiver signed prekey");
+        let bundle = PreKeyBundle::new(
+            snapshot.core.registration_id,
+            2u32.into(),
+            None,
+            1u32.into(),
+            signed.public_key().unwrap(),
+            signed.signature().unwrap(),
+            IdentityKey::new(snapshot.core.identity_key.public_key),
+        )
+        .unwrap();
+        let mut sender_adapter = sender_client.signal_adapter();
+        process_prekey_bundle(
+            &recipient.to_protocol_address(),
+            &mut sender_adapter.session_store,
+            &mut sender_adapter.identity_store,
+            &bundle,
+            &mut rand::make_rng::<rand::rngs::StdRng>(),
+            UsePQRatchet::No,
+        )
+        .await
+        .unwrap();
+
+        let call_id = "REKEY-NO-T";
+        let registry = client.call_registry();
+        let generation = registry
+            .insert_call_link_checked(CallSession::new_outgoing(
+                call_id,
+                Jid::new(call_id, Server::Call),
+                creator.clone(),
+            ))
+            .unwrap();
+        let (tx, rx) = async_channel::bounded(4);
+        assert!(registry.set_group_control_sender(call_id, generation, None, tx));
+
+        // Two real Signal envelopes cross the stanza parser, authorization,
+        // decryption and generation-scoped media mailbox. No live account is used.
+        for transaction_id in [7, 8] {
+            let key = vec![transaction_id as u8; 32];
+            let plaintext = MessageUtils::encode_and_pad(&{
+                let mut proto_contract_fixture = waproto::whatsapp::Message::default();
+                proto_contract_fixture.call = Some({
+                    let mut proto_contract_fixture = waproto::whatsapp::message::Call::default();
+                    proto_contract_fixture.call_key = Some(key.clone());
+                    proto_contract_fixture
+                })
+                .into();
+                proto_contract_fixture
+            });
+            let (enc_type, ciphertext) = sender_client
+                .signal()
+                .encrypt_message(&recipient, &plaintext)
+                .await
+                .unwrap();
+            let stanza = NodeBuilder::new("call")
+                .attr("from", sender.clone())
+                .attr("id", format!("REKEY-{transaction_id}"))
+                .children([NodeBuilder::new("enc_rekey")
+                    .attr("call-id", call_id)
+                    .attr("call-creator", creator.clone())
+                    .attr("transaction-id", transaction_id.to_string())
+                    .children([
+                        NodeBuilder::new("encopt").attr("keygen", "2").build(),
+                        NodeBuilder::new("enc")
+                            .attr("type", enc_type.as_wire_str())
+                            .attr("v", "2")
+                            .bytes(ciphertext)
+                            .build(),
+                    ])
+                    .build()])
+                .build();
+            let mut cancelled = false;
+            let mut malformed = stanza.clone();
+            malformed.attrs.insert("t", "invalid");
+            CallHandler
+                .handle(
+                    client.clone(),
+                    node_to_owned_ref(&malformed),
+                    &mut cancelled,
+                )
+                .await;
+            assert!(rx.try_recv().is_err(), "invalid t must not rotate keys");
+            CallHandler
+                .handle(client.clone(), node_to_owned_ref(&stanza), &mut cancelled)
+                .await;
+            let GroupControl::RawEpoch(epoch) = rx.try_recv().expect("rekey reached media") else {
+                panic!("expected a media epoch");
+            };
+            assert_eq!(epoch.transaction_id, transaction_id);
+            assert_eq!(epoch.raw_epoch_for_test(), key);
+        }
+        registry.remove_if_current(call_id, generation);
     }
 
     #[cfg(feature = "voip-control")]
@@ -2615,6 +2763,87 @@ mod tests {
 
     #[cfg(feature = "voip-control")]
     #[tokio::test]
+    async fn relay_only_update_does_not_replay_an_old_rekey_request() {
+        let client = make_sending_client().await;
+        client
+            .persistence_manager()
+            .process_command(crate::store::commands::DeviceCommand::SetLid(None))
+            .await;
+        let registry = client.call_registry();
+        let creator = fake_caller_lid();
+        let call_id = "RELAY-ONLY-EPOCH";
+        let initial = GroupCallUpdate::builder()
+            .call_id(call_id.to_string())
+            .call_creator(creator.clone())
+            .transaction_id(15)
+            .media("audio".to_string())
+            .connected_limit(32)
+            .joinable(true)
+            .av_upgradable(true)
+            .rekey_requested(false)
+            .participants(Vec::new())
+            .build();
+        let mut session = wacore::voip_control::CallSession::new_outgoing(
+            call_id,
+            Jid::new(call_id, Server::Call),
+            creator.clone(),
+        );
+        session.group = Some(initial.clone());
+        let generation = registry.insert_group_checked(session).expect("group");
+        let mut older = initial;
+        older.transaction_id = 13;
+        older.rekey_requested = true;
+        older.relay = Some(
+            wacore::types::group_call::GroupCallRelay::builder()
+                .transaction_id(1)
+                .self_pid(0)
+                .uuid("TEST-RELAY".to_string())
+                .participant_uuid("TEST-PARTICIPANT".to_string())
+                .attribute_padding(false)
+                .warp_mi_tag_len(4)
+                .key(vec![7; 32])
+                .tokens(vec![vec![9; 16]])
+                .endpoints(vec![
+                    wacore::types::group_call::GroupCallRelayEndpoint::builder()
+                        .relay_id(1)
+                        .token_id(0)
+                        .auth_token_id(0)
+                        .relay_name("test-relay".to_string())
+                        .is_fna(false)
+                        .ipv4("203.0.113.7".to_string())
+                        .port(3478)
+                        .build(),
+                ])
+                .build(),
+        );
+        let call = IncomingCall::new_for_test(
+            creator,
+            "RELAY-ONLY-STANZA".into(),
+            wacore::time::from_secs(1_700_000_000).expect("time"),
+            CallAction::GroupUpdate {
+                update: Box::new(older),
+            },
+        );
+        assert!(apply_group_control(&client, &call, generation).await);
+        assert_eq!(
+            registry.generation_of(call_id),
+            Some(generation),
+            "relay adoption is not a new epoch request; missing own LID must never enter fanout teardown"
+        );
+        let committed = registry
+            .group_state_if_current(call_id, generation)
+            .expect("state");
+        assert_eq!(committed.snapshot().expect("snapshot").transaction_id, 15);
+        assert!(committed.snapshot().expect("snapshot").relay.is_some());
+        assert_eq!(
+            registry.pending_group_epoch_transaction_if_current(call_id, generation),
+            None
+        );
+        registry.remove_if_current(call_id, generation);
+    }
+
+    #[cfg(feature = "voip-control")]
+    #[tokio::test]
     async fn rekey_group_update_is_acknowledged_before_epoch_fanout() {
         use wacore::types::group_call::GroupCallUpdate;
         use wacore::voip_control::CallSession;
@@ -3486,7 +3715,7 @@ mod tests {
             fake_caller_lid(),
             fake_caller_lid(),
         ));
-        let (event_tx, event_rx) = async_channel::bounded::<CallEvent>(2);
+        let (event_tx, event_rx) = async_channel::bounded::<CallEvent>(1);
         let (control_tx, _control_rx) = video_control_channel();
         registry.set_video_channels(
             "CALL-ID-0001",
@@ -3524,10 +3753,86 @@ mod tests {
             upgrade_token: Some(_), ..
         }) if source == fake_caller_lid() && call_creator == fake_caller_lid())
         );
-        assert!(matches!(
-            event_rx.try_recv(),
-            Ok(CallEvent::VideoStateChanged { .. })
-        ));
+        assert!(event_rx.is_empty(), "exactly one committed event");
+    }
+
+    #[cfg(feature = "voip-control")]
+    #[tokio::test]
+    async fn closed_video_receiver_does_not_undo_an_acked_transition() {
+        use wacore::voip_control::CallEvent;
+        use wacore::voip_control::control::VideoControl;
+
+        for close_before_ack in [true, false] {
+            let (client, send_started, release_send) = make_blocking_sending_client().await;
+            let (global_handler, global_rx) = ChannelEventHandler::new();
+            client.subscribe_handler(global_handler).detach();
+            let registry = client.call_registry();
+            let generation = registry.insert(wacore::voip_control::CallSession::new_incoming(
+                "CALL-ID-0001",
+                fake_caller_lid(),
+                fake_caller_lid(),
+            ));
+            let (event_tx, event_rx) = async_channel::bounded::<CallEvent>(1);
+            let (control_tx, control_rx) = video_control_channel();
+            registry.set_video_channels(
+                "CALL-ID-0001",
+                generation,
+                event_tx,
+                control_tx,
+                Box::new(|| {}),
+            );
+            begin_local_upgrade(&registry, generation).await;
+            if close_before_ack {
+                event_rx.close();
+            }
+
+            let mut cancelled = false;
+            {
+                let handling = CallHandler.handle(
+                    client,
+                    node_to_owned_ref(&video_stanza("4")),
+                    &mut cancelled,
+                );
+                tokio::pin!(handling);
+                tokio::select! {
+                    started = send_started.recv() => started.expect("typed ack send started"),
+                    _ = &mut handling => panic!("handler completed before typed ack"),
+                }
+                if !close_before_ack {
+                    event_rx.close();
+                }
+                release_send.send(()).await.expect("release typed ack");
+                tokio::select! {
+                    started = send_started.recv() => started.expect("Enabled send started"),
+                    _ = &mut handling => panic!("handler completed before Enabled announcement"),
+                }
+                release_send.send(()).await.expect("release Enabled send");
+                assert!(handling.await);
+            }
+            assert!(
+                cancelled,
+                "closed receiver does not restore the generic ack"
+            );
+            assert!(matches!(
+                event_rx.try_recv(),
+                Err(async_channel::TryRecvError::Closed)
+            ));
+            assert_eq!(
+                registry.video_states("CALL-ID-0001", generation),
+                Some((VideoState::Enabled, VideoState::Enabled))
+            );
+            assert!(registry.snapshot("CALL-ID-0001").expect("session").is_video);
+            assert!(
+                std::iter::from_fn(|| control_rx.try_recv().ok())
+                    .any(|control| control == VideoControl::Enable)
+            );
+            assert!(matches!(
+                global_rx.try_recv().as_deref(),
+                Ok(Event::IncomingCall(call))
+                    if matches!(call.action, CallAction::VideoState { .. })
+            ));
+            assert!(registry.reserve_call_event("CALL-ID-0001").is_some());
+        }
     }
 
     #[cfg(feature = "voip-control")]
@@ -3562,8 +3867,8 @@ mod tests {
                 )
                 .await
         );
-        let token = match next_legacy_event(&event_rx).expect("upgrade request event") {
-            CallEvent::VideoStateChanged {
+        let token = match event_rx.try_recv().expect("upgrade request event") {
+            CallEvent::PeerVideoStateChanged {
                 state: VideoState::UpgradeRequestV2,
                 upgrade_token: Some(token),
                 ..
@@ -3571,6 +3876,7 @@ mod tests {
             event => panic!("unexpected event: {event:?}"),
         };
         assert!(registry.peer_video_request_is_current("CALL-ID-0001", token));
+        assert!(event_rx.is_empty(), "exactly one request event");
 
         cancelled = false;
         assert!(
@@ -3584,13 +3890,14 @@ mod tests {
         );
         assert!(!registry.peer_video_request_is_current("CALL-ID-0001", token));
         assert!(matches!(
-            next_legacy_event(&event_rx),
-            Ok(CallEvent::VideoStateChanged {
+            event_rx.try_recv(),
+            Ok(CallEvent::PeerVideoStateChanged {
                 state: VideoState::Disabled,
                 upgrade_token: None,
                 ..
             })
         ));
+        assert!(event_rx.is_empty(), "exactly one cancellation event");
     }
 
     #[cfg(feature = "voip-control")]
@@ -3605,7 +3912,7 @@ mod tests {
             fake_caller_lid(),
             fake_caller_lid(),
         ));
-        let (event_tx, _event_rx) = async_channel::bounded::<CallEvent>(1);
+        let (event_tx, event_rx) = async_channel::bounded::<CallEvent>(1);
         let (control_tx, _control_rx) = video_control_channel();
         registry.set_video_channels(
             "CALL-ID-0001",
@@ -3635,11 +3942,23 @@ mod tests {
                 registry.reserve_call_event("CALL-ID-0001").is_none(),
                 "the next transition must not overtake committed effects"
             );
+            assert!(
+                event_rx.is_empty(),
+                "publication must wait for Enabled send"
+            );
             release_send.send(()).await.expect("release Enabled send");
             handling.await
         };
         assert!(handled);
         assert!(cancelled);
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(CallEvent::PeerVideoStateChanged {
+                state: VideoState::UpgradeAccept,
+                ..
+            })
+        ));
+        assert!(event_rx.is_empty(), "exactly one event after Enabled send");
         assert!(registry.reserve_call_event("CALL-ID-0001").is_some());
     }
 
@@ -3813,15 +4132,17 @@ mod tests {
                 .await
         );
 
-        let ev = next_legacy_event(&ev_rx).expect("event must be forwarded");
+        let ev = ev_rx.try_recv().expect("event must be forwarded");
         assert!(matches!(
             ev,
-            CallEvent::VideoStateChanged {
+            CallEvent::PeerVideoStateChanged {
+                source, call_creator,
                 state: VideoState::UpgradeAccept,
                 orientation: Some(1),
-                ..
-            }
+                upgrade_token: None,
+            } if source == fake_caller_lid() && call_creator == fake_caller_lid()
         ));
+        assert!(ev_rx.is_empty(), "exactly one committed accept event");
         let ctls: Vec<VideoControl> = std::iter::from_fn(|| ctl_rx.try_recv().ok()).collect();
         assert!(ctls.contains(&VideoControl::SetOrientation(1)));
         assert!(
@@ -4027,8 +4348,17 @@ mod tests {
         assert!(registry.snapshot("CALL-ID-0001").expect("session").is_video);
         assert!(matches!(
             ev_rx.try_recv(),
-            Ok(CallEvent::VideoStateChanged { .. })
+            Ok(CallEvent::PeerVideoStateChanged {
+                source, call_creator,
+                state: VideoState::UpgradeAccept,
+                orientation: Some(1),
+                upgrade_token: None,
+            }) if source == fake_caller_lid() && call_creator == fake_caller_lid()
         ));
+        assert!(
+            ev_rx.is_empty(),
+            "one-slot queue retains the canonical event"
+        );
         assert!(
             std::iter::from_fn(|| ctl_rx.try_recv().ok())
                 .any(|ctl| matches!(ctl, VideoControl::Enable)),

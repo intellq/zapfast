@@ -2,7 +2,7 @@
 
 Cópia de `wacore/appstate` de
 [oxidezap/whatsapp-rust](https://github.com/oxidezap/whatsapp-rust) no commit
-`f7468ae` (o mesmo que o `Cargo.toml` fixa), ligada pelo `[patch]` do
+`5e72baf` (o mesmo que o `Cargo.toml` fixa), ligada pelo `[patch]` do
 `Cargo.toml` do ZapFast. O manifesto troca os campos herdados do workspace
 pelos valores desse commit e os crates irmãos (`wacore-binary`,
 `wacore-libsignal`, `waproto`) pela fonte git do mesmo commit. Sem `benches`

@@ -25,6 +25,8 @@
 //!
 //! Only compiled under the non-default `bench-harness` feature.
 
+pub mod connected_idle;
+
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -46,6 +48,14 @@ use waproto::whatsapp as wa;
 /// Group sizes every client-level sweep runs. The claim under test is about
 /// *scale*, so a single width could not distinguish "expensive" from "grows".
 pub const GROUP_SIZES: &[usize] = &[8, 32, 128, 512];
+
+/// Feed a decoded synthetic stanza through the real client dispatcher.
+///
+/// This fixture preserves parser, interceptor and observer behavior without exposing
+/// built-in handlers in production. It does not exercise the Noise read loop.
+pub async fn process_stanza(client: &Arc<Client>, node: Arc<wacore_binary::OwnedNodeRef>) {
+    client.process_node(node).await;
+}
 
 /// Discards every frame. The noise socket still encrypts and frames the stanza
 /// before handing it over, so the send path is complete up to the syscall.
@@ -77,10 +87,7 @@ struct NoopHttpClient;
 #[async_trait::async_trait]
 impl HttpClient for NoopHttpClient {
     async fn execute(&self, _request: HttpRequest) -> Result<HttpResponse, anyhow::Error> {
-        Ok(HttpResponse {
-            status_code: 200,
-            body: Vec::new(),
-        })
+        Ok(HttpResponse::new(200, Vec::new()))
     }
 }
 
@@ -216,21 +223,28 @@ struct Fixture {
     own_sending_jid: Jid,
 }
 
-async fn build_fixture(group_size: usize) -> Fixture {
-    let backend = Arc::new(InMemoryBackend::new());
+async fn build_offline_client() -> Arc<Client> {
     let pm = Arc::new(
-        PersistenceManager::new(backend)
+        PersistenceManager::new(Arc::new(InMemoryBackend::new()))
             .await
             .expect("persistence manager"),
     );
-    let (client, _sync_rx) = Client::new(
-        Arc::new(TokioRuntime),
-        pm,
-        Arc::new(SinkTransportFactory),
-        Arc::new(NoopHttpClient),
-        None,
-    )
-    .await;
+    // Offline fixtures intentionally drop the manual receiver rather than starting
+    // a major-sync consumer they do not exercise.
+    Client::builder()
+        .with_runtime(TokioRuntime)
+        .with_persistence_manager(pm)
+        .with_transport_factory(SinkTransportFactory)
+        .with_http_client(NoopHttpClient)
+        .build()
+        .await
+        .expect("offline client")
+        .into_parts()
+        .0
+}
+
+async fn build_fixture(group_size: usize) -> Fixture {
+    let client = build_offline_client().await;
 
     let own_pn = Jid::new(OWN_USER, Server::Pn);
     let own_lid = Jid::new("100000000000001", Server::Lid);
@@ -433,14 +447,15 @@ async fn establish_acknowledged_session(client: &Arc<Client>, peer: &Jid) -> Arc
             .await
             .expect("companion persistence manager"),
     );
-    let (peer_client, _sync_rx) = Client::new(
-        Arc::new(TokioRuntime),
-        peer_pm,
-        Arc::new(SinkTransportFactory),
-        Arc::new(NoopHttpClient),
-        None,
-    )
-    .await;
+    let (peer_client, _sync_rx) = Client::builder()
+        .with_runtime(TokioRuntime)
+        .with_persistence_manager(peer_pm)
+        .with_transport_factory(SinkTransportFactory)
+        .with_http_client(NoopHttpClient)
+        .build()
+        .await
+        .expect("offline client")
+        .into_parts();
 
     let own_snapshot = client.persistence_manager.get_device_snapshot();
     let own_address = own_snapshot
@@ -637,20 +652,7 @@ async fn build_dm_fixture(peer_devices: usize, addressing: DmAddressing) -> (Arc
 
     assert!(peer_devices >= 1, "a recipient has at least its primary");
 
-    let backend = Arc::new(InMemoryBackend::new());
-    let pm = Arc::new(
-        PersistenceManager::new(backend)
-            .await
-            .expect("persistence manager"),
-    );
-    let (client, _sync_rx) = Client::new(
-        Arc::new(TokioRuntime),
-        pm,
-        Arc::new(SinkTransportFactory),
-        Arc::new(NoopHttpClient),
-        None,
-    )
-    .await;
+    let client = build_offline_client().await;
 
     let own_pn = Jid::new(OWN_USER, Server::Pn);
     let own_lid = Jid::new("100000000000001", Server::Lid);
@@ -950,6 +952,45 @@ impl ReceiveHarness {
         });
     }
 
+    /// Plaintext-only allocation control: bypass classification and Signal crypto,
+    /// but keep decode, special handling, dispatch and receipt flush unchanged.
+    /// Inputs are moved, never cloned. The counts are `(dispatched, skdm_only)`;
+    /// suppressed resends count as dispatched, so also check `messages_delivered`.
+    pub fn plaintext_burst(
+        &self,
+        payloads: Vec<(Vec<u8>, Arc<wacore::types::message::MessageInfo>)>,
+    ) -> (usize, usize) {
+        self.runtime.block_on(self.handle_plaintext_batch(payloads))
+    }
+
+    /// The harness entry's state size, separating runtime-entry future moves
+    /// (and any size-triggered Tokio box) from per-message application costs.
+    pub fn plaintext_burst_future_bytes(&self) -> usize {
+        size_of_val(&self.handle_plaintext_batch(Vec::new()))
+    }
+
+    async fn handle_plaintext_batch(
+        &self,
+        payloads: Vec<(Vec<u8>, Arc<wacore::types::message::MessageInfo>)>,
+    ) -> (usize, usize) {
+        let mut counts = (0, 0);
+        for (payload, info) in payloads {
+            let outcome = self
+                .client
+                .handle_decrypted_plaintext("msg", payload, 2, 0, Default::default(), &info)
+                .await
+                .expect("plaintext handling failed");
+            let (dispatched, skdm_only) = outcome.flags();
+            counts.0 += usize::from(dispatched);
+            counts.1 += usize::from(skdm_only);
+        }
+        self.client
+            .outbound_flush
+            .flush(&*self.client.runtime, std::time::Duration::from_secs(5))
+            .await;
+        counts
+    }
+
     /// Enqueue stanzas through the real production `MessageHandler::handle_inline` into
     /// chat lanes, driving the lane workers to process them, and flush outbound receipts.
     pub fn enqueue_and_drain(&self, nodes: &[Arc<wacore_binary::OwnedNodeRef>]) {
@@ -1242,29 +1283,55 @@ impl MultiLaneReceiveHarness {
     /// their respective chat lanes, await their processing, and flush outbound receipts.
     pub fn enqueue_and_drain(&self, nodes: &[Arc<wacore_binary::OwnedNodeRef>]) {
         self.runtime.block_on(async {
-            let target = self.messages_delivered() + nodes.len() as u64;
-            for node in nodes {
-                let mut cancelled = false;
-                let accepted = crate::handlers::message::MessageHandler::handle_inline(
-                    Arc::clone(&self.client),
-                    Arc::clone(node),
-                    &mut cancelled,
-                )
-                .await;
-                assert!(accepted && !cancelled, "message enqueue failed");
-            }
-            tokio::time::timeout(std::time::Duration::from_secs(30), async {
-                while self.messages_delivered() < target {
-                    tokio::task::yield_now().await;
-                }
-            })
-            .await
-            .expect("lane delivery timed out: a decrypt, commit, or worker failed");
-            self.client
-                .outbound_flush
-                .flush(&*self.client.runtime, std::time::Duration::from_secs(5))
-                .await;
+            let target = self.enqueue_batch(nodes).await;
+            self.drain_until(target).await;
         });
+    }
+
+    /// Enqueue without polling spawned workers, returning the delivery count to
+    /// pass to [`Self::drain`]. An isolated measurement must fail if enqueue yields
+    /// rather than silently including decrypt work from the runtime scheduler.
+    pub fn enqueue(&self, nodes: &[Arc<wacore_binary::OwnedNodeRef>]) -> u64 {
+        use futures::FutureExt;
+
+        let _runtime = self.runtime.enter();
+        self.enqueue_batch(nodes)
+            .now_or_never()
+            .expect("isolated enqueue yielded: worker work would contaminate the measurement")
+    }
+
+    /// Complete a previous [`Self::enqueue`], including outbound receipts.
+    pub fn drain(&self, target: u64) {
+        self.runtime.block_on(self.drain_until(target));
+    }
+
+    async fn enqueue_batch(&self, nodes: &[Arc<wacore_binary::OwnedNodeRef>]) -> u64 {
+        let target = self.messages_delivered() + nodes.len() as u64;
+        for node in nodes {
+            let mut cancelled = false;
+            let accepted = crate::handlers::message::MessageHandler::handle_inline(
+                Arc::clone(&self.client),
+                Arc::clone(node),
+                &mut cancelled,
+            )
+            .await;
+            assert!(accepted && !cancelled, "message enqueue failed");
+        }
+        target
+    }
+
+    async fn drain_until(&self, target: u64) {
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            while self.messages_delivered() < target {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("lane delivery timed out: a decrypt, commit, or worker failed");
+        self.client
+            .outbound_flush
+            .flush(&*self.client.runtime, std::time::Duration::from_secs(5))
+            .await;
     }
 
     /// Receive a burst of stanzas within a single runtime entry (`block_on`),
@@ -1353,20 +1420,7 @@ async fn build_multilane_receive_fixture(
     use wacore::libsignal::protocol::create_sender_key_distribution_message;
     use wacore::types::jid::{JidExt, make_sender_key_name};
 
-    let backend = Arc::new(InMemoryBackend::new());
-    let pm = Arc::new(
-        PersistenceManager::new(backend)
-            .await
-            .expect("persistence manager"),
-    );
-    let (client, _sync_rx) = Client::new(
-        Arc::new(TokioRuntime),
-        pm,
-        Arc::new(SinkTransportFactory),
-        Arc::new(NoopHttpClient),
-        None,
-    )
-    .await;
+    let client = build_offline_client().await;
 
     let own_pn = Jid::new(OWN_USER, Server::Pn);
     let own_lid = Jid::new("100000000000001", Server::Lid);
@@ -1411,7 +1465,8 @@ async fn build_multilane_receive_fixture(
                 &format!("bench-skdm-{i}"),
                 skdm.serialized(),
             )
-            .await;
+            .await
+            .expect("fixture sender key must install");
 
         groups.push(group);
         group_sender_keys.push(group_sender_key);
@@ -1469,20 +1524,7 @@ async fn build_receive_fixture() -> ReceiveFixture {
     use wacore::libsignal::protocol::create_sender_key_distribution_message;
     use wacore::types::jid::{JidExt, make_sender_key_name};
 
-    let backend = Arc::new(InMemoryBackend::new());
-    let pm = Arc::new(
-        PersistenceManager::new(backend)
-            .await
-            .expect("persistence manager"),
-    );
-    let (client, _sync_rx) = Client::new(
-        Arc::new(TokioRuntime),
-        pm,
-        Arc::new(SinkTransportFactory),
-        Arc::new(NoopHttpClient),
-        None,
-    )
-    .await;
+    let client = build_offline_client().await;
 
     let own_pn = Jid::new(OWN_USER, Server::Pn);
     let own_lid = Jid::new("100000000000001", Server::Lid);
@@ -1520,7 +1562,8 @@ async fn build_receive_fixture() -> ReceiveFixture {
     };
     client
         .handle_sender_key_distribution_message(&group, &peer_jid, "bench-skdm", skdm.serialized())
-        .await;
+        .await
+        .expect("fixture sender key must install");
 
     let counter = Arc::new(MessageCounter {
         delivered: portable_atomic::AtomicU64::new(0),
@@ -1686,20 +1729,7 @@ async fn build_scale_fixture(
     groups: usize,
     members: usize,
 ) -> (Arc<Client>, Vec<(Jid, Arc<GroupRoutingInfo>)>, Jid) {
-    let backend = Arc::new(InMemoryBackend::new());
-    let pm = Arc::new(
-        PersistenceManager::new(backend)
-            .await
-            .expect("persistence manager"),
-    );
-    let (client, _sync_rx) = Client::new(
-        Arc::new(TokioRuntime),
-        pm,
-        Arc::new(SinkTransportFactory),
-        Arc::new(NoopHttpClient),
-        None,
-    )
-    .await;
+    let client = build_offline_client().await;
 
     let own_pn = Jid::new(OWN_USER, Server::Pn);
     let own_lid = Jid::new("100000000000001", Server::Lid);

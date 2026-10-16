@@ -1,11 +1,14 @@
 use crate::client::Client;
 use crate::types::events::{Event, EventKind};
 use log::{debug, warn};
+use serde::Deserialize;
 use std::sync::Arc;
 use wacore::appstate::patch_decode::WAPatchName;
 use wacore::runtime::BoxFuture;
 use wacore::stanza::groups::{GroupNotification, GroupNotificationAction};
-use wacore::types::events::{GroupUpdate, MexNotification};
+use wacore::types::events::{
+    GroupUpdate, MexNotification, ReachoutTimelock, ReachoutTimelockUpdate,
+};
 use wacore_binary::NodeContentRef;
 use wacore_binary::{NodeRef, OwnedNodeRef};
 
@@ -138,7 +141,14 @@ async fn run_server_sync_collections(
     feature = "tracing",
     tracing::instrument(name = "wa.notif.group", level = "debug", skip_all)
 )]
-pub(crate) async fn handle_group_notification(client: &Arc<Client>, node: Arc<OwnedNodeRef>) {
+pub(crate) async fn handle_group_notification(
+    client: &Arc<Client>,
+    node: Arc<OwnedNodeRef>,
+    scope: crate::client::NotificationScope<'_>,
+) -> bool {
+    if !scope.is_current(client) {
+        return false;
+    }
     // `<groups_dirty>` is the one `w:gp2` stanza the server sends about itself:
     // `from` is `s.whatsapp.net`, not a group. Parsing it as an ordinary group
     // notification would name the server as the group in every event it
@@ -149,14 +159,14 @@ pub(crate) async fn handle_group_notification(client: &Arc<Client>, node: Arc<Ow
             .core
             .event_bus
             .dispatch(Event::Notification(Arc::clone(&node)));
-        return;
+        return true;
     }
 
     let mut notification = match GroupNotification::try_from_node_ref(node.get()) {
         Some(n) => n,
         None => {
             warn!(target: "Client/Group", "w:gp2 notification missing 'from' attribute");
-            return;
+            return true;
         }
     };
 
@@ -169,20 +179,31 @@ pub(crate) async fn handle_group_notification(client: &Arc<Client>, node: Arc<Ow
     let action_count = actions.len();
 
     for (action_index, action) in actions.into_iter().enumerate() {
+        if !scope.is_current(client) {
+            return false;
+        }
         // Granularly patch group cache instead of invalidating — matches WA Web's
         // addParticipantInfo / removeParticipantInfo pattern and avoids a
         // group metadata IQ round-trip.
         match &action {
             GroupNotificationAction::Add { participants, .. } => {
-                let metadata = client.lock_group_metadata(&notification.group_jid).await;
-                if let Some(info) = metadata.current().await {
+                let Some(metadata) = scope
+                    .run(client, client.lock_group_metadata(&notification.group_jid))
+                    .await
+                else {
+                    return false;
+                };
+                let Some(current) = scope.run(client, metadata.current()).await else {
+                    return false;
+                };
+                if let Some(info) = current {
                     let mut info = Arc::unwrap_or_clone(info);
                     info.add_participants(
                         participants
                             .iter()
                             .map(|p| (&p.jid, p.phone_number.as_ref())),
                     );
-                    metadata.publish(Arc::new(info)).await;
+                    metadata.publish_scoped(Arc::new(info), Some(scope)).await;
                     debug!(
                         target: "Client/Group",
                         "Patched group cache for {}: added {} participants",
@@ -195,13 +216,24 @@ pub(crate) async fn handle_group_notification(client: &Arc<Client>, node: Arc<Ow
                         "Group cache expired for {}: invalidating persisted metadata (add)",
                         notification.group_jid.observe()
                     );
-                    metadata.invalidate().await;
+                    metadata.invalidate_scoped(Some(scope)).await;
                 }
             }
             GroupNotificationAction::Remove { participants, .. } => {
                 let users: Vec<&str> = participants.iter().map(|p| p.jid.user.as_str()).collect();
-                let metadata = client.lock_group_metadata(&notification.group_jid).await;
-                if let Some(info) = metadata.current().await {
+                let Some(metadata) = scope
+                    .run(client, client.lock_group_metadata(&notification.group_jid))
+                    .await
+                else {
+                    return false;
+                };
+                let Some(current) = scope.run(client, metadata.current()).await else {
+                    return false;
+                };
+                if !scope.is_current(client) {
+                    return false;
+                }
+                if let Some(info) = current {
                     let mut info = Arc::unwrap_or_clone(info);
                     info.remove_participants(&users);
                     metadata.publish(Arc::new(info)).await;
@@ -219,10 +251,13 @@ pub(crate) async fn handle_group_notification(client: &Arc<Client>, node: Arc<Ow
                     );
                     metadata.invalidate().await;
                 }
-                drop(metadata);
-                client
-                    .rotate_sender_key_on_participant_remove(&notification.group_jid, &users)
-                    .await;
+                if let Err(error) = metadata
+                    .rotate_sender_key_on_participant_remove(&users)
+                    .await
+                {
+                    warn!(target: "Client/Group", "Sender-key retirement failed; ACK withheld: {error}");
+                    return false;
+                }
             }
             GroupNotificationAction::Modify { .. } => {
                 // A participant changed number / migrated PN<->LID. WA Web
@@ -239,16 +274,27 @@ pub(crate) async fn handle_group_notification(client: &Arc<Client>, node: Arc<Ow
                     "Group modify (number/LID migration) for {}: invalidating metadata and rotating sender key",
                     notification.group_jid.observe()
                 );
-                let metadata = client.lock_group_metadata(&notification.group_jid).await;
+                let Some(metadata) = scope
+                    .run(client, client.lock_group_metadata(&notification.group_jid))
+                    .await
+                else {
+                    return false;
+                };
+                if !scope.is_current(client) {
+                    return false;
+                }
                 metadata.invalidate().await;
-                drop(metadata);
-                client
-                    .force_rotate_own_sender_key(&notification.group_jid)
-                    .await;
+                if let Err(error) = metadata.force_rotate_own_sender_key().await {
+                    warn!(target: "Client/Group", "Sender-key retirement failed; ACK withheld: {error}");
+                    return false;
+                }
             }
             _ => {}
         }
 
+        if !scope.is_current(client) {
+            return false;
+        }
         debug!(
             target: "Client/Group",
             "Group notification: group={}, action={}",
@@ -301,10 +347,14 @@ pub(crate) async fn handle_group_notification(client: &Arc<Client>, node: Arc<Ow
     }
 
     // Also dispatch legacy generic notification for backward compatibility
+    if !scope.is_current(client) {
+        return false;
+    }
     client
         .core
         .event_bus
         .dispatch(Event::Notification(Arc::clone(&node)));
+    true
 }
 
 /// The server named these groups' cached metadata stale.
@@ -388,16 +438,19 @@ fn handle_groups_dirty(client: &Arc<Client>, groups: Vec<wacore_binary::Jid>) {
 
 /// Handle `<notification type="newsletter">` live updates.
 ///
-/// The pinned and latest notif IR confirm the notification type and handler,
-/// but expose no structured fields for `<live_updates>`. Without a sanitized
-/// capture or raw bundle evidence, history IQ children must not be inferred to
-/// be live-update children. This handler therefore retains the previously
-/// supported reaction shape only and always forwards the raw notification too.
-/// The server id is the correlation key for that established reaction update.
+/// The notif IR confirms the notification type but exposes no structure for
+/// `<live_updates>`; the fields read here come from a capture. Each
+/// `<message server_id>` carried `<forwards_count>`, `<votes>` (polls only)
+/// and `<reactions>`, in the same shapes as the history IQ, so the history
+/// parsers read them. The first notification after subscribing is a snapshot
+/// of the recent messages and later ones carry only the messages that changed,
+/// so a message missing from an update has not changed, not dropped to zero.
+/// The raw notification is always forwarded too.
 pub(crate) fn handle_newsletter_notification(client: &Arc<Client>, node: Arc<OwnedNodeRef>) {
-    use crate::features::newsletter::parse_reaction_counts;
+    use crate::features::newsletter::{parse_count_child, parse_poll_votes, parse_reaction_counts};
     use wacore::types::events::{
-        NewsletterLiveUpdate, NewsletterLiveUpdateMessage, NewsletterLiveUpdateReaction,
+        NewsletterLiveUpdate, NewsletterLiveUpdateMessage, NewsletterLiveUpdatePollVote,
+        NewsletterLiveUpdateReaction,
     };
 
     let nr = node.get();
@@ -429,10 +482,22 @@ pub(crate) fn handle_newsletter_notification(client: &Arc<Client>, node: Arc<Own
                     })
                     .collect();
 
+                let votes = parse_poll_votes(msg_node)
+                    .into_iter()
+                    .map(|v| {
+                        NewsletterLiveUpdatePollVote::builder()
+                            .option_hash(v.option_hash)
+                            .count(v.count)
+                            .build()
+                    })
+                    .collect();
+
                 Some(
                     NewsletterLiveUpdateMessage::builder()
                         .server_id(server_id)
                         .reactions(reactions)
+                        .votes(votes)
+                        .maybe_forwards_count(parse_count_child(msg_node, "forwards_count"))
                         .build(),
                 )
             })
@@ -505,6 +570,37 @@ pub(crate) fn handle_mex_notification(client: &Arc<Client>, node: &NodeRef<'_>) 
         "mex notification received: op_name={op_name} offline={}",
         offline.is_some()
     );
+    // WAWebHandleMexNotification routes this exact op with mexResponse.data;
+    // WAWebMexReachoutTimelockNotificationHandler reads the notify field. Reuse
+    // the pull state's Deserialize impl on the borrowed subtree: the raw twin
+    // retains the entire original Value, including fields we do not model.
+    if op_name == "NotificationUserReachoutTimelockUpdate"
+        && client
+            .core
+            .event_bus
+            .has_handler_for(EventKind::ReachoutTimelockUpdate)
+        && let Some(state) = payload
+            .get("data")
+            .and_then(|data| data.get("xwa2_notify_account_reachout_timelock"))
+            .filter(|state| state.is_object())
+    {
+        match ReachoutTimelock::deserialize(state) {
+            Ok(state) => client
+                .core
+                .event_bus
+                .dispatch(Event::ReachoutTimelockUpdate(
+                    ReachoutTimelockUpdate::builder()
+                        .state(state)
+                        .maybe_from(from.clone())
+                        .maybe_stanza_id(stanza_id.clone())
+                        .maybe_offline(offline.clone())
+                        .build(),
+                )),
+            Err(e) => {
+                warn!(target: "Client/Mex", "mex notification op={op_name} invalid reachout state: {e}");
+            }
+        }
+    }
     client
         .core
         .event_bus
@@ -666,7 +762,7 @@ mod tests {
     /// task to its own locals (152 B). This pins the shape, not the exact
     /// number: a future above the bound means the engine has been inlined
     /// back in. Budget: rebaseline per
-    /// [layout asserts](../../../agent_docs/layout_asserts.md).
+    /// [layout asserts](../../../agent_docs/testing.md).
     #[tokio::test]
     async fn the_server_sync_task_does_not_carry_the_sync_engine() {
         const MAX_SERVER_SYNC_FUTURE_BYTES: usize = 512;
@@ -819,5 +915,127 @@ mod tests {
             transport.sent().is_empty(),
             "an up-to-date server_sync must not reach the wire"
         );
+    }
+
+    fn counter(tag: &'static str, count: u64) -> Node {
+        NodeBuilder::new(tag).attr("count", count).build()
+    }
+
+    fn live_message(server_id: u64, children: Vec<Node>) -> Node {
+        NodeBuilder::new("message")
+            .attr("server_id", server_id)
+            .children(children)
+            .build()
+    }
+
+    fn live_updates(messages: Vec<Node>) -> Arc<OwnedNodeRef> {
+        let node = NodeBuilder::new("notification")
+            .attr(
+                "from",
+                "120363000000000001@newsletter"
+                    .parse::<wacore_binary::Jid>()
+                    .expect("jid"),
+            )
+            .attr("type", "newsletter")
+            .attr("id", "140965900")
+            .children([NodeBuilder::new("live_updates")
+                .children([NodeBuilder::new("messages").children(messages).build()])
+                .build()])
+            .build();
+        crate::test_utils::node_to_owned_ref(&node)
+    }
+
+    async fn live_update_messages(
+        node: Arc<OwnedNodeRef>,
+    ) -> Vec<wacore::types::events::NewsletterLiveUpdateMessage> {
+        let client = crate::test_utils::create_test_client().await;
+        let collector = Arc::new(crate::test_utils::TestEventCollector::default());
+        client.subscribe_handler(collector.clone()).detach();
+
+        handle_newsletter_notification(&client, node);
+
+        let updates: Vec<_> = collector
+            .events()
+            .iter()
+            .filter_map(|event| match &**event {
+                Event::NewsletterLiveUpdate(update) => Some(update.messages.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(updates.len(), 1, "one notification is one live update");
+        updates.into_iter().next().expect("one update")
+    }
+
+    /// The shape of a captured live update: every message carries
+    /// `<forwards_count>` and `<reactions>`, and a poll adds `<votes>` between
+    /// them, each in the history IQ's shape.
+    #[tokio::test]
+    async fn a_live_update_carries_poll_tallies_and_forwards() {
+        let hashes = [[1u8; 32], [2u8; 32], [3u8; 32], [4u8; 32]];
+        let counts = [183_189u64, 179_386, 392_787, 225_555];
+        let votes = hashes.iter().zip(counts).map(|(hash, count)| {
+            NodeBuilder::new("vote")
+                .attr("count", count)
+                .bytes(hash.as_slice())
+                .build()
+        });
+        let reactions = || {
+            NodeBuilder::new("reactions")
+                .children([NodeBuilder::new("reaction")
+                    .attr("code", "😡")
+                    .attr("count", 61u64)
+                    .build()])
+                .build()
+        };
+
+        let messages = live_update_messages(live_updates(vec![
+            live_message(
+                777,
+                vec![
+                    counter("forwards_count", 9426),
+                    NodeBuilder::new("votes").children(votes).build(),
+                    reactions(),
+                ],
+            ),
+            live_message(778, vec![counter("forwards_count", 12), reactions()]),
+        ]))
+        .await;
+
+        assert_eq!(messages.len(), 2);
+        let poll = &messages[0];
+        assert_eq!(poll.server_id, 777);
+        assert_eq!(poll.forwards_count, Some(9426));
+        assert_eq!(
+            poll.votes
+                .iter()
+                .map(|v| (v.option_hash, v.count))
+                .collect::<Vec<_>>(),
+            hashes.into_iter().zip(counts).collect::<Vec<_>>()
+        );
+        assert_eq!(poll.reactions.len(), 1);
+        assert_eq!(poll.reactions[0].code, "😡");
+        assert_eq!(poll.reactions[0].count, 61);
+
+        let post = &messages[1];
+        assert_eq!(post.server_id, 778);
+        assert_eq!(post.forwards_count, Some(12));
+        assert!(post.votes.is_empty(), "a non-poll message has no tallies");
+        assert_eq!(post.reactions.len(), 1);
+    }
+
+    /// A counter the server left out stays absent rather than reading as zero,
+    /// and a zero it did send is kept.
+    #[tokio::test]
+    async fn a_live_update_keeps_an_absent_forward_count_apart_from_zero() {
+        let messages = live_update_messages(live_updates(vec![
+            live_message(1, vec![]),
+            live_message(2, vec![counter("forwards_count", 0)]),
+        ]))
+        .await;
+
+        assert_eq!(messages[0].forwards_count, None);
+        assert!(messages[0].votes.is_empty());
+        assert!(messages[0].reactions.is_empty());
+        assert_eq!(messages[1].forwards_count, Some(0));
     }
 }

@@ -1,6 +1,10 @@
 pub mod commands;
 pub mod error;
 pub mod persistence_manager;
+pub(crate) mod release;
+pub use release::StoreRelease;
+#[cfg(test)]
+mod backend_probe;
 pub mod signal;
 pub mod signal_adapter;
 pub mod signal_cache;
@@ -9,7 +13,8 @@ pub mod traits;
 // Re-export from the sqlite-storage crate when the feature is enabled
 #[cfg(feature = "sqlite-storage")]
 pub use whatsapp_rust_sqlite_storage::{
-    ConnectionInitHook, SqliteStore, SqliteStoreConfig, StoredDeviceSummary, Synchronous,
+    ConnectionInitHook, SqliteDatabase, SqliteDatabaseConfig, SqliteStore, StoredDeviceSummary,
+    Synchronous,
 };
 
 pub use crate::store::traits::*;
