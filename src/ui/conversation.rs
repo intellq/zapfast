@@ -8292,11 +8292,9 @@ pub(crate) fn video_controls(
     }
     // The playback speed, cycled by a click as the voice message chip is.
     let speed_label = crate::audio::speed_label(controls.video.speed());
-    let speed_galley = ui.painter().layout_no_wrap(
-        speed_label,
-        theme::medium(11.5),
-        Color32::WHITE,
-    );
+    let speed_galley =
+        ui.painter()
+            .layout_no_wrap(speed_label, theme::medium(11.5), Color32::WHITE);
     let speed = Rect::from_center_size(
         pos2(
             sound.left() - 4.0 - (speed_galley.size().x + 10.0) / 2.0,

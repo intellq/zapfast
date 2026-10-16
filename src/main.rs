@@ -138,7 +138,12 @@ fn control(command: &Control, sent: std::io::Result<()>) -> (i32, Option<String>
     use std::io::ErrorKind;
     match sent {
         Ok(()) => (0, None),
-        Err(error) if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::ConnectionRefused) => {
+        Err(error)
+            if matches!(
+                error.kind(),
+                ErrorKind::NotFound | ErrorKind::ConnectionRefused
+            ) =>
+        {
             match command {
                 Control::Quit => (0, None),
                 Control::ReloadThemes => (
@@ -147,7 +152,10 @@ fn control(command: &Control, sent: std::io::Result<()>) -> (i32, Option<String>
                 ),
             }
         }
-        Err(error) => (1, Some(format!("Could not reach the running ZapFast: {error}"))),
+        Err(error) => (
+            1,
+            Some(format!("Could not reach the running ZapFast: {error}")),
+        ),
     }
 }
 
@@ -926,9 +934,18 @@ mod tests {
     fn quit_reports_what_the_running_copy_did() {
         use std::io::ErrorKind;
         assert_eq!(control(&Control::Quit, Ok(())), (0, None));
-        assert_eq!(control(&Control::Quit, Err(ErrorKind::NotFound.into())), (0, None));
-        assert_eq!(control(&Control::Quit, Err(ErrorKind::TimedOut.into())).0, 1);
-        assert_eq!(control(&Control::ReloadThemes, Err(ErrorKind::NotFound.into())).0, 1);
+        assert_eq!(
+            control(&Control::Quit, Err(ErrorKind::NotFound.into())),
+            (0, None)
+        );
+        assert_eq!(
+            control(&Control::Quit, Err(ErrorKind::TimedOut.into())).0,
+            1
+        );
+        assert_eq!(
+            control(&Control::ReloadThemes, Err(ErrorKind::NotFound.into())).0,
+            1
+        );
         assert_eq!(control(&Control::ReloadThemes, Ok(())), (0, None));
     }
 

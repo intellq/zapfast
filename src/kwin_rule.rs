@@ -27,8 +27,8 @@ pub fn with_rule(config: &str, app_id: &str, description: &str) -> Option<String
         .lines()
         .any(|line| line.trim() == format!("[{RULE_ID}]"));
     let key = list_key(config);
-    let listed = general_value(config, key)
-        .is_some_and(|ids| ids.split(',').any(|id| id.trim() == RULE_ID));
+    let listed =
+        general_value(config, key).is_some_and(|ids| ids.split(',').any(|id| id.trim() == RULE_ID));
     if has_group && listed {
         return None;
     }
@@ -82,9 +82,7 @@ fn has_other_rules(config: &str) -> bool {
         let line = line.trim();
         line.strip_prefix('[')
             .and_then(|rest| rest.strip_suffix(']'))
-            .is_some_and(|group| {
-                group != "General" && !group.starts_with('$') && group != RULE_ID
-            })
+            .is_some_and(|group| group != "General" && !group.starts_with('$') && group != RULE_ID)
     })
 }
 

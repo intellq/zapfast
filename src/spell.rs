@@ -155,7 +155,9 @@ impl Speller {
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// The typographic apostrophe reads as the plain one the dictionary uses.
@@ -337,7 +339,9 @@ mod tests {
     #[test]
     fn links_mentions_code_numbers_and_acronyms_are_left_alone() {
         assert_eq!(
-            picked("veja https://exemplo.com.br e www.site.com com @Ana #tag `codigo errado` CPF 2x ok"),
+            picked(
+                "veja https://exemplo.com.br e www.site.com com @Ana #tag `codigo errado` CPF 2x ok"
+            ),
             ["veja", "e", "com", "ok"]
         );
     }
