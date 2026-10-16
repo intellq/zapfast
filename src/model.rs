@@ -1563,6 +1563,8 @@ pub enum Dialog {
         messages: Vec<String>,
     },
     CreatePoll(ChatId),
+    /// Picks the spot to send, from coordinates or a map link.
+    SendLocation(ChatId),
     PollResults {
         chat: ChatId,
         message: String,
@@ -1776,6 +1778,14 @@ pub enum Action {
     },
     /// Sends the composer's text without its link preview.
     DismissLinkPreview,
+    /// Sends a spot as a location message.
+    SendLocation {
+        chat: ChatId,
+        latitude: f64,
+        longitude: f64,
+        /// Quoted message id.
+        quoting: Option<String>,
+    },
     ReplyInteractive {
         chat: ChatId,
         message: String,
