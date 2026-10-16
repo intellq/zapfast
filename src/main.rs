@@ -86,9 +86,15 @@ struct Cli {
     #[arg(long, requires = "demo")]
     demo_macos: bool,
 
+    /// Draw ZapFast's own title bar and window buttons, as Settings >
+    /// Appearance > Custom title bar does, on Windows and Linux (demo only).
+    #[cfg(feature = "demo")]
+    #[arg(long, conflicts_with = "demo_macos")]
+    demo_titlebar: bool,
+
     /// Demo view: `chat`, `phone-menu`, `empty`, `settings`, `login`,
     /// `pair`, `shortcuts`, `about`, `info`, `mention`, `light`, `whatsapp-dark`,
-    /// `side-bar`, or a comma-separated
+    /// or a comma-separated
     /// mix such as `chat,light`.
     #[cfg(feature = "demo")]
     #[arg(long)]
@@ -314,6 +320,14 @@ fn run() -> eframe::Result<()> {
     if first_run && !demo && zapfast::emoji::whatsapp_font_file(&dirs.emoji_font_dir()).is_some() {
         settings.whatsapp_emoji = true;
     }
+    // The drawn title bar (Windows and Linux): GNOME's button layout and
+    // icons, read once, and the choice every window is made with.
+    fastframe_titlebar::init();
+    #[cfg(feature = "demo")]
+    let custom_titlebar = settings.custom_titlebar || cli.demo_titlebar;
+    #[cfg(not(feature = "demo"))]
+    let custom_titlebar = settings.custom_titlebar;
+    fastframe_titlebar::set_enabled(custom_titlebar);
     let demo_persistence = demo.then(|| dirs.state.join("window.ron"));
     let start_minimized = settings.start_minimized;
 
@@ -590,7 +604,10 @@ fn native_options(
         // macOS uses a full-size content view under the traffic lights.
         .with_fullsize_content_view(true)
         .with_titlebar_shown(false)
-        .with_title_shown(false);
+        .with_title_shown(false)
+        // Windows and Linux: no frame when ZapFast draws its own title bar.
+        // Fixed for the window's life; a new choice replaces the window.
+        .with_decorations(!fastframe_titlebar::enabled());
     // eframe caps the restored size at the largest monitor, but under Wayland
     // winit reports a monitor's integer scale (a 125% screen counts as 200%),
     // which makes that cap far too small: a window left tall came back short

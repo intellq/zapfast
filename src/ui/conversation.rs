@@ -42,7 +42,7 @@ const NOT_SENT_RESEND_HINT: &str =
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let Some(chat) = app.current_chat().cloned() else {
-        if theme::macos_chrome(ui.ctx()) {
+        if theme::chrome_in_headers(ui.ctx()) {
             super::banner(app, ui);
         }
         empty(app, ui);
@@ -50,7 +50,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     };
     wallpaper::paint(ui, &app.wallpaper());
     let header = header(app, ui, &chat);
-    if theme::macos_chrome(ui.ctx()) {
+    if theme::chrome_in_headers(ui.ctx()) {
         super::banner(app, ui);
     }
     pin_banner(app, ui, &chat);
@@ -268,6 +268,10 @@ fn empty(app: &mut App, ui: &mut egui::Ui) {
     }
 }
 
+/// What the chat header needs beside the caption buttons ZapFast draws: its
+/// most buttons (Back, two calls, Search and More), the avatar, and a name.
+const HEADER_MIN_CONTENT: f32 = 320.0;
+
 fn header(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> Rect {
     let palette = app.palette;
     let title = app.chat_title(chat);
@@ -280,9 +284,13 @@ fn header(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> Rect {
         )
         .show(ui, |ui| {
             // The chat list, expanded or collapsed, clears the traffic lights.
-            if theme::macos_chrome(ui.ctx()) {
+            if theme::chrome_in_headers(ui.ctx()) {
                 super::titlebar_drag(ui, ui.max_rect());
             }
+            // The caption buttons ZapFast draws over a corner the header
+            // reaches: beside its own buttons, or above them when narrow.
+            let room = super::caption_room(ui.ctx(), ui.max_rect(), HEADER_MIN_CONTENT);
+            ui.add_space(room.top);
             let narrow = super::narrow(ui.ctx());
             let row = ui.horizontal(|ui| {
                 // Give both rows a fixed height so their contents align.
@@ -297,6 +305,7 @@ fn header(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> Rect {
                     // Beside the rail alone, the lights reach over this header.
                     ui.add_space(super::rail::lights_overhang(ui.ctx()));
                 }
+                ui.add_space(room.left);
                 let picture = app.avatar(&chat.id);
                 let (subtitle, color) = subtitle(app, chat);
                 let call_here = app.call_live_here(&chat.id);
@@ -309,7 +318,7 @@ fn header(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> Rect {
                 } else {
                     0.0
                 };
-                let right_controls = if narrow { 108.0 } else { 72.0 } + call_controls;
+                let right_controls = if narrow { 108.0 } else { 72.0 } + call_controls + room.right;
                 // Treat the avatar, name, and subtitle as one info button.
                 let block = ui
                     .scope(|ui| {
@@ -401,6 +410,7 @@ fn header(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> Rect {
                 };
                 let select_messages_label = crate::i18n::gettext(app.locale, "Select messages");
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.add_space(room.right);
                     let more = theme::icon_button(
                         ui,
                         Icon::Ellipsis,

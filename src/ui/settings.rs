@@ -297,11 +297,27 @@ fn draw_entry(ui: &mut egui::Ui, app: &mut App, palette: &Palette, row: &Row, co
 }
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
-    if theme::macos_chrome(ui.ctx()) {
+    if theme::chrome_in_headers(ui.ctx()) {
         super::banner(app, ui);
     }
     let palette = app.palette;
     let locale = app.locale;
+    // The caption buttons ZapFast draws, beside the column's title row when
+    // it reaches the top-right corner, or above it when the window is narrow.
+    // Measured where the row stands unscrolled, so scrolling moves it away.
+    let page = ui.max_rect();
+    let column_width = (page.width() - 2.0 * SIDE_MARGIN).clamp(0.0, COLUMN_WIDTH);
+    let room = super::caption_room(
+        ui.ctx(),
+        Rect::from_min_size(
+            pos2(
+                page.center().x - column_width / 2.0,
+                page.top() + TOP_MARGIN,
+            ),
+            vec2(column_width, 32.0),
+        ),
+        TITLE_MIN_CONTENT,
+    );
     egui::ScrollArea::vertical()
         .id_salt("settings")
         .auto_shrink([false, false])
@@ -322,7 +338,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     .layout(Layout::top_down(Align::Min)),
                 |ui| {
                     ui.set_width(width);
+                    ui.add_space(room.top);
                     ui.horizontal(|ui| {
+                        ui.add_space(room.left);
                         if theme::icon_button(
                             ui,
                             Icon::ArrowLeft,
@@ -372,6 +390,9 @@ const COLUMN_WIDTH: f32 = 640.0;
 const SIDE_MARGIN: f32 = 32.0;
 /// Space above and below the settings column.
 const TOP_MARGIN: f32 = 24.0;
+/// What the title row needs beside the caption buttons ZapFast draws: Back
+/// and the title.
+const TITLE_MIN_CONTENT: f32 = 220.0;
 
 /// Where the settings column was laid out, for layout tests.
 pub fn column_id() -> egui::Id {
@@ -490,6 +511,17 @@ fn sections(app: &App) -> Vec<Section> {
         },
     );
     appearance.row_with_width(translated(locale, "Language"), "", 220.0, language_picker);
+    // macOS keeps its own traffic lights over ZapFast's headers.
+    if cfg!(any(windows, target_os = "linux")) {
+        appearance.row(
+            translated(locale, "Custom title bar"),
+            translated(
+                locale,
+                "Draw ZapFast's own title bar and window buttons instead of the desktop's.",
+            ),
+            custom_titlebar_switch,
+        );
+    }
     appearance.toggle(
         translated(locale, "Hide the chat filters"),
         translated(
@@ -1863,7 +1895,7 @@ fn language_picker(ui: &mut egui::Ui, app: &mut App) {
 
 /// Wallpaper colour picker and live preview.
 pub fn wallpaper_show(app: &mut App, ui: &mut egui::Ui) {
-    if theme::macos_chrome(ui.ctx()) {
+    if theme::chrome_in_headers(ui.ctx()) {
         super::banner(app, ui);
     }
     let palette = app.palette;
@@ -2510,6 +2542,22 @@ fn about(app: &mut App, ui: &mut egui::Ui) {
     ui.add_space(14.0);
     if let Some(url) = widgets::credit(ui, &palette, app.locale) {
         app.actions.push(Action::OpenUrl(url.to_owned()));
+    }
+}
+
+/// The Custom title bar switch. Turning it over replaces the window, so it
+/// goes through its action rather than straight into the settings.
+fn custom_titlebar_switch(ui: &mut egui::Ui, app: &mut App) {
+    let palette = app.palette;
+    let label = crate::i18n::gettext(app.locale, "Custom title bar");
+    let mut value = app.settings.custom_titlebar;
+    let response = widgets::switch(ui, &palette, &mut value);
+    theme::reveal_focus(&response);
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, ui.is_enabled(), value, &label)
+    });
+    if response.changed() {
+        app.actions.push(Action::SetCustomTitlebar(value));
     }
 }
 

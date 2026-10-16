@@ -463,6 +463,11 @@ pub struct Settings {
     pub theme: ThemeChoice,
     /// The interface's typeface.
     pub font: FontChoice,
+    /// Windows and Linux: draw ZapFast's own title bar and window buttons
+    /// instead of the desktop's. Off by default: on some Intel graphics
+    /// drivers a frameless window shows a black band at the top and its
+    /// clicks land below where they are drawn (Spotifast #348, #554).
+    pub custom_titlebar: bool,
     /// Interface language. `None` follows the operating system's locale.
     pub interface_language: Option<crate::i18n::Locale>,
     /// Filename of the selected local JSON palette.
@@ -649,6 +654,7 @@ impl Default for Settings {
             version: SETTINGS_VERSION,
             theme: ThemeChoice::WhatsAppDark,
             font: FontChoice::System,
+            custom_titlebar: false,
             interface_language: None,
             custom_theme: None,
             custom_theme_cache: None,

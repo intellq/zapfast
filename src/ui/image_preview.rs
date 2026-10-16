@@ -81,8 +81,16 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
 
             // Inset from the window's edges, so the title does not touch the
             // left one and the close button keeps clear of the right.
-            let mut head =
-                ui.new_child(UiBuilder::new().max_rect(header_rect.shrink2(vec2(14.0, 0.0))));
+            // The header drags the window, and its actions stay clear of the
+            // caption buttons ZapFast draws over the window's corners.
+            super::caption_drag(ui, header_rect);
+            let room = super::caption_room(ui.ctx(), header_rect, 0.0);
+            let inset = header_rect.shrink2(vec2(14.0, 0.0));
+            let inset = Rect::from_min_max(
+                inset.min + vec2(room.left, 0.0),
+                inset.max - vec2(room.right, 0.0),
+            );
+            let mut head = ui.new_child(UiBuilder::new().max_rect(inset));
             head.set_clip_rect(header_rect);
             header(
                 app,
