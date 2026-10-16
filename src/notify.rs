@@ -259,12 +259,17 @@ pub fn play_sound(sound: NotificationSound) {
 trait ReadSeek: std::io::Read + std::io::Seek + Send + Sync {}
 impl<T: std::io::Read + std::io::Seek + Send + Sync> ReadSeek for T {}
 
-/// The title and body of a notification while the app lock is on, which
-/// name neither the chat nor the sender and carry none of the message.
+/// The title and body of a notification while the app lock is on, or with
+/// notification content turned off, which name neither the chat nor the
+/// sender and carry none of the message. The body has a context of its own:
+/// without one, catalogs gave it the composer placeholder's translation
+/// ("Type a message").
 pub fn locked_lines(locale: crate::i18n::Locale) -> (String, String) {
     (
         "ZapFast".to_owned(),
-        crate::i18n::gettext(locale, "New message").into_owned(),
+        // Translators: the body of a notification that hides who wrote and
+        // what: a message has arrived.
+        crate::i18n::pgettext(locale, "notification", "New message").into_owned(),
     )
 }
 
@@ -584,6 +589,23 @@ mod tests {
         );
         notifications.clear(&second, "shared");
         assert_eq!(theirs.try_recv(), Ok(Stop::Close));
+    }
+
+    #[test]
+    fn a_hidden_notification_says_new_message_in_every_language() {
+        use crate::i18n::Locale;
+        for (locale, body) in [
+            (Locale::English, "New message"),
+            (Locale::PortugueseBrazil, "Nova mensagem"),
+            (Locale::German, "Neue Nachricht"),
+            (Locale::Spanish, "Mensaje nuevo"),
+            (Locale::Italian, "Nuovo messaggio"),
+            (Locale::French, "Nouveau message"),
+            (Locale::Russian, "Новое сообщение"),
+            (Locale::ChineseSimplified, "新消息"),
+        ] {
+            assert_eq!(locked_lines(locale).1, body, "{locale:?}");
+        }
     }
 
     #[test]
