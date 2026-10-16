@@ -31,8 +31,10 @@ pub struct Mode {
 
 /// What one read did.
 pub enum Read {
-    /// A whole frame landed in the buffer.
-    Frame,
+    /// A whole frame landed in the buffer, taken from the camera at this instant: when the driver
+    /// handed it over, before any conversion, so the time a frame carries does not depend on how
+    /// long its conversion took.
+    Frame(std::time::Instant),
     /// The camera delivered something that is not a picture; read again.
     Idle,
     /// The camera is gone: unplugged, taken by another program, or refused.
@@ -92,16 +94,28 @@ impl Source {
         Ok(Self { camera, size })
     }
 
-    /// The size every frame is delivered at.
+    /// The largest size frames are delivered at, both sides even: the camera's own shape within
+    /// the budget it was opened with.
     pub fn size(&self) -> (usize, usize) {
         self.size
     }
 
-    /// Waits for the next frame and writes it into `out` as YUV 4:2:0 of
-    /// [`Source::size`]: the Y plane, then U, then V.
-    pub fn read(&mut self, out: &mut [u8]) -> Read {
-        let size = self.size;
+    /// The camera's own frame rate, as the driver granted it. A camera that would not say is
+    /// taken to deliver 30 frames a second.
+    pub fn fps(&self) -> u32 {
+        match self.camera.mode().fps {
+            0 => 30,
+            fps => fps,
+        }
+    }
+
+    /// Waits for the next frame and writes it into `out` as YUV 4:2:0 of `size`: the Y plane,
+    /// then U, then V. `size` is [`Source::size`] or a smaller size of the same shape, which is how
+    /// a call sends a smaller picture when its path carries less.
+    pub fn read(&mut self, out: &mut [u8], size: (usize, usize)) -> Read {
+        let mut taken = None;
         let converted = self.camera.read(|pixel, data, width, height| {
+            taken = Some(std::time::Instant::now());
             let Some(picture) = to_i420(pixel, data, width, height) else {
                 return false;
             };
@@ -109,8 +123,24 @@ impl Source {
             true
         });
         match converted {
-            Ok(true) => Read::Frame,
+            Ok(true) => Read::Frame(taken.unwrap_or_else(std::time::Instant::now)),
             Ok(false) => Read::Idle,
+            Err(error) => {
+                log::warn!("[CALL] the camera stopped delivering: {error}");
+                Read::Ended
+            }
+        }
+    }
+
+    /// Waits for the next frame and lets it go without converting it: the frames a call does not
+    /// send cost a dequeue, not a conversion and a scale of the camera's full picture.
+    pub fn skip(&mut self) -> Read {
+        let mut taken = None;
+        match self
+            .camera
+            .read(|_, _, _, _| taken = Some(std::time::Instant::now()))
+        {
+            Ok(()) => Read::Frame(taken.unwrap_or_else(std::time::Instant::now)),
             Err(error) => {
                 log::warn!("[CALL] the camera stopped delivering: {error}");
                 Read::Ended
@@ -202,20 +232,31 @@ impl I420 {
 }
 
 /// Copies one plane at another size, taking the nearest sample.
+///
+/// The source column of every output column is worked out once per plane rather than once per
+/// pixel: a 1080p camera scaled for a call is a division per pixel otherwise, on the thread that
+/// has to keep up with the camera.
 fn sample(from: &[u8], from_size: (usize, usize), to: &mut [u8], to_size: (usize, usize)) {
     if from_size == to_size {
         let length = to.len().min(from.len());
         to[..length].copy_from_slice(&from[..length]);
         return;
     }
-    for row in 0..to_size.1 {
-        let source_row = row * from_size.1 / to_size.1.max(1);
-        for column in 0..to_size.0 {
-            let source_column = column * from_size.0 / to_size.0.max(1);
-            to[row * to_size.0 + column] = from
-                .get(source_row * from_size.0 + source_column)
-                .copied()
-                .unwrap_or(128);
+    if to_size.0 == 0 || to_size.1 == 0 {
+        return;
+    }
+    let columns: Vec<usize> = (0..to_size.0)
+        .map(|column| column * from_size.0 / to_size.0)
+        .collect();
+    for (row, line) in to.chunks_exact_mut(to_size.0).take(to_size.1).enumerate() {
+        let start = row * from_size.1 / to_size.1 * from_size.0;
+        match from.get(start..start + from_size.0) {
+            Some(source) => {
+                for (out, &column) in line.iter_mut().zip(&columns) {
+                    *out = source.get(column).copied().unwrap_or(128);
+                }
+            }
+            None => line.fill(128),
         }
     }
 }

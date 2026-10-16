@@ -604,7 +604,8 @@ impl Worker {
         // Once per heartbeat, the engine's own counters for this call. A call that is up but carrying
         // no audio is otherwise indistinguishable in a bug report from one where nobody spoke, and
         // these numbers are what tell the two apart.
-        if let Some(runtime) = self.call.as_ref() {
+        if let Some(runtime) = self.call.as_mut() {
+            runtime.call.check_video_queue();
             runtime.call.log_media_stats();
         }
         // Discovery opens every audio device and asks every camera to name itself, so it runs on a

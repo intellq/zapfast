@@ -8775,6 +8775,7 @@ dependencies = [
  "ogg",
  "open",
  "openh264",
+ "openh264-sys2",
  "opus",
  "png 0.18.1",
  "qrcode",

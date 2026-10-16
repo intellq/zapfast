@@ -21,6 +21,7 @@ use anyhow::{Context, Result, anyhow};
 use egui::ColorImage;
 
 use crate::model::CallDirection;
+use crate::video_rate::{Cadence, Change as RateChange, FrameClock, RateControl, RateShare};
 use whatsapp_rust::prelude::{Client, Jid};
 use whatsapp_rust::types::call::{CallAction, IncomingCall};
 use whatsapp_rust::voip::{
@@ -28,30 +29,33 @@ use whatsapp_rust::voip::{
 };
 
 /// The pixel budget one camera session encodes within: a landscape frame at most 1280 by 720, a
-/// portrait one at most 720 by 1280.
+/// portrait one at most 720 by 1280. It is the largest step of [`crate::video_rate::TIERS`]; a path
+/// that carries less is sent one of the smaller ones.
 ///
 /// Following the camera's own aspect is what keeps a portrait camera portrait on the peer's screen
 /// and in the corner preview. Stretching it into one fixed landscape frame would either pad it into
 /// a letterbox or squash it, and neither is what the camera saw. The budget is 720p because that is
 /// what the peer's screen is: a smaller frame is scaled up twice (once by this side's bitrate and
 /// again by the phone) and reads as the soft, blocky picture a 640 by 360 call is.
-const CAPTURE_LONG_SIDE: usize = 1280;
-const CAPTURE_SHORT_SIDE: usize = 720;
+const CAPTURE_LONG_SIDE: usize = TOP_TIER.long_side;
+const CAPTURE_SHORT_SIDE: usize = TOP_TIER.short_side;
+const TOP_TIER: crate::video_rate::Tier =
+    crate::video_rate::TIERS[crate::video_rate::TIERS.len() - 1];
 /// The largest the corner preview may be, in the same orientation as the capture. The preview is a
 /// thumbnail rather than the call, so it stays the size of one and costs nothing to draw.
 const PREVIEW_LONG_SIDE: usize = 320;
 const PREVIEW_SHORT_SIDE: usize = 180;
-/// The cadence the camera is asked for and the encoder is built for: what WhatsApp's own clients
-/// send at most. A camera that grants fewer frames is used at what it gives, and the frames carry
-/// their own capture times, so nothing plays back at the wrong speed.
-const VIDEO_FPS: u32 = 20;
+/// The cadence the camera is asked for: what WhatsApp's own clients send at most. A camera that
+/// grants fewer frames is used at what it gives; one that grants more is thinned to an even
+/// fraction of its own rate (see [`crate::video_rate::decimation`]), and the frames carry their own
+/// capture times, so nothing plays back at the wrong speed.
+const VIDEO_FPS: u32 = TOP_TIER.fps;
 /// RTP video clock (90 kHz) divided by the capture cadence.
 const VIDEO_TS_STRIDE: u32 = 90_000 / VIDEO_FPS;
-/// The encoder's bitrate for the budget above, about what WhatsApp's own clients use for a 720p
-/// call, and low enough to fit the uplink a call shares with its own audio.
-const VIDEO_BITRATE: u32 = 1_500_000;
 /// How often the decoder, while it waits for the peer's first keyframe, asks for one again.
 const FIRST_KEYFRAME_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
+/// After a frame failed to reach the engine, how long before another keyframe is tried.
+const RESYNC_GAP: std::time::Duration = std::time::Duration::from_millis(500);
 
 // ---------------------------------------------------------------------------
 // State
@@ -524,7 +528,13 @@ const CAMERA_RELEASE: std::time::Duration = std::time::Duration::from_secs(2);
 impl CameraCapture {
     /// Opens `device` (the first camera when `None`) on a thread of its own and waits until it
     /// delivers, so a call never signals video it cannot send. Blocking: call it off the async loop.
-    fn start(device: Option<String>, ticks: async_channel::Sender<VideoTick>) -> Result<Self> {
+    ///
+    /// `rate` is what the call's rate control last decided; the thread reads it between frames.
+    fn start(
+        device: Option<String>,
+        ticks: async_channel::Sender<VideoTick>,
+        rate: Arc<RateShare>,
+    ) -> Result<Self> {
         let (frames, timed) = async_channel::bounded::<TimedVideoFrame>(4);
         let running = Arc::new(AtomicBool::new(true));
         let keyframe = Arc::new(AtomicBool::new(false));
@@ -537,7 +547,12 @@ impl CameraCapture {
             .name("zapfast-camera".to_owned())
             .spawn(move || {
                 let _alive = alive;
-                capture(device, frames, ticks, &stopping, &forced, ready);
+                let controls = CaptureControls {
+                    stopping: &stopping,
+                    keyframe: &forced,
+                    rate: &rate,
+                };
+                capture(device, frames, ticks, controls, ready);
                 let _ = done.send(());
             })
             .context("camera thread could not be started")?;
@@ -620,6 +635,10 @@ pub struct VideoPipeline {
     remote_tx: async_channel::Sender<VideoFrame>,
     camera: Option<CameraCapture>,
     device: Option<String>,
+    /// How much the camera sends, adapted to the peer's reports. It outlives a camera switch: the
+    /// path has not changed because the camera did.
+    rate: RateControl,
+    rate_share: Arc<RateShare>,
 }
 
 impl VideoPipeline {
@@ -639,25 +658,57 @@ impl VideoPipeline {
         let (ticks, tick_rx) = async_channel::bounded::<VideoTick>(2);
         let (remote_tx, remote_rx) = async_channel::bounded::<VideoFrame>(8);
         decode_remote(remote_rx, ticks.clone());
+        let rate_share = Arc::new(RateShare::default());
+        let rate = RateControl::new(Arc::clone(&rate_share));
         // A machine without a camera, or one whose camera is busy, still takes part in a video
         // call: it sees the other side, its own camera reads as off, and the camera button says
         // why when pressed.
-        let camera = match CameraCapture::start(device.clone(), ticks.clone()) {
-            Ok(camera) => Some(camera),
-            Err(error) => {
-                log::warn!("[CALL] the video call goes on without our camera: {error}");
-                None
-            }
-        };
+        let camera =
+            match CameraCapture::start(device.clone(), ticks.clone(), Arc::clone(&rate_share)) {
+                Ok(camera) => Some(camera),
+                Err(error) => {
+                    log::warn!("[CALL] the video call goes on without our camera: {error}");
+                    None
+                }
+            };
         Ok((
             Self {
                 ticks,
                 remote_tx,
                 camera,
                 device,
+                rate,
+                rate_share,
             },
             tick_rx,
         ))
+    }
+
+    /// The rate and picture the camera is sent at right now.
+    pub fn rate(&self) -> crate::video_rate::Setting {
+        self.rate.setting()
+    }
+
+    /// One RTCP packet from the peer, read for what it says about our video.
+    fn on_rtcp(
+        &mut self,
+        reports_audio: bool,
+        reports_video: bool,
+        blocks: &[(u32, u8)],
+        estimates: &[u32],
+    ) -> Option<RateChange> {
+        self.rate.on_rtcp(
+            reports_audio,
+            reports_video,
+            blocks,
+            estimates,
+            Instant::now(),
+        )
+    }
+
+    /// The relay connection could not take all the video queued for it.
+    fn on_send_drops(&mut self) -> Option<RateChange> {
+        self.rate.on_send_drops(Instant::now())
     }
 
     fn source(&self) -> LocalVideoSource {
@@ -694,11 +745,12 @@ impl VideoPipeline {
         let previous = self.camera.take();
         self.device = device.clone();
         let ticks = self.ticks.clone();
+        let rate = Arc::clone(&self.rate_share);
         // The old camera is released first, on the same blocking thread, so the new one never
         // races it for the device.
         let camera = tokio::task::spawn_blocking(move || {
             drop(previous);
-            CameraCapture::start(device, ticks)
+            CameraCapture::start(device, ticks, rate)
         })
         .await
         .map_err(|error| anyhow!("the camera thread failed: {error}"))??;
@@ -738,8 +790,7 @@ fn capture(
     device: Option<String>,
     timed: async_channel::Sender<TimedVideoFrame>,
     ticks: async_channel::Sender<VideoTick>,
-    stopping: &AtomicBool,
-    keyframe: &AtomicBool,
+    controls: CaptureControls<'_>,
     ready: std::sync::mpsc::Sender<Result<(), String>>,
 ) {
     // The camera's own shape decides the frame the encoder runs at, within the budget either way
@@ -753,8 +804,8 @@ fn capture(
             return;
         }
     };
-    let size = source.size();
-    let mut encoder = match video_encoder() {
+    let plan = SendPlan::new(source.size(), f64::from(source.fps()), controls.rate.load());
+    let encoder = match CameraEncoder::new(&plan) {
         Ok(encoder) => encoder,
         Err(error) => {
             log::error!("[CALL] camera encoder could not start: {error}");
@@ -766,102 +817,301 @@ fn capture(
     };
     // The camera and the encoder are both up: only now is a video call worth signaling.
     let _ = ready.send(Ok(()));
-    capture_frames(
-        &mut source,
-        size,
-        stopping,
-        keyframe,
-        &timed,
-        &ticks,
-        &mut encoder,
-        Instant::now(),
-    );
+    capture_frames(&mut source, controls, &timed, &ticks, plan, encoder);
     source.stop();
+}
+
+/// What the camera thread reads between frames.
+struct CaptureControls<'a> {
+    /// Cleared when the camera is no longer wanted.
+    stopping: &'a AtomicBool,
+    /// Set when the engine needs a keyframe; the next frame sent is encoded as one.
+    keyframe: &'a AtomicBool,
+    /// The rate and the picture size the call's rate control last chose.
+    rate: &'a RateShare,
+}
+
+/// How the camera's frames are being sent right now: at what size, how many of them, and how fast.
+#[derive(Debug)]
+struct SendPlan {
+    /// The camera's own picture, within the capture budget.
+    full: (usize, usize),
+    /// The camera's frame rate as last measured (or as the driver granted it, to begin with).
+    camera_fps: f64,
+    setting: crate::video_rate::Setting,
+    /// The picture sent: the camera's own shape, within the setting's step.
+    size: (usize, usize),
+    /// One frame sent for every this many the camera gives.
+    every: u32,
+}
+
+impl SendPlan {
+    fn new(full: (usize, usize), camera_fps: f64, setting: crate::video_rate::Setting) -> Self {
+        let tier = setting.tier();
+        let rounded = camera_fps.round().clamp(1.0, f64::from(u32::MAX)) as u32;
+        Self {
+            full,
+            camera_fps,
+            setting,
+            size: crate::camera::fit_even(full, (tier.long_side, tier.short_side)),
+            every: crate::video_rate::decimation(rounded, tier.fps),
+        }
+    }
+
+    /// Frames a second actually sent.
+    fn sent_fps(&self) -> f64 {
+        self.camera_fps / f64::from(self.every)
+    }
+
+    /// Bytes in one YUV 4:2:0 picture of the size sent.
+    fn frame_len(&self) -> usize {
+        let (width, height) = self.size;
+        width * height + 2 * (width / 2) * (height / 2)
+    }
+
+    fn describe(&self) -> String {
+        format!(
+            "{}x{} at {:.1} fps (one in {} camera frames), {} kbps",
+            self.size.0,
+            self.size.1,
+            self.sent_fps(),
+            self.every,
+            self.setting.bitrate / 1000
+        )
+    }
+}
+
+/// The encoder for one step of picture size and frame rate, and the rate it runs at.
+struct CameraEncoder {
+    encoder: openh264::encoder::Encoder,
+    /// The rate the encoder was last moved to; `None` until the first frame has initialised it.
+    applied: Option<u32>,
+    wanted: u32,
+    /// Whether moving the rate has failed once, so the log says it once.
+    refused: bool,
+}
+
+impl CameraEncoder {
+    /// Built at the step's ceiling. openh264 takes its rate limit from the configuration when the
+    /// first frame initialises it, and a rate set later cannot pass that limit, so the wanted rate
+    /// is applied once the encoder is running and can then move anywhere under the ceiling.
+    fn new(plan: &SendPlan) -> std::result::Result<Self, openh264::Error> {
+        Ok(Self {
+            encoder: video_encoder(plan.sent_fps(), plan.setting.tier().max_bitrate)?,
+            applied: None,
+            wanted: plan.setting.bitrate,
+            refused: false,
+        })
+    }
+
+    fn set_bitrate(&mut self, bitrate: u32) {
+        self.wanted = bitrate;
+    }
+
+    /// Encodes one picture into an access unit led by an access-unit delimiter, so the peer's
+    /// depacketizer sees the boundaries an encoder would have produced.
+    fn encode(
+        &mut self,
+        planes: &Yuv420<'_>,
+        keyframe: bool,
+    ) -> std::result::Result<Vec<u8>, openh264::Error> {
+        if keyframe {
+            self.encoder.force_intra_frame();
+        }
+        let mut unit = vec![0x00, 0x00, 0x00, 0x01, 0x09, 0xF0];
+        self.encoder.encode(planes)?.write_vec(&mut unit);
+        if self.applied != Some(self.wanted) {
+            if set_encoder_bitrate(&mut self.encoder, self.wanted) {
+                self.applied = Some(self.wanted);
+            } else if !self.refused {
+                self.refused = true;
+                log::warn!("[CALL] the camera encoder would not change its bitrate");
+            }
+        }
+        Ok(unit)
+    }
 }
 
 /// The H.264 encoder a call's camera feeds: Constrained Baseline, which is what WhatsApp's clients
 /// decode, with a keyframe every two seconds so a peer that lost one recovers on its own.
-fn video_encoder() -> std::result::Result<openh264::encoder::Encoder, openh264::Error> {
+///
+/// Rate control keeps to the bitrate rather than to a quality: on a call the bitrate is what the
+/// path carries, and an encoder that overshoots it on a busy scene is sending loss.
+fn video_encoder(
+    fps: f64,
+    bitrate: u32,
+) -> std::result::Result<openh264::encoder::Encoder, openh264::Error> {
     use openh264::encoder::{
-        BitRate, Encoder, EncoderConfig, FrameRate, IntraFramePeriod, Profile,
+        BitRate, Encoder, EncoderConfig, FrameRate, IntraFramePeriod, Profile, RateControlMode,
     };
+    let fps = fps.clamp(1.0, f64::from(VIDEO_FPS));
     let config = EncoderConfig::new()
         .profile(Profile::Baseline)
-        .bitrate(BitRate::from_bps(VIDEO_BITRATE))
-        .max_frame_rate(FrameRate::from_hz(VIDEO_FPS as f32))
-        .intra_frame_period(IntraFramePeriod::from_num_frames(VIDEO_FPS * 2))
+        .bitrate(BitRate::from_bps(bitrate))
+        .rate_control_mode(RateControlMode::Bitrate)
+        .max_frame_rate(FrameRate::from_hz(fps as f32))
+        .intra_frame_period(IntraFramePeriod::from_num_frames((fps * 2.0).round() as u32))
         .skip_frames(false);
     Encoder::with_api_config(openh264::OpenH264API::from_source(), config)
 }
 
-/// Reads frames from one camera until the call stops it, encoding and previewing each one.
-#[allow(clippy::too_many_arguments)]
+/// Moves a running encoder to `bitrate` without restarting it, so a rate change costs no keyframe.
+/// `false` if openh264 refused.
+fn set_encoder_bitrate(encoder: &mut openh264::encoder::Encoder, bitrate: u32) -> bool {
+    let mut info = openh264_sys2::SBitrateInfo {
+        iLayer: openh264_sys2::SPATIAL_LAYER_ALL,
+        iBitrate: std::os::raw::c_int::try_from(bitrate).unwrap_or(std::os::raw::c_int::MAX),
+    };
+    // SAFETY: `ENCODER_OPTION_BITRATE` reads one `SBitrateInfo` through the pointer during the
+    // call, and `info` lives across it. The encoder has encoded a frame, so it is initialised,
+    // which `SetOption` requires. The openh264 crate re-applies its configured rate only when the
+    // picture size changes, and a camera encoder never sees a new size: a new size gets a new
+    // encoder.
+    let status = unsafe {
+        encoder.raw_api().set_option(
+            openh264_sys2::ENCODER_OPTION_BITRATE,
+            (&raw mut info).cast::<std::os::raw::c_void>(),
+        )
+    };
+    status == 0
+}
+
+/// Reads frames from one camera until the call stops it, encoding and previewing the ones it sends.
+///
+/// The camera is thinned to an even fraction of its own rate, every `n`th frame, so the frames
+/// sent are evenly spaced, and each carries the time the camera took it, snapped to that spacing.
+/// The frames in between are let go without being converted. The picture size, the frame rate and
+/// the bitrate follow the call's rate control, read between frames.
 fn capture_frames(
     source: &mut crate::camera::Source,
-    size: (usize, usize),
-    stopping: &AtomicBool,
-    keyframe: &AtomicBool,
+    controls: CaptureControls<'_>,
     timed: &async_channel::Sender<TimedVideoFrame>,
     ticks: &async_channel::Sender<VideoTick>,
-    encoder: &mut openh264::encoder::Encoder,
-    started: Instant,
+    mut plan: SendPlan,
+    mut encoder: CameraEncoder,
 ) {
-    let (width, height) = size;
-    let (luma_len, chroma_len) = (width * height, width * height / 4);
-    let mut bytes = vec![0u8; luma_len + chroma_len * 2];
-    let frame_gap = std::time::Duration::from_secs(1) / VIDEO_FPS;
-    let mut last_sent: Option<Instant> = None;
-    log::info!("[CALL] camera enabled size={width}x{height}");
+    let mut bytes = vec![0u8; plan.frame_len()];
+    let mut clock = FrameClock::new(Instant::now(), plan.sent_fps());
+    let mut cadence = Cadence::new(plan.camera_fps);
+    // Camera frames since the last one sent; the next is sent when this reaches zero.
+    let mut countdown = 0u32;
+    // Set when a frame did not make it to the engine: the peer's decoder has lost its reference,
+    // so nothing but a frame it can start from is worth sending, and that not too often, or a
+    // queue that is full because the path is short is filled with keyframes.
+    let mut resync = false;
+    let mut resynced_at: Option<Instant> = None;
+    log::info!(
+        "[CALL] camera enabled size={}x{} sending {}",
+        plan.full.0,
+        plan.full.1,
+        plan.describe()
+    );
     loop {
-        if !stopping.load(Ordering::Relaxed) {
+        if !controls.stopping.load(Ordering::Relaxed) {
             log::info!("[CALL] camera disabled");
             return;
         }
-        match source.read(&mut bytes) {
-            crate::camera::Read::Frame => {}
+        let wanted = controls.rate.load();
+        if wanted.tier != plan.setting.tier {
+            let next = SendPlan::new(plan.full, plan.camera_fps, wanted);
+            match CameraEncoder::new(&next) {
+                Ok(fresh) => {
+                    encoder = fresh;
+                    clock.respace(next.sent_fps());
+                    plan = next;
+                    bytes.resize(plan.frame_len(), 0);
+                    countdown = 0;
+                    log::info!("[CALL] camera now sends {}", plan.describe());
+                }
+                // The step stays as it was; the next frame tries again.
+                Err(error) => log::warn!("[CALL] the camera encoder could not restart: {error}"),
+            }
+        }
+        plan.setting.bitrate = wanted.bitrate;
+        encoder.set_bitrate(wanted.bitrate);
+
+        let send = countdown == 0;
+        let read = if send {
+            source.read(&mut bytes, plan.size)
+        } else {
+            source.skip()
+        };
+        let captured = match read {
+            crate::camera::Read::Frame(captured) => captured,
+            // Not a picture: the frame that was due goes out with the next one instead.
             crate::camera::Read::Idle => continue,
             crate::camera::Read::Ended => {
                 log::warn!("[CALL] the camera stopped delivering frames");
                 return;
             }
+        };
+        countdown = if send { plan.every - 1 } else { countdown - 1 };
+        // A camera that slows down in the dark, or never ran at the rate it claimed, gets a new
+        // fraction, so the frames sent stay close to the step's rate.
+        if let Some(measured) = cadence.observe(captured) {
+            let next = SendPlan::new(plan.full, measured, plan.setting);
+            if next.every != plan.every {
+                match CameraEncoder::new(&next) {
+                    Ok(fresh) => {
+                        encoder = fresh;
+                        clock.respace(next.sent_fps());
+                        plan = next;
+                        countdown = 0;
+                        log::info!(
+                            "[CALL] camera runs at {measured:.1} fps, sending {}",
+                            plan.describe()
+                        );
+                    }
+                    Err(error) => {
+                        log::warn!("[CALL] the camera encoder could not restart: {error}")
+                    }
+                }
+            } else {
+                plan.camera_fps = measured;
+                clock.respace(plan.sent_fps());
+            }
         }
-        // A camera faster than the call's cadence is thinned to it, so the encoder's rate control
-        // and the timestamps agree.
-        if last_sent.is_some_and(|last| last.elapsed() < frame_gap.mul_f32(0.8)) {
+        if !send {
             continue;
         }
-        last_sent = Some(Instant::now());
 
+        let (width, height) = plan.size;
+        let (luma_len, chroma_len) = (width * height, (width / 2) * (height / 2));
         let luma = &bytes[..luma_len];
         let chroma_u = &bytes[luma_len..luma_len + chroma_len];
-        let chroma_v = &bytes[luma_len + chroma_len..];
+        let chroma_v = &bytes[luma_len + chroma_len..luma_len + 2 * chroma_len];
         let planes = Yuv420 {
             y: luma,
             u: chroma_u,
             v: chroma_v,
-            size,
+            size: plan.size,
         };
-        if keyframe.swap(false, Ordering::Relaxed) {
-            encoder.force_intra_frame();
+        let resync_due = resync && resynced_at.is_none_or(|at| at.elapsed() >= RESYNC_GAP);
+        // A delta frame the peer cannot decode only adds to a queue that is already full.
+        let encode = !resync || resync_due;
+        let keyframe = encode && (controls.keyframe.swap(false, Ordering::Relaxed) || resync_due);
+        if resync_due {
+            resynced_at = Some(Instant::now());
         }
-        match encoder.encode(&planes) {
-            Ok(stream) => {
-                // One access unit per encoded frame, led by an access-unit delimiter so the
-                // peer's depacketizer sees the boundaries an encoder would have produced.
-                let mut unit = vec![0x00, 0x00, 0x00, 0x01, 0x09, 0xF0];
-                stream.write_vec(&mut unit);
-                let elapsed = started.elapsed().as_micros() as u64;
-                let timestamp = (elapsed * 90 / 1000) as u32;
-                // A full queue means the wire is behind: dropping is the documented answer for
-                // video, and the next frame carries the picture forward anyway.
-                let _ = timed.try_send(
-                    TimedVideoFrame::builder()
+        if encode {
+            match encoder.encode(&planes, keyframe) {
+                Ok(unit) => {
+                    let frame = TimedVideoFrame::builder()
                         .data(unit)
-                        .timestamp(timestamp)
-                        .build(),
-                );
+                        .timestamp(clock.stamp(captured))
+                        .build();
+                    // A full queue means the wire is behind. The frame is dropped, which leaves the
+                    // peer's decoder without its reference, so the next frame sent starts afresh,
+                    // and the rate control hears that the path carries less than is sent.
+                    if timed.try_send(frame).is_err() {
+                        resync = true;
+                        controls.rate.note_queue_drop();
+                    } else if keyframe {
+                        resync = false;
+                    }
+                }
+                Err(error) => log::warn!("[CALL] camera frame could not be encoded: {error}"),
             }
-            Err(error) => log::warn!("[CALL] camera frame could not be encoded: {error}"),
         }
 
         let image = crate::video::rgb_image(
@@ -870,7 +1120,7 @@ fn capture_frames(
             chroma_v,
             (width, width / 2, width / 2),
             (width, height),
-            preview_size(size),
+            preview_size(plan.size),
             // Our own frames arrive upright from the camera: there is no rotation to undo.
             0,
         );
@@ -982,6 +1232,36 @@ fn decode_remote(
     if let Err(error) = spawned {
         log::error!("[CALL] remote video decoder could not start: {error}");
     }
+}
+
+/// RTCP payload-specific feedback (RFC 4585), the packet type a receiver estimate (REMB) rides.
+const RTCP_PAYLOAD_SPECIFIC: u8 = 206;
+
+/// Says in the log how the camera's rate moved and why. Numbers only.
+///
+/// The slow climb on a clean path moves the rate every second or so, so only a new picture size
+/// or a cut makes the shipped log; the climb is there at debug level.
+fn log_rate_change(call_id: &str, change: RateChange) {
+    use crate::video_rate::Reason;
+    let reason = match change.reason {
+        Reason::Loss(loss) => format!("the peer lost {:.0}% of it", loss * 100.0),
+        Reason::Clean => "the peer reports a clean path".to_owned(),
+        Reason::SendDrops => "video was dropped before it was sent".to_owned(),
+        Reason::Estimate(bitrate) => format!("the peer can take {} kbps", bitrate / 1000),
+    };
+    let level = if change.from.tier != change.to.tier || change.reason != Reason::Clean {
+        log::Level::Info
+    } else {
+        log::Level::Debug
+    };
+    log::log!(
+        level,
+        "[CALL] video rate call_id={call_id} {} kbps {} -> {} kbps {} ({reason})",
+        change.from.bitrate / 1000,
+        change.from.tier().name,
+        change.to.bitrate / 1000,
+        change.to.tier().name
+    );
 }
 
 /// While the decoder waits for the peer's first keyframe, when to ask for one again.
@@ -1760,7 +2040,60 @@ impl Call {
                 }
                 None
             }
+            // The peer's reports on what it received, which is what the camera's rate follows.
+            CallEvent::RtcpReceived {
+                reports_audio,
+                reports_video,
+                report_blocks,
+                feedback,
+                ..
+            } => {
+                let pipe = self.video_pipe.as_mut()?;
+                let blocks: Vec<(u32, u8)> = report_blocks
+                    .iter()
+                    .map(|block| (block.ssrc, block.fraction_lost))
+                    .collect();
+                let estimates: Vec<u32> = feedback
+                    .iter()
+                    .filter(|item| item.packet_type == RTCP_PAYLOAD_SPECIFIC && item.fmt == 15)
+                    .filter_map(|item| crate::video_rate::remb_bitrate(&item.fci))
+                    .collect();
+                if let Some(change) =
+                    pipe.on_rtcp(*reports_audio, *reports_video, &blocks, &estimates)
+                {
+                    log_rate_change(&self.call_id, change);
+                }
+                None
+            }
+            // The relay connection could not take all the video queued for it.
+            CallEvent::OutboundMediaDropped {
+                video_access_units, ..
+            } if *video_access_units > 0 => {
+                if let Some(change) = self.video_pipe.as_mut()?.on_send_drops() {
+                    log_rate_change(&self.call_id, change);
+                }
+                None
+            }
             _ => None,
+        }
+    }
+
+    /// Frames the camera thread could not hand to the engine since the last check count as the
+    /// path carrying less than is sent, like the relay connection's own drops. Called from the call
+    /// heartbeat.
+    ///
+    /// Only once the call is up: while the peer's phone rings nothing drains the queue yet, and
+    /// what overflows then says nothing about the path.
+    pub fn check_video_queue(&mut self) {
+        let active = self.phase == CallPhase::Active;
+        let Some(pipe) = self.video_pipe.as_mut() else {
+            return;
+        };
+        if pipe.rate_share.take_queue_drops() > 0
+            && active
+            && let Some(change) = pipe.on_send_drops()
+        {
+            log_rate_change(&self.call_id, change);
         }
     }
 
@@ -1791,6 +2124,17 @@ impl Call {
             self.call_id,
             marker,
         );
+        if let Some(pipe) = &self.video_pipe {
+            let rate = pipe.rate();
+            log::info!(
+                "[CALL] video send call_id={} at={} bitrate_kbps={} picture={} max_fps={}",
+                self.call_id,
+                marker,
+                rate.bitrate / 1000,
+                rate.tier().name,
+                rate.tier().fps,
+            );
+        }
         self.log_audio_path(marker);
     }
 
@@ -2347,6 +2691,7 @@ mod tests {
         let (_frames, timed) = async_channel::bounded::<TimedVideoFrame>(4);
         // No thread behind it: its end of the channel is already dropped.
         let (_done, finished) = std::sync::mpsc::channel();
+        let rate_share = Arc::new(RateShare::default());
         VideoPipeline {
             ticks,
             remote_tx,
@@ -2357,6 +2702,8 @@ mod tests {
                 finished,
             }),
             device: None,
+            rate: RateControl::new(Arc::clone(&rate_share)),
+            rate_share,
         }
     }
 
@@ -2964,7 +3311,7 @@ mod tests {
             v: &chroma,
             size: (width, height),
         };
-        let mut encoder = video_encoder().expect("the encoder starts");
+        let mut encoder = video_encoder(20.0, 700_000).expect("the encoder starts");
         let mut decoder = openh264::decoder::Decoder::new().expect("the decoder starts");
         let mut units = Vec::new();
         for frame in 0..4 {
@@ -2995,6 +3342,112 @@ mod tests {
         assert_eq!(decoded.dimensions(), (width, height));
     }
 
+    /// A grainy frame: a gradient under a layer of noise, which costs an encoder what a real
+    /// camera's sensor noise does, so a rate change shows up in the size of what it makes.
+    fn noise_frame(seed: &mut u32, len: usize) -> Vec<u8> {
+        (0..len)
+            .map(|at| {
+                *seed ^= *seed << 13;
+                *seed ^= *seed >> 17;
+                *seed ^= *seed << 5;
+                ((at % 160) as u8).wrapping_add((*seed % 48) as u8)
+            })
+            .collect()
+    }
+
+    /// The rate control moves the encoder's bitrate in the middle of a stream, and that costs the
+    /// peer no keyframe: the encoder keeps sending delta frames, only smaller ones.
+    #[test]
+    fn the_camera_encoder_changes_its_rate_without_a_keyframe() {
+        let (width, height) = (320, 240);
+        let plan = SendPlan::new(
+            (width, height),
+            20.0,
+            crate::video_rate::Setting {
+                bitrate: 1_000_000,
+                tier: 1,
+            },
+        );
+        let mut encoder = CameraEncoder::new(&plan).expect("the encoder starts");
+        let mut seed = 0x2545_f491;
+        let mut encode = |encoder: &mut CameraEncoder| {
+            let luma = noise_frame(&mut seed, width * height);
+            let chroma = noise_frame(&mut seed, width * height / 4);
+            let planes = Yuv420 {
+                y: &luma,
+                u: &chroma,
+                v: &chroma,
+                size: (width, height),
+            };
+            encoder.encode(&planes, false).expect("a frame encodes")
+        };
+        let fast: Vec<Vec<u8>> = (0..20).map(|_| encode(&mut encoder)).collect();
+        assert_eq!(encoder.applied, Some(1_000_000));
+        encoder.set_bitrate(250_000);
+        let slow: Vec<Vec<u8>> = (0..20).map(|_| encode(&mut encoder)).collect();
+        assert_eq!(encoder.applied, Some(250_000), "openh264 took the new rate");
+        // The encoder's own scene detection makes keyframes of grain this heavy now and then, at
+        // either rate; what matters is that the change itself does not.
+        assert!(
+            slow[..3].iter().all(|unit| !nal_types(unit).contains(&5)),
+            "no keyframe for a rate change"
+        );
+        // Delta frames only, settled at each rate.
+        let average = |units: &[Vec<u8>]| {
+            let deltas: Vec<usize> = units
+                .iter()
+                .filter(|unit| !nal_types(unit).contains(&5))
+                .map(Vec::len)
+                .collect();
+            deltas.iter().sum::<usize>() / deltas.len().max(1)
+        };
+        let (fast, slow) = (average(&fast[5..]), average(&slow[5..]));
+        assert!(
+            slow * 2 < fast,
+            "a quarter of the rate makes frames well under half the size: {slow} vs {fast}"
+        );
+    }
+
+    /// The Cam Link that delivered 1080p50 is thinned to every third frame at every step, so what
+    /// goes out is 16.7 evenly spaced frames a second rather than the 40 and 60 ms mix that
+    /// thinning by elapsed time made of it, at the size of the step the rate control chose.
+    #[test]
+    fn a_1080p50_capture_card_is_sent_in_even_steps_of_its_own_cadence() {
+        use crate::video_rate::{Setting, TIERS};
+        let full = crate::camera::fit_even((1920, 1080), (CAPTURE_LONG_SIDE, CAPTURE_SHORT_SIDE));
+        assert_eq!(full, (1280, 720));
+        let plans: Vec<SendPlan> = (0..TIERS.len())
+            .map(|tier| {
+                SendPlan::new(
+                    full,
+                    50.0,
+                    Setting {
+                        bitrate: 700_000,
+                        tier,
+                    },
+                )
+            })
+            .collect();
+        assert_eq!(
+            plans.iter().map(|plan| plan.size).collect::<Vec<_>>(),
+            [(852, 480), (960, 540), (1280, 720)]
+        );
+        assert!(plans.iter().all(|plan| plan.every == 3), "{plans:?}");
+        assert!((plans[2].sent_fps() - 50.0 / 3.0).abs() < 1e-9);
+        assert_eq!(plans[2].frame_len(), 1280 * 720 * 3 / 2);
+        // A portrait camera keeps its shape at every step.
+        let upright = SendPlan::new(
+            (720, 1280),
+            30.0,
+            Setting {
+                bitrate: 300_000,
+                tier: 0,
+            },
+        );
+        assert_eq!(upright.size, (480, 852));
+        assert_eq!(upright.every, 2, "15 frames a second from a 30 fps camera");
+    }
+
     #[test]
     fn a_peer_whose_first_keyframe_went_missing_is_asked_again_each_second() {
         let start = Instant::now();
@@ -3003,6 +3456,76 @@ mod tests {
         assert!(!waiting.ask(start + std::time::Duration::from_millis(400)));
         assert!(waiting.ask(start + std::time::Duration::from_millis(1000)));
         assert!(!waiting.ask(start + std::time::Duration::from_millis(1500)));
+    }
+
+    /// The peer's loss reports, the relay connection's drops and the camera thread's own drops all
+    /// move the camera's rate, and none of them is something to redraw the call screen for.
+    #[test]
+    fn the_peers_reports_move_the_cameras_rate() {
+        use whatsapp_rust::voip_control::MediaRtcpReportBlock;
+        let block = |ssrc: u32, fraction_lost: u8| {
+            MediaRtcpReportBlock::builder()
+                .ssrc(ssrc)
+                .fraction_lost(fraction_lost)
+                .cumulative_lost(0)
+                .extended_highest_sequence(0)
+                .jitter(0)
+                .last_sender_report(0)
+                .delay_since_last_sender_report(0)
+                .profile_extension(Vec::new())
+                .build()
+        };
+        let report = |lost: u8| CallEvent::RtcpReceived {
+            packet_types: vec![201],
+            sender_ssrc: 1,
+            referenced_ssrcs: vec![9],
+            reports_audio: false,
+            reports_video: true,
+            report_blocks: vec![block(9, lost)],
+            feedback: Vec::new(),
+        };
+        let mut call = dialing();
+        call.video = true;
+        call.video_pipe = Some(pipeline_with_a_running_camera());
+        let rate = |call: &Call| call.video_pipe.as_ref().expect("video").rate().bitrate;
+        let start = rate(&call);
+        assert_eq!(start, crate::video_rate::START_BITRATE);
+        assert_eq!(call.media(&report(128)), None, "nothing for the screen");
+        let after_loss = rate(&call);
+        assert!(after_loss < start, "half the video lost lowers the rate");
+        assert_eq!(
+            call.media(&CallEvent::OutboundMediaDropped {
+                video_access_units: 2,
+                packets: 40,
+            }),
+            None
+        );
+        let after_drops = rate(&call);
+        assert!(after_drops < after_loss, "the send queue's drops lower it");
+        // The camera thread's own drops count once the call is up, and not while the peer's phone
+        // rings, when nothing drains the queue yet.
+        let note_drop = |call: &Call| {
+            call.video_pipe
+                .as_ref()
+                .expect("video")
+                .rate_share
+                .note_queue_drop();
+        };
+        note_drop(&call);
+        call.check_video_queue();
+        assert_eq!(rate(&call), after_drops, "ringing: not a sign of the path");
+        call.phase = CallPhase::Active;
+        note_drop(&call);
+        call.check_video_queue();
+        assert!(
+            rate(&call) < after_drops,
+            "up: the path carries less than is sent"
+        );
+
+        // A voice call has no camera rate to move, and a report is not an error for it.
+        let mut voice = dialing();
+        assert_eq!(voice.media(&report(128)), None);
+        voice.check_video_queue();
     }
 
     #[test]
