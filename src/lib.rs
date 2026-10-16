@@ -4,6 +4,8 @@ pub mod account;
 pub mod animation;
 pub mod app;
 pub mod app_lock;
+#[cfg(target_os = "linux")]
+pub mod appearance;
 pub mod archive;
 pub mod audio;
 pub mod autostart;
