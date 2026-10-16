@@ -389,7 +389,8 @@ pub struct App {
     /// The wallpaper image named in the settings, decoded off this thread.
     pub wallpaper_image: crate::wallpaper::CustomImage,
 
-    /// A sent message moves its chat up, so the chat list goes to the top.
+    /// A sent message moves its chat up, so the chat list goes to the top,
+    /// if it is near the top already (the list decides, from its offset).
     pub scroll_chats_to_top: bool,
     pub composer: String,
     /// Text selection at the moment the composer's context menu opened.
@@ -4999,7 +5000,9 @@ impl App {
         self.scroll_to_bottom_forced = true;
     }
 
-    /// Scrolls the chat list to the top, where a sent message moves its chat.
+    /// Asks the chat list to follow a sent message's chat to the top. The list
+    /// goes only if it was near the top already: a reader working down through
+    /// older chats keeps their place.
     fn follow_sent_chat(&mut self) {
         if !self.favorites_order() {
             self.scroll_chats_to_top = true;

@@ -666,7 +666,7 @@ fn list(app: &mut App, ui: &mut egui::Ui) {
     let mut scroll_area = egui::ScrollArea::vertical()
         .id_salt("chat-list")
         .auto_shrink([false, false]);
-    if to_top {
+    if to_top && near_top(ui, "chat-list", row_height) {
         scroll_area = scroll_area.vertical_scroll_offset(0.0);
     }
     let target_row = app
@@ -742,8 +742,23 @@ fn list(app: &mut App, ui: &mut egui::Ui) {
     app.scroll_route
         .place(crate::app::ScrollPane::Chats, output.inner_rect);
     #[cfg(test)]
-    ui.ctx()
-        .data_mut(|data| data.insert_temp(list_offset_id(), output.state.offset.y));
+    ui.ctx().data_mut(|data| {
+        data.insert_temp(list_offset_id(), output.state.offset.y);
+        data.insert_temp(list_offset_id().with("id"), output.id);
+    });
+}
+
+/// Whether the list scrolled by `salt` is near enough its top to follow a sent
+/// message's chat there: at most one row down, so its first row still shows
+/// at least in part. A reader further down is working through older chats, and
+/// a send there keeps their place instead of throwing them back to the top.
+fn near_top(ui: &egui::Ui, salt: &str, row_height: f32) -> bool {
+    let id = ui.make_persistent_id(egui::IdSalt::new(salt));
+    let offset = egui::scroll_area::State::load(ui.ctx(), id)
+        .unwrap_or_default()
+        .offset
+        .y;
+    offset <= row_height
 }
 
 /// Set while a narrow window's slide draws copies of the list.
@@ -1501,7 +1516,7 @@ fn compact_list(app: &mut App, ui: &mut egui::Ui) {
     let mut scroll_area = egui::ScrollArea::vertical()
         .id_salt("chat-rail")
         .auto_shrink([false, false]);
-    if to_top {
+    if to_top && near_top(ui, "chat-rail", COMPACT_CELL) {
         scroll_area = scroll_area.vertical_scroll_offset(0.0);
     }
     // Alt+Up/Down reveals the chat it opens here too.
@@ -1545,6 +1560,11 @@ fn compact_list(app: &mut App, ui: &mut egui::Ui) {
     });
     app.scroll_route
         .place(crate::app::ScrollPane::Chats, output.inner_rect);
+    #[cfg(test)]
+    ui.ctx().data_mut(|data| {
+        data.insert_temp(list_offset_id().with("compact"), output.state.offset.y);
+        data.insert_temp(list_offset_id().with("compact-id"), output.id);
+    });
 }
 
 /// The collapsed form of the entry the secret code reveals.
@@ -2054,8 +2074,21 @@ mod tests {
         assert!(offset > 0.0, "the list moved down to reveal the last row");
     }
 
+    /// Moves a drawn list (`id` names where its scroll area's id was kept)
+    /// to `offset`, as a reader's scrolling would.
+    fn scroll_list_to(ctx: &egui::Context, id: egui::Id, offset: f32) {
+        let id = ctx
+            .data(|data| data.get_temp::<egui::Id>(id))
+            .expect("the list was drawn");
+        let mut state = egui::scroll_area::State::load(ctx, id).expect("scroll state");
+        state.offset.y = offset;
+        state.store(ctx, id);
+    }
+
+    /// A send follows its chat to the top only from a list that is within a
+    /// row of the top; further down, the reader keeps their place.
     #[test]
-    fn a_sent_message_scrolls_the_chat_list_to_the_top() {
+    fn a_sent_message_scrolls_the_chat_list_to_the_top_only_from_near_it() {
         let (_directory, mut app, ids, ctx) = rail_app(24);
         let frame = |app: &mut App| {
             let mut output = ctx.run_ui(
@@ -2070,11 +2103,26 @@ mod tests {
                 .expect("chat-list offset")
         };
         app.scroll_chat_into_view = ids.last().cloned();
-        assert!(frame(&mut app) > 0.0, "the list starts scrolled down");
+        let scrolled = frame(&mut app);
+        assert!(scrolled > theme::ROW_HEIGHT, "the list starts far down");
+        app.scroll_chats_to_top = true;
+        assert_eq!(
+            frame(&mut app),
+            scrolled,
+            "a reader far down keeps their place"
+        );
+        assert!(!app.scroll_chats_to_top, "the request was consumed");
 
+        // Just over a row down still counts as working down the list.
+        scroll_list_to(&ctx, list_offset_id().with("id"), theme::ROW_HEIGHT + 1.0);
+        assert_eq!(frame(&mut app), theme::ROW_HEIGHT + 1.0);
+        app.scroll_chats_to_top = true;
+        assert_eq!(frame(&mut app), theme::ROW_HEIGHT + 1.0);
+
+        scroll_list_to(&ctx, list_offset_id().with("id"), theme::ROW_HEIGHT / 2.0);
+        assert_eq!(frame(&mut app), theme::ROW_HEIGHT / 2.0);
         app.scroll_chats_to_top = true;
         assert_eq!(frame(&mut app), 0.0, "the list is back at the top");
-        assert!(!app.scroll_chats_to_top, "the request was consumed");
         assert_eq!(frame(&mut app), 0.0, "the list stays at the top");
     }
 
@@ -2269,28 +2317,77 @@ mod tests {
         );
     }
 
+    /// A backlog reply keeps the collapsed sidebar scrolled down even when
+    /// normal activity ordering moves the recipient to the top.
     #[test]
-    fn a_sent_message_scrolls_the_collapsed_list_to_the_top() {
+    fn sending_far_down_leaves_the_collapsed_list_scrolled_down() {
         let (_directory, mut app, ids, ctx) = rail_app(40);
-        let laid_out = |id: &str| {
-            ctx.data(|data| data.get_temp::<Rect>(compact_chat_id(id)))
-                .is_some()
+        let (backend, mut commands) = crate::backend::Backend::recording();
+        app.backend = backend;
+        app.open_chat = Some(ids[30].clone());
+        app.scroll_chat_into_view = Some(ids[30].clone());
+        rail_frame(&mut app, &ctx, vec![]);
+        rail_frame(&mut app, &ctx, vec![]);
+        let offset = || {
+            ctx.data(|data| data.get_temp::<f32>(list_offset_id().with("compact")))
+                .expect("the collapsed list was drawn")
+        };
+        let before = offset();
+        assert!(before > COMPACT_CELL, "the rail starts far down");
+        app.actions.push(Action::SendText {
+            chat: ids[30].clone(),
+            text: "Backlog reply fixture".into(),
+            quoting: None,
+        });
+        app.background_frame(&ctx);
+        assert!(
+            std::iter::from_fn(|| commands.try_recv().ok()).any(|command| matches!(
+                command,
+                crate::backend::Command::SendText { chat, .. } if chat == ids[30]
+            ))
+        );
+        // Normal activity ordering still moves the replied-to chat up.
+        app.chats
+            .iter_mut()
+            .find(|chat| chat.id == ids[30])
+            .unwrap()
+            .last_activity = 20_000;
+        rail_frame(&mut app, &ctx, vec![]);
+        rail_frame(&mut app, &ctx, vec![]);
+        assert_eq!(offset(), before, "sending keeps the sidebar offset");
+        assert_eq!(app.visible_chats()[0].id, ids[30]);
+    }
+
+    #[test]
+    fn a_sent_message_scrolls_the_collapsed_list_to_the_top_only_from_near_it() {
+        let (_directory, mut app, ids, ctx) = rail_app(40);
+        let offset = || {
+            ctx.data(|data| data.get_temp::<f32>(list_offset_id().with("compact")))
+                .expect("the collapsed list was drawn")
         };
         app.scroll_chat_into_view = Some(ids[39].clone());
         rail_frame(&mut app, &ctx, vec![]);
         rail_frame(&mut app, &ctx, vec![]);
-        assert!(laid_out(&ids[39]), "the rail starts scrolled to the end");
-
+        let scrolled = offset();
+        assert!(
+            scrolled > COMPACT_CELL,
+            "the rail starts scrolled to the end"
+        );
         app.scroll_chats_to_top = true;
-        // Row rects stay in memory until replaced; forget the old ones.
-        ctx.data_mut(|data| {
-            data.remove::<Rect>(compact_chat_id(&ids[0]));
-            data.remove::<Rect>(compact_chat_id(&ids[39]));
-        });
         rail_frame(&mut app, &ctx, vec![]);
         assert!(!app.scroll_chats_to_top, "the request was consumed");
-        assert!(laid_out(&ids[0]), "the first avatar is back on screen");
-        assert!(!laid_out(&ids[39]), "the last avatar left the screen");
+        assert_eq!(offset(), scrolled, "a reader far down keeps their place");
+
+        scroll_list_to(
+            &ctx,
+            list_offset_id().with("compact-id"),
+            COMPACT_CELL / 2.0,
+        );
+        rail_frame(&mut app, &ctx, vec![]);
+        assert_eq!(offset(), COMPACT_CELL / 2.0);
+        app.scroll_chats_to_top = true;
+        rail_frame(&mut app, &ctx, vec![]);
+        assert_eq!(offset(), 0.0, "the rail is back at the top");
     }
 
     #[test]

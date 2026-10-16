@@ -1299,7 +1299,7 @@ mod tests {
         let (settings, stored) = load_from(
             r#"{"enter_sends":false,"label_chips":true,"show_sender_pictures":true,
                 "names_from_contacts":false,"collapse_chat_list":false,
-                "save_contacts_to_phone":false}"#,
+                "save_contacts_to_phone":false,"keep_chat_list_position":true}"#,
         );
         assert!(!settings.enter_sends, "the rest of the file still loads");
         assert!(
@@ -1313,6 +1313,7 @@ mod tests {
             "collapse_chat_list",
             "pause_media_while_recording",
             "pause_media_while_playing",
+            "keep_chat_list_position",
         ] {
             assert!(stored.get(key).is_none(), "{key} is dropped on save");
         }

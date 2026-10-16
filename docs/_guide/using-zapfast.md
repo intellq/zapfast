@@ -242,7 +242,9 @@ menu, or other overlay is open; close it first, with Escape or its own button.
 
 Sending while reading older messages keeps your place. Use the
 newest-message button or `End` to return to the latest message when you are
-ready. The chat list scrolls to the top after you send, where the chat now is.
+ready. After you send, the chat moves to the top of the chat list, and the list
+follows it there when it was already at or near the top. Scrolled further down,
+working through older chats, the list keeps your place.
 Under the **Favorites** chip, the list keeps the phone's order and stays in place.
 
 A shared contact message shows the name from its vCard. When the card names a
