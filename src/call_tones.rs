@@ -1,8 +1,11 @@
-//! The tones a call makes on this side: the ringback heard while the peer's phone rings, and the
-//! ringtone of an incoming call.
+//! The tones a call makes on this side: the ringback heard while the peer's phone rings, the
+//! ringtone of an incoming call, and a short chime when a call connects, ends, or finds the peer
+//! busy.
 //!
-//! Both are synthesised here as a fallback; the fork bundles Telegram Desktop's call sounds
-//! (`assets/sounds/call_outgoing.mp3` and `call_incoming.mp3`), which play when they decode.
+//! The ringback and the ringtone are synthesised here as a fallback; the fork bundles Telegram
+//! Desktop's call sounds (`assets/sounds/call_outgoing.mp3` and `call_incoming.mp3`), which play
+//! when they decode. The chimes are only the recordings (`call_connect.mp3`, `call_end.mp3` and
+//! `call_busy.mp3`), played once on the call's own speaker.
 //! Pidgin, whose message sounds ZapFast plays,
 //! ships no call or ring sound (its `share/sounds/` holds only alert, login, logout, receive and
 //! send), and a tone made in code needs no licence note of its own.
@@ -55,12 +58,35 @@ pub enum Tone {
     Ringtone,
 }
 
+/// A short sound a call plays once, as it moves on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Chime {
+    /// The call connected.
+    Connect,
+    /// The call ended, whoever hung up.
+    End,
+    /// The peer was busy or declined.
+    Busy,
+}
+
+impl Chime {
+    fn bytes(self) -> &'static [u8] {
+        match self {
+            Self::Connect => include_bytes!("../assets/sounds/call_connect.mp3"),
+            Self::End => include_bytes!("../assets/sounds/call_end.mp3"),
+            Self::Busy => include_bytes!("../assets/sounds/call_busy.mp3"),
+        }
+    }
+}
+
 /// The call tone playing now, if any. At most one plays at a time.
 pub struct Tones {
     /// Whether a tone really reaches the speakers. Off in tests and demos.
     audible: bool,
     current: Option<Tone>,
     playing: Option<Playing>,
+    /// The last chime asked for, which a silent run only records.
+    last_chime: Option<Chime>,
 }
 
 impl Default for Tones {
@@ -77,6 +103,33 @@ impl Tones {
             audible: audible && !cfg!(test),
             current: None,
             playing: None,
+            last_chime: None,
+        }
+    }
+
+    /// The last chime played, or that would have been in a silent run.
+    pub fn last_chime(&self) -> Option<Chime> {
+        self.last_chime
+    }
+
+    /// Stops the tone and plays `chime` once, on `speaker` (the call's own, `None` for the
+    /// default), falling back to the default speaker when that one is gone.
+    pub fn chime(&mut self, chime: Chime, speaker: Option<&str>) {
+        self.set(None);
+        self.last_chime = Some(chime);
+        if !self.audible {
+            return;
+        }
+        let speaker = speaker.map(str::to_owned);
+        let spawned = std::thread::Builder::new()
+            .name("call-chime".into())
+            .spawn(move || {
+                if let Err(error) = play_once(chime, speaker.as_deref()) {
+                    log::debug!("call chime {chime:?} not played: {error}");
+                }
+            });
+        if let Err(error) = spawned {
+            log::debug!("no thread for a call chime: {error}");
         }
     }
 
@@ -154,6 +207,28 @@ impl Playing {
             }
         }
     }
+}
+
+/// Plays `chime` to its end on `speaker`, or on the default speaker if that one cannot be opened.
+fn play_once(chime: Chime, speaker: Option<&str>) -> Result<(), String> {
+    let health = crate::audio::Health::new("call chime");
+    let device = crate::call_audio::open_output(speaker, &health).or_else(|error| {
+        if speaker.is_some() {
+            log::debug!("call chime on the default speaker: {error}");
+            crate::call_audio::open_output(None, &health)
+        } else {
+            Err(error)
+        }
+    })?;
+    let player = rodio::Player::connect_new(device.mixer());
+    let decoder = rodio::Decoder::new(std::io::Cursor::new(chime.bytes()))
+        .map_err(|error| error.to_string())?;
+    player.append(decoder);
+    while !player.empty() && !health.failed() {
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    player.stop();
+    Ok(())
 }
 
 /// The recorded sound ZapFast bundles for `tone` (see `assets/sounds/README.md`), decoded to one
@@ -234,6 +309,11 @@ mod tests {
             let (_, _, samples) = recorded_cycle(tone).expect("the recording decodes");
             assert!(samples.iter().any(|sample| sample.abs() > 0.01));
         }
+        for chime in [Chime::Connect, Chime::End, Chime::Busy] {
+            let decoder = rodio::Decoder::new(std::io::Cursor::new(chime.bytes()))
+                .expect("the chime decodes");
+            assert!(decoder.into_iter().any(|sample| sample.abs() > 0.01));
+        }
     }
 
     use super::*;
@@ -288,5 +368,9 @@ mod tests {
         assert!(tones.playing.is_none());
         tones.set(None);
         assert_eq!(tones.current(), None);
+        tones.set(Some(Tone::Ringback));
+        tones.chime(Chime::Connect, Some("headset"));
+        assert_eq!(tones.current(), None, "a chime stops the tone");
+        assert_eq!(tones.last_chime(), Some(Chime::Connect));
     }
 }

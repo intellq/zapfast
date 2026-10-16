@@ -10,15 +10,18 @@
 //! offer to another account while a call is up is declined there.
 //!
 //! The tones follow the phase: the ringback while the peer's phone rings (the
-//! protocol's `<preaccept>`), the ringtone while a call to us waits.
+//! protocol's `<preaccept>`), the ringtone while a call to us waits, and a
+//! chime when the call connects, ends, or finds the peer busy. The ringtone
+//! follows the chat's quiet rules (muted, archived or locked chats do not
+//! ring), not the message sound: a call rings even with message sounds off.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use super::{App, CALL_FAREWELL, notification_sound};
+use super::{App, CALL_FAREWELL};
 use crate::backend::{Backend, Command};
-use crate::call_tones::Tone;
+use crate::call_tones::{Chime, Tone};
 use crate::calls::{CallPhase, CallUpdate};
 use crate::model::{AccountId, Action, CallDirection, Chat, ChatId};
 use crate::settings::NotificationSound;
@@ -313,6 +316,13 @@ impl App {
         let finished = !update.phase.is_live();
         let incoming = update.direction == CallDirection::Incoming;
         let was_live = self.call_live() && !other_account;
+        // The same call's last phase, which tells a change worth a chime from a repeat.
+        let previous = self
+            .call
+            .as_ref()
+            .filter(|current| !other_account && current.generation == update.generation)
+            .map(|current| current.phase);
+        let chime = chime(previous, &update);
         // A peer who stopped sending video leaves no picture: the last frame
         // is not a live one, so the surface goes back to their photo.
         if !update.remote_video || other_account {
@@ -361,9 +371,32 @@ impl App {
         }
         self.request_call_repaint();
         if ringing {
+            if self.call_should_ring() {
+                self.call_rings = self.call.as_ref().map(|call| call.generation);
+            }
             self.notify_incoming_call();
         }
+        if let Some(chime) = chime {
+            let speaker = self.call.as_ref().and_then(|call| call.speaker.clone());
+            self.call_tones.chime(chime, speaker.as_deref());
+        }
         self.sync_call_tone();
+    }
+
+    /// Whether the call ringing now plays the ringtone: always, unless the
+    /// account is silenced, anonymous (the call cannot be answered here), or
+    /// the chat stays quiet (muted, archived or locked). The message sound
+    /// plays no part: a call rings even when messages make no sound. A
+    /// caller without a chat row is a stranger, and rings.
+    fn call_should_ring(&self) -> bool {
+        let Some(call) = self.call.as_ref() else {
+            return false;
+        };
+        if self.account().settings.silenced || self.anonymous() {
+            return false;
+        }
+        self.chat(&call.chat)
+            .is_none_or(|chat| call_notification_eligible(chat, crate::util::now()))
     }
 
     /// Places a call from the chat header or the Calls page: the screen shows
@@ -423,6 +456,11 @@ impl App {
         let Some(call) = self.call.take() else {
             return;
         };
+        // Our own hang-up or refusal ends the call as the peer's would, with
+        // its chime; a call still being placed was never heard.
+        if call.phase.is_live() && call.phase != CallPhase::Placing {
+            self.call_tones.chime(Chime::End, call.speaker.as_deref());
+        }
         self.call_dismissed = Some(call.generation);
         if self.call_notified == Some(call.generation) {
             self.call_notified = None;
@@ -466,6 +504,11 @@ impl App {
         self.call_tones.current()
     }
 
+    /// The last chime a call played, if any.
+    pub fn call_chime(&self) -> Option<Chime> {
+        self.call_tones.last_chime()
+    }
+
     fn request_call_repaint(&self) {
         self.waker.wake();
     }
@@ -484,11 +527,12 @@ impl App {
         // The chat's own rules: a call in a chat that is muted, archived or
         // locked stays as quiet as a message in it. A caller without a chat
         // row is a stranger, and rings with the ordinary sound.
-        let chat_sound = match self.chat(&call.chat) {
-            Some(chat) if !call_notification_eligible(chat, now) => return,
-            Some(chat) => chat.notification_sound.clone(),
-            None => None,
-        };
+        if self
+            .chat(&call.chat)
+            .is_some_and(|chat| !call_notification_eligible(chat, now))
+        {
+            return;
+        }
         let (title, body, picture) = if self.app_lock.is_locked() {
             // Behind the app lock the desktop learns that a call came, and
             // nothing about who is calling.
@@ -506,14 +550,9 @@ impl App {
                 self.call_avatar(),
             )
         };
-        // A call rings with the ringtone whenever its notification would make
-        // a sound at all, whichever sound that is; with sounds off it only
-        // shows. The notification itself stays quiet so the two never play
-        // over each other.
-        let sound = notification_sound(&self.settings, chat_sound, false, false);
-        if sound != NotificationSound::None {
-            self.call_rings = Some(call.generation);
-        }
+        // The ringtone is the call's sound (see `call_should_ring`), so the
+        // notification itself stays quiet and the two never play over each
+        // other.
         let waker = self.waker.clone();
         self.call_notified = Some(call.generation);
         self.wants_attention = true;
@@ -652,6 +691,34 @@ impl App {
             self.drop_call_frames();
             self.sync_call_tone();
         }
+    }
+}
+
+/// The chime a call moving from `previous` (the same call's last phase, or
+/// `None` for a call not seen before) to `update` plays: connecting, the end
+/// of a call that was heard here, and the peer busy or declining ours. A call
+/// that rang here and was missed, or taken or turned down elsewhere, only
+/// stops ringing.
+fn chime(previous: Option<CallPhase>, update: &CallUpdate) -> Option<Chime> {
+    use crate::calls::CallOutcome;
+    let previous = previous?;
+    match update.phase {
+        CallPhase::Active if previous != CallPhase::Active => Some(Chime::Connect),
+        CallPhase::Ended | CallPhase::Failed if previous.is_live() => match update.outcome {
+            Some(CallOutcome::Busy) => Some(Chime::Busy),
+            Some(CallOutcome::Declined) if update.direction == CallDirection::Outgoing => {
+                Some(Chime::Busy)
+            }
+            Some(
+                CallOutcome::Missed
+                | CallOutcome::AnsweredElsewhere
+                | CallOutcome::DeclinedElsewhere,
+            ) => None,
+            // A call that was never offered says why in words, not with a chime.
+            _ if previous == CallPhase::Placing => None,
+            _ => Some(Chime::End),
+        },
+        _ => None,
     }
 }
 
@@ -934,6 +1001,50 @@ mod tests {
             &ctx,
         );
         assert!(self::sent(&mut commands).is_empty());
+    }
+
+    #[test]
+    fn a_call_chimes_as_it_connects_and_ends() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, mut commands) = app(directory.path());
+        let ctx = egui::Context::default();
+        let (generation, _) = press_call(&mut app, &mut commands, false);
+        app.handle_call_update(outgoing(generation, CallPhase::Ringing));
+        assert_eq!(app.call_chime(), None);
+        app.handle_call_update(outgoing(generation, CallPhase::Active));
+        assert_eq!(app.call_chime(), Some(Chime::Connect));
+        assert_eq!(app.call_tone(), None);
+        let mut over = outgoing(generation, CallPhase::Ended);
+        over.outcome = Some(CallOutcome::Answered);
+        app.handle_call_update(over);
+        assert_eq!(app.call_chime(), Some(Chime::End));
+
+        // The peer busy, on a fresh window.
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, mut commands) = self::app(directory.path());
+        let (generation, _) = press_call(&mut app, &mut commands, false);
+        app.handle_call_update(outgoing(generation, CallPhase::Ringing));
+        let mut busy = outgoing(generation, CallPhase::Failed);
+        busy.outcome = Some(CallOutcome::Busy);
+        app.handle_call_update(busy);
+        assert_eq!(app.call_chime(), Some(Chime::Busy));
+
+        // Our own hang-up ends with the same chime as the peer's.
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, mut commands) = self::app(directory.path());
+        let (generation, _) = press_call(&mut app, &mut commands, false);
+        app.handle_call_update(outgoing(generation, CallPhase::Active));
+        app.apply(Action::HangupCall, &ctx);
+        assert_eq!(app.call_chime(), Some(Chime::End));
+
+        // A call that rang here and was missed only stops ringing.
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _) = self::app(directory.path());
+        app.handle_call_update(update(1, CallPhase::Incoming));
+        let mut missed = update(1, CallPhase::Failed);
+        missed.outcome = Some(CallOutcome::Missed);
+        app.handle_call_update(missed);
+        assert_eq!(app.call_chime(), None);
     }
 
     #[test]
@@ -1225,9 +1336,6 @@ mod tests {
     fn a_call_to_us_rings_until_it_is_answered() {
         let directory = tempfile::tempdir().unwrap();
         let (mut app, _) = app(directory.path());
-        // A new install plays no message sound, and a call rings only where
-        // its notification would sound.
-        app.settings.message_sound = NotificationSound::System;
         app.handle_call_update(update(1, CallPhase::Incoming));
         assert_eq!(app.call_tone(), Some(Tone::Ringtone));
         assert_eq!(
@@ -1271,13 +1379,26 @@ mod tests {
     }
 
     #[test]
-    fn with_notification_sounds_off_a_call_shows_without_ringing() {
+    fn a_call_rings_with_message_sounds_off_but_not_in_a_quiet_chat() {
         let directory = tempfile::tempdir().unwrap();
         let (mut app, _) = app(directory.path());
+        // The fork's default: messages make no sound. A call still rings.
         app.settings.message_sound = NotificationSound::None;
         app.handle_call_update(update(1, CallPhase::Incoming));
-        assert_eq!(app.notifications.shown.len(), 1, "still announced");
-        assert_eq!(app.call_tone(), None);
+        assert_eq!(app.notifications.shown.len(), 1, "announced");
+        assert_eq!(app.call_tone(), Some(Tone::Ringtone));
+
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _) = self::app(directory.path());
+        app.chats[0].archived = true;
+        app.handle_call_update(update(1, CallPhase::Incoming));
+        assert_eq!(app.call_tone(), None, "an archived chat does not ring");
+
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _) = self::app(directory.path());
+        app.account_mut().settings.silenced = true;
+        app.handle_call_update(update(1, CallPhase::Incoming));
+        assert_eq!(app.call_tone(), None, "a silenced account does not ring");
 
         let directory = tempfile::tempdir().unwrap();
         let (mut app, _) = self::app(directory.path());
