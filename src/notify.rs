@@ -276,7 +276,7 @@ impl Notifications {
             None => call_key(&target.chat),
         };
         let cancelled = self.register(&target.account, &key);
-                // A limited chat's wait ends again if the desktop does not show this.
+        // A limited chat's wait ends again if the desktop does not show this.
         let failed: Box<dyn FnOnce() + Send> = if limited {
             self.undo_throttle(&target.account, &target.chat)
         } else {

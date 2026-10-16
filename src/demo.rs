@@ -3463,8 +3463,18 @@ pub fn call_sample(app: &mut App, incoming: bool, video: bool) {
     });
     app.call_account = Some(app.account().id.clone());
     if video && !incoming {
-        app.call_remote_frame = Some(std::sync::Arc::new(stock_frame([18, 32, 64], [4, 8, 16], true, 720)));
-        app.call_local_frame = Some(std::sync::Arc::new(stock_frame([240, 140, 60], [40, 30, 80], false, 320)));
+        app.call_remote_frame = Some(std::sync::Arc::new(stock_frame(
+            [18, 32, 64],
+            [4, 8, 16],
+            true,
+            720,
+        )));
+        app.call_local_frame = Some(std::sync::Arc::new(stock_frame(
+            [240, 140, 60],
+            [40, 30, 80],
+            false,
+            320,
+        )));
     }
 }
 
@@ -3473,7 +3483,11 @@ pub fn call_sample(app: &mut App, incoming: bool, video: bool) {
 /// fork has no stock photos, so the frame is drawn from two colors.
 fn stock_frame(top: [u8; 3], bottom: [u8; 3], portrait: bool, height: u32) -> egui::ColorImage {
     let height = height as usize;
-    let width = if portrait { height * 3 / 4 } else { height * 3 / 2 };
+    let width = if portrait {
+        height * 3 / 4
+    } else {
+        height * 3 / 2
+    };
     let mut pixels = Vec::with_capacity(width * height);
     for y in 0..height {
         let t = y as f32 / height.max(1) as f32;

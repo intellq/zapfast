@@ -4230,7 +4230,10 @@ fn call_menu(ui: &mut egui::Ui, view: &View<'_>, group: bool, actions: &mut Vec<
 /// Starts a reply when the response was double-clicked, as the menu's "Reply".
 fn reply_on_double_click(response: &egui::Response, message: &Message, actions: &mut Vec<Action>) {
     if response.double_clicked()
-        && !matches!(message.content, Content::Revoked { .. } | Content::Call { .. })
+        && !matches!(
+            message.content,
+            Content::Revoked { .. } | Content::Call { .. }
+        )
     {
         actions.push(Action::Reply(message.id.clone()));
     }

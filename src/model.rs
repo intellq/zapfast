@@ -2691,7 +2691,9 @@ mod tests {
             }
         );
         assert_eq!(
-            read(r#"{"kind":"call","outgoing":false,"status":"silenced_dnd","video":true,"group":4}"#),
+            read(
+                r#"{"kind":"call","outgoing":false,"status":"silenced_dnd","video":true,"group":4}"#
+            ),
             Content::Call {
                 video: true,
                 status: CallStatus::Missed,
