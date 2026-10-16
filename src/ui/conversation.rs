@@ -294,11 +294,17 @@ fn header(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> Rect {
                 }
                 let picture = app.avatar(&chat.id);
                 let (subtitle, color) = subtitle(app, chat);
-                // The call buttons reflect the backend's own state: this chat's call is the one
-                // the worker owns, and nothing about it is inferred here.
-                let call_here = app.call.as_ref().is_some_and(|call| call.chat == chat.id);
-                // Call, More and Search, and Back in a narrow window.
-                let right_controls = if narrow { 144.0 } else { 108.0 };
+                let call_here = app.call_live_here(&chat.id);
+                // More and Search, and Back in a narrow window, and the call
+                // buttons in a one-to-one chat.
+                let call_controls = if chat.kind == crate::model::ChatKind::Direct
+                    && app.me.as_deref() != Some(chat.id.as_str())
+                {
+                    36.0
+                } else {
+                    0.0
+                };
+                let right_controls = if narrow { 108.0 } else { 72.0 } + call_controls;
                 // Treat the avatar, name, and subtitle as one info button.
                 let block = ui
                     .scope(|ui| {
@@ -503,25 +509,15 @@ fn header(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> Rect {
                                 app.actions.push(Action::CloseChat);
                             }
                         });
-                    // A call is one to one, and it needs the platform's media backend: a group, a
-                    // channel or a broadcast list has no phone button here, and neither has any
-                    // chat on a platform whose backend cannot open a microphone, where a call
-                    // would fail on its first frame. The worker refuses those JIDs whatever this
-                    // header offers, so nothing can be started behind the interface's back either.
-                    // A live call still offers its hang-up button, which can only exist where the
-                    // backend does.
-                    let calls_here = crate::calls::capabilities();
+                    // Calls are one to one: a group, a channel, a broadcast
+                    // list and the chat with ourselves have no call button.
+                    // While this chat has the call, the button ends it.
                     // A blocked contact cannot be called, as on the phone.
-                    if chat.kind == crate::model::ChatKind::Direct
-                        && ((calls_here.voice && !chat.blocked) || call_here)
-                    {
-                        // While this chat is the one on a call, the phone button ends it;
-                        // otherwise it starts a voice call. A call in another chat is refused by
-                        // the worker rather than hidden here.
+                    if call_controls > 0.0 && (!chat.blocked || call_here) {
                         let (call_tooltip, call_icon, call_fill, call) = if call_here {
                             (
                                 crate::i18n::gettext(app.locale, "Hang up").into_owned(),
-                                Icon::Phone,
+                                Icon::PhoneOff,
                                 palette.danger,
                                 Action::HangupCall,
                             )

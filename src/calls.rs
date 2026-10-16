@@ -1,9 +1,10 @@
 //! 1:1 WhatsApp calling: signaling, media, audio devices, and state.
 //!
-//! Audio goes through rodio, the same layer the rest of the app plays and records with, so a call
-//! opens the platform's own audio API on every platform it ships for rather than shelling out to
-//! `pw-record` and `pw-play`. The engine's 16 kHz mono frames meet whatever rate and channel count a
-//! device wants inside [`crate::call_audio`], and each direction sits behind a *stable* channel, so
+//! The protocol, the encryption and the media engine are whatsapp-rust's (`Client::voip()`); this
+//! module keeps the state the interface draws. Audio goes through rodio, the layer the rest of the
+//! app plays and records with, so a call opens the platform's own audio API (PipeWire or ALSA,
+//! CoreAudio, WASAPI). The engine's 16 kHz mono frames meet whatever rate and channel count a device
+//! wants inside [`crate::call_audio`], and each direction sits behind a *stable* channel, so
 //! changing the input or output device replaces only the stream behind it without the engine ever
 //! seeing a port close.
 
@@ -154,13 +155,21 @@ pub struct CallUpdate {
     pub speaker: Option<String>,
 }
 
-/// A microphone or speaker PipeWire knows about.
+/// A microphone or speaker the platform reports.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AudioDevice {
-    /// The PipeWire `node.name`, used verbatim as `--target`.
+    /// The name the platform reports and accepts back when a stream is opened.
     pub id: String,
-    /// The `node.description`, which is what a person recognises.
+    /// What the picker shows.
     pub label: String,
+}
+
+/// The devices a call opens with: the microphone and speaker last picked, which the settings keep
+/// from one call to the next. `None` is the system default.
+#[derive(Clone, Debug, Default)]
+pub struct CallDevices {
+    pub microphone: Option<String>,
+    pub speaker: Option<String>,
 }
 
 /// The devices the call screen offers.
@@ -175,13 +184,6 @@ pub struct DeviceList {
 pub enum DeviceKind {
     Microphone,
     Speaker,
-}
-
-/// The devices a call should open with, as the settings hold them.
-#[derive(Clone, Debug, Default)]
-pub struct CallDevices {
-    pub microphone: Option<String>,
-    pub speaker: Option<String>,
 }
 
 /// What a set of selections resolved to against the machine's own list.
@@ -267,53 +269,17 @@ pub fn is_offer(action: &CallAction) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Platform capabilities
-// ---------------------------------------------------------------------------
-
-/// What calling can actually do on the platform this build runs on.
-///
-/// Voice goes through rodio, which opens the platform's own audio API wherever the app builds, so
-/// voice is offered everywhere. The interface asks this, and a platform without a backend for a
-/// feature does not offer it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CallCapabilities {
-    /// One-to-one voice calls: a microphone and a speaker.
-    pub voice: bool,
-}
-
-/// What the media backend behind [`CallPhase`] can do on this platform.
-pub fn capabilities() -> CallCapabilities {
-    CallCapabilities {
-        // rodio opens PipeWire, CoreAudio or WASAPI, so a call can carry voice wherever the app
-        // builds. Whether this machine has a microphone at all is asked when a call is placed,
-        // because that is a fact about the machine rather than about the platform.
-        voice: true,
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Device discovery
 // ---------------------------------------------------------------------------
 
 /// Lists microphones and speakers for the call screen.
 ///
 /// They come from rodio, the same layer a call opens them through, so a picker offers what a call
-/// can actually take and the names it reports are what the saved setting holds. On a platform whose
-/// call backend is not built, the lists are empty rather than a list nothing can use, and the
-/// pickers are never reached.
+/// can actually take, on every platform: PipeWire or ALSA, CoreAudio, WASAPI.
 pub fn devices() -> DeviceList {
-    let capable = capabilities();
     DeviceList {
-        microphones: if capable.voice {
-            audio_devices(crate::call_audio::microphones())
-        } else {
-            Vec::new()
-        },
-        speakers: if capable.voice {
-            audio_devices(crate::call_audio::speakers())
-        } else {
-            Vec::new()
-        },
+        microphones: audio_devices(crate::call_audio::microphones()),
+        speakers: audio_devices(crate::call_audio::speakers()),
     }
 }
 
@@ -332,15 +298,37 @@ fn audio_devices(found: Vec<(String, String)>) -> Vec<AudioDevice> {
 /// The engine's audio clock, and the microphone and the speaker the engine talks to.
 ///
 /// Both live in [`crate::call_audio`], which opens them through rodio the way the rest of the app
-/// already plays and records: the platform's own audio API on every platform it ships for, with no
-/// `pw-record` or `pw-play` needed for a call to exist. A device change replaces only the reader or
-/// the writer behind the engine's channel, so nothing about the call's codec or stream state is
-/// rebuilt for it.
+/// already plays and records. A device change replaces only the reader or the writer behind the
+/// engine's channel, so nothing about the call's codec or stream state is rebuilt for it.
 pub use crate::call_audio::{AudioInput, AudioOutput, RATE};
 
 /// What a call still cannot open on this machine, if anything.
-fn missing_audio_device() -> Option<&'static str> {
-    crate::call_audio::unavailable()
+///
+/// Read against the devices this call would really open rather than the system defaults alone: a
+/// machine whose default microphone is busy still takes a call aimed at one the user picked, so
+/// the check follows the same selections the streams will.
+fn missing_audio_device(microphone: Option<&str>, speaker: Option<&str>) -> Option<&'static str> {
+    crate::call_audio::unavailable(microphone, speaker)
+}
+
+/// The same check, run where it cannot stall the caller.
+///
+/// `missing_audio_device` opens every device to name it, which is a blocking enumeration. Both
+/// `Call::place` and `Call::answer` are awaited on the worker's own async loop, and the worker
+/// already moves its other device discovery to `spawn_blocking` for exactly this reason: a slow or
+/// wedged audio stack would otherwise hold up message handling and signaling while a call starts.
+/// The microphone and speaker names are cloned in, so nothing borrowed crosses the thread.
+async fn missing_audio_device_off_thread(
+    microphone: Option<String>,
+    speaker: Option<String>,
+) -> Option<&'static str> {
+    tokio::task::spawn_blocking(move || {
+        missing_audio_device(microphone.as_deref(), speaker.as_deref())
+    })
+    .await
+    // A panicked check is not a machine without devices: refusing the call over it would be a lie,
+    // so it is treated as "nothing missing" and the ordinary open path reports what it finds.
+    .unwrap_or(None)
 }
 
 // ---------------------------------------------------------------------------
@@ -383,6 +371,13 @@ pub struct Call {
 }
 
 impl Call {
+    /// Opens a ringing call on the devices last picked, so answering it starts there.
+    pub fn with_devices(mut self, devices: CallDevices) -> Self {
+        self.microphone = devices.microphone;
+        self.speaker_device = devices.speaker;
+        self
+    }
+
     /// Places an outgoing 1:1 call.
     pub async fn place(
         client: &Arc<Client>,
@@ -393,10 +388,9 @@ impl Call {
         let peer: Jid = chat
             .parse()
             .map_err(|error| anyhow!("not a WhatsApp JID: {error}"))?;
-        if !capabilities().voice {
-            return Err(anyhow!("calling is not available on this platform yet"));
-        }
-        if let Some(missing) = missing_audio_device() {
+        if let Some(missing) =
+            missing_audio_device_off_thread(microphone.clone(), speaker.clone()).await
+        {
             return Err(anyhow!("no {missing} is available; a call needs one"));
         }
         let (mic, mic_rx) = AudioInput::spawn(microphone.clone());
@@ -432,11 +426,9 @@ impl Call {
         })
     }
 
-    /// Records an incoming offer so the UI can ask the user. No media exists until they answer.
-    ///
-    /// The remembered devices are pre-selected on the prompt, so answering opens the same
-    /// microphone and speaker the last call used rather than the system defaults.
-    pub fn ringing(chat: String, incoming: Box<IncomingCall>, devices: CallDevices) -> Self {
+    /// Records an incoming offer so the UI can ask the user. No media exists until they answer,
+    /// and answering opens the system's default devices unless others are picked meanwhile.
+    pub fn ringing(chat: String, incoming: Box<IncomingCall>) -> Self {
         let call_id = incoming.action.call_id().to_owned();
         log::info!("[CALL] incoming offer call_id={call_id}");
         Self {
@@ -453,8 +445,32 @@ impl Call {
             media_ready: false,
             mic: None,
             speaker: None,
-            microphone: devices.microphone,
-            speaker_device: devices.speaker,
+            microphone: None,
+            speaker_device: None,
+            lost_devices: Vec::new(),
+        }
+    }
+
+    /// A call for a test: a snapshot with no signaling and no engine behind it, so a test can put
+    /// one on the worker and check what privacy recovery does with its update.
+    #[cfg(test)]
+    pub(crate) fn test_snapshot(chat: &str) -> Self {
+        Self {
+            generation: next_generation(),
+            call_id: "test-call".to_owned(),
+            chat: chat.to_owned(),
+            direction: CallDirection::Incoming,
+            phase: CallPhase::Incoming,
+            started: None,
+            outcome: None,
+            peer_audio: None,
+            incoming: None,
+            handle: None,
+            media_ready: false,
+            mic: None,
+            speaker: None,
+            microphone: None,
+            speaker_device: None,
             lost_devices: Vec::new(),
         }
     }
@@ -573,18 +589,19 @@ impl Call {
             return Err(anyhow!("nothing is ringing"));
         };
         // Answering opens the same streams a call places, so the same checks apply: an answered call
-        // with no media backend would be worse than a refused one, because the other side's call is
-        // already up.
-        if !capabilities().voice {
-            return Err(anyhow!("calling is not available on this platform yet"));
-        }
-        if let Some(missing) = missing_audio_device() {
+        // without a microphone would be worse than a refused one.
+        if let Some(missing) =
+            missing_audio_device_off_thread(microphone.clone(), speaker.clone()).await
+        {
             return Err(anyhow!("no {missing} is available; a call needs one"));
         }
         let (mic, mic_rx) = AudioInput::spawn(microphone.clone());
         let (output, output_tx) = AudioOutput::spawn(speaker.clone());
 
         let voip = client.voip();
+        // From here the library owns the answer: if it fails, its own guard ends the call with the
+        // peer, so there is no offer left for [`Call::abandon`] to refuse.
+        self.incoming = None;
         let accepted = voip
             .accept(&incoming)
             .audio(mic_rx, output_tx)
@@ -599,7 +616,6 @@ impl Call {
         self.handle = Some(handle);
         self.mic = Some(mic);
         self.speaker = Some(output);
-        self.incoming = None;
         self.microphone = microphone;
         self.speaker_device = speaker;
         // The user picked the phone up. The media plane is still coming up, so this is `Accepted`
@@ -609,6 +625,20 @@ impl Call {
         log::info!("[CALL] accepted locally call_id={}", self.call_id);
         self.became_active();
         Ok(())
+    }
+
+    /// Ends a call this side could not answer: the offer is refused when it is still ours to
+    /// refuse, so the caller is not left ringing, and the call reads as one that never came up.
+    pub async fn abandon(&mut self, client: &Arc<Client>) -> CallUpdate {
+        if let Some(incoming) = self.incoming.take()
+            && let Err(error) = client.voip().reject(&incoming).await
+        {
+            log::warn!("[CALL] the offer could not be refused: {error}");
+        }
+        self.cleanup();
+        self.phase = CallPhase::Failed;
+        self.outcome = Some(CallOutcome::Failed);
+        self.update()
     }
 
     /// Declines a ringing call with the real `<reject>`.
@@ -907,11 +937,12 @@ impl Call {
         self.ended_by(outcome)
     }
 
-    /// The call was resolved on another of the account's devices, or the caller gave up.
+    /// The call was resolved on another of the account's devices (`elsewhere` says how), or the
+    /// caller gave up (`None`).
     ///
     /// A call we were ringing for that was answered or declined elsewhere is not the same thing as
-    /// an unanswered one, so the two cases get their own words while both release the media.
-    pub fn resolved_elsewhere(&mut self) -> Option<CallUpdate> {
+    /// an unanswered one, so the cases get their own words while all release the media.
+    pub fn resolved_elsewhere(&mut self, elsewhere: Option<CallOutcome>) -> Option<CallUpdate> {
         if !self.phase.is_live() {
             return None;
         }
@@ -932,6 +963,8 @@ impl Call {
         };
         self.outcome = Some(if live {
             CallOutcome::AnsweredElsewhere
+        } else if let Some(outcome) = elsewhere {
+            outcome
         } else if ringing {
             CallOutcome::Missed
         } else {
@@ -960,6 +993,13 @@ impl Call {
     /// Ends the call because its media went away, telling a call that was up from one that never
     /// came up: the phase says which, and the outcome names the cause either way.
     fn ended_by(&mut self, outcome: CallOutcome) -> Option<CallUpdate> {
+        // A media event that arrives after the call is already over must not reopen it or rewrite
+        // the outcome it ended with. The relay's `Closed` can land after a hang-up has ended the
+        // call, and recording that as `ConnectionLost` would replace the real reason with a false
+        // one and publish a second end for a call the screen has already dropped.
+        if matches!(self.phase, CallPhase::Ended | CallPhase::Failed) {
+            return None;
+        }
         self.phase = if self.started.is_some() {
             CallPhase::Ended
         } else {
@@ -1107,25 +1147,19 @@ mod tests {
         }
     }
 
-    /// The pickers and the backend agree: a platform that can carry voice lists the devices rodio
-    /// reports, and a platform that cannot lists none rather than a list nothing can open.
+    /// The pickers list what rodio reports, each device named and labelled.
     #[test]
-    fn the_audio_pickers_follow_the_voice_capability() {
+    fn the_audio_pickers_name_every_device() {
         let listed = super::devices();
-        if super::capabilities().voice {
-            for device in listed.microphones.iter().chain(&listed.speakers) {
-                assert!(
-                    !device.id.is_empty(),
-                    "a device is named by what rodio reports"
-                );
-                assert!(
-                    !device.label.is_empty(),
-                    "a device is labelled for the picker"
-                );
-            }
-        } else {
-            assert!(listed.microphones.is_empty());
-            assert!(listed.speakers.is_empty());
+        for device in listed.microphones.iter().chain(&listed.speakers) {
+            assert!(
+                !device.id.is_empty(),
+                "a device is named by what rodio reports"
+            );
+            assert!(
+                !device.label.is_empty(),
+                "a device is labelled for the picker"
+            );
         }
     }
 
@@ -1708,24 +1742,39 @@ mod tests {
         // and it was not a call nobody answered either.
         let mut call = dialing();
         let update = call
-            .resolved_elsewhere()
+            .resolved_elsewhere(None)
             .expect("the other device took the call");
         assert_eq!(update.phase, CallPhase::Failed);
         assert_eq!(update.outcome, Some(CallOutcome::NoAnswer));
 
         // A ringing incoming call resolved elsewhere: this device never picked it up.
-        let mut incoming = dialing();
-        incoming.direction = CallDirection::Incoming;
-        incoming.phase = CallPhase::Incoming;
-        let update = incoming.resolved_elsewhere().expect("resolved elsewhere");
+        let ringing = || {
+            let mut incoming = dialing();
+            incoming.direction = CallDirection::Incoming;
+            incoming.phase = CallPhase::Incoming;
+            incoming
+        };
+        let update = ringing()
+            .resolved_elsewhere(None)
+            .expect("resolved elsewhere");
         assert_eq!(update.phase, CallPhase::Failed);
         assert_eq!(update.outcome, Some(CallOutcome::Missed));
+
+        // The phone took it, or turned it down, while it rang here: said as such.
+        let update = ringing()
+            .resolved_elsewhere(Some(CallOutcome::AnsweredElsewhere))
+            .expect("answered on the phone");
+        assert_eq!(update.outcome, Some(CallOutcome::AnsweredElsewhere));
+        let update = ringing()
+            .resolved_elsewhere(Some(CallOutcome::DeclinedElsewhere))
+            .expect("declined on the phone");
+        assert_eq!(update.outcome, Some(CallOutcome::DeclinedElsewhere));
 
         // A call that was up and then resolved elsewhere was answered, just not here.
         let mut live = dialing();
         live.media(&CallEvent::RelayAllocated);
         live.signaling(&accept()).expect("the peer answered");
-        let update = live.resolved_elsewhere().expect("resolved elsewhere");
+        let update = live.resolved_elsewhere(None).expect("resolved elsewhere");
         assert_eq!(update.phase, CallPhase::Ended);
         // The other device answered, so this is neither an answered call here nor one nobody
         // answered: it is its own kind of ending, and the outcome is what says so rather than the
@@ -1744,7 +1793,7 @@ mod tests {
         let mut call = dialing();
         call.signaling(&accept()).expect("the peer answered");
         assert_eq!(call.phase(), CallPhase::Connecting);
-        let update = call.resolved_elsewhere().expect("resolved elsewhere");
+        let update = call.resolved_elsewhere(None).expect("resolved elsewhere");
         assert_eq!(update.phase, CallPhase::Failed);
         assert_eq!(update.outcome, Some(CallOutcome::NoAnswer));
         assert!(call.started.is_none(), "never answered here");
@@ -1809,25 +1858,10 @@ mod tests {
 
 /// The device discovery, on the machine it is running on.
 ///
-/// Ignored by default: it reads this computer's real PipeWire graph, so its result depends on the
-/// hardware. Run it with `cargo test --lib -- --ignored --nocapture calls::hardware_tests` on a
-/// machine with PipeWire to see what a call would be offered, which is how a report about a device
-/// that is missing from the pickers gets answered.
-#[cfg(test)]
-mod platform_tests {
-    use super::*;
-
-    /// The compile-time platform is what the interface is told.
-    #[test]
-    fn calling_is_offered_only_where_the_media_backend_runs() {
-        let capable = capabilities();
-        assert!(
-            capable.voice,
-            "rodio carries voice on every platform the app builds for"
-        );
-    }
-}
-
+/// Ignored by default: it reads this computer's real audio devices, so its result depends on the
+/// hardware. Run it with `cargo test --lib -- --ignored --nocapture calls::hardware_tests` to see
+/// what a call would be offered, which is how a report about a device that is missing from the
+/// pickers gets answered.
 #[cfg(test)]
 mod hardware_tests {
     #[test]
@@ -1837,7 +1871,10 @@ mod hardware_tests {
         eprintln!("microphones: {:#?}", list.microphones);
         eprintln!("speakers: {:#?}", list.speakers);
         for device in list.microphones.iter().chain(&list.speakers) {
-            assert!(!device.id.is_empty(), "a device is named by its node name");
+            assert!(
+                !device.id.is_empty(),
+                "a device is named by what the platform reports"
+            );
             assert!(
                 !device.id.ends_with(".monitor"),
                 "a monitor of a sink is not an input anybody can speak into"

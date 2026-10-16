@@ -46,3 +46,4 @@ src/transcribe.rs
 src/ui/lock.rs
 src/account.rs
 src/ui/accounts.rs
+src/app/calls.rs

@@ -724,6 +724,16 @@ pub fn is_masked_number(name: &str) -> bool {
         })
 }
 
+/// A call's length as the phone shows it: `m:ss`, or `h:mm:ss` past an hour.
+pub fn call_duration(seconds: u64) -> String {
+    let (hours, minutes, seconds) = (seconds / 3600, seconds % 3600 / 60, seconds % 60);
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
+    }
+}
+
 /// Formats a phone number with a plus sign and country-appropriate grouping.
 pub fn phone(digits: &str) -> String {
     let digits: String = digits.chars().filter(char::is_ascii_digit).collect();
@@ -882,6 +892,13 @@ pub fn tray_template_rgba(size: usize) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_call_length_reads_the_way_the_phone_shows_it() {
+        assert_eq!(super::call_duration(0), "0:00");
+        assert_eq!(super::call_duration(65), "1:05");
+        assert_eq!(super::call_duration(3600 + 2 * 60 + 3), "1:02:03");
+    }
+
     #[test]
     fn the_contact_editor_keeps_names_as_they_were_saved() {
         let names = |name, first| super::editor_names(name, first);

@@ -33,7 +33,6 @@ pub fn can_call_back(content: &Content, chat: &Chat) -> bool {
         }
     ) && chat.kind == ChatKind::Direct
         && !chat.blocked
-        && crate::calls::capabilities().voice
 }
 
 /// The menu of a call row: call back, and delete the row here.

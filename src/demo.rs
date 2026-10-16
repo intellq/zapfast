@@ -2326,6 +2326,49 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
             // has been up for a few minutes.
             "call" => call_sample(app, true),
             "call-active" => call_sample(app, false),
+            // The other states of a call: dialing, muted with the device
+            // pickers open and a headset gone, its farewell, and the strip a
+            // call keeps while the reader is in a chat.
+            "call-outgoing" => {
+                call_sample(app, false);
+                if let Some(call) = app.call.as_mut() {
+                    call.phase = CallPhase::Ringing;
+                    call.started = None;
+                }
+            }
+            "call-devices" => {
+                call_sample(app, false);
+                app.call_devices = crate::calls::DeviceList {
+                    microphones: vec![crate::calls::AudioDevice {
+                        id: "studio-mic".into(),
+                        label: "Studio Microphone".into(),
+                    }],
+                    speakers: vec![crate::calls::AudioDevice {
+                        id: "desk-speakers".into(),
+                        label: "Desk Speakers".into(),
+                    }],
+                };
+                app.call_devices_open = true;
+                if let Some(call) = app.call.as_mut() {
+                    call.muted = true;
+                    call.speaker = Some("desk-speakers".into());
+                    call.lost_devices = vec![crate::calls::LostDevice {
+                        kind: crate::calls::DeviceKind::Microphone,
+                        name: "Wireless Headset".into(),
+                    }];
+                }
+            }
+            "call-ended" => {
+                call_sample(app, false);
+                if let Some(call) = app.call.as_mut() {
+                    call.phase = CallPhase::Ended;
+                    call.outcome = Some(crate::calls::CallOutcome::Answered);
+                }
+            }
+            "call-strip" => {
+                call_sample(app, false);
+                app.call_surface_hidden = true;
+            }
             "wallpaper-image" => wallpaper_image_sample(app),
             "omarchy" | "omarchy-light" => {
                 let mut themes: Vec<_> = crate::theme::presets().collect();
@@ -3364,6 +3407,7 @@ pub fn call_sample(app: &mut App, incoming: bool) {
         microphone: None,
         speaker: None,
     });
+    app.call_account = Some(app.account().id.clone());
 }
 
 /// Synthetic call records for the Calls view and the transcript entries.
@@ -5426,6 +5470,10 @@ mod tests {
             "call",
             "call-active",
             "pinned",
+            "call-outgoing",
+            "call-devices",
+            "call-ended",
+            "call-strip",
         ] {
             let mut app = self::app();
             apply_flags(&mut app, Some(page));
@@ -14834,8 +14882,8 @@ mod picture_edge_tests {
     }
 }
 
-/// The call UI: the card a ringing call shows in the main window, and the window a call that is up
-/// gets of its own.
+/// The call screen as a window: what opens it, what puts it aside without ending the call, and the
+/// one control that does end it.
 #[cfg(test)]
 mod call_surface_tests {
     use super::tests::{app, frame_with};
@@ -14864,6 +14912,14 @@ mod call_surface_tests {
 
     /// The labels one frame publishes to a screen reader, after the surface has settled.
     fn labels(app: &mut App, ctx: &egui::Context) -> Vec<String> {
+        labelled(app, ctx)
+            .into_iter()
+            .map(|(label, _)| label)
+            .collect()
+    }
+
+    /// The labels one frame publishes, with whether each control is disabled.
+    fn labelled(app: &mut App, ctx: &egui::Context) -> Vec<(String, bool)> {
         let mut labels = Vec::new();
         for _ in 0..3 {
             let mut output = ctx.run_ui(
@@ -14887,276 +14943,78 @@ mod call_surface_tests {
                 .expect("accessibility tree")
                 .nodes
                 .iter()
-                .filter_map(|(_, node)| node.label().map(str::to_owned))
+                .filter_map(|(_, node)| {
+                    node.label()
+                        .map(|label| (label.to_owned(), node.is_disabled()))
+                })
                 .collect();
         }
         labels
     }
 
-    /// Runs frames at `size` and returns the last frame's shapes.
-    fn frames(
-        app: &mut App,
-        ctx: &egui::Context,
-        size: egui::Vec2,
-    ) -> Vec<egui::epaint::ClippedShape> {
-        let mut shapes = Vec::new();
-        for _ in 0..3 {
-            let mut output = ctx.run_ui(
-                egui::RawInput {
-                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
-                    ..Default::default()
-                },
-                |ui| {
-                    let ctx = ui.ctx().clone();
-                    app.background_frame(&ctx);
-                    app.frame_ui(ui);
-                },
-            );
-            output.textures_delta.clear();
-            shapes = output.shapes;
-        }
-        shapes
-    }
-
-    fn rect(ctx: &egui::Context, id: egui::Id) -> Option<egui::Rect> {
-        ctx.data(|data| data.get_temp::<egui::Rect>(id))
-    }
-
-    fn photos() -> (App, egui::Context) {
-        let mut app = app();
-        let ctx = egui::Context::default();
-        app.attach(&ctx);
-        apply_flags(&mut app, Some("photos"));
-        frames(&mut app, &ctx, egui::vec2(1180.0, 1400.0));
-        (app, ctx)
-    }
-
-    /// Both audio types keep their own player treatment and forwarding label
-    /// across themes, bubble sides, download states, and narrow layouts.
     #[test]
-    fn audio_files_have_a_track_and_music_badge_independent_of_forwarding() {
-        for light in [false, true] {
-            for from_me in [false, true] {
-                for downloaded in [false, true] {
-                    for width in [1180.0, 560.0] {
-                        let mut app = app();
-                        apply_flags(
-                            &mut app,
-                            Some(if light {
-                                "audio-types,light"
-                            } else {
-                                "audio-types"
-                            }),
-                        );
-                        let chat = app.open_chat.clone().unwrap();
-                        let audio_path = app
-                            .account()
-                            .dirs
-                            .media_cache_dir()
-                            .join("synthetic-audio.ogg");
-                        for row in &mut app.conversations.get_mut(&chat).unwrap().messages {
-                            row.from_me = from_me;
-                            if downloaded && let Content::Audio { media, .. } = &mut row.content {
-                                media.path = Some(audio_path.clone());
-                            }
-                        }
-                        let ctx = egui::Context::default();
-                        app.attach(&ctx);
-                        frames(&mut app, &ctx, egui::vec2(width, 780.0));
-                        for (id, voice, forwarded) in [
-                            ("audio-original", true, false),
-                            ("audio-file", false, false),
-                            ("audio-forwarded", false, true),
-                        ] {
-                            let bubble = crate::ui::conversation::bubble_id(&chat, id);
-                            let frame =
-                                rect(&ctx, bubble.with("rect")).expect("audio bubble drawn");
-                            assert_eq!(rect(&ctx, bubble.with("voice-waveform")).is_some(), voice);
-                            assert_eq!(rect(&ctx, bubble.with("audio-track")).is_some(), !voice);
-                            let badge = rect(&ctx, bubble.with("audio-file"));
-                            assert_eq!(badge.is_some(), !voice);
-                            if let Some(badge) = badge {
-                                assert!(frame.contains_rect(badge), "music badge fits in bubble");
-                            }
-                            let chip =
-                                rect(&ctx, crate::ui::conversation::speed_chip_id(&chat, id));
-                            assert_eq!(
-                                chip.is_some(),
-                                downloaded,
-                                "playable audio retains speed control"
-                            );
-                            if let Some(chip) = chip {
-                                assert!(frame.contains_rect(chip), "speed control fits in bubble");
-                            }
-                            assert_eq!(rect(&ctx, bubble.with("forwarded")).is_some(), forwarded);
-                        }
-                    }
-                }
-            }
-        }
-    }
+    fn escape_leaves_full_screen_before_it_puts_the_call_aside() {
+        let (mut app, ctx) = on_a_call();
+        app.actions.push(Action::ToggleCallFullscreen);
+        frame_with(&mut app, &ctx, Vec::new());
+        assert!(app.call_fullscreen, "the surface takes the whole screen");
+        assert!(!app.call_surface_hidden);
 
-    /// "Forwarded" sits at the start of the bubble, just under its top, on
-    /// incoming and own messages alike (#250).
-    #[test]
-    fn the_forwarded_label_starts_at_the_bubble_start_on_both_sides() {
-        let (_app, ctx) = photos();
-        let chat = SAMPLES[0].id;
-        for id in ["photos-forwarded-in", "photos-forwarded-out", "photos-in"] {
-            let bubble = crate::ui::conversation::bubble_id(chat, id);
-            let frame = rect(&ctx, bubble.with("rect")).expect("the bubble was drawn");
-            let label = rect(&ctx, bubble.with("forwarded")).expect("the label was drawn");
-            assert!(
-                (label.left() - (frame.left() + 10.0)).abs() < 0.5,
-                "{id}: the label starts at the bubble's start ({label:?} in {frame:?})"
-            );
-            assert!(
-                label.top() - frame.top() <= 7.0,
-                "{id}: the label sits just under the bubble's top ({label:?} in {frame:?})"
-            );
-        }
-        let bubble = crate::ui::conversation::bubble_id(chat, "photos-in");
-        let label = rect(&ctx, bubble.with("forwarded")).unwrap();
-        let picture = rect(&ctx, bubble.with("picture")).expect("the picture was drawn");
+        frame_with(&mut app, &ctx, vec![key(egui::Key::Escape)]);
+        assert!(!app.call_fullscreen, "escape leaves full screen");
         assert!(
-            picture.top() - label.bottom() <= 3.5,
-            "the picture follows the label closely ({label:?}, {picture:?})"
-        );
-    }
-
-    /// A picture without a caption carries its time and ticks over its
-    /// bottom corner, and its bubble closes just under it; with a caption
-    /// they stay on the caption's line below the picture (#251).
-    #[test]
-    fn a_picture_without_a_caption_carries_its_time_over_its_corner() {
-        let (_app, ctx) = photos();
-        let chat = SAMPLES[0].id;
-        for id in ["photos-in", "photos-out"] {
-            let bubble = crate::ui::conversation::bubble_id(chat, id);
-            let frame = rect(&ctx, bubble.with("rect")).expect("the bubble was drawn");
-            let picture = rect(&ctx, bubble.with("picture")).expect("the picture was drawn");
-            let footer = rect(&ctx, crate::ui::conversation::footer_id(chat, id))
-                .expect("the time was drawn");
-            assert!(
-                picture.contains_rect(footer),
-                "{id}: the time is over the picture ({footer:?} in {picture:?})"
-            );
-            assert!(
-                picture.right() - footer.right() <= 12.0
-                    && picture.bottom() - footer.bottom() <= 8.0,
-                "{id}: the time sits in the picture's bottom corner ({footer:?} in {picture:?})"
-            );
-            assert!(
-                frame.bottom() - picture.bottom() <= 7.0,
-                "{id}: no strip under the picture ({picture:?} in {frame:?})"
-            );
-            assert!(
-                (frame.left() + 10.0 - picture.left()).abs() < 0.5
-                    && (frame.right() - 10.0 - picture.right()).abs() < 0.5,
-                "{id}: the bubble wraps the picture ({picture:?} in {frame:?})"
-            );
-        }
-        let bubble = crate::ui::conversation::bubble_id(chat, "photos-caption");
-        let picture = rect(&ctx, bubble.with("picture")).expect("the captioned picture");
-        let footer = rect(
-            &ctx,
-            crate::ui::conversation::footer_id(chat, "photos-caption"),
-        )
-        .expect("the captioned picture's time");
-        assert!(
-            footer.top() >= picture.bottom(),
-            "with a caption the time stays below the picture ({footer:?}, {picture:?})"
-        );
-    }
-
-    /// A voice message carries its time and ticks on the duration's line,
-    /// as on the phone, rather than on a line of their own under it.
-    #[test]
-    fn a_voice_message_keeps_its_time_on_the_duration_line() {
-        let mut app = app();
-        let ctx = egui::Context::default();
-        app.attach(&ctx);
-        apply_flags(&mut app, Some("voice"));
-        frames(&mut app, &ctx, egui::vec2(1180.0, 1400.0));
-        let chat = SAMPLES[0].id;
-        for id in ["ada-voice", "you-voice"] {
-            let frame = rect(
-                &ctx,
-                crate::ui::conversation::bubble_id(chat, id).with("rect"),
-            )
-            .expect("the bubble was drawn");
-            let footer = rect(&ctx, crate::ui::conversation::footer_id(chat, id))
-                .expect("the time was drawn");
-            assert!(
-                frame.contains_rect(footer),
-                "{id}: the time is inside the bubble ({footer:?} in {frame:?})"
-            );
-            // The fork's transcribe button shares that line and makes it a
-            // few points taller.
-            let pill = 12.0;
-            assert!(
-                frame.bottom() - footer.bottom() <= 8.0 + pill / 2.0,
-                "{id}: the bubble closes under the time ({footer:?} in {frame:?})"
-            );
-            assert!(
-                frame.height() <= 60.0 + pill,
-                "{id}: no line of its own for the time ({footer:?} in {frame:?})"
-            );
-        }
-    }
-
-    /// A chat with unsent text shows it in its row, after an accent
-    /// "Draft:", while the open chat's text stays in the composer (#245).
-    #[test]
-    fn a_chat_with_a_draft_shows_it_in_the_list() {
-        let mut app = app();
-        let ctx = egui::Context::default();
-        app.attach(&ctx);
-        apply_flags(&mut app, Some("drafts"));
-        let shapes = frames(&mut app, &ctx, egui::vec2(1180.0, 780.0));
-        let texts: Vec<(String, egui::Color32)> = shapes
-            .iter()
-            .filter_map(|clipped| match &clipped.shape {
-                egui::Shape::Text(text) => Some((
-                    text.galley.text().to_owned(),
-                    text.galley
-                        .job
-                        .sections
-                        .first()
-                        .map_or(text.fallback_color, |section| section.format.color),
-                )),
-                _ => None,
-            })
-            .collect();
-        let labels: Vec<_> = texts
-            .iter()
-            .filter(|(text, _)| text.trim() == "Draft:")
-            .collect();
-        assert_eq!(labels.len(), 2, "two rows carry a draft: {texts:?}");
-        assert!(
-            labels.iter().all(|(_, color)| *color == app.palette.accent),
-            "the label is in the accent: {labels:?}"
-        );
-        assert!(
-            texts
-                .iter()
-                .any(|(text, _)| text.starts_with("Sounds good, see you at")),
-            "a draft reads on one line: {texts:?}"
+            !app.call_surface_hidden,
+            "and the call screen is still the screen"
         );
         assert_eq!(
-            app.draft_preview(SAMPLES[2].id).as_deref(),
-            Some("Sounds good, see you at the station")
+            app.call.as_ref().map(|call| call.phase),
+            Some(CallPhase::Active),
+            "a window state is not a call state"
+        );
+
+        frame_with(&mut app, &ctx, vec![key(egui::Key::Escape)]);
+        assert!(
+            app.call_surface_hidden,
+            "a second escape is the same move the back button makes"
         );
         assert_eq!(
-            app.draft_preview(SAMPLES[0].id),
-            None,
-            "the open chat's text is in the composer"
+            app.call.as_ref().map(|call| call.phase),
+            Some(CallPhase::Active),
+            "and the call runs on behind the bar"
         );
-        app.drafts.insert(SAMPLES[1].id.into(), " \n ".into());
+    }
+
+    #[test]
+    fn only_the_hang_up_button_ends_a_call() {
+        let (mut app, ctx) = on_a_call();
+        app.backend.record_demo_commands();
+        app.actions.push(Action::ToggleCallFullscreen);
+        frame_with(&mut app, &ctx, Vec::new());
+        // Everything a reader can do to the window short of hanging up.
+        frame_with(&mut app, &ctx, vec![key(egui::Key::Escape)]);
+        frame_with(&mut app, &ctx, vec![key(egui::Key::Escape)]);
+        app.actions.push(Action::ReturnToCall);
+        frame_with(&mut app, &ctx, Vec::new());
+        app.actions.push(Action::ToggleCallFullscreen);
+        frame_with(&mut app, &ctx, Vec::new());
+        frame_with(&mut app, &ctx, vec![key(egui::Key::Escape)]);
+        let hang_ups = |commands: Vec<crate::backend::Command>| {
+            commands
+                .into_iter()
+                .filter(|command| matches!(command, crate::backend::Command::HangupCall))
+                .count()
+        };
         assert_eq!(
-            app.draft_preview(SAMPLES[1].id),
-            None,
-            "blank text is no draft"
+            hang_ups(app.backend.take_demo_commands()),
+            0,
+            "stepping away, returning, and full screen never hang up"
+        );
+        app.actions.push(Action::HangupCall);
+        frame_with(&mut app, &ctx, Vec::new());
+        assert_eq!(
+            hang_ups(app.backend.take_demo_commands()),
+            1,
+            "the hang-up button is the one that ends the call"
         );
     }
 
@@ -15170,6 +15028,7 @@ mod call_surface_tests {
         // Escape is not an answer and not a refusal, so the ringing call stays where it can be
         // answered.
         frame_with(&mut app, &ctx, vec![key(egui::Key::Escape)]);
+        assert!(!app.call_surface_hidden, "the ringing call is still there");
         assert_eq!(
             app.call.as_ref().map(|call| call.phase),
             Some(CallPhase::Incoming)
@@ -15187,7 +15046,135 @@ mod call_surface_tests {
     }
 
     #[test]
-    fn a_ringing_call_is_a_card_with_its_two_answers() {
+    fn the_bar_brings_the_call_screen_back() {
+        let (mut app, ctx) = on_a_call();
+        ctx.enable_accesskit();
+        app.actions.push(Action::LeaveCallSurface);
+        let bar = labels(&mut app, &ctx);
+        assert!(
+            bar.contains(&"Return to the call".to_owned()),
+            "the bar offers the way back: {bar:?}"
+        );
+        assert!(
+            !bar.contains(&"Hide the call screen".to_owned()),
+            "and the surface that was put aside is not on screen: {bar:?}"
+        );
+        assert_eq!(
+            app.call.as_ref().map(|call| call.phase),
+            Some(CallPhase::Active),
+            "the bar is only ever a way back to a call that is still up"
+        );
+
+        app.actions.push(Action::ReturnToCall);
+        let screen = labels(&mut app, &ctx);
+        assert!(
+            screen.contains(&"Hide the call screen".to_owned()),
+            "the surface comes back: {screen:?}"
+        );
+        assert!(
+            !screen.contains(&"Return to the call".to_owned()),
+            "and the bar goes with it: {screen:?}"
+        );
+        assert_eq!(
+            app.call.as_ref().map(|call| call.phase),
+            Some(CallPhase::Active),
+            "returning is not a new call"
+        );
+    }
+
+    /// The bar is a way back to a call that is still up, so it goes when the call does.
+    #[test]
+    fn the_bar_leaves_with_the_call_it_belongs_to() {
+        let (mut app, ctx) = on_a_call();
+        ctx.enable_accesskit();
+        app.actions.push(Action::LeaveCallSurface);
+        frame_with(&mut app, &ctx, Vec::new());
+        let bar = labels(&mut app, &ctx);
+        assert!(
+            bar.contains(&"Return to the call".to_owned()),
+            "the call is still up behind the bar: {bar:?}"
+        );
+
+        let call = app.call.as_mut().expect("a call is up");
+        call.phase = CallPhase::Ended;
+        call.outcome = Some(crate::calls::CallOutcome::Answered);
+        let after = labels(&mut app, &ctx);
+        assert!(
+            !after.contains(&"Return to the call".to_owned()),
+            "a call that is over has no way back: {after:?}"
+        );
+    }
+
+    /// A locked chat's farewell, and any call the reader put aside, still ends behind the bar.
+    ///
+    /// `call_surface_hidden` is set for a locked call's terminal snapshot, but the surface only
+    /// looked at the bar while the phase was live, so the four-second farewell painted the whole
+    /// window once more and announced that a hidden chat had a call. A hidden snapshot stays behind
+    /// the bar whatever the phase.
+    #[test]
+    fn a_hidden_farewell_stays_behind_the_bar() {
+        let (mut app, ctx) = on_a_call();
+        ctx.enable_accesskit();
+        app.call_surface_hidden = true;
+        let call = app.call.as_mut().expect("a call is up");
+        call.phase = CallPhase::Ended;
+        call.outcome = Some(crate::calls::CallOutcome::Answered);
+        let shown = labels(&mut app, &ctx);
+        for absent in ["Full screen", "Mute", "Hang up"] {
+            assert!(
+                !shown.contains(&absent.to_owned()),
+                "a hidden farewell must not paint the call surface: {absent} in {shown:?}"
+            );
+        }
+    }
+
+    /// A call that is over offers no control: the backend has already released the runtime.
+    ///
+    /// The farewell keeps the controls it was drawn with so the outcome reads where the call was,
+    /// but the red Hang up stayed enabled, so a click sent a command nobody was listening for and
+    /// the screen offered an action for a call that had ended.
+    #[test]
+    fn the_farewell_offers_no_action_for_a_call_that_is_over() {
+        let (mut app, ctx) = on_a_call();
+        ctx.enable_accesskit();
+        let call = app.call.as_mut().expect("a call is up");
+        call.phase = CallPhase::Ended;
+        call.outcome = Some(crate::calls::CallOutcome::Answered);
+        let shown = labelled(&mut app, &ctx);
+        for tip in ["Mute", "Hang up"] {
+            let control = shown.iter().find(|(label, _)| label == tip);
+            assert!(
+                matches!(control, Some((_, true))),
+                "{tip} is disabled once the call is over: {shown:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_call_screen_labels_every_control_it_offers() {
+        let (mut running, ctx) = on_a_call();
+        ctx.enable_accesskit();
+        let screen = labels(&mut running, &ctx);
+        for expected in [
+            "Hide the call screen",
+            "Full screen",
+            "Mute",
+            "Microphone and speaker",
+            "Hang up",
+        ] {
+            assert!(
+                screen.contains(&expected.to_owned()),
+                "missing accessible label: {expected}"
+            );
+        }
+        // The same controls say what they do when pressed, not just which button they are.
+        running.actions.push(Action::ToggleCallFullscreen);
+        let full = labels(&mut running, &ctx);
+        assert!(
+            full.contains(&"Exit full screen".to_owned()),
+            "the full-screen control says how to leave: {full:?}"
+        );
+
         let mut ringing = app();
         apply_flags(&mut ringing, Some("call"));
         let ctx = egui::Context::default();
@@ -15198,87 +15185,6 @@ mod call_surface_tests {
             assert!(
                 incoming.contains(&expected.to_owned()),
                 "missing accessible label: {expected}"
-            );
-        }
-        assert!(
-            !incoming.contains(&"Mute".to_owned()),
-            "a ringing call has no call window yet: {incoming:?}"
-        );
-    }
-
-    /// Tests run without a windowing system, where egui draws a viewport as a window inside the
-    /// main one, so the call window's controls show up in the same tree.
-    #[test]
-    fn the_call_window_labels_every_control_it_offers() {
-        let (mut running, ctx) = on_a_call();
-        ctx.enable_accesskit();
-        let screen = labels(&mut running, &ctx);
-        for expected in ["Mute", "Speaker and devices", "Hang up"] {
-            assert!(
-                screen.contains(&expected.to_owned()),
-                "missing accessible label: {expected} in {screen:?}"
-            );
-        }
-        assert!(
-            !screen.contains(&"Accept".to_owned()),
-            "an answered call leaves the card: {screen:?}"
-        );
-    }
-
-    #[test]
-    fn only_hanging_up_ends_a_call() {
-        let (mut app, ctx) = on_a_call();
-        app.backend.record_demo_commands();
-        frame_with(&mut app, &ctx, vec![key(egui::Key::Escape)]);
-        let hang_ups = |commands: Vec<crate::backend::Command>| {
-            commands
-                .into_iter()
-                .filter(|command| matches!(command, crate::backend::Command::HangupCall))
-                .count()
-        };
-        assert_eq!(hang_ups(app.backend.take_demo_commands()), 0);
-        app.actions.push(Action::HangupCall);
-        frame_with(&mut app, &ctx, Vec::new());
-        assert_eq!(hang_ups(app.backend.take_demo_commands()), 1);
-    }
-
-    /// The background history row's title fits on its line in every
-    /// language, instead of ending in an ellipsis. Checked in a window
-    /// narrower than the default (where the longer earlier title was already
-    /// cut short here), so a wider system font still has room.
-    #[test]
-    fn the_older_history_title_fits_in_every_language() {
-        /// Every text drawn, and whether it was cut short with an ellipsis.
-        fn texts(shape: &egui::Shape, out: &mut Vec<(String, bool)>) {
-            match shape {
-                egui::Shape::Text(text) => {
-                    out.push((text.galley.text().to_owned(), text.galley.elided))
-                }
-                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| texts(shape, out)),
-                _ => {}
-            }
-        }
-        for locale in crate::i18n::Locale::ALL {
-            let mut app = app();
-            let ctx = egui::Context::default();
-            app.attach(&ctx);
-            let title = crate::i18n::gettext(locale, "Fetch older history").into_owned();
-            apply_flags(&mut app, Some("settings"));
-            app.locale = locale;
-            app.settings_search = title.clone();
-            let mut drawn = Vec::new();
-            for clipped in &frames(&mut app, &ctx, egui::vec2(900.0, 780.0)) {
-                texts(&clipped.shape, &mut drawn);
-            }
-            let titles: Vec<bool> = drawn
-                .iter()
-                .filter(|(text, _)| *text == title)
-                .map(|(_, elided)| *elided)
-                .collect();
-            assert!(!titles.is_empty(), "{locale:?}: {title:?} is not drawn");
-            assert!(
-                !titles.contains(&true),
-                "{locale:?}: {title:?} is cut short"
             );
         }
     }

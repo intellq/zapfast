@@ -70,12 +70,12 @@ impl CallRuntime {
         self.watching = true;
         let (tx, events) = async_channel::bounded(64);
         self.events = events;
+        // The handle's event queue has one reader, and this is it.
+        let Some(mut media) = handle.take_events() else {
+            log::warn!("[CALL] the call's events were already taken");
+            return;
+        };
         tokio::spawn(async move {
-            let Some(mut media) = handle.take_events() else {
-                handle.wait_ended().await;
-                let _ = tx.send(CallRuntimeEvent::Ended).await;
-                return;
-            };
             loop {
                 tokio::select! {
                     event = media.recv() => match event {
@@ -106,11 +106,34 @@ impl Worker {
 
     /// Hands the call screen the microphones and speakers it can offer, and keeps them: they are
     /// how a device that goes away is named by the description the user saw.
-    pub(super) fn emit_call_devices(&mut self) -> calls::DeviceList {
-        let devices = calls::devices();
-        self.call_devices = devices.clone();
-        self.emit(Event::CallDevices(Box::new(devices.clone())));
+    pub(super) async fn emit_call_devices(&mut self) -> calls::DeviceList {
+        let devices = discover_devices().await;
+        self.publish_call_devices(devices.clone());
         devices
+    }
+
+    /// Stores and publishes a device list, so the pickers and the fallback naming share one
+    /// snapshot of the machine.
+    pub(super) fn publish_call_devices(&mut self, devices: calls::DeviceList) {
+        self.call_devices = devices.clone();
+        self.emit(Event::CallDevices(Box::new(devices)));
+    }
+
+    /// Re-sends the current call after privacy recovery, since call updates are withheld while the
+    /// lock state is unknown.
+    ///
+    /// Nothing is rediscovered: the last published list is what the picker already had, and the
+    /// runtime's own snapshot is what the surface should draw. The chat can finally be judged
+    /// private or not, so a call that arrived mid-recovery rings behind the right lock state rather
+    /// than being dropped for the whole recovery.
+    pub(super) fn replay_call(&mut self) {
+        let Some(runtime) = self.call.as_ref() else {
+            return;
+        };
+        let devices = self.call_devices.clone();
+        let update = runtime.last.clone();
+        self.publish_call_devices(devices);
+        self.emit_call(update);
     }
 
     /// Publishes one call state, and lets the call go once it reaches a terminal phase.
@@ -191,20 +214,15 @@ impl Worker {
             ));
             return;
         };
-        // The devices the settings remember, checked against the machine first: a headset that was
-        // switched off since the last call falls back to the system default and says so, instead of
-        // opening a stream that can never deliver a frame.
-        let devices = self.emit_call_devices();
-        let wanted = self.call_defaults.clone();
-        let resolved = calls::resolve_devices(&devices, wanted.microphone, wanted.speaker);
-        match Call::place(
-            &client,
-            chat.to_string(),
-            resolved.microphone,
-            resolved.speaker,
-        )
-        .await
-        {
+        // A call opens on the devices last picked, or the system's defaults when they are gone;
+        // the call screen's pickers move it to others while it runs.
+        let devices = self.emit_call_devices().await;
+        let resolved = calls::resolve_devices(
+            &devices,
+            self.call_defaults.microphone.clone(),
+            self.call_defaults.speaker.clone(),
+        );
+        match Call::place(&client, chat.to_string(), resolved.microphone, resolved.speaker).await {
             Ok(mut call) => {
                 call.set_lost_devices(resolved.lost_devices);
                 let mut runtime = CallRuntime::new(call);
@@ -232,7 +250,8 @@ impl Worker {
                 // checked against the machine so one that vanished falls back rather than opening a
                 // stream that can never deliver.
                 let (microphone, speaker) = runtime.call.selections();
-                let resolved = calls::resolve_devices(&calls::devices(), microphone, speaker);
+                let resolved =
+                    calls::resolve_devices(&discover_devices().await, microphone, speaker);
                 let answered = runtime
                     .call
                     .answer(&client, resolved.microphone, resolved.speaker)
@@ -245,10 +264,11 @@ impl Worker {
                     }
                     Err(error) => {
                         log::error!("[CALL] could not answer the call: {error}");
+                        let update = runtime.call.abandon(&client).await;
                         self.emit(Event::Error(format!(
                             "The call could not be answered: {error}"
                         )));
-                        return;
+                        Some(update)
                     }
                 }
             }
@@ -300,8 +320,6 @@ impl Worker {
     }
 
     pub(super) fn set_call_microphone(&mut self, device: Option<String>) {
-        // The picker is also the preference: the next call opens where this one was left.
-        self.call_defaults.microphone = device.clone();
         let update = self
             .call
             .as_mut()
@@ -312,7 +330,6 @@ impl Worker {
     }
 
     pub(super) fn set_call_speaker(&mut self, device: Option<String>) {
-        self.call_defaults.speaker = device.clone();
         let update = self
             .call
             .as_mut()
@@ -384,29 +401,60 @@ impl Worker {
                 });
                 self.emit_call_log();
             }
+            // Refuse it to the caller rather than dropping it. An offer that is only dropped leaves
+            // the other side ringing until its own protocol timeout, believing this device might
+            // still answer; a real `<reject>` ends it there and then. The call that is already up
+            // is untouched: this is the second offer's own call id being refused, not ours.
+            match self.client.as_ref() {
+                Some(client) => match client.voip().reject(incoming).await {
+                    Ok(()) => log::info!(
+                        "[CALL] refused a second offer while one is up call_id={}",
+                        action.call_id()
+                    ),
+                    Err(error) => {
+                        log::warn!("[CALL] a second offer could not be refused: {error}")
+                    }
+                },
+                None => log::warn!("[CALL] no client to refuse a second offer with"),
+            }
             return;
         }
         // A group, broadcast or newsletter offer never reaches the 1:1 call surface. The interface
         // hides the buttons for those chats, but the worker is the boundary: a non-direct offer is
         // refused here rather than rung, so no call is created and no history entry is written.
+        //
+        // Refuse it to the caller instead of only dropping it: a dropped offer leaves the other
+        // side ringing until its own protocol timeout, believing this device might still answer,
+        // while a real `<reject>` ends it there and then. Only a 1:1 offer rings, so an offer that
+        // reaches here is one the caller is told we will not take.
         if !callable_chat(&chat) {
-            log::warn!("[CALL] refusing an incoming offer from a chat that is not one to one");
+            match self.client.as_ref() {
+                Some(client) => match client.voip().reject(incoming).await {
+                    Ok(()) => log::warn!(
+                        "[CALL] refused an incoming offer from a chat that is not one to one"
+                    ),
+                    Err(error) => {
+                        log::warn!("[CALL] a non-direct offer could not be refused: {error}")
+                    }
+                },
+                None => log::warn!("[CALL] no client to refuse a non-direct offer with"),
+            }
             return;
         }
-        // The remembered devices are pre-selected on the prompt, so answering picks up right where
-        // the last call left off.
-        let call = Call::ringing(chat, Box::new(incoming.clone()), self.call_defaults.clone());
+        let call = Call::ringing(chat, Box::new(incoming.clone())).with_devices(self.call_defaults.clone());
         let update = call.update();
         self.call = Some(CallRuntime::new(call));
-        self.emit_call_devices();
+        self.emit_call_devices().await;
         self.emit_call(update);
     }
 
-    /// A call we were ringing or talking on was resolved on another of the account's devices, or
-    /// the caller gave up before anyone answered.
-    pub(super) fn call_resolved(&mut self, call_id: &str) {
+    /// A call we were ringing for was resolved on another of the account's devices (`elsewhere`
+    /// says how), or the caller gave up before anyone answered (`None`).
+    pub(super) fn call_resolved(&mut self, call_id: &str, elsewhere: Option<calls::CallOutcome>) {
         let update = match self.call.as_mut() {
-            Some(runtime) if runtime.call.call_id() == call_id => runtime.call.resolved_elsewhere(),
+            Some(runtime) if runtime.call.call_id() == call_id => {
+                runtime.call.resolved_elsewhere(elsewhere)
+            }
             _ => None,
         };
         if let Some(update) = update {
@@ -419,6 +467,8 @@ impl Worker {
         if let Some(mut runtime) = self.call.take() {
             let update = runtime.call.hangup(self.client.as_ref()).await;
             self.record_call(&runtime.call_id, runtime.began, &update);
+            // The window lets the call go as it lets any other finished one.
+            self.emit(Event::Call(Box::new(update)));
         }
     }
 
@@ -448,9 +498,7 @@ impl Worker {
         // Discovery opens every audio device to name it, so it runs on a blocking thread rather
         // than on the worker's async loop: a slow device must not hold up message handling or the
         // call's own events.
-        let devices = tokio::task::spawn_blocking(calls::devices)
-            .await
-            .unwrap_or_default();
+        let devices = discover_devices().await;
         // Read before the fresh list replaces it: a device that just went away is still named in
         // here by the description the user saw.
         let known = self.call_devices.clone();
@@ -489,6 +537,15 @@ impl Worker {
             self.emit_call(update);
         }
     }
+}
+
+/// Device discovery off the worker thread: enumerating opens every audio device to name it, so it
+/// runs on a blocking thread rather than on the async loop, where a slow device would hold up
+/// message handling and the call's own events.
+async fn discover_devices() -> calls::DeviceList {
+    tokio::task::spawn_blocking(calls::devices)
+        .await
+        .unwrap_or_default()
 }
 
 /// Whether a chat can be called at all.

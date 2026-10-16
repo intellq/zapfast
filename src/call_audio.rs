@@ -4,12 +4,12 @@
 //! whatever the platform's own audio API offers (PipeWire or ALSA, CoreAudio, WASAPI) at the rate
 //! and channel count that device wants, in `f32`, and this module converts between the two.
 //!
-//! It is the same rodio the rest of the app plays and records through, so a call no longer needs
-//! `pw-record` or `pw-play` to exist: the engine's channel stays stable while a device is chosen or
-//! lost, and only the reader or the writer behind it is replaced.
+//! It is the same rodio the rest of the app plays and records through. The engine's channel stays
+//! stable while a device is chosen or lost, and only the reader or the writer behind it is
+//! replaced.
 //!
 //! Device selection is by name, because the name a platform reports is what it also accepts back:
-//! the call screen's picker, the saved setting, and the stream all speak the same identifier.
+//! the call screen's picker and the stream speak the same identifier.
 
 use std::num::NonZero;
 use std::sync::Arc;
@@ -31,8 +31,13 @@ const BLOCK_MS: usize = 20;
 ///
 /// The engine writes one 20 ms slice every 20 ms and drops the frame when this channel is full, so
 /// whatever is here is the burst the speaker may absorb before the peer's voice starts breaking up.
-/// Three hundred milliseconds sits above the engine's own jitter cushion rather than under it.
-pub const SPEAKER_QUEUE: usize = 16;
+///
+/// The capacity is counted in whole engine frames, not in slices: one frame is [`FRAME_SAMPLES`],
+/// which is 60 ms at [`RATE`], so sixteen of them was about 960 ms — nearly a second of the peer's
+/// voice arriving late before the queue began shedding, not the three hundred milliseconds the
+/// comment claimed. Five frames is the 300 ms the design wants, and it still sits above the
+/// engine's own jitter cushion rather than under it.
+pub const SPEAKER_QUEUE: usize = 5;
 /// How long the sink may hold audio without playing any of it before the stream is restarted.
 ///
 /// A device that stops draining is not a slow consumer to catch up with: the queue only grows and
@@ -175,8 +180,8 @@ impl Layout {
 
 /// The microphones the platform reports, as `(name, label)`.
 ///
-/// The name is what the platform both reports and accepts back, so it is what a saved setting
-/// holds and what a stream looks for.
+/// The name is what the platform both reports and accepts back, so it is what the picker holds
+/// and what a stream looks for.
 pub fn microphones() -> Vec<(String, String)> {
     match rodio::microphone::available_inputs() {
         Ok(inputs) => dedupe(
@@ -247,17 +252,65 @@ fn dedupe(mut found: Vec<(String, String)>) -> Vec<(String, String)> {
 /// check a machine with no microphone would ring the peer, connect, and carry silence with nothing
 /// on screen to explain it. So the devices are looked for first, and their absence fails the call
 /// with something the reader can act on instead of a call that looks healthy.
-pub fn unavailable() -> Option<&'static str> {
-    if rodio::microphone::MicrophoneBuilder::new()
-        .default_device()
-        .is_err()
-    {
+pub fn unavailable(microphone: Option<&str>, speaker: Option<&str>) -> Option<&'static str> {
+    if !input_available(microphone) {
         return Some("microphone");
     }
-    if rodio::DeviceSinkBuilder::from_default_device().is_err() {
+    if !output_available(speaker) {
         return Some("speaker");
     }
     None
+}
+
+/// Whether the microphone a call would really open can be had.
+fn input_available(selected: Option<&str>) -> bool {
+    let listed: Option<Vec<String>> = rodio::microphone::available_inputs()
+        .ok()
+        .map(|inputs| inputs.into_iter().map(|input| input.to_string()).collect());
+    chosen_available(selected, listed.as_deref(), || {
+        rodio::microphone::MicrophoneBuilder::new()
+            .default_device()
+            .is_ok()
+    })
+}
+
+/// Whether the speaker a call would really open can be had.
+fn output_available(selected: Option<&str>) -> bool {
+    let listed: Option<Vec<String>> =
+        rodio::cpal::default_host()
+            .output_devices()
+            .ok()
+            .map(|devices| {
+                devices
+                    .into_iter()
+                    .filter_map(|device| device.description().ok().map(|d| d.name().to_owned()))
+                    .collect()
+            });
+    chosen_available(selected, listed.as_deref(), || {
+        rodio::DeviceSinkBuilder::from_default_device().is_ok()
+    })
+}
+
+/// Whether the device a call would open can be had: the one the user picked, or the system default
+/// when nothing is picked.
+///
+/// A named device is looked for in what discovery found, so a machine whose *default* is busy still
+/// takes a call aimed at a device the user chose. The default is asked for only when nothing is
+/// named, which is what `None` means. `listed` is `None` when discovery could not
+/// run at all, which is not the same as an empty machine: a broken helper must not refuse a call,
+/// so a selection stands on it, the way `resolve_devices` keeps one.
+fn chosen_available(
+    selected: Option<&str>,
+    listed: Option<&[String]>,
+    default_ok: impl FnOnce() -> bool,
+) -> bool {
+    match selected {
+        Some(name) => match listed {
+            Some(names) => names.iter().any(|known| known == name),
+            None => true,
+        },
+        None => default_ok(),
+    }
 }
 
 /// Where the microphone's samples come from: this machine's device, or a test's stand-in.
@@ -485,7 +538,11 @@ pub struct AudioInput {
 impl AudioInput {
     pub fn spawn(target: Option<String>) -> (Self, async_channel::Receiver<Vec<i16>>) {
         let (out, rx) = async_channel::bounded::<Vec<i16>>(4);
-        let (swap, swaps) = async_channel::bounded::<Option<String>>(1);
+        // Unbounded so a device the user picks while the pump is busy is never dropped: a capacity
+        // of one would silently discard the newer selection when two arrive before the pump reads
+        // the first, and `bind` has no way to report that. The pump drains them in order, so the
+        // last one wins and what the picker shows stays what the stream is bound to.
+        let (swap, swaps) = async_channel::unbounded::<Option<String>>();
         let (fell, fell_back) = async_channel::bounded::<()>(1);
         // One per call, read by the test above and written by the pump below, so a reader that
         // survives a mute or a rebind is told from one that was started again.
@@ -543,6 +600,12 @@ async fn mic_pump(
                     );
                     target = None;
                     let _ = fell.try_send(());
+                }
+                // The engine dropped its port: the call is over, so stop retrying an open that no
+                // one is waiting for rather than spinning on a dead device for the rest of the
+                // process' life.
+                if out.is_closed() {
+                    return;
                 }
                 tokio::time::sleep(RETRY).await;
                 continue;
@@ -761,7 +824,9 @@ pub struct AudioOutput {
 impl AudioOutput {
     pub fn spawn(target: Option<String>) -> (Self, async_channel::Sender<Vec<i16>>) {
         let (tx, rx) = async_channel::bounded::<Vec<i16>>(SPEAKER_QUEUE);
-        let (swap, swaps) = async_channel::bounded::<Option<String>>(1);
+        // Unbounded for the same reason the microphone's is: a newer device selection must not be
+        // dropped because the previous one has not been read yet.
+        let (swap, swaps) = async_channel::unbounded::<Option<String>>();
         let (fell, fell_back) = async_channel::bounded::<()>(1);
         let opens = Arc::new(AtomicUsize::new(0));
         let stalls = Arc::new(AtomicUsize::new(0));
@@ -827,6 +892,12 @@ async fn play_pump(
                     );
                     target = None;
                     let _ = fell.try_send(());
+                }
+                // The engine dropped its port: the call is over, so stop retrying an open that no
+                // one is waiting for rather than spinning on a dead device for the rest of the
+                // process' life.
+                if rx.is_closed() {
+                    return;
                 }
                 tokio::time::sleep(RETRY).await;
                 continue;
@@ -1124,6 +1195,9 @@ pub(crate) mod fake {
         /// What the stream opened last reported, which a test feeds the errors of a failing
         /// stream through. Each open starts a fresh one, as a new stream would.
         pub(crate) health: Arc<Mutex<crate::audio::Health>>,
+        /// How long an open is made to take, so a test can hold the pump still while it sends
+        /// device selections and prove none of them is dropped.
+        pub(crate) open_pause: Arc<AtomicUsize>,
     }
 
     impl Speaker {
@@ -1256,6 +1330,7 @@ pub(crate) mod fake {
             played_count: Arc::new(AtomicUsize::new(0)),
             played: Arc::new(Mutex::new(Duration::ZERO)),
             health: Arc::new(Mutex::new(crate::audio::Health::new("test speaker"))),
+            open_pause: Arc::new(AtomicUsize::new(0)),
         };
         *INSTALLED.lock().unwrap_or_else(|error| error.into_inner()) = Some(Installed {
             microphone: Some(Spec {
@@ -1285,8 +1360,18 @@ pub(crate) mod fake {
     /// The speaker to hand a writer, if a test installed one. Every open is recorded, which is how
     /// a rebind is told from a restart.
     pub(super) fn open_speaker(device: Option<&str>) -> Option<Speaker> {
-        let installed = INSTALLED.lock().unwrap_or_else(|error| error.into_inner());
-        let speaker = installed.as_ref()?.speaker.clone()?;
+        // The install lock is not held across the pause, so a slow open cannot block another
+        // thread that needs the fixture.
+        let speaker = {
+            let installed = INSTALLED.lock().unwrap_or_else(|error| error.into_inner());
+            installed.as_ref()?.speaker.clone()?
+        };
+        // The pause holds the pump inside this open, so a test that sets one can send selections
+        // that the pump cannot yet read.
+        let pause = speaker.open_pause.load(Ordering::Relaxed);
+        if pause > 0 {
+            std::thread::sleep(Duration::from_millis(pause as u64));
+        }
         speaker
             .opened
             .lock()
@@ -1574,6 +1659,54 @@ mod tests {
         );
     }
 
+    /// A device the user picks is validated against what exists, not against the system default.
+    ///
+    /// A machine whose default microphone is busy — another app holding it, a headset that
+    /// switched off — still takes a call aimed at a device the user chose. Asking only about the
+    /// default refused the call before it rang, even though the selected device was right there.
+    #[test]
+    fn a_named_device_is_checked_against_what_exists_not_the_default() {
+        let listed = vec!["mic-a".to_owned(), "mic-b".to_owned()];
+        // A device the user picked is available when it is there, whatever the default is doing.
+        assert!(chosen_available(Some("mic-b"), Some(&listed), || false));
+        // And refused when the machine really does not have it.
+        assert!(!chosen_available(Some("mic-z"), Some(&listed), || true));
+        // The default is consulted only when nothing is named.
+        assert!(chosen_available(None, Some(&listed), || true));
+        assert!(!chosen_available(None, Some(&listed), || false));
+        // Discovery that could not run is not an empty machine: the selection stands on it.
+        assert!(chosen_available(Some("mic-z"), None, || false));
+    }
+
+    /// A second device selection made before the pump has read the first is not lost.
+    ///
+    /// The picker can move twice in one stroke — a keyboard-driven list, or an impatient second
+    /// click — and the stream must end up on the device the picker shows rather than on the one the
+    /// pump happened to read first. With a capacity-one channel and an ignored `try_send`, the
+    /// newer selection vanished while `Call::set_microphone` had already published it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_second_device_selection_is_not_lost_before_the_first_is_read() {
+        let (_devices, speaker) = fake::install(vec![0.0; 8], 1, RATE, (RATE, 1));
+        // Hold the pump inside its first open long enough for two selections to be sent while it
+        // cannot read them.
+        speaker.open_pause.store(400, Ordering::Relaxed);
+        let (output, _tx) = AudioOutput::spawn(None);
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        output.bind(Some("First".to_owned()));
+        output.bind(Some("Second".to_owned()));
+        let started = Instant::now();
+        while speaker.opened_count() < 3 && started.elapsed() < Duration::from_secs(5) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let opened = speaker.opened();
+        drop(output);
+        assert_eq!(
+            opened.last().and_then(|device| device.as_deref()),
+            Some("Second"),
+            "the last device the user picked is the one in use: {opened:?}"
+        );
+    }
+
     /// A sink that has not played yet is given the start-up window rather than the stall window.
     ///
     /// A suspended device, a Bluetooth headset still connecting, or an audio graph that a new
@@ -1769,7 +1902,7 @@ mod tests {
         let speakers = speakers();
         eprintln!("microphones: {microphones:#?}");
         eprintln!("speakers: {speakers:#?}");
-        eprintln!("unavailable: {:?}", unavailable());
+        eprintln!("unavailable: {:?}", unavailable(None, None));
 
         // The default device first, then every device by name, so a machine whose default input
         // is silent still says which microphone a call should be pointed at.
