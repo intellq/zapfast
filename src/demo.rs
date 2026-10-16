@@ -1270,6 +1270,19 @@ fn interactive_sample(app: &mut App, with_image: bool) {
     app.scroll_to_bottom = true;
 }
 
+/// The first chat with only its last two messages: a conversation shorter
+/// than the view, which sits at its bottom.
+fn short_chat_sample(app: &mut App) {
+    let id = SAMPLES[0].id;
+    let conversation = app.conversations.get_mut(id).unwrap();
+    let keep = conversation.messages.len().saturating_sub(2);
+    conversation.messages.drain(..keep);
+    conversation.complete = true;
+    app.open_chat = Some(id.into());
+    app.typing.clear();
+    app.scroll_to_bottom = true;
+}
+
 fn interactive_actions_sample(app: &mut App) {
     use crate::model::{InteractiveAction, InteractiveButton, InteractiveCard, InteractiveOption};
     interactive_sample(app, false);
@@ -1874,6 +1887,7 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
         match part {
             "chat" | "" => {}
             "phone-menu" => phone_menu_sample(app),
+            "short-chat" => short_chat_sample(app),
             "chat-menu" => app.open_chat_menu = Some(app.chats[0].id.clone()),
             "chat-header-menu" => app.open_header_menu = app.open_chat.clone(),
             "interactive-actions" => interactive_actions_sample(app),
@@ -4396,6 +4410,51 @@ mod tests {
                 assert!(app.backend.take_demo_commands().iter().any(|c| matches!(c, crate::backend::Command::VotePoll { choices, .. } if choices == &[1])));
             }
         }
+    }
+
+    /// A chat shorter than the view sits at its bottom, by the composer, as
+    /// on WhatsApp (#378), and stays there when a message arrives.
+    #[test]
+    fn a_short_chat_sits_at_the_bottom_of_the_view() {
+        let mut app = app();
+        short_chat_sample(&mut app);
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        render(&mut app, &ctx);
+        let chat = SAMPLES[0].id;
+        let rect_of = |app: &App, ctx: &egui::Context, index: usize| {
+            let message = &app.conversations[chat].messages[index];
+            let id = crate::ui::conversation::bubble_id(chat, &message.id).with("rect");
+            ctx.data(|data| data.get_temp::<egui::Rect>(id)).unwrap()
+        };
+        let first = rect_of(&app, &ctx, 0);
+        let last = rect_of(&app, &ctx, 1);
+        // The window is 780 points tall; the composer takes its foot.
+        assert!(first.top() > 300.0, "the messages moved down: {first:?}");
+        assert!(
+            last.bottom() > 600.0,
+            "the last one is by the composer: {last:?}"
+        );
+
+        let mut arrival = app.conversations[chat].messages[1].clone();
+        arrival.id = "short-arrival".into();
+        arrival.timestamp += 1;
+        app.conversations
+            .get_mut(chat)
+            .unwrap()
+            .messages
+            .push(arrival);
+        render(&mut app, &ctx);
+        let newest = rect_of(&app, &ctx, 2);
+        assert!(
+            (newest.bottom() - last.bottom()).abs() < 2.0,
+            "the newest message takes the bottom: {newest:?} {last:?}"
+        );
+        assert!(
+            rect_of(&app, &ctx, 0).top() < first.top(),
+            "older ones move up"
+        );
     }
 
     #[test]
@@ -8276,7 +8335,12 @@ mod tests {
         );
         assert!(app.reaction_target.is_none(), "a double-click never reacts");
 
-        // A right-click on the bubble still opens the context menu, not the picker.
+        // A right-click on the bubble still opens the context menu, not the
+        // picker. The reply bar made the view shorter, and the chat, which
+        // sits at the bottom of the view, moved up with it.
+        let bubble = ctx
+            .data(|data| data.get_temp::<egui::Rect>(id.with("rect")))
+            .expect("the bubble publishes its rect");
         let press = |pressed| egui::Event::PointerButton {
             pos: bubble.center(),
             button: egui::PointerButton::Secondary,

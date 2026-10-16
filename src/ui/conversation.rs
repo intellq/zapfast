@@ -2512,7 +2512,29 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                     ui.ctx().request_repaint();
                 }
             }
-            Frame::new()
+            // A chat shorter than the view sits at its bottom, next to the
+            // composer, as on WhatsApp: the space above it is what the
+            // messages left free last frame.
+            let natural_id = scroll_id.with("natural-height");
+            let natural = ui.ctx().data(|data| data.get_temp::<f32>(natural_id));
+            // The spacing after the filler is part of the space it takes.
+            let filler = bottom_filler(viewport.height(), natural, ui.spacing().item_spacing.y);
+            // While a button is held (a sweep, a text selection, a click),
+            // the rows stay where the pointer found them: a sweep turns the
+            // composer into the selection bar, and the view's new height
+            // would otherwise move every row under the pointer.
+            let filler_id = scroll_id.with("filler");
+            let held = ui.input(|input| input.pointer.any_down());
+            let filler = match ui.ctx().data(|data| data.get_temp::<f32>(filler_id)) {
+                Some(kept) if held => kept,
+                _ => filler,
+            };
+            ui.ctx()
+                .data_mut(|data| data.insert_temp(filler_id, filler));
+            if filler > 0.0 {
+                ui.add_space(filler);
+            }
+            let measured = Frame::new()
                 .inner_margin(Margin::symmetric(18, 10))
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());
@@ -2874,7 +2896,15 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                         );
                         pinned = true;
                     }
-                });
+                })
+                .response
+                .rect
+                .height();
+            if natural.is_none_or(|natural| (natural - measured).abs() > 0.5) {
+                ui.ctx()
+                    .data_mut(|data| data.insert_temp(natural_id, measured));
+                ui.ctx().request_repaint();
+            }
             if background.clicked() {
                 actions.push(Action::FocusComposer);
             }
@@ -8849,6 +8879,13 @@ fn rounded_corners(corners: &[egui::Pos2], radius: f32) -> Vec<egui::Pos2> {
         }
     }
     points
+}
+
+/// The space above a conversation's messages that keeps a short one at the
+/// bottom of the view: what `natural`, the height the messages took last
+/// frame, leaves of the viewport. Unmeasured, there is none.
+fn bottom_filler(viewport: f32, natural: Option<f32>, spacing: f32) -> f32 {
+    natural.map_or(0.0, |natural| (viewport - natural - spacing).max(0.0))
 }
 
 /// Draws the in-chat player with a waveform for voice notes or a track and music badge
