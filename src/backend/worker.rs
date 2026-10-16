@@ -91,6 +91,13 @@ const ATTACHMENT_LIMIT_ERROR: &str =
     crate::i18n::n_("This attachment exceeds the configured download size limit");
 const ATTACHMENT_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// The time a download gets before it is given up: two minutes, plus a
+/// second for every 128 KiB the file declares. A slow but moving transfer of
+/// a large file is not cut off, while a stalled one still ends with a retry.
+fn attachment_timeout(size: Option<u64>) -> Duration {
+    ATTACHMENT_TIMEOUT + Duration::from_secs(size.unwrap_or(0) / (128 * 1024))
+}
+
 async fn with_attachment_deadline<T>(
     duration: Duration,
     operation: impl std::future::Future<Output = Result<T, String>>,
@@ -8079,7 +8086,8 @@ impl Worker {
             let keep_others = named.is_some();
             let path = named
                 .unwrap_or_else(|| media_path(&dir, &chat, &cache_id, &mime, file_name.as_deref()));
-            let result = with_attachment_deadline(ATTACHMENT_TIMEOUT, async {
+            let deadline = attachment_timeout(downloadable.file_length());
+            let result = with_attachment_deadline(deadline, async {
                 match fetch_attachment(
                     &client,
                     &*downloadable,
@@ -8240,7 +8248,7 @@ impl Worker {
         tokio::spawn(async move {
             let path = media_path(&dir, &chat, &format!("{id}-motion"), "video/mp4", None);
             let result = with_attachment_deadline(
-                ATTACHMENT_TIMEOUT,
+                attachment_timeout(video.file_length()),
                 // Someone clicked for it, so no size limit, as with any attachment.
                 download_attachment(&client, &video, &dir, &path, None),
             )
@@ -12245,6 +12253,16 @@ mod tests {
             .unwrap();
         assert!(matches!(staged.content, Content::Document { .. }));
         assert_eq!(staged.file_name.as_deref(), Some("song.ogg"));
+    }
+
+    #[test]
+    fn a_larger_attachment_gets_longer_to_download() {
+        assert_eq!(attachment_timeout(None), ATTACHMENT_TIMEOUT);
+        assert_eq!(attachment_timeout(Some(100 * 1024)), ATTACHMENT_TIMEOUT);
+        assert_eq!(
+            attachment_timeout(Some(500 * 1024 * 1024)),
+            Duration::from_secs(120 + 4000)
+        );
     }
 
     #[tokio::test]
