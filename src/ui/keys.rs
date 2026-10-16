@@ -448,8 +448,8 @@ fn take_key(input: &mut egui::InputState, key: Key, with: Modifiers) -> bool {
 }
 
 /// Handles keys while the image preview is open. No chat shortcut runs, and
-/// typing and clipboard input are swallowed; Tab, Enter, Space and the arrows
-/// stay for the preview's own controls.
+/// typing and clipboard input are swallowed; Left/Right browse photos, while
+/// Tab, Enter, Space and Up/Down stay for the preview's own controls.
 fn preview_keys(app: &mut App, ctx: &egui::Context) {
     let mut actions = Vec::new();
     ctx.input_mut(|input| {
@@ -678,6 +678,10 @@ pub const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+,", crate::i18n::n_("Settings")),
     ("Ctrl++ / Ctrl+-", crate::i18n::n_("Zoom in / out")),
     ("Ctrl+0", crate::i18n::n_("Reset zoom")),
+    (
+        "← / →",
+        crate::i18n::n_("Previous / next image in the image viewer"),
+    ),
     (
         "? / Ctrl+/",
         crate::i18n::n_("Keyboard shortcuts (? when not typing)"),

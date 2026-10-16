@@ -9,7 +9,9 @@
 //! adds it to or removes it from the favorites.
 
 use crate::i18n::tr;
-use egui::{Color32, CornerRadius, Frame, Layout, Margin, Rect, Sense, Stroke, Vec2, pos2, vec2};
+use egui::{
+    Align, Color32, CornerRadius, Frame, Layout, Margin, Rect, Sense, Stroke, Vec2, pos2, vec2,
+};
 
 use crate::app::App;
 use crate::model::{Action, Content, MediaState};
@@ -83,7 +85,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                     let output = ui
                         .scope_builder(egui::UiBuilder::new().max_rect(area), |ui| {
                             egui::ScrollArea::both()
-                                .id_salt("image-preview-scroll")
+                                .id_salt(("image-preview-scroll", preview.path()))
                                 .auto_shrink([false, false])
                                 // egui drags only on touch screens by default.
                                 .scroll_source(egui::scroll_area::ScrollSource {
@@ -96,6 +98,15 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                         })
                         .inner;
                     let shown = &output.inner;
+                    if preview.can_navigate() {
+                        navigation_overlay(
+                            ui,
+                            area,
+                            shown.rect.intersect(output.inner_rect),
+                            &palette,
+                            &mut app.actions,
+                        );
+                    }
                     // Stored under the id the scroll area reads, from inside the
                     // scope, and after it, as it clamps its offset to
                     // this frame's size; the next frame lays out the zoomed size
@@ -518,6 +529,77 @@ fn fit_within(size: Vec2, rect: Rect) -> Rect {
     }
     let scale = (rect.width() / size.x).min(rect.height() / size.y);
     Rect::from_center_size(rect.center(), size * scale)
+}
+
+/// Previous and next buttons over the visible part of the photo, shown while
+/// the pointer is over it. A photo too narrow for both gets a band just wide
+/// enough, centred on it, so the buttons sit at its edges instead of on top of
+/// each other. Neither button checks whether there is an image that way: the
+/// conversation is only searched when one is pressed.
+fn navigation_overlay(
+    ui: &mut egui::Ui,
+    area: Rect,
+    image: Rect,
+    palette: &theme::Palette,
+    actions: &mut Vec<Action>,
+) {
+    const DIAMETER: f32 = 40.0;
+    const INSET: f32 = 12.0;
+    let min_width = 2.0 * (DIAMETER + INSET) + DIAMETER;
+    let mut band = image;
+    if band.width() < min_width {
+        band = Rect::from_center_size(band.center(), vec2(min_width, band.height()));
+    }
+    let band = band.intersect(area);
+    if band.height() < DIAMETER || band.width() < 2.0 * DIAMETER {
+        return;
+    }
+    if ui.input(|input| input.pointer.hover_pos()).is_none() || !ui.rect_contains_pointer(band) {
+        return;
+    }
+    let inset = INSET.min((band.width() - 2.0 * DIAMETER) / 2.0);
+    for (right, icon, hint, action) in [
+        (
+            false,
+            Icon::ChevronLeft,
+            "Previous image (Left arrow)",
+            Action::PreviousImage,
+        ),
+        (
+            true,
+            Icon::ChevronRight,
+            "Next image (Right arrow)",
+            Action::NextImage,
+        ),
+    ] {
+        let x = if right {
+            band.right() - inset - DIAMETER / 2.0
+        } else {
+            band.left() + inset + DIAMETER / 2.0
+        };
+        let rect = Rect::from_center_size(egui::pos2(x, band.center().y), Vec2::splat(DIAMETER));
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .id_salt(("image-preview-navigation", right))
+                .max_rect(rect)
+                .layout(Layout::left_to_right(Align::Center)),
+            |ui| {
+                if theme::circle_button(
+                    ui,
+                    icon,
+                    DIAMETER,
+                    palette.overlay.gamma_multiply(0.85),
+                    palette.surface_hover,
+                    palette.text,
+                    hint,
+                )
+                .clicked()
+                {
+                    actions.push(action);
+                }
+            },
+        );
+    }
 }
 
 /// Zoom factor the wheel or a pinch asks for over the preview area, with the
