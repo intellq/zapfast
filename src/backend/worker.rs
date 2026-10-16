@@ -81,6 +81,12 @@ const THUMBNAIL_SIDE: u32 = 96;
 const PROFILE_PICTURE_SIDE: u32 = 640;
 /// Sticker download batch size for the picker.
 const STICKER_FETCH_LIMIT: usize = 40;
+/// Picker stickers that arrive between two refreshes of its shelves while
+/// more are still on their way. The backlog is paced, two at a time and
+/// slower after a rate limit, so waiting for all of it left the shelves
+/// stale for minutes; refreshing on every arrival reshuffled Recent under
+/// the reader (#165).
+const SHELF_REFRESH_EVERY: usize = 4;
 const ATTACHMENT_LIMIT_ERROR: &str =
     crate::i18n::n_("This attachment exceeds the configured download size limit");
 const ATTACHMENT_TIMEOUT: Duration = Duration::from_secs(120);
@@ -747,6 +753,11 @@ pub async fn run(
         favorite_fetches: HashSet::new(),
         sticker_pace: Default::default(),
         sticker_failed: HashSet::new(),
+        sticker_download_failed: HashSet::new(),
+        sticker_resume: false,
+        sticker_clicked: HashSet::new(),
+        sticker_retried: HashSet::new(),
+        sticker_arrivals: 0,
         favorites_pushing: false,
         favorites_again: false,
         favorites_recovered,
@@ -839,6 +850,7 @@ pub async fn run(
                 worker.retry_avatars();
                 worker.pump_group_info();
                 worker.pump_favorite_stickers();
+                worker.resume_sticker_fetches();
                 worker.pump_read_sync();
                 worker.pump_favorite_chats();
                 worker.pump_poll_votes();
@@ -1115,6 +1127,20 @@ struct Worker {
     sticker_pace: sticker_pace::Pace,
     /// Recent stickers whose download failed this session, not asked again.
     sticker_failed: HashSet<String>,
+    /// Chat stickers whose picker download failed this session, not asked
+    /// again.
+    sticker_download_failed: HashSet<(ChatId, String)>,
+    /// The server paused picker downloads with some left to fetch; the tick
+    /// fetches them once the pause is over.
+    sticker_resume: bool,
+    /// Chat stickers clicked while a picker download of theirs was in
+    /// flight, downloaded again, re-upload and all, if that one fails.
+    sticker_clicked: HashSet<(ChatId, String)>,
+    /// Those clicked stickers downloading again; one that arrives refreshes
+    /// the picker's shelves, as a picker download would.
+    sticker_retried: HashSet<(ChatId, String)>,
+    /// Picker stickers that arrived since the shelves were last sent.
+    sticker_arrivals: usize,
     /// Whether favorite changes are on their way to the phone.
     favorites_pushing: bool,
     /// More favorite changes arrived while a push was running.
@@ -3309,6 +3335,10 @@ impl Worker {
     async fn on_logged_out(&mut self) {
         self.privacy_generation = self.privacy_generation.wrapping_add(1);
         self.edits.clear();
+        self.sticker_download_failed.clear();
+        self.sticker_clicked.clear();
+        self.sticker_retried.clear();
+        self.sticker_arrivals = 0;
         self.stop_bot().await;
         if let Err(error) = self.archive.clear() {
             log::warn!("could not clear the archive: {error}");
@@ -6340,29 +6370,26 @@ impl Worker {
             }
             Command::StickerFetched { hash, result } => {
                 self.sticker_fetches.remove(&hash);
-                match result {
+                match &result {
                     Ok(path) => {
-                        if self.archive.set_sticker_path(&hash, &path).is_err() {
+                        if self.archive.set_sticker_path(&hash, path).is_err() {
                             log::warn!("could not file a sticker");
                         }
                     }
-                    Err(error) if sticker_pace::rate_limited(&error) => {
+                    Err(error) if sticker_pace::rate_limited(error) => {
                         log::warn!("sticker downloads paused: the server asked to slow down");
                         self.sticker_pace.limited(Instant::now());
+                        self.sticker_resume = true;
                     }
                     Err(_error) => {
                         log::warn!("could not fetch a sticker");
                         self.sticker_failed.insert(hash);
                     }
                 }
+                let arrived = result.is_ok();
                 // The next missing ones take the freed places.
                 self.fetch_missing_stickers();
-                // Recent is sorted by use, so each arrival lands mid-grid and
-                // shifts every tile after it. Publish the batch once, instead
-                // of reshuffling the open picker under the reader (#165).
-                if self.sticker_fetches.is_empty() {
-                    self.emit_stickers();
-                }
+                self.picker_sticker_settled(arrived);
             }
             Command::MeInfo { about } => {
                 self.me_about = about;
@@ -7715,6 +7742,12 @@ impl Worker {
 
     fn download_media(&mut self, chat: ChatId, id: String, card: Option<usize>) {
         if !self.downloads.insert((chat.clone(), id.clone(), card)) {
+            // A click while only the picker is fetching it: the picker's
+            // download skips the re-upload, so remember to ask if it fails.
+            let key = (chat, id);
+            if card.is_none() && self.sticker_downloads.contains(&key) {
+                self.sticker_clicked.insert(key);
+            }
             return;
         }
         let Some(client) = self.client.clone() else {
@@ -7827,6 +7860,10 @@ impl Worker {
                     .and_then(|media| media.media_key.clone())
             })
             .unwrap_or_default();
+        // A sticker only the picker wanted is not worth a re-upload request:
+        // the picker fetches in the background, and each request counts
+        // toward the server's rate limit (#405). A click on its bubble asks.
+        let reupload = !self.sticker_downloads.contains(&(chat.clone(), id.clone()));
         let jid = Self::jid_of(&chat);
         let row = self.archive.message(&chat, &id).ok().flatten();
         let is_from_me = row.as_ref().is_some_and(|row| row.from_me);
@@ -7889,7 +7926,7 @@ impl Worker {
                     Err(error) => {
                         let text = error.to_string();
                         let expired = ["403", "404", "410"].iter().any(|code| text.contains(code));
-                        match (&jid, expired && !media_key.is_empty()) {
+                        match (&jid, expired && reupload && !media_key.is_empty()) {
                             (Some(jid), true) => {
                                 // Ask the phone to re-upload expired media, then retry once.
                                 let request = MediaReuploadRequest {
@@ -8049,17 +8086,70 @@ impl Worker {
             let _ = self.archive.put_media_path_at(&chat, &id, card, Some(path));
         }
         self.downloads.remove(&(chat.clone(), id.clone(), card));
-        let for_picker = self.sticker_downloads.remove(&(chat.clone(), id.clone()));
+        let key = (chat.clone(), id.clone());
+        let for_picker = self.sticker_downloads.remove(&key);
+        let clicked = self.sticker_clicked.remove(&key);
+        let retried = self.sticker_retried.remove(&key);
+        if for_picker && let Err(error) = &result {
+            if sticker_pace::rate_limited(error) {
+                log::warn!("sticker downloads paused: the server asked to slow down");
+                self.sticker_pace.limited(Instant::now());
+                self.sticker_resume = true;
+            } else if clicked {
+                // Asked for in its chat meanwhile: try again as that click,
+                // which may ask the phone to re-upload it.
+                self.sticker_retried.insert(key);
+                self.download(chat, id);
+                self.fetch_missing_stickers();
+                return;
+            } else {
+                self.sticker_download_failed.insert(key);
+            }
+        }
+        let result_ok = result.is_ok();
         self.emit(Event::Media {
             card,
             chat,
             message: id,
             result,
         });
-        // Listing the shelves scans the archive; one pass per batch keeps
-        // a send queued behind many picker downloads from waiting on each.
-        if for_picker && self.sticker_downloads.is_empty() {
+        if retried && !for_picker && result_ok {
             self.emit_stickers();
+        }
+        if for_picker {
+            // The next missing ones take the freed places.
+            self.fetch_missing_stickers();
+            self.picker_sticker_settled(result_ok);
+        }
+    }
+
+    /// Sends the picker its shelves after a picker download settles: once
+    /// every [`SHELF_REFRESH_EVERY`] arrivals, and when none is left in
+    /// flight. Listing the shelves scans the archive, and Recent is sorted
+    /// by use, so each arrival lands mid-grid and shifts the tiles after it:
+    /// a refresh per arrival would keep a send queued behind the scans and
+    /// reshuffle the open picker under the reader (#165).
+    fn picker_sticker_settled(&mut self, arrived: bool) {
+        if arrived {
+            self.sticker_arrivals += 1;
+        }
+        if self.picker_downloads() == 0 || self.sticker_arrivals >= SHELF_REFRESH_EVERY {
+            self.sticker_arrivals = 0;
+            self.emit_stickers();
+        }
+    }
+
+    /// Picker downloads in flight, recent and chat stickers together, which
+    /// share one limit.
+    fn picker_downloads(&self) -> usize {
+        self.sticker_fetches.len() + self.sticker_downloads.len()
+    }
+
+    /// Fetches the stickers a rate limit left behind, once its pause is over.
+    fn resume_sticker_fetches(&mut self) {
+        if self.sticker_resume && self.sticker_pace.open(Instant::now()) {
+            self.sticker_resume = false;
+            self.fetch_missing_stickers();
         }
     }
 
@@ -8082,7 +8172,7 @@ impl Worker {
         };
         let dir = self.dirs.sticker_cache_dir();
         for sticker in phone.into_iter().filter(|sticker| sticker.path.is_none()) {
-            if self.sticker_fetches.len() >= sticker_pace::IN_FLIGHT {
+            if self.picker_downloads() >= sticker_pace::IN_FLIGHT {
                 break;
             }
             if self.sticker_failed.contains(&sticker.hash)
@@ -8116,12 +8206,27 @@ impl Worker {
                 let _ = commands.send(Command::StickerFetched { hash, result });
             });
         }
-        match self.archive.stickers_without_file(STICKER_FETCH_LIMIT) {
+        // Rows that failed this session are skipped below; asking for that
+        // many more keeps them from filling the window and hiding the rest.
+        let limit = STICKER_FETCH_LIMIT + self.sticker_download_failed.len();
+        match self.archive.stickers_without_file(limit) {
             Ok(list) => {
-                for (chat, id) in list {
-                    if self.sticker_downloads.insert((chat.clone(), id.clone())) {
-                        self.download(chat, id);
+                for key in list {
+                    if self.picker_downloads() >= sticker_pace::IN_FLIGHT {
+                        break;
                     }
+                    // One already downloading for its chat is not the picker's.
+                    let downloading =
+                        self.downloads
+                            .contains(&(key.0.clone(), key.1.clone(), None));
+                    if downloading
+                        || self.sticker_download_failed.contains(&key)
+                        || !self.sticker_downloads.insert(key.clone())
+                    {
+                        continue;
+                    }
+                    let (chat, id) = key;
+                    self.download(chat, id);
                 }
             }
             Err(error) => log::warn!("could not list unfetched stickers: {error}"),
@@ -15831,6 +15936,11 @@ mod receipt_tests {
             favorite_fetches: HashSet::new(),
             sticker_pace: Default::default(),
             sticker_failed: HashSet::new(),
+            sticker_download_failed: HashSet::new(),
+            sticker_resume: false,
+            sticker_clicked: HashSet::new(),
+            sticker_retried: HashSet::new(),
+            sticker_arrivals: 0,
             favorites_pushing: false,
             favorites_again: false,
             favorites_recovered: true,
