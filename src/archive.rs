@@ -229,6 +229,7 @@ fn chat_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Chat> {
         read_only: row.get(14)?,
         labels: Vec::new(),
         ephemeral_expiration: row.get::<_, Option<u32>>(16)?,
+        unread_mention: None,
         notification_sound: row
             .get::<_, Option<String>>(19)?
             .and_then(|sound| serde_json::from_str(&sound).ok()),
@@ -1656,6 +1657,36 @@ impl Archive {
                 |row| row.get(0),
             )
             .optional()
+    }
+
+    /// The oldest of a chat's `unread` newest incoming messages that mentions
+    /// us (under any id in `ours`) or everyone.
+    pub fn unread_mention(&self, chat: &str, unread: u32, ours: &[&str]) -> Result<Option<String>> {
+        if unread == 0 {
+            return Ok(None);
+        }
+        let mut statement = self.connection.prepare(
+            "SELECT id, mentions FROM messages WHERE chat = ?1 AND from_me = 0
+             ORDER BY timestamp DESC, COALESCE(history_order, 9223372036854775807) DESC,
+                      rowid DESC
+             LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![chat, unread], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut oldest = None;
+        for row in rows {
+            let (id, mentions) = row?;
+            let mentions: Vec<crate::model::MentionRef> =
+                serde_json::from_str(&mentions).unwrap_or_default();
+            if mentions
+                .iter()
+                .any(|mention| crate::mentions::names_us(mention, ours))
+            {
+                oldest = Some(id);
+            }
+        }
+        Ok(oldest)
     }
 
     pub fn message(&self, chat: &str, id: &str) -> Result<Option<Message>> {
@@ -3810,6 +3841,50 @@ pub(crate) mod tests {
         );
         let reread = archive.message(chat, "p1").expect("read").expect("exists");
         assert_eq!(reread.content, updated.content);
+    }
+
+    #[test]
+    fn the_oldest_unread_mention_of_us_is_found() {
+        let archive = Archive::in_memory().expect("opens");
+        let chat = "1-2@g.us";
+        archive.ensure_chat(chat, "Club").expect("chat");
+        let me = "15550001111@s.whatsapp.net";
+        let mention = |user: &str, id: &str| crate::model::MentionRef {
+            user: user.into(),
+            id: id.into(),
+        };
+        let rows = [
+            ("old", 100, vec![mention("15550001111", me)]),
+            ("first", 200, vec![mention("15550001111", me)]),
+            (
+                "other",
+                300,
+                vec![mention("15550002222", "x@s.whatsapp.net")],
+            ),
+            ("lid", 400, vec![mention("98765", "98765@lid")]),
+            ("plain", 500, Vec::new()),
+        ];
+        for (id, timestamp, mentions) in rows {
+            let mut row = message(chat, id, timestamp, false);
+            row.mentions = mentions;
+            archive.insert_message(&row, None).expect("insert");
+        }
+        let mut own = message(chat, "mine", 600, true);
+        own.mentions = vec![mention("15550001111", me)];
+        archive.insert_message(&own, None).expect("insert");
+        let ours = [me, "98765@lid"];
+        assert_eq!(archive.unread_mention(chat, 0, &ours).unwrap(), None);
+        assert_eq!(archive.unread_mention(chat, 1, &ours).unwrap(), None);
+        assert_eq!(
+            archive.unread_mention(chat, 2, &ours).unwrap().as_deref(),
+            Some("lid")
+        );
+        assert_eq!(
+            archive.unread_mention(chat, 4, &ours).unwrap().as_deref(),
+            Some("first"),
+            "the oldest unread one, not one already read"
+        );
+        assert_eq!(archive.unread_mention(chat, 4, &[]).unwrap(), None);
     }
 
     #[test]

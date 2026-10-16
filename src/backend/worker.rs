@@ -1571,6 +1571,16 @@ impl Worker {
         }
         chat.labels = self.archive.chat_labels(&chat.id).unwrap_or_default();
         chat.blocked = self.is_blocked(&chat.id);
+        if chat.is_group() && chat.unread > 0 {
+            let ours: Vec<&str> = [self.me_pn.as_deref(), self.me_lid.as_deref()]
+                .into_iter()
+                .flatten()
+                .collect();
+            chat.unread_mention = self
+                .archive
+                .unread_mention(&chat.id, chat.unread, &ours)
+                .unwrap_or_default();
+        }
     }
 
     fn emit_message(&self, chat: &str, id: &str) {

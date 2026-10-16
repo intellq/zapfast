@@ -2194,13 +2194,10 @@ impl App {
             .flatten()
             .collect();
         let is_us = |id: &str| ours.contains(&id);
-        let mentioned = message.mentions.iter().any(|mention| {
-            crate::mentions::is_everyone(mention)
-                || is_us(&mention.id)
-                || ours
-                    .iter()
-                    .any(|id| id.split('@').next() == Some(mention.user.as_str()))
-        });
+        let mentioned = message
+            .mentions
+            .iter()
+            .any(|mention| crate::mentions::names_us(mention, &ours));
         mentioned
             || message
                 .quoted
@@ -4208,6 +4205,7 @@ impl App {
             && !self.window_hidden
         {
             chat.unread = 0;
+            chat.unread_mention = None;
             self.mark_read(&chat.id);
         }
         // Inside the authenticated folder the chat stays open; otherwise a
@@ -4875,6 +4873,7 @@ impl App {
         if let Some(known) = self.chat_mut(chat) {
             known.unread = 0;
             known.marked_unread = false;
+            known.unread_mention = None;
         }
         // Clear local unread state regardless of receipt settings.
         self.backend.send(Command::MarkRead {
@@ -5803,7 +5802,18 @@ impl App {
                 };
                 self.apply(Action::Open(page), ctx);
             }
-            Action::OpenChat(id) => self.open_chat(id),
+            Action::OpenChat(id) => {
+                // A chat where someone mentioned us opens at the mention, as
+                // on WhatsApp, rather than at the first unread message.
+                let mention = self
+                    .chat(&id)
+                    .filter(|_| self.open_chat.as_deref() != Some(id.as_str()))
+                    .and_then(|chat| chat.unread_mention.clone());
+                match mention {
+                    Some(message) => self.apply(Action::OpenMessage { chat: id, message }, ctx),
+                    None => self.open_chat(id),
+                }
+            }
             Action::OpenCallChat(id) => self.open_chat(id),
             Action::NavigateBack => self.navigate_back(ctx),
             Action::NavigateForward => self.navigate_forward(ctx),
@@ -14440,6 +14450,34 @@ mod tests {
         assert_eq!(shown, ["Ada"], "the chip finds the chat marked by hand");
         // The app badge counts it too, as WhatsApp does.
         assert_eq!(app.unread_chat_count(), 1);
+    }
+
+    /// Opening a chat where someone mentioned us shows the mention, and
+    /// reading it takes the "@" away (#487).
+    #[test]
+    fn opening_a_chat_goes_to_its_unread_mention() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        let id = "1-2@g.us";
+        let mut club = Chat::new(id.into(), "Club".into());
+        club.unread = 3;
+        club.unread_mention = Some("m2".into());
+        app.chats = vec![club, Chat::new("3@s.whatsapp.net".into(), "Ada".into())];
+        app.conversations.entry(id.into()).or_default().merge(
+            (1..=4).map(|n| message(id, &format!("m{n}"), n)).collect(),
+            false,
+        );
+        app.apply(Action::OpenChat(id.into()), &ctx);
+        assert_eq!(app.open_chat.as_deref(), Some(id));
+        assert_eq!(app.scroll_anchor.as_deref(), Some("m2"));
+        let chat = app.chat(id).unwrap();
+        assert_eq!((chat.unread, chat.unread_mention.as_ref()), (0, None));
+
+        // Without a mention, a chat opens as before.
+        app.apply(Action::OpenChat("3@s.whatsapp.net".into()), &ctx);
+        app.scroll_anchor = None;
+        app.apply(Action::OpenChat(id.into()), &ctx);
+        assert_eq!(app.scroll_anchor, None);
     }
 
     #[test]

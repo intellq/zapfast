@@ -21,7 +21,9 @@ people, only admins can mention everyone. People are notified as they are
 for any mention. Edits update the visible mentions. Editing an existing `@all`
 mention does not notify everyone again; adding `@all` in an edit requests a new
 notification. Forwarding or quoting an `@all` message does not notify everyone
-again. The smiley opens emoji
+again. A group where an unread message mentions you, or everyone, shows **@**
+beside its unread count in the chat list, even when muted, and opening it shows
+the oldest unread mention. The smiley opens emoji
 (searchable), GIFs, and stickers,
 including the stickers used on the phone.
 

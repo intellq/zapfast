@@ -340,6 +340,22 @@ pub fn badge(ui: &Ui, palette: &Palette, at: egui::Pos2, count: u32, muted: bool
     width
 }
 
+/// "@" in the round of a count badge: an unread message mentions us.
+pub fn mention_badge(ui: &Ui, palette: &Palette, at: egui::Pos2) -> f32 {
+    let galley =
+        ui.painter()
+            .layout_no_wrap("@".to_owned(), theme::semibold(12.0), palette.on_accent);
+    let rect = Rect::from_center_size(at, vec2(20.0, 20.0));
+    ui.painter()
+        .circle_filled(rect.center(), 10.0, palette.accent);
+    ui.painter().galley(
+        rect.center() - galley.size() / 2.0,
+        galley,
+        palette.on_accent,
+    );
+    20.0
+}
+
 /// Empty unread reminder: the same round as a count badge, with no digit.
 pub fn unread_dot(ui: &Ui, palette: &Palette, at: egui::Pos2, muted: bool) -> f32 {
     let fill = if muted { palette.dim } else { palette.accent };

@@ -233,6 +233,9 @@ pub struct Chat {
     /// Whether the account blocked this contact, as the server's blocklist
     /// last said. The worker sets it; the archive does not keep it.
     pub blocked: bool,
+    /// The oldest unread message that mentions us (or everyone), which the
+    /// chat list marks with "@" and opening the chat shows.
+    pub unread_mention: Option<String>,
 }
 
 /// Test chats that have had a message, so the chat list shows them
@@ -293,6 +296,7 @@ impl Chat {
             labels: Vec::new(),
             notification_sound: None,
             blocked: false,
+            unread_mention: None,
         }
     }
 

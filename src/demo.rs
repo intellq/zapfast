@@ -523,6 +523,10 @@ pub fn populate(app: &mut App) {
         chat.muted_until = sample.muted.then_some(0);
         chat.archived = sample.archived;
         chat.locked = sample.locked;
+        // Someone in Rust Berlin mentioned us among its unread messages.
+        if sample.name == "Rust Berlin" {
+            chat.unread_mention = Some(format!("{}-2", sample.id));
+        }
         let mut conversation = Conversation {
             complete: true,
             requested: true,
