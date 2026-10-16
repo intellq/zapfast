@@ -5200,3 +5200,67 @@ msgstr ""
 msgctxt "call"
 msgid "Silenced (unknown caller)"
 msgstr ""
+
+#: src/app.rs:3829
+msgid "Loading chat history"
+msgstr ""
+
+#: src/app.rs:4114
+msgid "Connecting"
+msgstr ""
+
+#: src/app.rs:5419
+msgid "Incoming voice call"
+msgstr ""
+
+#: src/app.rs:7803
+msgid "{}: {}"
+msgstr ""
+
+#: src/settings.rs:431
+msgid "Direct messages"
+msgstr ""
+
+#: src/settings.rs:433
+msgid "Direct messages and groups"
+msgstr ""
+
+#: src/ui/dialogs.rs:1476
+msgid "This deletes \"{name}\" and its stickers from this computer. To use it again, import it again."
+msgstr ""
+
+#: src/ui/dialogs.rs:1484
+msgid "Remove sticker pack?"
+msgstr ""
+
+#: src/ui/dialogs.rs:2155
+msgid "Description"
+msgstr ""
+
+#: src/ui/keys.rs:630
+msgid "Copy the selected messages"
+msgstr ""
+
+#: src/ui/settings.rs:834
+msgid "None"
+msgstr ""
+
+#: src/util.rs:286
+msgid "Off"
+msgstr ""
+
+#: src/util.rs:287
+msgid "24 hours"
+msgstr ""
+
+#: src/util.rs:288
+msgid "7 days"
+msgstr ""
+
+#: src/util.rs:289
+msgid "90 days"
+msgstr ""
+
+#: src/util.rs:292
+msgid "Disappearing messages"
+msgstr ""

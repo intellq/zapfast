@@ -5369,3 +5369,67 @@ msgstr "Silenciada (número desconhecido)"
 msgctxt "mention"
 msgid "all"
 msgstr "todos"
+
+#: src/app.rs:3829
+msgid "Loading chat history"
+msgstr "Carregando o histórico da conversa"
+
+#: src/app.rs:4114
+msgid "Connecting"
+msgstr "Conectando"
+
+#: src/app.rs:5419
+msgid "Incoming voice call"
+msgstr "Chamada de voz recebida"
+
+#: src/app.rs:7803
+msgid "{}: {}"
+msgstr "{}: {}"
+
+#: src/settings.rs:431
+msgid "Direct messages"
+msgstr "Conversas individuais"
+
+#: src/settings.rs:433
+msgid "Direct messages and groups"
+msgstr "Conversas individuais e grupos"
+
+#: src/ui/dialogs.rs:1476
+msgid "This deletes \"{name}\" and its stickers from this computer. To use it again, import it again."
+msgstr "Isso apaga “{name}” e suas figurinhas deste computador. Para usá-lo de novo, importe-o novamente."
+
+#: src/ui/dialogs.rs:1484
+msgid "Remove sticker pack?"
+msgstr "Remover o pacote de figurinhas?"
+
+#: src/ui/dialogs.rs:2155
+msgid "Description"
+msgstr "Descrição"
+
+#: src/ui/keys.rs:630
+msgid "Copy the selected messages"
+msgstr "Copiar as mensagens selecionadas"
+
+#: src/ui/settings.rs:834
+msgid "None"
+msgstr "Nenhum"
+
+#: src/util.rs:286
+msgid "Off"
+msgstr "Desativado"
+
+#: src/util.rs:287
+msgid "24 hours"
+msgstr "24 horas"
+
+#: src/util.rs:288
+msgid "7 days"
+msgstr "7 dias"
+
+#: src/util.rs:289
+msgid "90 days"
+msgstr "90 dias"
+
+#: src/util.rs:292
+msgid "Disappearing messages"
+msgstr "Mensagens temporárias"
