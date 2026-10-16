@@ -1745,21 +1745,17 @@ pub fn compact_width(_ctx: &egui::Context) -> f32 {
     super::rail::WIDTH
 }
 
-/// The rail's avatars: the chats the full list would show right now, under
-/// the same filter, search, archive, and locked-folder state. `beside_list`
-/// says the full list is on screen too; it keeps its own scrolling then,
-/// and the column scrolls on its own.
-pub(super) fn compact_list(app: &mut App, ui: &mut egui::Ui, beside_list: bool) {
+/// The rail's avatars while the list is hidden: the chats the full list
+/// would show right now, under the same filter, search, archive, and
+/// locked-folder state.
+pub(super) fn compact_list(app: &mut App, ui: &mut egui::Ui) {
     // The copies a narrow window's slide draws show the real column's
     // offset, and leave its requests and carried scroll to it.
     let copy = ui
         .ctx()
         .data(|data| data.get_temp::<bool>(slide_copy_id()))
         .is_some();
-    // The list takes its own request to follow a sent chat to the top.
-    let to_top = !copy
-        && (std::mem::take(&mut app.scroll_rail_to_top)
-            | (!beside_list && std::mem::take(&mut app.scroll_chats_to_top)));
+    let to_top = !copy && std::mem::take(&mut app.scroll_chats_to_top);
     if !app.locked_folder_open() && app.secret_code_matched() {
         // As in the full list, the secret code reveals only the way in.
         compact_locked_entry(app, ui);
@@ -1779,12 +1775,11 @@ pub(super) fn compact_list(app: &mut App, ui: &mut egui::Ui, beside_list: bool) 
     {
         scroll_area = scroll_area.vertical_scroll_offset(offset);
     }
-    // Alt+Up/Down reveals the chat it opens here too, when the list that
-    // would otherwise show it is hidden.
+    // Alt+Up/Down reveals the chat it opens here too.
     let target_row = app
         .scroll_chat_into_view
         .as_ref()
-        .filter(|_| !beside_list && !copy)
+        .filter(|_| !copy)
         .and_then(|target| chats.iter().position(|chat| chat.id == *target));
     if let Some(target_row) = target_row {
         let id = ui.make_persistent_id(egui::IdSalt::new("chat-rail"));
@@ -1802,11 +1797,7 @@ pub(super) fn compact_list(app: &mut App, ui: &mut egui::Ui, beside_list: bool) 
         scroll_area = scroll_area.vertical_scroll_offset(offset);
         app.scroll_chat_into_view = None;
     }
-    let pane = if beside_list {
-        crate::app::ScrollPane::Rail
-    } else {
-        crate::app::ScrollPane::Chats
-    };
+    let pane = crate::app::ScrollPane::Chats;
     let carried = if copy {
         0.0
     } else {

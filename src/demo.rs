@@ -17139,10 +17139,12 @@ mod rail_tests {
                 assert!((top[0].center().y - header.center().y).abs() < 3.0);
             }
             assert!(Destination::Chats.lit(&app));
-            // The chats' avatars are in the rail beside the list too.
+            // Beside the list the rail does not repeat its chats.
             let first = app.visible_chats()[0].id.clone();
-            let beside = recorded(&ctx, crate::ui::chats::compact_chat_id(&first))
-                .expect("the avatars are in the rail beside the list");
+            assert!(
+                recorded(&ctx, crate::ui::chats::compact_chat_id(&first)).is_none(),
+                "{macos}: no avatars in the rail beside the list"
+            );
 
             let (app, ctx) = open("rail", macos);
             let rail = rail_rect(&ctx).expect("the rail is drawn with the list hidden");
@@ -17168,101 +17170,7 @@ mod rail_tests {
                 "{macos}: between the destinations and Settings: {avatar:?}"
             );
             // Under Show the chat list, which takes a cell of its own.
-            assert!(avatar.top() >= show.bottom() && avatar.top() > beside.top());
-        }
-    }
-
-    /// The rail's avatars beside the shown list: they sit between the
-    /// destinations and the bottom group without overlapping either, in a
-    /// tall and a short window, only the ones on screen are laid out, and a
-    /// click opens the chat with the list still shown.
-    #[test]
-    fn the_rail_shows_the_chats_avatars_beside_the_list() {
-        let viewport_id = crate::ui::chats::list_offset_id().with("compact-viewport");
-        for macos in [false, true] {
-            for size in [egui::vec2(1280.0, 800.0), egui::vec2(1280.0, 440.0)] {
-                let (mut app, ctx) = open("chat", macos);
-                for _ in 0..3 {
-                    frame_at(&mut app, &ctx, size, Vec::new());
-                }
-                let label = format!("{macos} {size:?}");
-                let rail = rail_rect(&ctx).expect("the rail is drawn");
-                assert!(list_header(&ctx).is_some(), "{label}: the list is shown");
-                let starred = destination_rect(&ctx, Destination::Starred);
-                let lowest = [
-                    Destination::Archived,
-                    Destination::Locked,
-                    Destination::Settings,
-                ]
-                .into_iter()
-                .filter_map(|destination| ctx.read_response(rail::destination_id(destination)))
-                .map(|response| response.rect)
-                .chain(stop_rect(&ctx, Stop::Profile))
-                .fold(f32::INFINITY, |top, rect| top.min(rect.top()));
-                let viewport = recorded(&ctx, viewport_id).expect("the avatars' column");
-                assert!(rail.contains_rect(viewport), "{label}: {viewport:?}");
-                assert!(
-                    viewport.top() >= starred.bottom() && viewport.bottom() <= lowest,
-                    "{label}: {viewport:?} between {starred:?} and {lowest}"
-                );
-                let drawn: Vec<(String, egui::Rect)> = app
-                    .visible_chats()
-                    .iter()
-                    .filter_map(|chat| {
-                        recorded(&ctx, crate::ui::chats::compact_chat_id(&chat.id))
-                            .map(|rect| (chat.id.clone(), rect))
-                    })
-                    .collect();
-                assert!(!drawn.is_empty(), "{label}: avatars are drawn");
-                if size.y < 500.0 {
-                    assert!(
-                        drawn.len() < app.visible_chats().len(),
-                        "{label}: only the avatars on screen are laid out"
-                    );
-                }
-                // The column clips its avatars to itself; one laid out past
-                // its end is never seen.
-                assert!(
-                    drawn
-                        .iter()
-                        .all(|(_, rect)| rect.top() < viewport.bottom() + 60.0),
-                    "{label}: avatars past the column: {drawn:?}"
-                );
-                let open_chat = app.open_chat.clone();
-                // The short window may leave room for the open chat's alone.
-                let Some((target, rect)) = drawn
-                    .iter()
-                    .find(|(id, rect)| {
-                        Some(id) != open_chat.as_ref() && viewport.contains(rect.center())
-                    })
-                    .cloned()
-                else {
-                    assert!(size.y < 500.0, "{label}: another chat's avatar is in view");
-                    continue;
-                };
-                frame_at(
-                    &mut app,
-                    &ctx,
-                    size,
-                    vec![egui::Event::PointerMoved(rect.center())],
-                );
-                for pressed in [true, false] {
-                    frame_at(
-                        &mut app,
-                        &ctx,
-                        size,
-                        vec![egui::Event::PointerButton {
-                            pos: rect.center(),
-                            button: egui::PointerButton::Primary,
-                            pressed,
-                            modifiers: egui::Modifiers::NONE,
-                        }],
-                    );
-                }
-                frame_at(&mut app, &ctx, size, Vec::new());
-                assert_eq!(app.open_chat.as_deref(), Some(target.as_str()), "{label}");
-                assert!(list_header(&ctx).is_some(), "{label}: the list stays shown");
-            }
+            assert!(avatar.top() >= show.bottom());
         }
     }
 

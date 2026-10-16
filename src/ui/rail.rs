@@ -1,9 +1,9 @@
 //! The navigation rail on the left of the chat list, as WhatsApp's desktop
 //! clients have it: Chats, Calls and Starred at the top; Archived and Locked
 //! chats (while there are any), Settings and our own avatar (the account
-//! switcher) at the bottom. The chats' avatars fill the rail between the
-//! two, beside the list and while it is hidden, so every chat is one click
-//! away.
+//! switcher) at the bottom. While the chat list is hidden, the chats'
+//! avatars fill the rail between the two, so every chat is still one click
+//! away. Beside the list they would only repeat it.
 
 use egui::{Frame, Margin, Rect, Sense, Vec2, vec2};
 
@@ -190,22 +190,24 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, hidden: bool) {
             // A cell of its own under Starred: nothing above it moves when
             // the list comes and goes.
             show_list_button(app, ui, &palette);
+            ui.add_space(GAP / 2.0);
+            let line = Rect::from_center_size(
+                ui.cursor().min + vec2(width / 2.0, 0.0),
+                vec2(DIVIDER, 1.0),
+            );
+            ui.painter().rect_filled(line, 0.0, palette.outline);
+            ui.add_space(GAP / 2.0);
+            // The avatars take what the two groups leave, and scroll there.
+            let middle = (ui.available_height() - foot).max(0.0);
+            ui.allocate_ui_with_layout(
+                vec2(width, middle),
+                egui::Layout::top_down(egui::Align::Center),
+                |ui| {
+                    ui.spacing_mut().item_spacing.y = row_gap;
+                    super::chats::compact_list(app, ui);
+                },
+            );
         }
-        ui.add_space(GAP / 2.0);
-        let line =
-            Rect::from_center_size(ui.cursor().min + vec2(width / 2.0, 0.0), vec2(DIVIDER, 1.0));
-        ui.painter().rect_filled(line, 0.0, palette.outline);
-        ui.add_space(GAP / 2.0);
-        // The avatars take what the two groups leave, and scroll there.
-        let middle = (ui.available_height() - foot).max(0.0);
-        ui.allocate_ui_with_layout(
-            vec2(width, middle),
-            egui::Layout::top_down(egui::Align::Center),
-            |ui| {
-                ui.spacing_mut().item_spacing.y = row_gap;
-                super::chats::compact_list(app, ui, !hidden);
-            },
-        );
         let rest = (ui.available_height() - foot).max(0.0);
         ui.add_space(rest);
         for destination in bottom {
