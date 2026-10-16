@@ -392,6 +392,10 @@ pub struct App {
     /// A sent message moves its chat up, so the chat list goes to the top,
     /// if it is near the top already (the list decides, from its offset).
     pub scroll_chats_to_top: bool,
+    /// Image URIs whose file changed under them, for egui to read afresh on
+    /// the next frame: it caches a picture by its URI for as long as it is
+    /// on screen, and a chat's picture keeps one file name across changes.
+    stale_images: Vec<String>,
     pub composer: String,
     /// Text selection at the moment the composer's context menu opened.
     pub composer_menu_selection: Option<egui::text::CCursorRange>,
@@ -1313,6 +1317,7 @@ impl App {
             zoom_applied: false,
             wallpaper_image: crate::wallpaper::CustomImage::default(),
             scroll_chats_to_top: false,
+            stale_images: Vec::new(),
             composer: String::new(),
             composer_menu_selection: None,
             primary_paste: None,
@@ -3676,13 +3681,22 @@ impl App {
                 self.presence.insert(id, Presence { online, last_seen });
             }
             Event::Avatar { id, full, path } => {
-                if full {
+                // A changed picture arrives under the file name of the one it
+                // replaces, which egui would otherwise keep showing.
+                self.stale_images
+                    .extend(path.iter().map(|path| crate::util::image_uri(path)));
+                let previous = if full {
                     self.avatar_full_requests.remove(&id);
-                    self.avatars_full.insert(id, path);
+                    self.avatars_full.insert(id, path)
                 } else {
                     self.avatar_requests.remove(&id);
-                    self.avatars.insert(id, path);
-                }
+                    self.avatars.insert(id, path)
+                };
+                self.stale_images.extend(
+                    previous
+                        .flatten()
+                        .map(|previous| crate::util::image_uri(&previous)),
+                );
             }
             Event::LinkPreview { link, card } => {
                 if let Some(current) = &mut self.composer_link
@@ -7938,6 +7952,9 @@ impl App {
         self.wallpaper_image.sync(wallpaper.as_deref(), &self.waker);
         self.handle_notification_opens();
         self.handle_events();
+        for uri in std::mem::take(&mut self.stale_images) {
+            crate::image_cache::forget(ctx, &uri);
+        }
         self.tick(ctx);
         self.tick_audio(ctx);
         self.tick_transcripts();
@@ -14297,6 +14314,44 @@ mod tests {
         app.search_hits.push(message("1@s.whatsapp.net", "m", 1));
         app.apply(Action::Search(String::new()), &ctx);
         assert!(app.search_hits.is_empty());
+    }
+
+    /// A chat's new picture arrives under the file name of its old one, and
+    /// the window reads it afresh instead of keeping the old one it loaded.
+    #[test]
+    fn a_changed_chat_picture_is_read_again() {
+        let mut app = app();
+        let (backend, _commands, events) = Backend::recording_with_events();
+        app.backend = backend;
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        let group = "fixture@g.us";
+        let path = std::path::PathBuf::from("/cache/avatars/fixture.jpg");
+        let uri = crate::util::image_uri(&path);
+        let picture = |events: &std::sync::mpsc::Sender<Event>| {
+            events
+                .send(Event::Avatar {
+                    id: group.into(),
+                    full: false,
+                    path: Some(path.clone()),
+                })
+                .unwrap();
+        };
+        picture(&events);
+        app.background_frame(&ctx);
+        crate::image_cache::include(&ctx, uri.clone(), b"old picture");
+        assert!(
+            ctx.try_load_bytes(&uri).is_ok(),
+            "the old picture is loaded"
+        );
+        picture(&events);
+        app.background_frame(&ctx);
+        let old = matches!(
+            ctx.try_load_bytes(&uri),
+            Ok(egui::load::BytesPoll::Ready { bytes, .. }) if bytes.as_ref() == b"old picture"
+        );
+        assert!(!old, "the old picture is gone, so the new file is read");
+        assert_eq!(app.avatars.get(group), Some(&Some(path)));
     }
 
     #[test]

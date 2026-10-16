@@ -81,6 +81,19 @@ pub fn touch(ctx: &egui::Context, uri: &str) {
     }
 }
 
+/// Forgets one image now rather than once it falls out of the resident
+/// window: a chat picture replaced under the same file name. A later draw
+/// registers the bytes again.
+pub fn forget(ctx: &egui::Context, uri: &str) {
+    let registry = registry(ctx);
+    registry
+        .0
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .remove(uri);
+    ctx.forget_image(uri);
+}
+
 /// Forgets the images that have not been drawn for the longest.
 ///
 /// Images the current frame drew are never forgotten, so a frame that shows
