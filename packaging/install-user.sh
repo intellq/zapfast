@@ -69,7 +69,14 @@ EXEC_PATH="$installed" awk '
     }
     return out "\""
   }
-  /^Exec=/ { print "Exec=" quote(ENVIRON["EXEC_PATH"]); next }
+  # Everything after the command name stays: the Quit action keeps the
+  # `quit` it asks the running copy for.
+  /^Exec=/ {
+    rest = $0
+    sub(/^Exec=[^ ]*[ ]*/, "", rest)
+    print "Exec=" quote(ENVIRON["EXEC_PATH"]) (rest != "" ? " " rest : "")
+    next
+  }
   { print }
 ' "$here/applications/zapfast.desktop" > "$apps_dir/zapfast.desktop"
 

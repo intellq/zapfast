@@ -1939,6 +1939,8 @@ impl App {
                     }
                 }
                 ControlCommand::ReloadThemes => self.actions.push(Action::ReloadThemes),
+                // Quitting reveals nothing, so it works behind the app lock too.
+                ControlCommand::Quit => self.actions.push(Action::Quit),
                 ControlCommand::Ping => {}
                 ControlCommand::Anonymous(number) => {
                     match number
@@ -9894,6 +9896,21 @@ mod tests {
             )),
             "the hidden account downloads there too"
         );
+    }
+
+    /// `zapfast quit` takes the tray's Quit path, and does even behind the
+    /// app lock, since quitting reveals nothing.
+    #[test]
+    fn a_quit_request_quits_even_behind_the_lock() {
+        let ctx = egui::Context::default();
+        let mut app = app();
+        app.app_lock = crate::app_lock::AppLock::new(true);
+        assert!(app.app_lock.is_locked());
+        let queue = std::sync::Arc::new(std::sync::Mutex::new(vec![ControlCommand::Quit]));
+        app.control_commands = Some(queue);
+        app.handle_control_commands();
+        app.apply_actions(&ctx);
+        assert!(app.quit_requested);
     }
 
     #[test]

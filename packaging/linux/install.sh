@@ -121,7 +121,13 @@ exec_quoted() {
 # desktop of an open session looks icons up in folders it listed at login.
 exec_line() {
   EXEC_QUOTED=$(exec_quoted) ICON=${1:-} awk '
-    /^Exec=/ { print "Exec=" ENVIRON["EXEC_QUOTED"]; next }
+    # What follows the command stays, such as the Quit action'"'"'s `quit`.
+    /^Exec=/ {
+      rest = $0
+      sub(/^Exec=[^ ]*[ ]*/, "", rest)
+      print "Exec=" ENVIRON["EXEC_QUOTED"] (rest != "" ? " " rest : "")
+      next
+    }
     /^Icon=/ && ENVIRON["ICON"] != "" { print "Icon=" ENVIRON["ICON"]; next }
     { print }
   ' "$here/zapfast.desktop"

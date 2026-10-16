@@ -12,3 +12,9 @@ Categories=Network;InstantMessaging;Chat;
 Keywords=whatsapp;chat;messaging;
 Keywords[pt_BR]=whatsapp;conversa;mensagens;bate-papo;
 StartupWMClass=zapfast
+Actions=quit;
+
+[Desktop Action quit]
+Name=Quit ZapFast
+Name[pt_BR]=Sair do ZapFast
+Exec=zapfast quit

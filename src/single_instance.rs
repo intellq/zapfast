@@ -59,6 +59,8 @@ pub enum ControlCommand {
     Ping,
     /// Turns anonymous mode on for an account, by its place in the account list from 1.
     Anonymous(usize),
+    /// Quits, as the tray's Quit does.
+    Quit,
 }
 
 type Queue = Arc<Mutex<Vec<ControlCommand>>>;
@@ -136,6 +138,7 @@ fn parse(verb: &str) -> Option<ControlCommand> {
     match verb {
         "show" => Some(ControlCommand::Show),
         "reload-themes" => Some(ControlCommand::ReloadThemes),
+        "quit" => Some(ControlCommand::Quit),
         "ping" => Some(ControlCommand::Ping),
         verb if verb.starts_with(ANONYMOUS) => verb[ANONYMOUS.len()..]
             .parse()
@@ -265,6 +268,7 @@ mod tests {
         assert_eq!(parse("anonymous 2"), Some(ControlCommand::Anonymous(2)));
         assert_eq!(parse("anonymous x"), None);
         assert_eq!(parse("reload-themes"), Some(ControlCommand::ReloadThemes));
+        assert_eq!(parse("quit"), Some(ControlCommand::Quit));
         assert_eq!(parse("GET / HTTP/1.1"), None);
         assert_eq!(parse("frobnicate"), None);
         assert_eq!(parse(""), None);

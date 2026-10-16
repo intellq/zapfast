@@ -118,6 +118,37 @@ struct Cli {
 enum Control {
     /// Reload palettes in an already-running ZapFast without showing its window.
     ReloadThemes,
+    /// Quit an already-running ZapFast, which closing its window leaves in the tray.
+    Quit,
+}
+
+impl Control {
+    /// The request the running copy is sent.
+    fn verb(&self) -> &'static str {
+        match self {
+            Control::ReloadThemes => "reload-themes",
+            Control::Quit => "quit",
+        }
+    }
+}
+
+/// The exit code and the line for stderr after `command` was sent. Quitting
+/// when nothing runs is what was asked for, so it succeeds quietly.
+fn control(command: &Control, sent: std::io::Result<()>) -> (i32, Option<String>) {
+    use std::io::ErrorKind;
+    match sent {
+        Ok(()) => (0, None),
+        Err(error) if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::ConnectionRefused) => {
+            match command {
+                Control::Quit => (0, None),
+                Control::ReloadThemes => (
+                    1,
+                    Some("ZapFast is not running, so there are no themes to reload.".to_owned()),
+                ),
+            }
+        }
+        Err(error) => (1, Some(format!("Could not reach the running ZapFast: {error}"))),
+    }
 }
 
 /// Default log filter, used when `RUST_LOG` is unset.
@@ -163,18 +194,18 @@ fn run() -> eframe::Result<()> {
     let launch = fastframe_update::intercept(&zapfast::updates::CONFIG);
     let cli = Cli::parse_from(&launch.arguments);
     let discovered = paths::AppDirs::discover();
-    if matches!(cli.command, Some(Control::ReloadThemes)) {
-        if let Err(error) = single_instance::send(&discovered.runtime, "reload-themes") {
-            use std::io::ErrorKind;
-            if matches!(
-                error.kind(),
-                ErrorKind::NotFound | ErrorKind::ConnectionRefused
-            ) {
-                eprintln!("ZapFast is not running, so there are no themes to reload.");
-            } else {
-                eprintln!("Could not reach the running ZapFast: {error}");
-            }
-            std::process::exit(1);
+    // A control command only talks to the running copy: whatever the answer,
+    // it never starts ZapFast and never stops a process itself.
+    if let Some(command) = &cli.command {
+        let (code, message) = control(
+            command,
+            single_instance::send(&discovered.runtime, command.verb()),
+        );
+        if let Some(message) = message {
+            eprintln!("{message}");
+        }
+        if code != 0 {
+            std::process::exit(code);
         }
         return Ok(());
     }
@@ -880,6 +911,26 @@ fn app_icon() -> egui::IconData {
 #[cfg(all(test, feature = "demo"))]
 mod tests {
     use super::*;
+
+    /// `quit` is the subcommand, not a link to open.
+    #[test]
+    fn quit_is_a_subcommand() {
+        let cli = Cli::try_parse_from(["zapfast", "quit"]).unwrap();
+        assert!(matches!(cli.command, Some(Control::Quit)));
+        assert_eq!(Control::Quit.verb(), "quit");
+    }
+
+    /// Quitting succeeds when the running copy takes it and, quietly, when
+    /// nothing runs; reloading themes with nothing running fails.
+    #[test]
+    fn quit_reports_what_the_running_copy_did() {
+        use std::io::ErrorKind;
+        assert_eq!(control(&Control::Quit, Ok(())), (0, None));
+        assert_eq!(control(&Control::Quit, Err(ErrorKind::NotFound.into())), (0, None));
+        assert_eq!(control(&Control::Quit, Err(ErrorKind::TimedOut.into())).0, 1);
+        assert_eq!(control(&Control::ReloadThemes, Err(ErrorKind::NotFound.into())).0, 1);
+        assert_eq!(control(&Control::ReloadThemes, Ok(())), (0, None));
+    }
 
     #[test]
     fn tour_cli_accepts_manual_and_delayed_starts() {
