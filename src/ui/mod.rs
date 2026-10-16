@@ -39,6 +39,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         titlebar_strip(app, ui);
         lock::show(app, ui);
         focus_ring(app, ctx);
+        announce(app, ctx);
         return;
     }
     keys::handle(app, ctx);
@@ -70,6 +71,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         update::show(app, ctx);
         toasts(app, ctx);
         focus_ring(app, ctx);
+        announce(app, ctx);
         return;
     }
     let macos = theme::macos_chrome(ctx);
@@ -106,6 +108,13 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     }
     toasts(app, ctx);
     focus_ring(app, ctx);
+    announce(app, ctx);
+}
+
+/// Emits the screen reader announcement nodes; private ones stay silent
+/// while the app is locked.
+fn announce(app: &mut App, ctx: &egui::Context) {
+    app.announcer.show(ctx, !app.app_lock.is_locked());
 }
 
 /// The chat list, or the open chat or page with the list beside it unless

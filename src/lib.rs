@@ -2,6 +2,7 @@
 
 pub mod account;
 pub mod animation;
+pub mod announcer;
 pub mod app;
 pub mod app_lock;
 #[cfg(target_os = "linux")]

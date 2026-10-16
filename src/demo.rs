@@ -4871,6 +4871,21 @@ mod tests {
     }
 
     #[test]
+    fn announcer_nodes_are_in_every_frame() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        app.announcer
+            .say(crate::announcer::Category::Status, "Fixture status");
+        let labels = accessible_labels(&mut app, &ctx);
+        assert!(
+            labels.iter().any(|label| label == "Fixture status"),
+            "{labels:?}"
+        );
+    }
+
+    #[test]
     fn the_lock_screen_draws_no_chat_name_or_message() {
         let mut app = app();
         let ctx = egui::Context::default();
