@@ -404,6 +404,11 @@ fn run() -> eframe::Result<()> {
                 Box::new(move |cc| {
                     let mut app = lease.take(&cc.egui_ctx);
                     app.attach(&cc.egui_ctx);
+                    // Registered here rather than in `attach`, which headless
+                    // tests call too: they must never start a browser.
+                    #[cfg(all(unix, not(target_os = "macos")))]
+                    cc.egui_ctx
+                        .add_plugin(zapfast::opener::DetachedLinks::default());
                     #[cfg(feature = "demo")]
                     if cli.demo_macos {
                         zapfast::theme::preview_macos(&cc.egui_ctx);
