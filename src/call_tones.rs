@@ -1,7 +1,9 @@
 //! The tones a call makes on this side: the ringback heard while the peer's phone rings, and the
 //! ringtone of an incoming call.
 //!
-//! Both are synthesised here rather than bundled. Pidgin, whose message sounds ZapFast plays,
+//! Both are synthesised here as a fallback; the fork bundles Telegram Desktop's call sounds
+//! (`assets/sounds/call_outgoing.mp3` and `call_incoming.mp3`), which play when they decode.
+//! Pidgin, whose message sounds ZapFast plays,
 //! ships no call or ring sound (its `share/sounds/` holds only alert, login, logout, receive and
 //! send), and a tone made in code needs no licence note of its own.
 //!
@@ -120,14 +122,21 @@ impl Playing {
                     }
                 };
                 let player = rodio::Player::connect_new(device.mixer());
-                player.append(
-                    SamplesBuffer::new(
-                        NonZero::<u16>::MIN,
-                        NonZero::new(RATE).expect("48 kHz is not zero"),
-                        cycle(tone),
-                    )
-                    .repeat_infinite(),
-                );
+                // ZapFast's own call sounds when they decode, else the tone made in code.
+                match recorded_cycle(tone) {
+                    Some((channels, rate, samples)) => {
+                        player
+                            .append(SamplesBuffer::new(channels, rate, samples).repeat_infinite());
+                    }
+                    None => player.append(
+                        SamplesBuffer::new(
+                            NonZero::<u16>::MIN,
+                            NonZero::new(RATE).expect("48 kHz is not zero"),
+                            cycle(tone),
+                        )
+                        .repeat_infinite(),
+                    ),
+                }
                 // Runs until the handle is dropped, which closes the channel.
                 let _ = stopped.recv();
                 const STEPS: u32 = 6;
@@ -145,6 +154,19 @@ impl Playing {
             }
         }
     }
+}
+
+/// The recorded sound ZapFast bundles for `tone` (see `assets/sounds/README.md`), decoded to one
+/// cycle to repeat; `None` if it does not decode, and the tone made in code plays instead.
+fn recorded_cycle(tone: Tone) -> Option<(NonZero<u16>, NonZero<u32>, Vec<f32>)> {
+    let bytes: &'static [u8] = match tone {
+        Tone::Ringback => include_bytes!("../assets/sounds/call_outgoing.mp3"),
+        Tone::Ringtone => include_bytes!("../assets/sounds/call_incoming.mp3"),
+    };
+    let decoder = rodio::Decoder::new(std::io::Cursor::new(bytes)).ok()?;
+    let (channels, rate) = (decoder.channels(), decoder.sample_rate());
+    let samples: Vec<f32> = decoder.collect();
+    (!samples.is_empty()).then_some((channels, rate, samples))
 }
 
 /// One cycle of `tone`, mono at 48 kHz, ready to repeat.
@@ -204,6 +226,16 @@ fn edge(t: f32, length: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    /// The bundled recordings decode, so the fallback made in code is only
+    /// for a build whose decoder cannot read them.
+    #[test]
+    fn the_bundled_call_sounds_decode() {
+        for tone in [Tone::Ringback, Tone::Ringtone] {
+            let (_, _, samples) = recorded_cycle(tone).expect("the recording decodes");
+            assert!(samples.iter().any(|sample| sample.abs() > 0.01));
+        }
+    }
+
     use super::*;
 
     #[test]
