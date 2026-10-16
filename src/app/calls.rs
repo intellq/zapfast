@@ -31,6 +31,8 @@ pub struct CallPerson {
     pub picture: Option<std::path::PathBuf>,
     /// Whether the call service counts them as in the call, not only asked.
     pub joined: bool,
+    /// Whether their camera's picture is arriving.
+    pub video: bool,
 }
 
 /// How long a call may stay placing with no word from its worker before the
@@ -139,6 +141,7 @@ impl App {
                     name: app.display_name(&person.id),
                     picture: app.avatar(&person.id),
                     joined: person.joined,
+                    video: person.video,
                     id: person.id,
                 })
                 .collect()
@@ -197,6 +200,8 @@ impl App {
         self.call_remote_frame = None;
         self.call_local_texture = None;
         self.call_remote_texture = None;
+        self.call_member_frames.clear();
+        self.call_member_textures.clear();
     }
 
     /// A video call's newest pictures, from the account the call is on.
@@ -204,6 +209,7 @@ impl App {
         &mut self,
         local: Option<std::sync::Arc<egui::ColorImage>>,
         remote: Option<std::sync::Arc<egui::ColorImage>>,
+        from: Option<String>,
     ) {
         if self.call_account.as_ref() != Some(&self.account().id) || !self.call_live() {
             return;
@@ -211,8 +217,12 @@ impl App {
         if let Some(image) = local {
             self.call_local_frame = Some(image);
         }
-        if let Some(image) = remote {
-            self.call_remote_frame = Some(image);
+        match (remote, from) {
+            (Some(image), Some(member)) => {
+                self.call_member_frames.insert(member, image);
+            }
+            (Some(image), None) => self.call_remote_frame = Some(image),
+            (None, _) => {}
         }
     }
 
@@ -285,6 +295,18 @@ impl App {
         if !update.camera_on || other_account {
             self.call_local_frame = None;
         }
+        // Likewise a member whose video stopped, or who left: their tile goes back to their photo.
+        let sending: Vec<&str> = update
+            .group
+            .iter()
+            .flat_map(|group| &group.participants)
+            .filter(|person| person.video && !other_account)
+            .map(|person| person.id.as_str())
+            .collect();
+        self.call_member_frames
+            .retain(|member, _| sending.contains(&member.as_str()));
+        self.call_member_textures
+            .retain(|member, _| sending.contains(&member.as_str()));
         self.call = Some(update);
         self.call_account = Some(account);
         if finished {
@@ -792,6 +814,40 @@ mod tests {
         // Closing the folder sends the call back behind the strip.
         app.close_locked_folder();
         assert!(app.call_surface_hidden);
+    }
+
+    /// A group member's picture stays on their tile while their video runs, and goes when it
+    /// stops; it never stands in for a one-to-one peer's.
+    #[test]
+    fn a_members_picture_lasts_as_long_as_their_video() {
+        use crate::calls::{GroupCall, Participant};
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _) = app(directory.path());
+        let with = |video: bool| {
+            let mut update = update(1, CallPhase::Active);
+            update.video = true;
+            update.group = Some(GroupCall {
+                caller: None,
+                participants: vec![Participant {
+                    id: ADA.to_owned(),
+                    joined: true,
+                    video,
+                }],
+            });
+            update
+        };
+        app.handle_call_update(with(false));
+        let image = Arc::new(egui::ColorImage::filled([2, 2], egui::Color32::BLACK));
+        app.handle_call_video(None, Some(image), Some(ADA.to_owned()));
+        app.handle_call_update(with(true));
+        assert!(app.call_member_frames.contains_key(ADA));
+        assert!(app.call_remote_frame.is_none(), "not a one-to-one picture");
+        assert!(app.call_people()[0].video);
+        app.handle_call_update(with(false));
+        assert!(
+            app.call_member_frames.is_empty(),
+            "a stopped camera leaves no frozen picture"
+        );
     }
 
     #[test]

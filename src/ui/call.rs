@@ -961,40 +961,89 @@ fn group_live(
         bottom -= notes_height + 8.0;
     }
 
-    // Those in the call first, then those only asked to it.
-    let mut people: Vec<&CallPerson> = who.people.iter().filter(|p| p.joined).collect();
-    people.extend(who.people.iter().filter(|p| !p.joined));
-    let overflow = people.len().saturating_sub(MAX_TILES);
-    let shown = if overflow > 0 {
-        &people[..MAX_TILES - 1]
-    } else {
-        &people[..]
-    };
-    let count = shown.len() + usize::from(overflow > 0);
+    // Those in the call first, then our own camera while it runs, then those
+    // only asked to it; past the most a grid holds, the last tile counts the
+    // rest.
+    let me = (call.video && call.camera_on)
+        .then(|| app.call_local_frame.clone())
+        .flatten();
+    let mut tiles: Vec<Tile<'_>> = who
+        .people
+        .iter()
+        .filter(|person| person.joined)
+        .map(Tile::Person)
+        .collect();
+    tiles.extend(me.map(Tile::Me));
+    tiles.extend(
+        who.people
+            .iter()
+            .filter(|person| !person.joined)
+            .map(Tile::Person),
+    );
+    if tiles.len() > MAX_TILES {
+        let rest = tiles.len() - (MAX_TILES - 1);
+        tiles.truncate(MAX_TILES - 1);
+        tiles.push(Tile::More(rest));
+    }
     let grid = Rect::from_min_max(
         egui::pos2(area.left(), header.bottom() + 12.0),
         egui::pos2(area.right(), bottom.max(header.bottom() + 60.0)),
     );
-    let tiles = tile_grid(count, grid, TILE_GAP);
-    for (person, rect) in shown.iter().zip(&tiles) {
-        person_tile(ui, locale, palette, person, *rect);
+    let rects = tile_grid(tiles.len(), grid, TILE_GAP);
+    let you = gettext(locale, "You").into_owned();
+    for (tile, rect) in tiles.into_iter().zip(rects) {
+        match tile {
+            // A member whose camera is on fills their tile with it; anyone
+            // else keeps their photo, so nobody leaves the grid by turning it
+            // off.
+            Tile::Person(person) => match person
+                .video
+                .then(|| app.call_member_frames.get(&person.id).cloned())
+                .flatten()
+            {
+                Some(image) => {
+                    let mut kept = app.call_member_textures.remove(&person.id);
+                    let texture = call_texture(ui, &mut kept, "zapfast-call-member", &image);
+                    if let Some(kept) = kept {
+                        app.call_member_textures.insert(person.id.clone(), kept);
+                    }
+                    video_tile(ui, &person.name, texture, image_size(&image), rect);
+                }
+                None => person_tile(ui, locale, palette, person, rect),
+            },
+            // Our own camera takes a tile of its own beside the others rather
+            // than floating over one of them.
+            Tile::Me(image) => {
+                let texture = call_texture(
+                    ui,
+                    &mut app.call_local_texture,
+                    "zapfast-call-local",
+                    &image,
+                );
+                video_tile(ui, &you, texture, image_size(&image), rect);
+            }
+            Tile::More(rest) => {
+                ui.painter()
+                    .rect_filled(rect, CornerRadius::same(14), tile_fill(palette));
+                ui.painter().text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    format!("+{rest}"),
+                    theme::bold(24.0),
+                    palette.secondary,
+                );
+            }
+        }
     }
-    if overflow > 0
-        && let Some(rect) = tiles.last()
-    {
-        ui.painter()
-            .rect_filled(*rect, CornerRadius::same(14), tile_fill(palette));
-        ui.painter().text(
-            rect.center(),
-            egui::Align2::CENTER_CENTER,
-            format!("+{}", overflow + 1),
-            theme::bold(24.0),
-            palette.secondary,
-        );
-    }
+}
 
-    // Our own camera sits in the top corner at its own shape.
-    own_preview(ui, app, call, palette, area);
+/// One tile of a group call's grid.
+enum Tile<'a> {
+    Person(&'a CallPerson),
+    /// Our own camera's picture.
+    Me(std::sync::Arc<egui::ColorImage>),
+    /// How many more are on the call than the grid holds.
+    More(usize),
 }
 
 /// A tile's ground: a shade off the window in either theme, where a light
@@ -1011,6 +1060,58 @@ fn tile_fill(palette: &Palette) -> Color32 {
 fn notes_height(call: &CallUpdate) -> f32 {
     let lines = call.lost_devices.len() + usize::from(call.peer_audio.is_some());
     lines as f32 * 22.0
+}
+
+/// A member's tile while their camera is on: the picture fills it, cropped
+/// to its shape as WhatsApp's grid does, with their name on a plate in the
+/// corner.
+fn video_tile(ui: &mut egui::Ui, name: &str, texture: egui::TextureId, size: Vec2, rect: Rect) {
+    egui::Image::new((texture, rect.size()))
+        .uv(cover_uv(size, rect.size()))
+        .corner_radius(CornerRadius::same(14))
+        .paint_at(ui, rect);
+    let label = ui
+        .painter()
+        .layout_no_wrap(name.to_owned(), theme::semibold(13.0), Color32::WHITE);
+    let width = label.size().x.min(rect.width() - 36.0).max(0.0);
+    let plate = Rect::from_min_size(
+        egui::pos2(
+            rect.left() + 10.0,
+            rect.bottom() - 10.0 - label.size().y - 8.0,
+        ),
+        vec2(width + 16.0, label.size().y + 8.0),
+    );
+    ui.painter()
+        .rect_filled(plate, CornerRadius::same(8), VIDEO_SCRIM);
+    let clip = ui.painter().with_clip_rect(plate.shrink2(vec2(8.0, 0.0)));
+    clip.galley(
+        egui::pos2(plate.left() + 8.0, plate.top() + 4.0),
+        label,
+        Color32::WHITE,
+    );
+}
+
+/// The part of a picture of `image` size that covers a tile of `tile` size:
+/// the middle of it, cut down on whichever side is too long.
+fn cover_uv(image: Vec2, tile: Vec2) -> Rect {
+    let full = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+    if image.x <= 0.0 || image.y <= 0.0 || tile.x <= 0.0 || tile.y <= 0.0 {
+        return full;
+    }
+    let (picture, frame) = (image.x / image.y, tile.x / tile.y);
+    if picture > frame {
+        let keep = frame / picture;
+        Rect::from_min_max(
+            egui::pos2((1.0 - keep) / 2.0, 0.0),
+            egui::pos2((1.0 + keep) / 2.0, 1.0),
+        )
+    } else {
+        let keep = picture / frame;
+        Rect::from_min_max(
+            egui::pos2(0.0, (1.0 - keep) / 2.0),
+            egui::pos2(1.0, (1.0 + keep) / 2.0),
+        )
+    }
 }
 
 /// One person's tile on a group call: their picture and name, dimmed while
@@ -1176,5 +1277,19 @@ mod tests {
         let middle = (five[3].left() + five[4].right()) / 2.0;
         assert!((middle - area.center().x).abs() < 0.5);
         assert!(tile_grid(0, area, TILE_GAP).is_empty());
+    }
+
+    #[test]
+    fn a_members_picture_covers_their_tile_from_its_middle() {
+        // A wide picture in a 4:3 tile loses its sides.
+        let wide = cover_uv(vec2(1600.0, 900.0), vec2(400.0, 300.0));
+        assert!((wide.top() - 0.0).abs() < 1e-6 && (wide.bottom() - 1.0).abs() < 1e-6);
+        assert!((wide.center().x - 0.5).abs() < 1e-6);
+        assert!((wide.width() - (4.0 / 3.0) / (16.0 / 9.0)).abs() < 1e-4);
+        // A portrait one loses its top and bottom.
+        let tall = cover_uv(vec2(720.0, 1280.0), vec2(400.0, 300.0));
+        assert!((tall.width() - 1.0).abs() < 1e-6);
+        assert!((tall.center().y - 0.5).abs() < 1e-6);
+        assert!(tall.height() < 1.0);
     }
 }

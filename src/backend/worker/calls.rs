@@ -470,7 +470,28 @@ impl Worker {
                 self.emit(Event::CallVideo {
                     local: Some(image),
                     remote: None,
+                    from: None,
                 });
+            }
+            VideoTick::RemoteFrom { sender, image } => {
+                // A group member's picture, for their own tile, under the id their tile has.
+                let Some((id, first)) = self
+                    .call
+                    .as_mut()
+                    .and_then(|runtime| runtime.call.group_picture(&sender))
+                else {
+                    return;
+                };
+                self.emit(Event::CallVideo {
+                    local: None,
+                    remote: Some(image),
+                    from: Some(self.canonical_str(&id)),
+                });
+                // Their tile turns from their photo to their picture.
+                if first && let Some(runtime) = self.call.as_ref() {
+                    let update = self.canonical_call(runtime.call.update());
+                    self.emit(Event::Call(Box::new(update)));
+                }
             }
             VideoTick::Remote(image) => {
                 let first = self
@@ -488,6 +509,7 @@ impl Worker {
                     self.emit(Event::CallVideo {
                         local: None,
                         remote: Some(image),
+                        from: None,
                     });
                 }
                 if first && let Some(runtime) = self.call.as_ref() {
@@ -1047,6 +1069,23 @@ mod tests {
             ["15550002222@s.whatsapp.net", "200000000000002@lid"],
             "named by phone number where known, and without us"
         );
+
+        // A member's picture reaches the window under their chat id, and turns their tile.
+        let image = std::sync::Arc::new(egui::ColorImage::filled([2, 2], egui::Color32::BLACK));
+        worker.call_frame(VideoTick::RemoteFrom {
+            sender: "200000000000001:5@lid".parse().unwrap(),
+            image,
+        });
+        let events: Vec<Event> = events.try_iter().collect();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Event::CallVideo { from: Some(id), remote: Some(_), .. }
+                if id == "15550002222@s.whatsapp.net"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Event::Call(update) if update.group.as_ref().is_some_and(|group| group.participants[0].video)
+        )));
 
         // The caller gives up before we answer: a missed group call, in the group.
         assert!(worker.call_resolved(crate::calls::test_offers::CALL_ID, None));

@@ -208,6 +208,9 @@ pub struct Participant {
     pub id: String,
     /// Whether the call service counts them as in the call, rather than only asked to it.
     pub joined: bool,
+    /// Whether their camera's picture is arriving: set by their first frame, cleared when they
+    /// say their video stopped or leave the call.
+    pub video: bool,
 }
 
 impl GroupCall {
@@ -525,10 +528,39 @@ fn require_video(requested: bool, pipeline: bool) -> Result<()> {
 pub enum VideoTick {
     /// Our own camera, for the corner preview.
     Local(Arc<ColorImage>),
-    /// The peer's picture.
+    /// The peer's picture, on a one-to-one call.
     Remote(Arc<ColorImage>),
+    /// One member's picture on a group call, by the sender the media named, so the call screen
+    /// can put it on that member's tile.
+    RemoteFrom { sender: Jid, image: Arc<ColorImage> },
     /// The peer's picture could not be decoded: the peer is asked for a keyframe.
     Lost,
+}
+
+/// The most group members whose pictures are decoded at once. Each has a decoder of its own; a new
+/// sender past the cap takes the place of the one that began first.
+const MAX_REMOTE_STREAMS: usize = 16;
+
+/// The largest a group member's picture is converted at, either way round.
+const TILE_PICTURE: (usize, usize) = (640, 360);
+
+/// The size a group member's picture of `size` is converted at: its own, or smaller to fit
+/// [`TILE_PICTURE`] at its own shape. Never larger than it came.
+fn tile_picture(size: (usize, usize)) -> (usize, usize) {
+    let (long, short) = (size.0.max(size.1), size.0.min(size.1));
+    if long <= TILE_PICTURE.0 && short <= TILE_PICTURE.1 {
+        return size;
+    }
+    crate::camera::fit_even(size, TILE_PICTURE)
+}
+
+/// One sender's picture being decoded.
+struct RemoteStream {
+    decoder: openh264::decoder::Decoder,
+    /// Whether a keyframe has arrived, which is where a decoder can start.
+    started: bool,
+    waiting: FirstKeyframe,
+    orientation: u8,
 }
 
 /// The camera side of the call: the camera module delivers YUV 4:2:0 at a fixed size, so the
@@ -687,7 +719,8 @@ impl VideoPipeline {
     fn start_blocking(
         device: Option<String>,
     ) -> Result<(Self, async_channel::Receiver<VideoTick>)> {
-        let (ticks, tick_rx) = async_channel::bounded::<VideoTick>(2);
+        // Room for a picture from each of several group members between two drains.
+        let (ticks, tick_rx) = async_channel::bounded::<VideoTick>(8);
         let (remote_tx, remote_rx) = async_channel::bounded::<VideoFrame>(8);
         decode_remote(remote_rx, ticks.clone());
         let rate_share = Arc::new(RateShare::default());
@@ -1193,7 +1226,10 @@ impl openh264::formats::YUVSource for Yuv420<'_> {
 /// Decodes the peer's access units into pictures for the UI.
 ///
 /// A decoder cannot start on a delta frame, so frames are skipped until the sink marks one as a
-/// keyframe. Runs on its own thread for the same reason the encoder does.
+/// keyframe. A group call's frames each name their sender, and each sender gets a decoder of its
+/// own (at most [`MAX_REMOTE_STREAMS`]), so every member's picture reaches its own tile; a
+/// one-to-one call's carry no sender and share one. Runs on its own thread for the same reason the
+/// encoder does.
 fn decode_remote(
     frames: async_channel::Receiver<VideoFrame>,
     ticks: async_channel::Sender<VideoTick>,
@@ -1203,55 +1239,91 @@ fn decode_remote(
         .spawn(move || {
             use openh264::formats::YUVSource as _;
 
-            let mut decoder = openh264::decoder::Decoder::new().ok();
-            let mut started = false;
-            let mut waiting = FirstKeyframe::default();
-            let mut last_orientation = 0u8;
+            let mut streams: std::collections::HashMap<Option<Jid>, RemoteStream> =
+                std::collections::HashMap::new();
+            // The order the senders began in, so the cap lets go of the oldest stream.
+            let mut order: std::collections::VecDeque<Option<Jid>> =
+                std::collections::VecDeque::new();
             while let Ok(frame) = frames.recv_blocking() {
-                if !started {
+                let key = frame.sender.as_ref().map(Jid::to_non_ad);
+                if !streams.contains_key(&key) {
+                    let Ok(decoder) = openh264::decoder::Decoder::new() else {
+                        log::error!("[CALL] remote video decoder could not start");
+                        return;
+                    };
+                    if order.len() >= MAX_REMOTE_STREAMS
+                        && let Some(oldest) = order.pop_front()
+                    {
+                        streams.remove(&oldest);
+                    }
+                    order.push_back(key.clone());
+                    streams.insert(
+                        key.clone(),
+                        RemoteStream {
+                            decoder,
+                            started: false,
+                            waiting: FirstKeyframe::default(),
+                            orientation: 0,
+                        },
+                    );
+                }
+                let Some(stream) = streams.get_mut(&key) else {
+                    continue;
+                };
+                if !stream.started {
                     if !frame.keyframe {
                         // The peer's video is flowing and none of it can be decoded: its first
                         // keyframe went missing, or went out before this side could read it. A peer
                         // sends another only when asked, so the screen would otherwise say its
-                        // camera is off for the whole call. The engine sends the request.
-                        if waiting.ask(Instant::now()) {
+                        // camera is off for the whole call. The engine sends the request (on a
+                        // one-to-one call; a group's members send keyframes on their own schedule).
+                        if stream.waiting.ask(Instant::now()) {
                             let _ = ticks.try_send(VideoTick::Lost);
                         }
                         continue;
                     }
-                    started = true;
+                    stream.started = true;
                 }
-                let Some(decoder) = decoder.as_mut() else {
-                    return;
-                };
                 // The peer's camera rotation, which the frames carry so a phone held upright arrives
                 // upright. It rides the same bits on a keyframe and on a delta frame, and a peer
                 // that turns its phone changes it mid-call, so it is read per frame rather than once.
                 let orientation = frame.orientation & 0x03;
-                if orientation != last_orientation {
-                    last_orientation = orientation;
+                if orientation != stream.orientation {
+                    stream.orientation = orientation;
                     log::info!(
                         "[CALL] remote camera orientation is {} degrees",
                         orientation as u32 * 90
                     );
                 }
                 let turns = crate::video::orientation_turns(orientation);
-                match decoder.decode(&frame.data) {
+                match stream.decoder.decode(&frame.data) {
                     Ok(Some(decoded)) => {
                         let (width, height) = decoded.dimensions();
                         if width == 0 || height == 0 {
                             continue;
                         }
-                        let image = crate::video::rgb_image(
+                        // A member's picture fills a tile of a grid, never the window, so it is
+                        // converted at a tile's size: a dozen full pictures a frame would be more
+                        // than the interface thread can upload.
+                        let out = if key.is_some() {
+                            tile_picture((width, height))
+                        } else {
+                            (width, height)
+                        };
+                        let image = Arc::new(crate::video::rgb_image(
                             decoded.y(),
                             decoded.u(),
                             decoded.v(),
                             decoded.strides(),
                             (width, height),
-                            (width, height),
+                            out,
                             turns,
-                        );
-                        let _ = ticks.try_send(VideoTick::Remote(Arc::new(image)));
+                        ));
+                        let tick = match key {
+                            Some(sender) => VideoTick::RemoteFrom { sender, image },
+                            None => VideoTick::Remote(image),
+                        };
+                        let _ = ticks.try_send(tick);
                     }
                     Ok(None) => {}
                     Err(error) => {
@@ -1402,6 +1474,8 @@ struct GroupRoster {
     /// service numbers them, so one that arrives late never replaces a newer one.
     transaction: Option<u32>,
     participants: Vec<GroupCallParticipant>,
+    /// The members whose pictures are arriving, by their roster JID.
+    video: Vec<Jid>,
 }
 
 impl GroupRoster {
@@ -1443,7 +1517,45 @@ impl GroupRoster {
             return false;
         }
         self.participants = update.participants.clone();
+        // A member who left sends no picture; one who comes back says so with a new first frame.
+        let participants = &self.participants;
+        self.video.retain(|jid| {
+            participants
+                .iter()
+                .any(|person| &person.jid.to_non_ad() == jid && person.is_connected())
+        });
         true
+    }
+
+    /// The roster entry a media sender or a signaling source belongs to: the same user, whatever
+    /// the device, by privacy id or by phone number.
+    fn member(&self, sender: &Jid) -> Option<&GroupCallParticipant> {
+        let same = |jid: &Jid| jid.user == sender.user && jid.server == sender.server;
+        self.participants
+            .iter()
+            .find(|person| same(&person.jid) || person.pn.as_ref().is_some_and(same))
+    }
+
+    /// Notes a picture from `sender`: the id its tile is drawn under, and whether it is the first
+    /// since their video began. `None` for a sender the roster does not name, who has no tile.
+    fn picture_from(&mut self, sender: &Jid) -> Option<(String, bool)> {
+        let person = self.member(sender)?;
+        let (jid, id) = (person.jid.to_non_ad(), participant_id(person));
+        let first = !self.video.contains(&jid);
+        if first {
+            self.video.push(jid);
+        }
+        Some((id, first))
+    }
+
+    /// Notes that `source` stopped sending video. Returns whether that changed anything.
+    fn video_stopped(&mut self, source: &Jid) -> bool {
+        let Some(jid) = self.member(source).map(|person| person.jid.to_non_ad()) else {
+            return false;
+        };
+        let before = self.video.len();
+        self.video.retain(|known| known != &jid);
+        self.video.len() != before
     }
 
     fn view(&self) -> GroupCall {
@@ -1453,14 +1565,19 @@ impl GroupRoster {
                 .participants
                 .iter()
                 .map(|person| Participant {
-                    // The phone number when the roster carries it, so the person is named the way
-                    // their chat is; otherwise their privacy id.
-                    id: person.pn.as_ref().unwrap_or(&person.jid).to_non_ad_string(),
+                    id: participant_id(person),
                     joined: person.is_connected(),
+                    video: self.video.contains(&person.jid.to_non_ad()),
                 })
                 .collect(),
         }
     }
+}
+
+/// The id a roster entry is drawn under: the phone number when the roster carries it, so the
+/// person is named the way their chat is; otherwise their privacy id.
+fn participant_id(person: &GroupCallParticipant) -> String {
+    person.pn.as_ref().unwrap_or(&person.jid).to_non_ad_string()
 }
 
 /// Who rang us with `incoming`: the member named on the call wrapper when the call service sent it
@@ -2209,10 +2326,19 @@ impl Call {
                 None
             }
             CallEvent::PeerVideoStateChanged {
+                source,
                 state,
                 upgrade_token,
                 ..
             } => {
+                if let Some(roster) = self.group.as_mut() {
+                    // One member's camera: their tile goes back to their picture when it stops.
+                    // A group's call never turns into a video call, so a request is not asked.
+                    if state.is_inactive_for_call_mode() && roster.video_stopped(source) {
+                        return Some(self.update());
+                    }
+                    return None;
+                }
                 if state.is_upgrade_request() && !self.video {
                     // The peer turned their camera on in a voice call: the screen asks, and the
                     // camera button answers. A request resolved by signaling has no token.
@@ -2683,6 +2809,20 @@ impl Call {
         }
         log::info!("[CALL] camera device {:?}", self.camera);
         Ok(self.update())
+    }
+
+    /// Notes a group member's picture: the id of the tile it belongs on, and whether it is the
+    /// first since their video began (which the call screen is told, so the tile turns to it).
+    /// `None` on a one-to-one call, or for a sender the roster does not name.
+    pub fn group_picture(&mut self, sender: &Jid) -> Option<(String, bool)> {
+        let (id, first) = self.group.as_mut()?.picture_from(sender)?;
+        if first {
+            log::info!(
+                "[CALL] a group member's video began call_id={}",
+                self.call_id
+            );
+        }
+        Some((id, first))
     }
 
     /// Whether the peer's picture is the one to show right now.
@@ -3842,12 +3982,81 @@ mod tests {
                 Participant {
                     id: "200000000000001@lid".to_owned(),
                     joined: true,
+                    video: false,
                 },
                 Participant {
                     id: "200000000000002@lid".to_owned(),
                     joined: false,
+                    video: false,
                 },
             ]
+        );
+    }
+
+    /// A member's first picture turns their tile to it; their own video state stopping, or their
+    /// leaving, turns it back, and a picture from someone the roster does not name has no tile.
+    #[test]
+    fn a_members_picture_comes_and_goes_with_their_camera() {
+        use whatsapp_rust::voip::VideoState;
+        let incoming = group_offer(vec![
+            member("200000000000001", true),
+            member("200000000000002", true),
+        ]);
+        let mut call = Call::ringing(GROUP.to_owned(), Box::new(incoming), true);
+        call.phase = CallPhase::Active;
+        let sender: Jid = "200000000000002:4@lid".parse().unwrap();
+        let sending = |call: &Call| -> Vec<bool> {
+            call.update()
+                .group
+                .unwrap()
+                .participants
+                .iter()
+                .map(|person| person.video)
+                .collect()
+        };
+
+        assert_eq!(
+            call.group_picture(&sender),
+            Some(("200000000000002@lid".to_owned(), true)),
+            "the first picture, from any of the member's devices"
+        );
+        assert_eq!(
+            call.group_picture(&sender),
+            Some(("200000000000002@lid".to_owned(), false))
+        );
+        assert_eq!(sending(&call), [false, true]);
+        assert_eq!(
+            call.group_picture(&"200000000000077@lid".parse().unwrap()),
+            None,
+            "a stranger has no tile"
+        );
+
+        let stopped = CallEvent::PeerVideoStateChanged {
+            source: sender.clone(),
+            call_creator: test_offers::CREATOR.parse().unwrap(),
+            state: VideoState::Stopped,
+            orientation: None,
+            upgrade_token: None,
+        };
+        assert!(call.media(&stopped).is_some(), "their tile goes back");
+        assert_eq!(sending(&call), [false, false]);
+        assert!(call.media(&stopped).is_none(), "only once");
+
+        call.group_picture(&sender);
+        let left = roster(2, vec![member("200000000000001", true)]);
+        call.media(&CallEvent::GroupUpdated(Box::new(left)));
+        let back = roster(
+            3,
+            vec![
+                member("200000000000001", true),
+                member("200000000000002", true),
+            ],
+        );
+        call.media(&CallEvent::GroupUpdated(Box::new(back)));
+        assert_eq!(
+            sending(&call),
+            [false, false],
+            "someone who left and came back has not sent a picture yet"
         );
     }
 

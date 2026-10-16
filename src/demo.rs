@@ -2412,6 +2412,9 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
             // up with a tile for each member, one of them only asked to it.
             "call-group" => group_call_sample(app, true, false),
             "call-group-active" => group_call_sample(app, false, false),
+            // A group's video call: three members' cameras on, Tom's off, and
+            // ours in the corner.
+            "call-group-video" => group_call_sample(app, false, true),
             "call-strip" => {
                 call_sample(app, false, false);
                 app.call_surface_hidden = true;
@@ -3719,8 +3722,16 @@ pub fn group_call_sample(app: &mut App, incoming: bool, video: bool) {
         (SAMPLES[0].id, true),
         (SAMPLES[2].id, false),
     ];
+    // Who sends a picture on a video call, and which stand-in it is.
+    let cameras = [
+        (roster[0].0, ([200, 150, 80], [60, 40, 90])),
+        (roster[1].0, ([70, 110, 190], [20, 20, 50])),
+        (roster[3].0, ([230, 110, 90], [40, 30, 60])),
+    ];
+    let sending = |id: &str| video && cameras.iter().any(|(camera, _)| *camera == id);
     if let Some(call) = app.call.as_mut() {
         call.chat = SAMPLES[1].id.to_owned();
+        call.remote_video = false;
         call.group = Some(crate::calls::GroupCall {
             caller: Some(roster[0].0.to_owned()),
             participants: roster
@@ -3728,9 +3739,19 @@ pub fn group_call_sample(app: &mut App, incoming: bool, video: bool) {
                 .map(|(id, joined)| crate::calls::Participant {
                     id: (*id).to_owned(),
                     joined: *joined,
+                    video: sending(id),
                 })
                 .collect(),
         });
+    }
+    app.call_remote_frame = None;
+    if video && !incoming {
+        for (id, (top, bottom)) in cameras {
+            app.call_member_frames.insert(
+                id.to_owned(),
+                std::sync::Arc::new(stock_frame(top, bottom, false, 360)),
+            );
+        }
     }
 }
 
@@ -5993,6 +6014,7 @@ mod tests {
             "call-strip",
             "call-group",
             "call-group-active",
+            "call-group-video",
             "call-video",
             "call-video,light",
             "call-video-incoming",
@@ -6126,6 +6148,8 @@ mod tests {
             ("call-group", wide),
             ("call-group-active", wide),
             ("call-group-active", narrow),
+            ("call-group-video", wide),
+            ("call-group-video", narrow),
             ("settings", wide),
             ("settings", narrow),
             ("calls", wide),

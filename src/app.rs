@@ -835,6 +835,10 @@ pub struct App {
     /// than made afresh for every frame.
     pub call_local_texture: Option<CallTexture>,
     pub call_remote_texture: Option<CallTexture>,
+    /// The newest picture of each group member whose video is arriving, by chat id, and the
+    /// texture each is drawn through.
+    pub call_member_frames: HashMap<String, std::sync::Arc<egui::ColorImage>>,
+    pub call_member_textures: HashMap<String, CallTexture>,
     /// Whether ZapFast starts at login, when this installation supports it.
     pub start_with_system: Option<bool>,
     /// Whether ZapFast is the desktop's app for WhatsApp links, when this
@@ -1695,6 +1699,8 @@ impl App {
             call_remote_frame: None,
             call_local_texture: None,
             call_remote_texture: None,
+            call_member_frames: HashMap::new(),
+            call_member_textures: HashMap::new(),
             start_with_system: None,
             whatsapp_links: None,
             pending_wa_link: None,
@@ -3564,7 +3570,11 @@ impl App {
             }
             Event::Call(update) => self.handle_call_update(*update),
             Event::CallDevices(devices) => self.call_devices = *devices,
-            Event::CallVideo { local, remote } => self.handle_call_video(local, remote),
+            Event::CallVideo {
+                local,
+                remote,
+                from,
+            } => self.handle_call_video(local, remote, from),
             Event::CallLog(entries) => {
                 self.call_log = entries;
                 self.call_log_loaded = true;
