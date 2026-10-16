@@ -50,6 +50,8 @@ const VIDEO_TS_STRIDE: u32 = 90_000 / VIDEO_FPS;
 /// The encoder's bitrate for the budget above, about what WhatsApp's own clients use for a 720p
 /// call, and low enough to fit the uplink a call shares with its own audio.
 const VIDEO_BITRATE: u32 = 1_500_000;
+/// How often the decoder, while it waits for the peer's first keyframe, asks for one again.
+const FIRST_KEYFRAME_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
 
 // ---------------------------------------------------------------------------
 // State
@@ -921,10 +923,18 @@ fn decode_remote(
 
             let mut decoder = openh264::decoder::Decoder::new().ok();
             let mut started = false;
+            let mut waiting = FirstKeyframe::default();
             let mut last_orientation = 0u8;
             while let Ok(frame) = frames.recv_blocking() {
                 if !started {
                     if !frame.keyframe {
+                        // The peer's video is flowing and none of it can be decoded: its first
+                        // keyframe went missing, or went out before this side could read it. A peer
+                        // sends another only when asked, so the screen would otherwise say its
+                        // camera is off for the whole call. The engine sends the request.
+                        if waiting.ask(Instant::now()) {
+                            let _ = ticks.try_send(VideoTick::Lost);
+                        }
                         continue;
                     }
                     started = true;
@@ -971,6 +981,31 @@ fn decode_remote(
         });
     if let Err(error) = spawned {
         log::error!("[CALL] remote video decoder could not start: {error}");
+    }
+}
+
+/// While the decoder waits for the peer's first keyframe, when to ask for one again.
+#[derive(Debug, Default)]
+struct FirstKeyframe {
+    asked: Option<Instant>,
+}
+
+impl FirstKeyframe {
+    /// A frame arrived that the decoder cannot start on: whether to ask the peer for a keyframe
+    /// now. The first time at once, then once a [`FIRST_KEYFRAME_RETRY`], since a request can be
+    /// lost on the way like anything else.
+    fn ask(&mut self, now: Instant) -> bool {
+        if self
+            .asked
+            .is_some_and(|at| now.duration_since(at) < FIRST_KEYFRAME_RETRY)
+        {
+            return false;
+        }
+        if self.asked.is_none() {
+            log::info!("[CALL] the peer's video began without a keyframe; asking for one");
+        }
+        self.asked = Some(now);
+        true
     }
 }
 
@@ -2958,6 +2993,16 @@ mod tests {
             .expect("the decoder reads it")
             .expect("a picture");
         assert_eq!(decoded.dimensions(), (width, height));
+    }
+
+    #[test]
+    fn a_peer_whose_first_keyframe_went_missing_is_asked_again_each_second() {
+        let start = Instant::now();
+        let mut waiting = FirstKeyframe::default();
+        assert!(waiting.ask(start), "at once");
+        assert!(!waiting.ask(start + std::time::Duration::from_millis(400)));
+        assert!(waiting.ask(start + std::time::Duration::from_millis(1000)));
+        assert!(!waiting.ask(start + std::time::Duration::from_millis(1500)));
     }
 
     #[test]
