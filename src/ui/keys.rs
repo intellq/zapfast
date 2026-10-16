@@ -418,14 +418,16 @@ fn preview_keys(app: &mut App, ctx: &egui::Context) {
 }
 
 /// Handles keys while a video is expanded: Escape returns it to its message,
-/// Space plays or pauses it, M mutes it, and the left and right arrows jump
-/// five seconds. No chat shortcut runs and nothing is typed under it.
+/// Space plays or pauses it, M mutes it, S changes the speed, and the left and
+/// right arrows jump five seconds. No chat shortcut runs and nothing is typed
+/// under it.
 fn video_keys(app: &mut App, ctx: &egui::Context) {
-    let (escape, space, mute, back, forward) = ctx.input_mut(|input| {
+    let (escape, space, mute, speed, back, forward) = ctx.input_mut(|input| {
         let keys = (
             input.consume_key(Modifiers::NONE, Key::Escape),
             input.consume_key(Modifiers::NONE, Key::Space),
             input.consume_key(Modifiers::NONE, Key::M),
+            input.consume_key(Modifiers::NONE, Key::S),
             input.consume_key(Modifiers::NONE, Key::ArrowLeft),
             input.consume_key(Modifiers::NONE, Key::ArrowRight),
         );
@@ -454,6 +456,9 @@ fn video_keys(app: &mut App, ctx: &egui::Context) {
     }
     if mute {
         app.actions.push(Action::ToggleVideoSound);
+    }
+    if speed {
+        app.actions.push(Action::CycleVideoSpeed);
     }
     for (pressed, seconds) in [(back, -VIDEO_JUMP), (forward, VIDEO_JUMP)] {
         if pressed

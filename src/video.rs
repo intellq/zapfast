@@ -85,21 +85,41 @@ enum Delivery {
     Unsupported(String),
 }
 
-/// Playback time: wall time while no sound steers it.
+/// Playback time: wall time, scaled by the playback speed, while no sound
+/// steers it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Clock {
     /// Position when the clock last stopped or jumped.
     anchor: Duration,
     /// When it started running from `anchor`, while it runs.
     since: Option<Instant>,
+    /// Video time per wall time in thousandths; 0 is the default 1x.
+    permille: u32,
 }
 
 impl Clock {
     pub fn position(&self, now: Instant) -> Duration {
         self.anchor
-            + self
-                .since
-                .map_or(Duration::ZERO, |since| now.saturating_duration_since(since))
+            + self.since.map_or(Duration::ZERO, |since| {
+                now.saturating_duration_since(since).mul_f64(self.rate())
+            })
+    }
+
+    fn rate(&self) -> f64 {
+        if self.permille == 0 {
+            1.0
+        } else {
+            f64::from(self.permille) / 1000.0
+        }
+    }
+
+    /// Runs at `speed` times wall time from here on, without a jump.
+    pub fn set_speed(&mut self, speed: f32, now: Instant) {
+        self.anchor = self.position(now);
+        if self.since.is_some() {
+            self.since = Some(now);
+        }
+        self.permille = (speed.max(0.0) * 1000.0).round() as u32;
     }
 
     pub fn running(&self) -> bool {
@@ -201,10 +221,72 @@ impl Backend {
 struct Sound {
     device: rodio::MixerDeviceSink,
     sink: rodio::Player,
-    /// Video time the queued decoder started from.
+    /// Video time the queued sound starts from.
     base: Duration,
     /// Decodes through FFmpeg or Media Foundation rather than symphonia.
     backend: Option<Backend>,
+    /// Video time per second of queued sound: the playback speed.
+    factor: f32,
+}
+
+/// A video's sound compressed by its playback speed as it plays, with the
+/// voice messages' pitch-keeping stretch, every channel kept: only a few
+/// thousand frames are held, never the rest of the track.
+struct Stretched<S> {
+    stream: crate::timestretch::Stream<S>,
+    channels: rodio::ChannelCount,
+    rate: rodio::SampleRate,
+    total: Option<Duration>,
+}
+
+impl<S: rodio::Source> Stretched<S> {
+    fn new(source: S, factor: f32) -> Self {
+        let channels = source.channels();
+        let rate = source.sample_rate();
+        let total = source.total_duration().map(|total| total.div_f32(factor));
+        Self {
+            stream: crate::timestretch::Stream::new(source, usize::from(channels.get()), factor),
+            channels,
+            rate,
+            total,
+        }
+    }
+}
+
+impl<S: rodio::Source> Iterator for Stretched<S> {
+    type Item = rodio::Sample;
+
+    fn next(&mut self) -> Option<rodio::Sample> {
+        self.stream.next()
+    }
+}
+
+impl<S: rodio::Source> rodio::Source for Stretched<S> {
+    fn current_span_len(&self) -> Option<usize> {
+        None
+    }
+
+    fn channels(&self) -> rodio::ChannelCount {
+        self.channels
+    }
+
+    fn sample_rate(&self) -> rodio::SampleRate {
+        self.rate
+    }
+
+    fn total_duration(&self) -> Option<Duration> {
+        self.total
+    }
+}
+
+/// Queues `source` on `sink` at `speed`: as decoded at 1x, streamed through
+/// the stretch above it.
+fn queue_sound(sink: &rodio::Player, source: Box<dyn rodio::Source + Send>, speed: f32) {
+    if speed > 1.0 {
+        sink.append(Stretched::new(source, speed));
+    } else {
+        sink.append(source);
+    }
 }
 
 impl Sound {
@@ -216,6 +298,7 @@ impl Sound {
         from: Duration,
         level: f32,
         mut backend: Option<Backend>,
+        speed: f32,
     ) -> Result<Option<Self>, String> {
         // Sound FFmpeg or Media Foundation cannot read may still be AAC the
         // built-in decoder reads; the picture keeps its own decoder.
@@ -241,32 +324,40 @@ impl Sound {
         let sink = rodio::Player::connect_new(device.mixer());
         sink.pause();
         sink.set_volume(level);
-        sink.append(source);
+        queue_sound(&sink, source, speed);
         Ok(Some(Self {
             device,
             sink,
             base: from,
             backend,
+            factor: speed.max(1.0),
         }))
     }
 
-    /// Queues the sound again from `from`, paused. A fresh player keeps the
+    /// Queues the sound again from `from` at `speed`, paused. A fresh player keeps the
     /// seek off the audio thread, which `Player::try_seek` would wait for.
-    fn restart(&mut self, path: &Path, from: Duration, level: f32) {
+    fn restart(&mut self, path: &Path, from: Duration, level: f32, speed: f32) {
         let sink = rodio::Player::connect_new(self.device.mixer());
         sink.pause();
         sink.set_volume(level);
         if let Ok(source) = source(path, from, self.backend.as_ref()) {
-            sink.append(source);
+            queue_sound(&sink, source, speed);
         }
         self.sink = sink;
         self.base = from;
+        self.factor = speed.max(1.0);
     }
 
     /// Position of the sound in the video, while there is sound left.
     fn position(&self) -> Option<Duration> {
-        (!self.sink.empty()).then(|| self.base + self.sink.get_pos())
+        (!self.sink.empty()).then(|| sound_position(self.base, self.sink.get_pos(), self.factor))
     }
+}
+
+/// The video time reached after `played` of sound queued from `base` at
+/// `factor` times speed: each second heard covers `factor` of the video.
+fn sound_position(base: Duration, played: Duration, factor: f32) -> Duration {
+    base + played.mul_f32(factor)
 }
 
 /// The video's sound from `from`, through FFmpeg or Media Foundation when
@@ -581,6 +672,8 @@ pub struct Player {
     gpu: bool,
     /// Frames are decoded large enough for the expanded view.
     detail: bool,
+    /// Playback speed, kept from one video to the next.
+    speed: f32,
 }
 
 impl Player {
@@ -595,6 +688,38 @@ impl Player {
             ffmpeg: false,
             gpu: false,
             detail: false,
+            speed: 1.0,
+        }
+    }
+
+    pub fn speed(&self) -> f32 {
+        self.speed
+    }
+
+    /// Plays at the next of 1x, 1.5x and 2x, as the voice message chip does.
+    pub fn cycle_speed(&mut self) {
+        self.set_speed(crate::audio::next_cycled_speed(self.speed, false));
+    }
+
+    /// Plays at `speed`, carrying on from where the video stands.
+    pub fn set_speed(&mut self, speed: f32) {
+        let speed = crate::audio::supported_speed(speed);
+        if speed == self.speed {
+            return;
+        }
+        self.speed = speed;
+        let level = self.level();
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+        let now = Instant::now();
+        session.clock.set_speed(speed, now);
+        let position = session.clock.position(now);
+        if let Some(sound) = &mut session.sound {
+            sound.restart(&session.path, position, level, speed);
+            if session.state == State::Playing {
+                sound.sink.play();
+            }
         }
     }
 
@@ -613,6 +738,7 @@ impl Player {
         let max_side = self.max_side();
         let waker = self.waker.clone();
         let level = self.level();
+        let speed = self.speed;
         let Some(session) = self.session.as_mut() else {
             return;
         };
@@ -630,7 +756,7 @@ impl Player {
         session.decoded = false;
         session.frames = spawn_decoder(&session.path, at, waker, session.backend.clone(), max_side);
         if let Some(sound) = &mut session.sound {
-            sound.restart(&session.path, at, level);
+            sound.restart(&session.path, at, level, speed);
         }
     }
 
@@ -707,8 +833,9 @@ impl Player {
             session.backend.clone(),
             max_side,
         );
+        let speed = self.speed;
         if let Some(sound) = &mut session.sound {
-            sound.restart(&session.path, to, level);
+            sound.restart(&session.path, to, level, speed);
         }
     }
 
@@ -801,7 +928,7 @@ impl Player {
         clock.seek(from, now);
         let backend = self.backend();
         let (sound, unsupported_audio) = if self.audible {
-            match Sound::open(path, from, self.level(), backend.clone()) {
+            match Sound::open(path, from, self.level(), backend.clone(), self.speed) {
                 Ok(sound) => (sound, false),
                 Err(error) => {
                     log::warn!("video audio could not be decoded: {error}");
@@ -811,6 +938,7 @@ impl Player {
         } else {
             (None, false)
         };
+        clock.set_speed(self.speed, now);
         self.session = Some(Session {
             message: message.to_owned(),
             path: path.to_owned(),
@@ -859,7 +987,8 @@ impl Player {
     /// Plays the session's video with the built-in decoders from where it
     /// was, after FFmpeg or Media Foundation failed on it.
     fn fall_back(&mut self) {
-        let (waker, audible, level) = (self.waker.clone(), self.audible, self.level());
+        let (waker, audible, level, speed) =
+            (self.waker.clone(), self.audible, self.level(), self.speed);
         let max_side = self.max_side();
         let Some(session) = self.session.as_mut() else {
             return;
@@ -875,7 +1004,7 @@ impl Player {
         session.decoded = false;
         session.frames = spawn_decoder(&session.path, from, waker, None, max_side);
         let (sound, unsupported_audio) = if audible {
-            match Sound::open(&session.path, from, level, None) {
+            match Sound::open(&session.path, from, level, None, speed) {
                 Ok(sound) => (sound, false),
                 Err(error) => {
                     log::warn!("video audio could not be decoded: {error}");
@@ -1634,6 +1763,71 @@ mod tests {
         assert_eq!(player.poll(&ctx), None);
         assert_eq!(player.message(), Some("clip"));
         assert!(!player.session.as_ref().unwrap().unsupported_audio);
+    }
+
+    #[test]
+    fn clock_runs_faster_at_a_higher_speed_without_a_jump() {
+        let start = Instant::now();
+        let mut clock = Clock::default();
+        clock.resume(start);
+        let second = start + Duration::from_secs(1);
+        clock.set_speed(2.0, second);
+        assert_eq!(clock.position(second), Duration::from_secs(1));
+        assert_eq!(
+            clock.position(second + Duration::from_secs(2)),
+            Duration::from_secs(5)
+        );
+        clock.set_speed(1.0, second + Duration::from_secs(2));
+        assert_eq!(
+            clock.position(second + Duration::from_secs(3)),
+            Duration::from_secs(6)
+        );
+    }
+
+    #[test]
+    fn the_sound_at_2x_lasts_half_as_long_in_every_channel() {
+        let track = sound_decoder(Path::new(SAMPLE), Duration::ZERO).unwrap();
+        let channels = rodio::Source::channels(&track);
+        let plain = track.count();
+        let track = sound_decoder(Path::new(SAMPLE), Duration::ZERO).unwrap();
+        let stretched = Stretched::new(track, 2.0);
+        // The channels the track has, not a mono downmix.
+        assert_eq!(rodio::Source::channels(&stretched), channels);
+        let rate = rodio::Source::sample_rate(&stretched);
+        let total = rodio::Source::total_duration(&stretched).unwrap();
+        let samples = stretched.count();
+        assert_eq!(samples % usize::from(channels.get()), 0);
+        let frames = |samples: usize| samples / usize::from(channels.get());
+        // The clip's sound, in half the time, to the frame.
+        assert!(frames(samples).abs_diff(frames(plain).div_ceil(2)) <= 1);
+        let seconds = frames(samples) as f64 / f64::from(rate.get());
+        assert!(
+            (seconds - total.as_secs_f64()).abs() < 0.1,
+            "got {seconds} s"
+        );
+    }
+
+    #[test]
+    fn sped_up_sound_reports_the_video_time_it_reached() {
+        // A second heard at 2x from the 3 s mark is the 5 s mark, and the
+        // clock that follows it stays put.
+        let base = Duration::from_secs(3);
+        assert_eq!(
+            sound_position(base, Duration::from_secs(1), 2.0),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            sound_position(base, Duration::from_secs(2), 1.5),
+            Duration::from_secs(6)
+        );
+        let start = Instant::now();
+        let mut clock = Clock::default();
+        clock.seek(base, start);
+        clock.resume(start);
+        clock.set_speed(2.0, start);
+        let later = start + Duration::from_secs(1);
+        clock.follow(sound_position(base, Duration::from_secs(1), 2.0), later);
+        assert_eq!(clock.position(later), Duration::from_secs(5));
     }
 
     #[test]

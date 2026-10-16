@@ -6365,6 +6365,7 @@ impl App {
             }
             Action::SeekVideo { message, fraction } => self.video.seek(&message, fraction),
             Action::ToggleVideoSound => self.video.toggle_mute(),
+            Action::CycleVideoSpeed => self.video.cycle_speed(),
             Action::SetVideoVolume(volume) => {
                 self.video.set_volume(volume);
                 self.settings.video_volume = self.video.volume();

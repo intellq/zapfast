@@ -169,6 +169,13 @@ protocol. These notes are for coding agents and new contributors.
   not to the video decoder. `Action::PlayVideo/SeekVideo/ToggleVideoSound` drive
   it; leaving the chat stops it and an unseen video pauses. Round video
   messages (PTV) are `Content::Video { note: true }` and draw as circles.
+  `Action::CycleVideoSpeed` (the chip, or S full-window) runs the `Clock` at
+  1x, 1.5x or 2x; above 1x the sound is queued through `timestretch::Stream`,
+  the voice messages' pitch-keeping stretch run as the sound plays. It holds
+  only the frames its next search can reach, never the rest of the track,
+  searches on the channels' average and copies every channel, so stereo stays
+  stereo. A second heard covers `factor` seconds of video (`sound_position`),
+  so the sound keeps steering the clock at any speed.
 - Message bodies paint through `markup::paint_selectable` and single lines
   through `widgets::selectable_rich_text`: both hand the galley to
   `egui::text_selection::LabelSelectionState` (which paints it) and only

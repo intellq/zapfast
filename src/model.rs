@@ -1821,6 +1821,8 @@ pub enum Action {
     },
     /// Mutes or unmutes video playback.
     ToggleVideoSound,
+    /// Plays videos at the next of 1x, 1.5x and 2x.
+    CycleVideoSpeed,
     /// The video sound slider moved to this level, 0 to 1.
     SetVideoVolume(f32),
     /// Shows a loaded video over the window, nearly as tall as it.
