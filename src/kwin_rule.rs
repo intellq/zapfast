@@ -26,15 +26,16 @@ pub fn with_rule(config: &str, app_id: &str, description: &str) -> Option<String
     let has_group = config
         .lines()
         .any(|line| line.trim() == format!("[{RULE_ID}]"));
-    let listed = general_value(config, "rules")
-        .is_some_and(|rules| rules.split(',').any(|id| id.trim() == RULE_ID));
+    let key = list_key(config);
+    let listed = general_value(config, key)
+        .is_some_and(|ids| ids.split(',').any(|id| id.trim() == RULE_ID));
     if has_group && listed {
         return None;
     }
     let mut out = if listed {
         config.to_owned()
     } else {
-        list_rule(config)
+        list_rule(config, key)
     };
     if !has_group {
         if !out.is_empty() && !out.ends_with('\n') {
@@ -57,6 +58,36 @@ pub fn with_rule(config: &str, app_id: &str, description: &str) -> Option<String
     Some(out)
 }
 
+/// The `[General]` key that lists the rules in `config`.
+///
+/// KWin 6.8 lists them in `Order`. It still reads the older `rules`, but as a
+/// file to convert: every rule missing from that list is deleted and the list
+/// becomes `Order`. So `rules` is written only to a file that already uses it,
+/// or that holds no other rule, where nothing can be lost; any other file gets
+/// `Order`.
+fn list_key(config: &str) -> &'static str {
+    if general_value(config, "Order").is_some() {
+        "Order"
+    } else if general_value(config, "rules").is_some() || !has_other_rules(config) {
+        "rules"
+    } else {
+        "Order"
+    }
+}
+
+/// Whether `config` holds a rule other than ZapFast's. `[General]` and the
+/// groups starting with `$` hold KWin's own data, not rules.
+fn has_other_rules(config: &str) -> bool {
+    config.lines().any(|line| {
+        let line = line.trim();
+        line.strip_prefix('[')
+            .and_then(|rest| rest.strip_suffix(']'))
+            .is_some_and(|group| {
+                group != "General" && !group.starts_with('$') && group != RULE_ID
+            })
+    })
+}
+
 /// A key of the `[General]` group.
 fn general_value<'a>(config: &'a str, key: &str) -> Option<&'a str> {
     let mut general = false;
@@ -74,10 +105,10 @@ fn general_value<'a>(config: &'a str, key: &str) -> Option<&'a str> {
     None
 }
 
-/// `config` with the rule's id at the end of `[General]`'s `rules` and
-/// `count` set to the length of that list.
-fn list_rule(config: &str) -> String {
-    let mut ids: Vec<String> = general_value(config, "rules")
+/// `config` with the rule's id at the end of `[General]`'s list `key`, and,
+/// for the older `rules`, `count` set to the length of that list.
+fn list_rule(config: &str, key: &str) -> String {
+    let mut ids: Vec<String> = general_value(config, key)
         .unwrap_or_default()
         .split(',')
         .map(str::trim)
@@ -85,19 +116,22 @@ fn list_rule(config: &str) -> String {
         .map(str::to_owned)
         .collect();
     ids.push(RULE_ID.to_owned());
-    let rules = format!("rules={}", ids.join(","));
-    let count = format!("count={}", ids.len());
-    let mut out = String::with_capacity(config.len() + rules.len() + 16);
+    let list = format!("{key}={}", ids.join(","));
+    // `Order` has no count; `count` is kept off it, as KWin 6.8 deletes it.
+    let count = (key == "rules").then(|| format!("count={}", ids.len()));
+    let mut out = String::with_capacity(config.len() + list.len() + 16);
     let mut general = false;
     let mut seen_general = false;
-    let mut wrote = (false, false);
+    let mut wrote = (count.is_none(), false);
     let finish_general = |out: &mut String, wrote: &mut (bool, bool)| {
-        if !wrote.0 {
-            out.push_str(&count);
+        if !wrote.0
+            && let Some(count) = &count
+        {
+            out.push_str(count);
             out.push('\n');
         }
         if !wrote.1 {
-            out.push_str(&rules);
+            out.push_str(&list);
             out.push('\n');
         }
         *wrote = (true, true);
@@ -119,20 +153,20 @@ fn list_rule(config: &str) -> String {
             general = trimmed == "[General]";
             seen_general |= general;
         } else if general && let Some((name, _)) = trimmed.split_once('=') {
-            match name.trim() {
-                "count" => {
-                    out.push_str(&count);
-                    out.push('\n');
-                    wrote.0 = true;
-                    continue;
-                }
-                "rules" => {
-                    out.push_str(&rules);
-                    out.push('\n');
-                    wrote.1 = true;
-                    continue;
-                }
-                _ => {}
+            let name = name.trim();
+            if name == key {
+                out.push_str(&list);
+                out.push('\n');
+                wrote.1 = true;
+                continue;
+            }
+            if name == "count"
+                && let Some(count) = &count
+            {
+                out.push_str(count);
+                out.push('\n');
+                wrote.0 = true;
+                continue;
             }
         }
         out.push_str(line);
@@ -142,7 +176,13 @@ fn list_rule(config: &str) -> String {
         finish_general(&mut out, &mut wrote);
     }
     if !seen_general {
-        let mut head = format!("[General]\n{count}\n{rules}\n");
+        let mut head = String::from("[General]\n");
+        if let Some(count) = &count {
+            head.push_str(count);
+            head.push('\n');
+        }
+        head.push_str(&list);
+        head.push('\n');
         if !out.is_empty() {
             head.push('\n');
         }
@@ -259,12 +299,49 @@ mod tests {
 
     #[test]
     fn a_general_without_rules_gets_them_before_the_next_group() {
+        let config = "[General]\nfoo=bar\n";
+        let out = with_rule(config, "zapfast", "d").unwrap();
+        assert_eq!(
+            out,
+            format!("[General]\nfoo=bar\ncount=1\nrules={RULE_ID}\n\n{RULE}")
+        );
+    }
+
+    #[test]
+    fn an_order_list_grows_and_gets_no_rules_key() {
+        // As KWin 6.8 writes it, with the `steam` rule it ships.
+        let config = "[aaa]\nwmclass=a\n\n[bbb]\nwmclass=b\n\n[General]\nOrder=steam,aaa,bbb\n";
+        let out = with_rule(config, "zapfast", "d").unwrap();
+        assert_eq!(
+            out,
+            format!(
+                "[aaa]\nwmclass=a\n\n[bbb]\nwmclass=b\n\n[General]\nOrder=steam,aaa,bbb,{RULE_ID}\n\n{RULE}"
+            )
+        );
+        assert_eq!(with_rule(&out, "zapfast", "d"), None, "added once");
+    }
+
+    #[test]
+    fn a_listed_rule_in_an_order_list_is_left_alone() {
+        // KWin 6.8 deletes every rule missing from a `rules` key, so writing
+        // one listing only ZapFast's rule wiped the others.
+        let config = format!(
+            "[aaa]\nwmclass=a\n\n[{RULE_ID}]\nposition=1,2\npositionrule=4\n\n[General]\nOrder=steam,aaa,{RULE_ID}\n"
+        );
+        assert_eq!(with_rule(&config, "zapfast", "d"), None);
+    }
+
+    #[test]
+    fn other_rules_without_a_list_get_an_order_list() {
         let config = "[General]\nfoo=bar\n\n[aaa]\nwmclass=a\n";
         let out = with_rule(config, "zapfast", "d").unwrap();
-        assert!(out.starts_with(&format!(
-            "[General]\nfoo=bar\ncount=1\nrules={RULE_ID}\n\n[aaa]\n"
-        )));
+        assert!(out.starts_with(&format!("[General]\nfoo=bar\nOrder={RULE_ID}\n\n[aaa]\n")));
+        assert!(!out.contains("rules=") && !out.contains("count="));
         assert!(out.ends_with(RULE));
+
+        let config = "[aaa]\nwmclass=a\n";
+        let out = with_rule(config, "zapfast", "d").unwrap();
+        assert!(out.starts_with(&format!("[General]\nOrder={RULE_ID}\n\n[aaa]\n")));
     }
 
     #[test]

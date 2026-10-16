@@ -66,7 +66,8 @@ if command -v update-desktop-database >/dev/null 2>&1; then
 fi
 
 # The KWin rule that remembers the window's position on Plasma under Wayland
-# (src/kwin_rule.rs): its group, and its id in [General]'s rules and count.
+# (src/kwin_rule.rs): its group, and its id in [General]'s rules and count
+# (Order, from KWin 6.8).
 kwin_rule=5f0c2d9e-8b1a-4c7e-9a43-2e6d1f7b0a58
 kwinrules=$config_dir/kwinrulesrc
 if grep -qs "^\[$kwin_rule\]" "$kwinrules"; then
@@ -89,6 +90,15 @@ if grep -qs "^\[$kwin_rule\]" "$kwinrules"; then
     rule { next }
     general && /^rules=/ { print "rules=" rules; next }
     general && /^count=/ { print "count=" kept + 0; next }
+    # KWin 6.8 lists the rules in Order, with no count.
+    general && /^Order=/ {
+      n = split(substr($0, 7), ids, ",")
+      order = ""
+      for (i = 1; i <= n; i++)
+        if (ids[i] != "" && ids[i] != ENVIRON["RULE"]) order = order (order == "" ? "" : ",") ids[i]
+      print "Order=" order
+      next
+    }
     { print }
   ' "$kwinrules" "$kwinrules" >"$kwinrules.zapfast-uninstall"; then
     mv -f "$kwinrules.zapfast-uninstall" "$kwinrules"
