@@ -360,6 +360,30 @@ pub const PINNED_CHATS: usize = 3;
 /// WhatsApp Plus raises the limit to twenty.
 pub const PLUS_PINNED_CHATS: usize = 20;
 
+/// Says in the log whether WhatsApp lets this device start calls, and group
+/// calls in particular. WhatsApp Web shows group calling only while the server
+/// turns on `enable_web_group_calling` for the account, and a group offer from
+/// a device it is off for is refused with 427 ("group call not enabled"). Two
+/// flags, no personal data; asked like the pin limit, for want of an event.
+fn spawn_calling_gate_log(client: Arc<Client>) {
+    tokio::spawn(async move {
+        for _ in 0..30 {
+            let calling = client
+                .ab_prop_enabled(abprops::web::ENABLE_WEB_CALLING)
+                .await;
+            let group = client
+                .ab_prop_enabled(abprops::web::ENABLE_WEB_GROUP_CALLING)
+                .await;
+            if let (Some(calling), Some(group)) = (calling, group) {
+                log::info!("[CALL] web calling enabled={calling} group calling enabled={group}");
+                return;
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+        log::info!("[CALL] web calling flags never arrived");
+    });
+}
+
 /// Reports how many chats this account may pin. The AB props arrive shortly
 /// after connecting and there is no event for them, so this polls briefly.
 fn spawn_pin_limit_check(
@@ -2012,7 +2036,11 @@ impl Worker {
         };
         let sender = self.wa_sender.clone();
         let builder = host_owned_presence(Bot::builder().with_backend(store))
-            .with_watched_ab_props([abprops::web::AURA_PINNED_CHATS_BENEFIT_ACTIVE]);
+            .with_watched_ab_props([
+                abprops::web::AURA_PINNED_CHATS_BENEFIT_ACTIVE,
+                abprops::web::ENABLE_WEB_CALLING,
+                abprops::web::ENABLE_WEB_GROUP_CALLING,
+            ]);
         let builder = match crate::proxy::for_whatsapp() {
             Some(proxy) => {
                 log::info!("connecting through the proxy {}", proxy.redacted());
@@ -2928,6 +2956,7 @@ impl Worker {
                     self.presence_refresh_pending = false;
                     self.announce_presence(self.online_wanted);
                     spawn_pin_limit_check(client.clone(), self.events.clone(), self.waker.clone());
+                    spawn_calling_gate_log(client.clone());
                     let channels = self.commands.clone();
                     let followed = client.clone();
                     tokio::spawn(async move {
