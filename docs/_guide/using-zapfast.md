@@ -328,6 +328,8 @@ chat**, and the button beside it (`Ctrl+B`), which hides the list: the chats'
 avatars then fill the rail between its top and bottom buttons. Unread chats
 show their badge, hovering names a chat, clicking opens it, and `Ctrl+B` or
 the button under **Starred** brings the full list back.
+In a short window, scroll the rail to reach its lower buttons. Tab and
+Shift+Tab bring the focused button into view, too.
 
 ## Notifications and the tray
 

@@ -1805,6 +1805,7 @@ pub(super) fn compact_list(app: &mut App, ui: &mut egui::Ui) {
     };
     // Only the avatars on screen are laid out, however many chats there are.
     let output = scroll_area.show_rows(ui, COMPACT_CELL, chats.len(), |ui, range| {
+        let mut focused = None;
         if carried != 0.0 {
             ui.scroll_with_delta_animation(
                 vec2(0.0, carried),
@@ -1818,8 +1819,20 @@ pub(super) fn compact_list(app: &mut App, ui: &mut egui::Ui) {
             if response.clicked() && !app.locked_folder_open() && !app.show_archived {
                 app.actions.push(Action::KeepUnread(chat.id.clone()));
             }
+            if response.has_focus() {
+                focused = Some(response);
+            }
         }
+        focused
     });
+    // The rail itself scrolls in a short window. The inner scroll area has
+    // consumed the avatar's focus target; reveal its viewport in the outer
+    // one as well, so a focused avatar cannot stay clipped by the rail.
+    if let Some(mut focused) = output.inner {
+        focused.rect = output.inner_rect;
+        focused.interact_rect = focused.rect.intersect(ui.clip_rect());
+        theme::reveal_focus_in(ui, &focused);
+    }
     if !copy {
         ui.ctx().data_mut(|data| {
             data.insert_temp(shared_offset_id().with("rail"), output.state.offset.y);

@@ -17339,6 +17339,133 @@ mod rail_tests {
         }
     }
 
+    /// At the minimum window height, Tab and Shift+Tab reveal every rail
+    /// control, including the bottom group, without crossing the title bar.
+    #[test]
+    fn tab_reveals_every_rail_control_in_a_short_window() {
+        for macos in [false, true] {
+            for page in ["chat", "rail"] {
+                for reverse in [false, true] {
+                    let (mut app, ctx) = open(page, macos);
+                    let size = egui::vec2(1180.0, 300.0);
+                    for _ in 0..3 {
+                        frame_at(&mut app, &ctx, size, Vec::new());
+                    }
+                    let mut expected = vec![
+                        Stop::Chats,
+                        Stop::Calls,
+                        Stop::Starred,
+                        Stop::Archived,
+                        Stop::Locked,
+                        Stop::Settings,
+                        Stop::Profile,
+                    ];
+                    if page == "rail" {
+                        expected.push(Stop::Sidebar);
+                    }
+                    for stop in &expected {
+                        assert!(stop_rect(&ctx, *stop).is_some(), "{stop:?} is offered");
+                    }
+                    ctx.memory_mut(|memory| {
+                        memory.request_focus(rail::destination_id(Destination::Chats));
+                    });
+                    let mut reached = std::collections::BTreeSet::new();
+                    for _ in 0..40 {
+                        frame_at(
+                            &mut app,
+                            &ctx,
+                            size,
+                            vec![egui::Event::Key {
+                                key: egui::Key::Tab,
+                                physical_key: None,
+                                pressed: true,
+                                repeat: false,
+                                modifiers: if reverse {
+                                    egui::Modifiers::SHIFT
+                                } else {
+                                    egui::Modifiers::NONE
+                                },
+                            }],
+                        );
+                        for _ in 0..3 {
+                            frame_at(&mut app, &ctx, size, Vec::new());
+                        }
+                        let focused = ctx.memory(|memory| memory.focused());
+                        let Some((stop, id)) = focus::stops(&ctx)
+                            .into_iter()
+                            .find(|(stop, id)| Some(*id) == focused && expected.contains(stop))
+                        else {
+                            continue;
+                        };
+                        let response = ctx.read_response(id).unwrap();
+                        let mut viewport = rail_rect(&ctx).unwrap();
+                        if crate::theme::traffic_light_inset(&ctx) > 0.0 {
+                            viewport.min.y += crate::theme::TOP_BAR_HEIGHT / 2.0 + 12.0;
+                        }
+                        assert_eq!(
+                            response.interact_rect, response.rect,
+                            "{page}, macOS={macos}, reverse={reverse}: {stop:?} is fully visible"
+                        );
+                        assert!(
+                            viewport.contains_rect(response.rect),
+                            "{stop:?} stays in the rail below the title bar"
+                        );
+                        reached.insert(stop);
+                    }
+                    assert_eq!(reached, expected.into_iter().collect());
+                }
+            }
+        }
+    }
+
+    /// Wheel scrolling reaches the account button at the minimum height;
+    /// growing the window restores the usual top and bottom positions.
+    #[test]
+    fn a_short_rail_scrolls_and_resets_when_the_window_grows() {
+        for macos in [false, true] {
+            for page in ["chat", "rail"] {
+                let (mut app, ctx) = open(page, macos);
+                let chats = destination_rect(&ctx, Destination::Chats);
+                let profile = stop_rect(&ctx, Stop::Profile).unwrap();
+                let size = egui::vec2(1180.0, 300.0);
+                for _ in 0..3 {
+                    frame_at(&mut app, &ctx, size, Vec::new());
+                }
+                assert!(stop_rect(&ctx, Stop::Profile).unwrap().bottom() > size.y);
+                let pointer = destination_rect(&ctx, Destination::Calls).center();
+                frame_at(
+                    &mut app,
+                    &ctx,
+                    size,
+                    vec![
+                        egui::Event::PointerMoved(pointer),
+                        egui::Event::MouseWheel {
+                            unit: egui::MouseWheelUnit::Point,
+                            delta: egui::vec2(0.0, -600.0),
+                            modifiers: egui::Modifiers::NONE,
+                            phase: egui::TouchPhase::Move,
+                        },
+                    ],
+                );
+                for _ in 0..30 {
+                    frame_at(&mut app, &ctx, size, Vec::new());
+                }
+                let id = focus::control(&ctx, Stop::Profile).unwrap();
+                let response = ctx.read_response(id).unwrap();
+                assert_eq!(
+                    response.interact_rect, response.rect,
+                    "{page}, macOS={macos}: the account button is fully visible after scrolling"
+                );
+                assert!(rail_rect(&ctx).unwrap().contains_rect(response.rect));
+                for _ in 0..3 {
+                    frame(&mut app, &ctx, 1180.0, Vec::new());
+                }
+                assert_eq!(destination_rect(&ctx, Destination::Chats), chats);
+                assert_eq!(stop_rect(&ctx, Stop::Profile), Some(profile));
+            }
+        }
+    }
+
     /// The Calls page's chips, All and Missed, are the chat list's own,
     /// under its search field and in its Tab order. Missed keeps only calls
     /// to us nobody took, a group's included; a search looks among them,
