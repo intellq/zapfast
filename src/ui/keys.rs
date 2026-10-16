@@ -7,6 +7,10 @@ use crate::model::{Action, Chat, Dialog, InfoView, Page, Scroll};
 
 /// Routes keyboard commands to actions, respecting overlays and text focus.
 pub fn handle(app: &mut App, ctx: &egui::Context) {
+    if app.picture_edit.is_some() {
+        editor_keys(app, ctx);
+        return;
+    }
     if app.image_preview.is_some() {
         preview_keys(app, ctx);
         return;
@@ -477,6 +481,21 @@ fn preview_keys(app: &mut App, ctx: &egui::Context) {
         input
             .events
             .retain(|event| !crate::image_preview::consumes_key(event));
+    });
+    app.actions.extend(actions);
+}
+
+/// Handles keys while the cropper covers the window: Escape leaves the
+/// staged picture alone, Enter keeps the crop.
+fn editor_keys(app: &mut App, ctx: &egui::Context) {
+    let mut actions = Vec::new();
+    ctx.input_mut(|input| {
+        if input.consume_key(Modifiers::NONE, Key::Escape) {
+            actions.push(Action::CancelPictureEdit);
+        }
+        if input.consume_key(Modifiers::NONE, Key::Enter) {
+            actions.push(Action::ApplyPictureEdit);
+        }
     });
     app.actions.extend(actions);
 }
@@ -960,8 +979,7 @@ mod tests {
         ));
         app.actions.clear();
         app.emoji_start = None;
-        app.pending
-            .push(crate::app::Pending::File("unsent.png".into()));
+        app.stage(crate::app::Pending::File("unsent.png".into()));
         escape(&mut app, &ctx);
         assert!(matches!(app.actions.as_slice(), [Action::ClearPending]));
         app.actions.clear();
@@ -1074,8 +1092,7 @@ mod tests {
         app.show_update = true;
         app.page = Page::Settings;
         app.reply_to = Some("reply-fixture".into());
-        app.pending
-            .push(crate::app::Pending::File("unsent.png".into()));
+        app.stage(crate::app::Pending::File("unsent.png".into()));
         let ctx = egui::Context::default();
         let mut output = ctx.run_ui(
             egui::RawInput {

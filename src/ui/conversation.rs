@@ -11598,7 +11598,7 @@ fn pending_preview(app: &mut App, ui: &mut egui::Ui) {
             }
         },
     );
-    let title = match &app.pending[selected] {
+    let title = match &app.pending[selected].item {
         crate::app::Pending::Picture { .. } => tr("Pasted picture").to_owned(),
         crate::app::Pending::File(path) | crate::app::Pending::Document(path) => path
             .file_name()
@@ -11614,6 +11614,35 @@ fn pending_preview(app: &mut App, ui: &mut egui::Ui) {
         1,
     );
     title.paint(ui, top.center() - title.size() / 2.0, palette.text);
+    // A picture can be cropped and turned before it goes out. A document
+    // goes as the file it is, so it is not edited here.
+    let editable = match &app.pending[selected].item {
+        crate::app::Pending::Picture { .. } => true,
+        crate::app::Pending::File(path) => crate::app::Pending::is_picture_file(path),
+        crate::app::Pending::Document(_) => false,
+    };
+    if editable {
+        let id = app.pending[selected].id;
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(top.shrink2(vec2(12.0, 0.0)))
+                .layout(Layout::right_to_left(Align::Center)),
+            |ui| {
+                if theme::icon_button(
+                    ui,
+                    Icon::Pencil,
+                    20.0,
+                    palette.secondary,
+                    palette.text,
+                    tr("Crop and rotate"),
+                )
+                .clicked()
+                {
+                    app.actions.push(Action::EditPicture(id));
+                }
+            },
+        );
+    }
 
     let strip = Rect::from_min_max(
         egui::pos2(area.left(), area.bottom() - PENDING_TILE - 24.0),
@@ -11624,7 +11653,7 @@ fn pending_preview(app: &mut App, ui: &mut egui::Ui) {
         egui::pos2(area.right() - 24.0, strip.top() - 8.0),
     );
     if stage.width() > 16.0 && stage.height() > 16.0 {
-        let item = &mut app.pending[selected];
+        let item = &mut app.pending[selected].item;
         pending_large(ui, &palette, item, selected, stage);
     }
 
@@ -11651,7 +11680,7 @@ fn pending_preview(app: &mut App, ui: &mut egui::Ui) {
         pending_thumbnail(
             ui,
             &palette,
-            &mut app.pending[index],
+            &mut app.pending[index].item,
             index,
             rect.shrink(3.0),
         );
@@ -11832,12 +11861,12 @@ fn pending_poster(
 }
 
 /// Forgets the first frames of videos no longer attached.
-fn forget_pending_posters(ctx: &egui::Context, pending: &[crate::app::Pending]) {
+fn forget_pending_posters(ctx: &egui::Context, pending: &[crate::app::Staged]) {
     if let Ok(mut slots) = pending_posters(ctx).0.lock() {
         slots.retain(|path, _| {
-            pending
-                .iter()
-                .any(|item| matches!(item, crate::app::Pending::File(file) if file == path))
+            pending.iter().any(
+                |staged| matches!(&staged.item, crate::app::Pending::File(file) if file == path),
+            )
         });
     }
 }

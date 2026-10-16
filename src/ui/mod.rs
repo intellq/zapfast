@@ -7,6 +7,7 @@ pub mod chats;
 pub mod conversation;
 pub mod dialogs;
 pub(crate) mod focus;
+pub mod image_editor;
 pub mod image_preview;
 pub mod info;
 pub mod keys;
@@ -57,6 +58,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         && app.image_preview.is_none()
         && app.video_expanded.is_none()
         && app.sticker_view.is_none()
+        && app.picture_edit.is_none()
         && app.emoji_start.is_none()
         && app.mention_start.is_none()
         // Selection keeps egui's order so Tab can reach message checkboxes.
@@ -114,6 +116,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     video_view::show(app, ctx);
     call::show(app, ctx);
     app.history_rect = central.filter(|_| app.page == Page::Chats);
+    image_editor::show(app, ctx);
     if let Some(history) = app.history_rect {
         drop_target(app, ctx, history);
     }
