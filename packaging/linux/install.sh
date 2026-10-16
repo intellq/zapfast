@@ -135,7 +135,7 @@ exec_line() {
 mkdir -p "$apps_dir"
 exec_line > "$apps_dir/zapfast.desktop"
 
-# WhatsApp links: the whatsapp:// scheme, which the wa.me and
+# WhatsApp links: the whatsapp:// and wa:// schemes, which the wa.me and
 # api.whatsapp.com pages open, goes to ZapFast through a hidden entry of its
 # own. The same entry and default ZapFast writes itself while "Open WhatsApp
 # links" is on (src/wa_link.rs), so the two never disagree.
@@ -149,27 +149,31 @@ Exec=$(exec_quoted) %u
 Icon=zapfast
 Terminal=false
 NoDisplay=true
-MimeType=x-scheme-handler/whatsapp;
+MimeType=x-scheme-handler/whatsapp;x-scheme-handler/wa;
 ENTRY
 mimeapps=$config_dir/mimeapps.list
 mkdir -p "$config_dir"
 touch "$mimeapps"
 awk '
-  BEGIN { line = "x-scheme-handler/whatsapp=zapfast-links.desktop;" }
+  BEGIN {
+    lines[1] = "x-scheme-handler/whatsapp=zapfast-links.desktop;"
+    lines[2] = "x-scheme-handler/wa=zapfast-links.desktop;"
+  }
   /^[[:space:]]*\[/ {
     section = $0; gsub(/^[[:space:]]+|[[:space:]]+$/, "", section)
     defaults = (section == "[Default Applications]")
     print
-    if (defaults && !placed) { print line; placed = 1 }
+    if (defaults && !placed) { print lines[1]; print lines[2]; placed = 1 }
     next
   }
-  defaults && /^[[:space:]]*x-scheme-handler\/whatsapp[[:space:]]*=/ { next }
+  defaults && /^[[:space:]]*x-scheme-handler\/(whatsapp|wa)[[:space:]]*=/ { next }
   { print; last = $0 }
   END {
     if (!placed) {
       if (NR > 0 && last != "") print ""
       print "[Default Applications]"
-      print line
+      print lines[1]
+      print lines[2]
     }
   }
 ' "$mimeapps" > "$mimeapps.zapfast" && mv -f "$mimeapps.zapfast" "$mimeapps"

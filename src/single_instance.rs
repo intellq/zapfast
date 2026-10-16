@@ -146,7 +146,7 @@ fn parse(verb: &str) -> Option<ControlCommand> {
             .map(ControlCommand::Anonymous),
         verb => verb
             .strip_prefix(OPEN)
-            .filter(|link| crate::wa_link::parse(link).is_some())
+            .filter(|link| crate::wa_link::parse_argument(link).is_some())
             .map(|link| ControlCommand::Open(link.to_owned())),
     }
 }

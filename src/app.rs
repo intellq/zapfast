@@ -2229,8 +2229,21 @@ impl App {
                 ControlCommand::Open(link) => {
                     log::info!("[WINDOW] another launch opened a link");
                     self.actions.push(Action::ShowWindow);
-                    if let Some(link) = crate::wa_link::parse(&link) {
-                        self.open_wa_link(link);
+                    if let Some(link) = crate::wa_link::parse_argument(&link) {
+                        if self.app_lock.is_locked() {
+                            // Nothing opens behind the lock: the chat or the
+                            // invite waits for the unlock.
+                            self.app_lock.defer(match link {
+                                crate::wa_link::WaLink::Chat { phone, text } => {
+                                    crate::app_lock::Deferred::Chat { phone, text }
+                                }
+                                crate::wa_link::WaLink::Invite(code) => {
+                                    crate::app_lock::Deferred::Invite(code)
+                                }
+                            });
+                        } else {
+                            self.open_wa_link(link);
+                        }
                     }
                 }
                 ControlCommand::ReloadThemes => self.actions.push(Action::ReloadThemes),
@@ -2255,6 +2268,7 @@ impl App {
             }
         }
         if matches!(self.link, LinkStatus::Connected)
+            && !self.app_lock.is_locked()
             && let Some(link) = self.pending_wa_link.take()
         {
             self.open_wa_link(link);
@@ -2323,7 +2337,8 @@ impl App {
             // Behind the app lock nothing changes yet: the message, with its
             // account, opens once unlocked.
             if self.app_lock.is_locked() {
-                self.app_lock.deferred = Some(target);
+                self.app_lock
+                    .defer(crate::app_lock::Deferred::Message(target));
                 self.actions.push(Action::ShowWindow);
                 continue;
             }
@@ -6723,11 +6738,13 @@ impl App {
             // A clicked notification opens its message once unlocked; the
             // rest would show or change what the lock hides.
             if let Action::OpenMessage { chat, message } = action {
-                self.app_lock.deferred = Some(crate::notify::NotificationTarget {
+                let target = crate::notify::NotificationTarget {
                     account: self.account().id.clone(),
                     chat,
                     message: Some(message),
-                });
+                };
+                self.app_lock
+                    .defer(crate::app_lock::Deferred::Message(target));
             }
             return;
         }
@@ -9615,14 +9632,8 @@ impl App {
                     return;
                 }
                 self.app_lock.unlocked(matched);
-                if matched && let Some(target) = self.app_lock.deferred.take() {
-                    self.switch_account(&target.account);
-                    if let Some(message) = target.message {
-                        self.actions.push(Action::OpenMessage {
-                            chat: target.chat,
-                            message,
-                        });
-                    }
+                if matched {
+                    self.replay_deferred();
                 }
             }
             Outcome::WrongCurrent => {
@@ -9651,11 +9662,34 @@ impl App {
         }
     }
 
+    /// Replays, in the order they arrived, what was asked for from outside
+    /// while the app was locked.
+    fn replay_deferred(&mut self) {
+        use crate::app_lock::Deferred;
+        for request in std::mem::take(&mut self.app_lock.deferred) {
+            match request {
+                Deferred::Message(target) => {
+                    self.switch_account(&target.account);
+                    if let Some(message) = target.message {
+                        self.actions.push(Action::OpenMessage {
+                            chat: target.chat,
+                            message,
+                        });
+                    }
+                }
+                Deferred::Chat { phone, text } => {
+                    self.open_wa_link(crate::wa_link::WaLink::Chat { phone, text });
+                }
+                Deferred::Invite(code) => self.open_wa_link(crate::wa_link::WaLink::Invite(code)),
+            }
+        }
+    }
+
     /// Forgets the app lock password and lifts the lock: after unlinking,
     /// when nothing is left behind it.
     fn forget_app_lock(&mut self) {
         self.app_lock.form = None;
-        self.app_lock.deferred = None;
+        self.app_lock.deferred.clear();
         self.app_lock.release();
         if self.settings.app_lock_hash.take().is_some() {
             self.save_settings();
@@ -12442,6 +12476,85 @@ mod tests {
         assert!(app.quit_requested);
     }
 
+    fn open_links(app: &mut App, links: &[&str]) {
+        let queue = std::sync::Arc::new(std::sync::Mutex::new(
+            links
+                .iter()
+                .map(|link| ControlCommand::Open((*link).to_owned()))
+                .collect::<Vec<_>>(),
+        ));
+        app.control_commands = Some(queue);
+        app.handle_control_commands();
+    }
+
+    #[test]
+    fn links_behind_the_lock_open_nothing_until_unlocked() {
+        use crate::app_lock::{Deferred, Outcome};
+        let mut app = app();
+        app.app_lock = crate::app_lock::AppLock::new(true);
+        app.notification_opens
+            .lock()
+            .unwrap()
+            .push(crate::notify::NotificationTarget {
+                account: AccountId::first(),
+                chat: "15550003333@s.whatsapp.net".into(),
+                message: Some("m1".into()),
+            });
+        app.handle_notification_opens();
+        open_links(
+            &mut app,
+            &[
+                "https://wa.me/15550001111",
+                "https://chat.whatsapp.com/AbCdEf1234567890XyZ",
+                "5594 9277-7990",
+            ],
+        );
+        assert!(app.dialog.is_none() && app.invite.is_none());
+        assert!(app.pending_wa_link.is_none());
+        assert!(!app.actions.iter().any(|action| matches!(
+            action,
+            Action::StartChat { .. } | Action::MessageYourself | Action::OpenMessage { .. }
+        )));
+        // The newer chat replaced the older one, and the order of arrival holds.
+        assert!(matches!(
+            app.app_lock.deferred.as_slice(),
+            [
+                Deferred::Message(_),
+                Deferred::Invite(_),
+                Deferred::Chat { phone, text: None }
+            ] if phone == "559492777990"
+        ));
+        // A wrong password changes nothing.
+        app.app_lock_outcome(Outcome::Unlock(false));
+        assert!(app.dialog.is_none() && app.app_lock.deferred.len() == 3);
+        app.actions.clear();
+        app.app_lock_outcome(Outcome::Unlock(true));
+        assert!(app.app_lock.deferred.is_empty());
+        assert_eq!(app.dialog, Some(Dialog::JoinGroup));
+        assert!(app.invite.is_some());
+        assert!(
+            app.actions
+                .iter()
+                .any(|action| matches!(action, Action::OpenMessage { .. }))
+        );
+        // Not connected here, so the chat waits for the connection.
+        assert!(matches!(
+            app.pending_wa_link,
+            Some(crate::wa_link::WaLink::Chat { ref phone, .. }) if phone == "559492777990"
+        ));
+    }
+
+    #[test]
+    fn forgetting_the_lock_drops_what_waited() {
+        let mut app = app();
+        app.app_lock = crate::app_lock::AppLock::new(true);
+        open_links(&mut app, &["https://wa.me/15550001111"]);
+        assert_eq!(app.app_lock.deferred.len(), 1);
+        app.forget_app_lock();
+        assert!(app.app_lock.deferred.is_empty());
+        assert!(app.pending_wa_link.is_none());
+    }
+
     #[test]
     fn a_notification_behind_the_lock_keeps_its_account() {
         let directory = tempfile::tempdir().unwrap();
@@ -12461,13 +12574,10 @@ mod tests {
             AccountId::first(),
             "nothing changes while locked"
         );
-        assert_eq!(
-            app.app_lock
-                .deferred
-                .as_ref()
-                .map(|target| target.account.as_str()),
-            Some("2")
-        );
+        assert!(matches!(
+            app.app_lock.deferred.as_slice(),
+            [crate::app_lock::Deferred::Message(target)] if target.account.as_str() == "2"
+        ));
     }
 
     #[test]

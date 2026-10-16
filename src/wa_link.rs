@@ -1,9 +1,10 @@
 //! WhatsApp links that ZapFast opens itself: `wa.me` and `api.whatsapp.com`
-//! chat links, the `whatsapp://` scheme the browser hands them on as, and
-//! group invites.
+//! chat links, the `whatsapp://` and `wa://` schemes the browser hands them
+//! on as, group invites, and a bare phone number given on the command line.
 //!
-//! [`handler`] registers ZapFast as the desktop's app for `whatsapp://`
-//! links, which the pages behind `wa.me` open when a browser visits them.
+//! [`handler`] registers ZapFast as the desktop's app for `whatsapp://` and
+//! `wa://` links, which the pages behind `wa.me` open when a browser visits
+//! them.
 
 /// A WhatsApp link that ZapFast can open.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -34,7 +35,7 @@ pub fn parse(value: &str) -> Option<WaLink> {
             .map(|(_, value)| value.into_owned())
     };
     let phone = match url.scheme() {
-        "whatsapp" => match url.host_str()? {
+        "whatsapp" | "wa" => match url.host_str()? {
             "send" => query("phone")?,
             "chat" => {
                 let code = query("code")?;
@@ -80,6 +81,21 @@ pub fn parse(value: &str) -> Option<WaLink> {
     Some(WaLink::Chat { phone, text })
 }
 
+/// What the command line or a handed-over request names: a link
+/// [`parse`] reads, or a bare phone number such as `5594 9277-7990` or
+/// `+55 (94) 92777-7990`, which opens that chat like a `wa.me` link. The
+/// number takes 7 to 15 digits, with spaces, hyphens, and brackets; anything
+/// else is refused.
+pub fn parse_argument(value: &str) -> Option<WaLink> {
+    parse(value).or_else(|| {
+        let value = value.trim();
+        if value.chars().any(char::is_control) {
+            return None;
+        }
+        crate::util::international_phone(value).map(|phone| WaLink::Chat { phone, text: None })
+    })
+}
+
 /// A path segment with its `%XX` escapes decoded.
 fn percent_decode(segment: &str) -> Option<String> {
     let bytes = segment.as_bytes();
@@ -112,7 +128,7 @@ fn phone_digits(value: &str) -> Option<String> {
     ((8..=15).contains(&digits.len()) && !digits.starts_with('0')).then_some(digits)
 }
 
-/// Registration as the desktop's app for `whatsapp://` links.
+/// Registration as the desktop's app for `whatsapp://` and `wa://` links.
 pub mod handler {
     use std::io;
 
@@ -152,7 +168,7 @@ pub mod handler {
         /// A hidden entry of its own, so the menu entry a package installs
         /// stays untouched and the link always reaches this executable.
         const DESKTOP_ID: &str = "zapfast-links.desktop";
-        const MIME: &str = "x-scheme-handler/whatsapp";
+        const MIMES: [&str; 2] = ["x-scheme-handler/whatsapp", "x-scheme-handler/wa"];
         const DEFAULTS: &str = "[Default Applications]";
 
         fn home_dir(variable: &str, fallback: &str) -> Option<PathBuf> {
@@ -181,8 +197,9 @@ pub mod handler {
                  Icon=zapfast\n\
                  Terminal=false\n\
                  NoDisplay=true\n\
-                 MimeType={MIME};\n",
-                crate::autostart::exec_quote(&executable.to_string_lossy())
+                 MimeType={}\n",
+                crate::autostart::exec_quote(&executable.to_string_lossy()),
+                MIMES.map(|mime| format!("{mime};")).concat()
             )
         }
 
@@ -191,7 +208,11 @@ pub mod handler {
             let defaults = mimeapps().and_then(|path| std::fs::read_to_string(path).ok());
             entry.and_then(|path| std::fs::read_to_string(path).ok())
                 == Some(desktop_entry(executable))
-                && defaults.is_some_and(|text| default_of(&text).as_deref() == Some(DESKTOP_ID))
+                && defaults.is_some_and(|text| {
+                    MIMES
+                        .iter()
+                        .all(|mime| default_of(&text, mime).as_deref() == Some(DESKTOP_ID))
+                })
         }
 
         pub fn install(executable: &Path) -> io::Result<()> {
@@ -222,8 +243,13 @@ pub mod handler {
         pub fn remove(_executable: &Path) -> io::Result<()> {
             if let Some(list) = mimeapps() {
                 let text = read_or_empty(&list)?;
-                if default_of(&text).as_deref() == Some(DESKTOP_ID) {
-                    std::fs::write(&list, with_default(&text, None))?;
+                // Only the entries that still name this app are given back.
+                let ours: Vec<&str> = MIMES
+                    .into_iter()
+                    .filter(|mime| default_of(&text, mime).as_deref() == Some(DESKTOP_ID))
+                    .collect();
+                if !ours.is_empty() {
+                    std::fs::write(&list, without_default(&text, &ours))?;
                 }
             }
             if let Some(dir) = applications() {
@@ -242,8 +268,8 @@ pub mod handler {
             }
         }
 
-        /// The first app `mimeapps.list` names for WhatsApp links.
-        pub(super) fn default_of(text: &str) -> Option<String> {
+        /// The first app `mimeapps.list` names for `mime`.
+        pub(super) fn default_of(text: &str, mime: &str) -> Option<String> {
             let mut in_defaults = false;
             for line in text.lines() {
                 let line = line.trim();
@@ -251,7 +277,7 @@ pub mod handler {
                     in_defaults = line == DEFAULTS;
                 } else if in_defaults
                     && let Some((key, value)) = line.split_once('=')
-                    && key.trim() == MIME
+                    && key.trim() == mime
                 {
                     return value
                         .split(';')
@@ -266,7 +292,20 @@ pub mod handler {
         /// `mimeapps.list` with WhatsApp links going to `desktop_id`, or to
         /// no default app. Every other line is kept as it was.
         pub(super) fn with_default(text: &str, desktop_id: Option<&str>) -> String {
-            let line = desktop_id.map(|id| format!("{MIME}={id};"));
+            match desktop_id {
+                Some(id) => set_defaults(text, &MIMES, Some(id)),
+                None => without_default(text, &MIMES),
+            }
+        }
+
+        fn without_default(text: &str, mimes: &[&str]) -> String {
+            set_defaults(text, mimes, None)
+        }
+
+        fn set_defaults(text: &str, mimes: &[&str], desktop_id: Option<&str>) -> String {
+            let lines: Vec<String> = desktop_id
+                .map(|id| mimes.iter().map(|mime| format!("{mime}={id};")).collect())
+                .unwrap_or_default();
             let mut out: Vec<String> = Vec::new();
             let mut in_defaults = false;
             let mut placed = false;
@@ -275,11 +314,8 @@ pub mod handler {
                 if trimmed.starts_with('[') {
                     in_defaults = trimmed == DEFAULTS;
                     out.push(raw.to_owned());
-                    if in_defaults
-                        && !placed
-                        && let Some(line) = &line
-                    {
-                        out.push(line.clone());
+                    if in_defaults && !placed && !lines.is_empty() {
+                        out.extend(lines.iter().cloned());
                         placed = true;
                     }
                     continue;
@@ -287,17 +323,17 @@ pub mod handler {
                 let ours = in_defaults
                     && trimmed
                         .split_once('=')
-                        .is_some_and(|(key, _)| key.trim() == MIME);
+                        .is_some_and(|(key, _)| mimes.contains(&key.trim()));
                 if !ours {
                     out.push(raw.to_owned());
                 }
             }
-            if !placed && let Some(line) = line {
+            if !placed && !lines.is_empty() {
                 if out.last().is_some_and(|last| !last.trim().is_empty()) {
                     out.push(String::new());
                 }
                 out.push(DEFAULTS.to_owned());
-                out.push(line);
+                out.extend(lines);
             }
             let mut text = out.join("\n");
             text.push('\n');
@@ -335,9 +371,8 @@ pub mod handler {
             HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_SZ, RegDeleteTreeW, RegGetValueW, RegSetKeyValueW,
         };
 
-        const KEY: &str = r"Software\Classes\whatsapp";
-        const COMMAND: &str = r"Software\Classes\whatsapp\shell\open\command";
-        const ICON: &str = r"Software\Classes\whatsapp\DefaultIcon";
+        /// The schemes registered, each under `Software\Classes`.
+        const SCHEMES: [&str; 2] = ["whatsapp", "wa"];
 
         fn wide(text: &str) -> Vec<u16> {
             std::ffi::OsStr::new(text)
@@ -399,34 +434,54 @@ pub mod handler {
             }
         }
 
+        fn scheme_registered(scheme: &str, executable: &Path) -> bool {
+            read(&format!(r"Software\Classes\{scheme}\shell\open\command")).as_deref()
+                == Some(command(executable).as_str())
+        }
+
         pub fn registered(executable: &Path) -> bool {
-            read(COMMAND).as_deref() == Some(command(executable).as_str())
+            SCHEMES
+                .iter()
+                .all(|scheme| scheme_registered(scheme, executable))
         }
 
         pub fn install(executable: &Path) -> io::Result<()> {
-            if registered(executable) {
-                return Ok(());
+            for scheme in SCHEMES {
+                if scheme_registered(scheme, executable) {
+                    continue;
+                }
+                let key = format!(r"Software\Classes\{scheme}");
+                write(&key, None, "URL:WhatsApp")?;
+                write(&key, Some("URL Protocol"), "")?;
+                write(
+                    &format!(r"{key}\DefaultIcon"),
+                    None,
+                    &format!("\"{}\",0", executable.display()),
+                )?;
+                write(
+                    &format!(r"{key}\shell\open\command"),
+                    None,
+                    &command(executable),
+                )?;
             }
-            write(KEY, None, "URL:WhatsApp")?;
-            write(KEY, Some("URL Protocol"), "")?;
-            write(ICON, None, &format!("\"{}\",0", executable.display()))?;
-            write(COMMAND, None, &command(executable))
+            Ok(())
         }
 
         pub fn remove(executable: &Path) -> io::Result<()> {
-            // Another app's registration is not ours to delete.
-            if !registered(executable) {
-                return Ok(());
+            for scheme in SCHEMES {
+                // Another app's registration is not ours to delete.
+                if !scheme_registered(scheme, executable) {
+                    continue;
+                }
+                let key = wide(&format!(r"Software\Classes\{scheme}"));
+                // SAFETY: a null-terminated UTF-16 subkey of HKEY_CURRENT_USER.
+                let status = unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, key.as_ptr()) };
+                const ERROR_FILE_NOT_FOUND: u32 = 2;
+                if status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND {
+                    return Err(io::Error::from_raw_os_error(status as i32));
+                }
             }
-            let key = wide(KEY);
-            // SAFETY: a null-terminated UTF-16 subkey of HKEY_CURRENT_USER.
-            let status = unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, key.as_ptr()) };
-            const ERROR_FILE_NOT_FOUND: u32 = 2;
-            if status == ERROR_SUCCESS || status == ERROR_FILE_NOT_FOUND {
-                Ok(())
-            } else {
-                Err(io::Error::from_raw_os_error(status as i32))
-            }
+            Ok(())
         }
     }
 
@@ -452,11 +507,14 @@ pub mod handler {
     mod tests {
         use super::platform::{default_of, desktop_entry, with_default};
 
+        const WHATSAPP: &str = "x-scheme-handler/whatsapp";
+        const WA: &str = "x-scheme-handler/wa";
+
         #[test]
         fn the_entry_hands_the_link_to_this_executable() {
             let entry = desktop_entry(std::path::Path::new("/home/a b/.local/bin/zapfast"));
             assert!(entry.contains("Exec=\"/home/a b/.local/bin/zapfast\" %u\n"));
-            assert!(entry.contains("MimeType=x-scheme-handler/whatsapp;\n"));
+            assert!(entry.contains("MimeType=x-scheme-handler/whatsapp;x-scheme-handler/wa;\n"));
             assert!(entry.contains("NoDisplay=true\n"));
         }
 
@@ -466,14 +524,23 @@ pub mod handler {
                         [Default Applications]\ntext/html=firefox.desktop\n\
                         x-scheme-handler/whatsapp=other.desktop;\n";
             let ours = with_default(text, Some("zapfast-links.desktop"));
-            assert_eq!(default_of(&ours).as_deref(), Some("zapfast-links.desktop"));
+            assert_eq!(
+                default_of(&ours, WHATSAPP).as_deref(),
+                Some("zapfast-links.desktop")
+            );
+            assert_eq!(
+                default_of(&ours, WA).as_deref(),
+                Some("zapfast-links.desktop")
+            );
             assert!(
                 ours.contains("[Added Associations]\nx-scheme-handler/whatsapp=other.desktop;")
             );
             assert!(ours.contains("text/html=firefox.desktop"));
             assert_eq!(ours.matches("x-scheme-handler/whatsapp=").count(), 2);
+            assert_eq!(ours.matches("x-scheme-handler/wa=").count(), 1);
             let removed = with_default(&ours, None);
-            assert_eq!(default_of(&removed), None);
+            assert_eq!(default_of(&removed, WHATSAPP), None);
+            assert_eq!(default_of(&removed, WA), None);
             assert!(removed.contains("text/html=firefox.desktop"));
         }
 
@@ -482,12 +549,14 @@ pub mod handler {
             let ours = with_default("", Some("zapfast-links.desktop"));
             assert_eq!(
                 ours,
-                "[Default Applications]\nx-scheme-handler/whatsapp=zapfast-links.desktop;\n"
+                "[Default Applications]\nx-scheme-handler/whatsapp=zapfast-links.desktop;\n\
+                 x-scheme-handler/wa=zapfast-links.desktop;\n"
             );
             let ours = with_default("[Added Associations]\na=b;\n", Some("z.desktop"));
             assert_eq!(
                 ours,
-                "[Added Associations]\na=b;\n\n[Default Applications]\nx-scheme-handler/whatsapp=z.desktop;\n"
+                "[Added Associations]\na=b;\n\n[Default Applications]\nx-scheme-handler/whatsapp=z.desktop;\n\
+                 x-scheme-handler/wa=z.desktop;\n"
             );
         }
     }
@@ -495,7 +564,7 @@ pub mod handler {
 
 #[cfg(test)]
 mod tests {
-    use super::{WaLink, parse};
+    use super::{WaLink, parse, parse_argument};
 
     fn chat(phone: &str, text: Option<&str>) -> Option<WaLink> {
         Some(WaLink::Chat {
@@ -547,6 +616,69 @@ mod tests {
             parse(&format!("whatsapp://chat?code={code}")),
             Some(WaLink::Invite(code.to_owned()))
         );
+    }
+
+    #[test]
+    fn the_wa_scheme_reads_like_whatsapp() {
+        assert_eq!(
+            parse("wa://send?phone=559492777990&text=oi"),
+            chat("559492777990", Some("oi"))
+        );
+        let code = "AbCdEf1234567890XyZ";
+        assert_eq!(
+            parse(&format!("wa://chat?code={code}")),
+            Some(WaLink::Invite(code.to_owned()))
+        );
+        assert_eq!(parse("wa://call?phone=559492777990"), None);
+        assert_eq!(parse("wa://send"), None);
+    }
+
+    #[test]
+    fn a_bare_number_opens_its_chat() {
+        for number in [
+            "559492777990",
+            "+559492777990",
+            "5594 92777990",
+            "5594 9277-7990",
+            "+55 (94) 9277-7990",
+            "  55-94-9277-7990  ",
+        ] {
+            assert_eq!(
+                parse_argument(number),
+                chat("559492777990", None),
+                "{number}"
+            );
+        }
+        assert_eq!(parse_argument("1234567"), chat("1234567", None));
+        assert_eq!(
+            parse_argument("123456789012345"),
+            chat("123456789012345", None)
+        );
+        assert_eq!(
+            parse_argument("wa://send?phone=559492777990"),
+            chat("559492777990", None)
+        );
+    }
+
+    #[test]
+    fn anything_else_is_not_a_number() {
+        for value in [
+            "",
+            "123456",
+            "1234567890123456",
+            "0559492777990",
+            "55abc92777990",
+            "55 94 (92777990",
+            "55 94) 92777990",
+            "++559492777990",
+            "5594.92777990",
+            "5594\n92777990",
+            "call 559492777990",
+            "https://example.com/559492777990",
+            "whatsapp://call?phone=559492777990",
+        ] {
+            assert_eq!(parse_argument(value), None, "{value:?}");
+        }
     }
 
     #[test]

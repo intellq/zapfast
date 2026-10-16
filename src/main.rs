@@ -12,10 +12,12 @@ use clap::Parser;
 struct Cli {
     #[command(subcommand)]
     command: Option<Control>,
-    /// A WhatsApp link to open, such as `https://wa.me/5511999999999` or
-    /// `whatsapp://send?phone=5511999999999`, as the desktop hands it over.
-    #[arg(value_name = "LINK")]
-    link: Option<String>,
+    /// A WhatsApp link to open, such as `https://wa.me/5511999999999`,
+    /// `whatsapp://send?phone=5511999999999` or `wa://send?phone=...`, as the
+    /// desktop hands it over, or a phone number such as `+55 11 99999-9999`
+    /// (7 to 15 digits; spaces, hyphens, and brackets allowed).
+    #[arg(value_name = "LINK_OR_NUMBER", num_args = 0..)]
+    link: Vec<String>,
     /// Log more from the WhatsApp library.
     #[arg(short, long)]
     verbose: bool,
@@ -224,13 +226,14 @@ fn run() -> eframe::Result<()> {
         return Ok(());
     }
     // Only a WhatsApp link is taken; anything else starts ZapFast as usual.
-    let link = cli.link.as_deref().map(str::trim).and_then(|link| {
-        let known = zapfast::wa_link::parse(link).is_some();
-        if !known {
-            eprintln!("Not a WhatsApp link ZapFast opens: {link}");
+    let link = {
+        let link = cli.link.join(" ").trim().to_owned();
+        let known = !link.is_empty() && zapfast::wa_link::parse_argument(&link).is_some();
+        if !known && !link.is_empty() {
+            eprintln!("Not a WhatsApp link or phone number ZapFast opens: {link}");
         }
-        known.then(|| link.to_owned())
-    });
+        known.then_some(link)
+    };
     let waker = backend::Waker::default();
     #[cfg(feature = "demo")]
     let demo = cli.demo || cli.demo_shot.is_some() || cli.demo_tour;
@@ -989,6 +992,24 @@ mod tests {
         let cli = Cli::try_parse_from(["zapfast", "quit"]).unwrap();
         assert!(matches!(cli.command, Some(Control::Quit)));
         assert_eq!(Control::Quit.verb(), "quit");
+    }
+
+    /// A number split over several arguments is one number.
+    #[test]
+    fn a_number_may_span_arguments() {
+        let cli = Cli::try_parse_from(["zapfast", "5594", "9277-7990"]).unwrap();
+        assert_eq!(cli.link.join(" "), "5594 9277-7990");
+        assert!(cli.command.is_none());
+        let cli = Cli::try_parse_from(["zapfast", "+55", "(94)", "9277-7990"]).unwrap();
+        assert_eq!(
+            zapfast::wa_link::parse_argument(&cli.link.join(" ")),
+            Some(zapfast::wa_link::WaLink::Chat {
+                phone: "559492777990".into(),
+                text: None
+            })
+        );
+        let cli = Cli::try_parse_from(["zapfast", "wa://send?phone=559492777990"]).unwrap();
+        assert_eq!(cli.link.len(), 1);
     }
 
     /// Quitting succeeds when the running copy takes it and, quietly, when

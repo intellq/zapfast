@@ -220,6 +220,17 @@ fn run(work: Work) -> Outcome {
     }
 }
 
+/// One request the app lock holds until it is unlocked.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Deferred {
+    /// A clicked notification's message, with its account.
+    Message(crate::notify::NotificationTarget),
+    /// A chat a link named, with the text it carried.
+    Chat { phone: String, text: Option<String> },
+    /// The code of a group invite a link named.
+    Invite(String),
+}
+
 /// The lock's state while the app runs.
 pub struct AppLock {
     clock: Clock,
@@ -233,8 +244,11 @@ pub struct AppLock {
     /// The last try was wrong.
     pub wrong: bool,
     pub forgetting: Forgetting,
-    /// A notification clicked while locked, opened once unlocked.
-    pub deferred: Option<crate::notify::NotificationTarget>,
+    /// What was asked for from outside while locked, in the order it
+    /// arrived, replayed once unlocked: a clicked notification's message, a
+    /// chat a link named, or a group invite. Each names something the lock
+    /// would otherwise hide, so it waits instead of opening behind the lock.
+    pub deferred: Vec<Deferred>,
     /// The Settings password form, when open.
     pub form: Option<Form>,
 }
@@ -262,7 +276,7 @@ impl AppLock {
             entry: String::new(),
             wrong: false,
             forgetting: Forgetting::No,
-            deferred: None,
+            deferred: Vec::new(),
             form: None,
         }
     }
@@ -279,6 +293,16 @@ impl AppLock {
 
     pub fn is_locked(&self) -> bool {
         self.locked
+    }
+
+    /// Holds `request` until the unlock, after everything asked for before
+    /// it. A newer request of the same kind replaces the older one, which
+    /// the newer would only cover.
+    pub fn defer(&mut self, request: Deferred) {
+        let kind = std::mem::discriminant(&request);
+        self.deferred
+            .retain(|held| std::mem::discriminant(held) != kind);
+        self.deferred.push(request);
     }
 
     /// Someone used the window: the inactivity count starts again.
@@ -431,6 +455,23 @@ impl AppLock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_newer_request_of_a_kind_replaces_the_older_one() {
+        let mut lock = AppLock::new(true);
+        let chat = |phone: &str| Deferred::Chat {
+            phone: phone.into(),
+            text: None,
+        };
+        lock.defer(chat("15550000001"));
+        lock.defer(Deferred::Invite("a".into()));
+        lock.defer(chat("15550000002"));
+        lock.defer(Deferred::Invite("b".into()));
+        assert_eq!(
+            lock.deferred,
+            vec![chat("15550000002"), Deferred::Invite("b".into())]
+        );
+    }
     use std::sync::Mutex;
 
     /// A clock that moves only when told to.
