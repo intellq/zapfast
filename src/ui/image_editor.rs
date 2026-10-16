@@ -369,6 +369,12 @@ fn shade_outside(ui: &egui::Ui, palette: theme::Palette, picture: Rect, crop: Re
     }
 }
 
+/// The largest rectangle of `shape`'s proportions centred in `room`.
+fn fitted(shape: Vec2, room: Rect) -> Rect {
+    let scale = (room.width() / shape.x.max(1.0)).min(room.height() / shape.y.max(1.0));
+    Rect::from_center_size(room.center(), shape * scale)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -403,10 +409,4 @@ mod tests {
         assert_eq!(turned_corners(2)[0], Pos2::new(1.0, 1.0));
         assert_eq!(turned_corners(2)[1], Pos2::new(0.0, 1.0));
     }
-}
-
-/// The largest rectangle of `shape`'s proportions centred in `room`.
-fn fitted(shape: Vec2, room: Rect) -> Rect {
-    let scale = (room.width() / shape.x.max(1.0)).min(room.height() / shape.y.max(1.0));
-    Rect::from_center_size(room.center(), shape * scale)
 }
