@@ -5445,3 +5445,233 @@ msgstr ""
 
 msgid "Asks your phone in the background for older messages in the open, pinned and ten most recent chats."
 msgstr ""
+
+msgid "{seconds} s"
+msgstr ""
+
+msgid "{minutes} min"
+msgstr ""
+
+msgid "{minutes} min {seconds} s"
+msgstr ""
+
+msgid "{hours} h"
+msgstr ""
+
+msgid "{hours} h {minutes} min"
+msgstr ""
+
+msgid "Back to the calls"
+msgstr ""
+
+msgid "New call"
+msgstr ""
+
+msgid "Search name or number"
+msgstr ""
+
+msgid "Video call"
+msgstr ""
+
+msgid "Send as document"
+msgstr ""
+
+msgid "Group calls happen on the phone"
+msgstr ""
+
+msgid "Open in the viewer"
+msgstr ""
+
+msgid "Save all…"
+msgstr ""
+
+msgid "Back to the message (Esc)"
+msgstr ""
+
+msgid "Forward {count} message"
+msgid_plural "Forward {count} messages"
+msgstr[0] ""
+msgstr[1] ""
+
+msgid "Custom title bar"
+msgstr ""
+
+msgid "Draw ZapFast's own title bar and window buttons instead of the desktop's."
+msgstr ""
+
+msgid "Show message content in notifications"
+msgstr ""
+
+msgid "When off, they say only “New message”."
+msgstr ""
+
+msgid "Limit repeat notifications"
+msgstr ""
+
+msgid "After one notification, a chat stays quiet for 10 minutes. Opening the chat resets this. In groups, mentions and replies to you still notify."
+msgstr ""
+
+msgid "Wants to switch to video: turn on your camera to answer"
+msgstr ""
+
+msgid "Their camera is off"
+msgstr ""
+
+msgid "Camera “{name}” is not available"
+msgstr ""
+
+msgid "The other side's audio is not getting through"
+msgstr ""
+
+msgid "Start video"
+msgstr ""
+
+msgid "Turn the camera off"
+msgstr ""
+
+msgid "Turn the camera on"
+msgstr ""
+
+msgid "Devices"
+msgstr ""
+
+msgid "Camera"
+msgstr ""
+
+msgid "First camera"
+msgstr ""
+
+msgid "Incoming video call"
+msgstr ""
+
+msgid "Group voice call from {name}"
+msgstr ""
+
+msgid "Group video call from {name}"
+msgstr ""
+
+msgid "Incoming group voice call"
+msgstr ""
+
+msgid "Incoming group video call"
+msgstr ""
+
+msgid "Invited"
+msgstr ""
+
+msgid "Missed voice call"
+msgstr ""
+
+msgid "Missed video call"
+msgstr ""
+
+msgid "Missed group voice call"
+msgstr ""
+
+msgid "Missed group video call"
+msgstr ""
+
+msgid "Group voice call"
+msgstr ""
+
+msgid "Group video call"
+msgstr ""
+
+msgid "Call link"
+msgstr ""
+
+msgid "Calls from your phone's call log and the ones you make here appear here."
+msgstr ""
+
+msgid "Reading this account's calls."
+msgstr ""
+
+msgid "No matching calls"
+msgstr ""
+
+msgid "Frequently contacted"
+msgstr ""
+
+msgid "All contacts"
+msgstr ""
+
+msgid "Video call {name}"
+msgstr ""
+
+msgid "Voice call {name}"
+msgstr ""
+
+msgid "Start call"
+msgstr ""
+
+msgid "Call one person by voice or video, or choose a call in the list to see it."
+msgstr ""
+
+msgid "Hang up the current call first"
+msgstr ""
+
+msgid "Cancel (Esc)"
+msgstr ""
+
+msgid "Keep this crop"
+msgstr ""
+
+msgid "Reset"
+msgstr ""
+
+msgid "Turn right"
+msgstr ""
+
+msgid "Turn left"
+msgstr ""
+
+msgid "Close preview (Esc)"
+msgstr ""
+
+msgid "Zoom in"
+msgstr ""
+
+msgid "Fit"
+msgstr ""
+
+msgid "Show at original size"
+msgstr ""
+
+msgid "Zoom out"
+msgstr ""
+
+msgid "Show in the chat"
+msgstr ""
+
+msgid "Show the photo"
+msgstr ""
+
+msgid "Play or pause the video"
+msgstr ""
+
+msgid "Minimize"
+msgstr ""
+
+msgid "Maximize"
+msgstr ""
+
+msgid "Restore"
+msgstr ""
+
+msgid "Crop and rotate"
+msgstr ""
+
+msgid "Dismiss the current action, return from search, Calls or Starred, or close the chat"
+msgstr ""
+
+msgid "Previous / next item in the media viewer"
+msgstr ""
+
+msgid "Back to the chats"
+msgstr ""
+
+msgid "Call info"
+msgstr ""
+
+msgid "Show in chat"
+msgstr ""

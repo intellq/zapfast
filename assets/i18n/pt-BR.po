@@ -5614,3 +5614,236 @@ msgstr "Não foi possível listar a mídia."
 
 msgid "Asks your phone in the background for older messages in the open, pinned and ten most recent chats."
 msgstr "Pede ao seu celular, em segundo plano, mensagens mais antigas da conversa aberta, das fixadas e das dez mais recentes."
+
+msgid "{seconds} s"
+msgstr "{seconds} s"
+
+msgid "{minutes} min"
+msgstr "{minutes} min"
+
+msgid "{minutes} min {seconds} s"
+msgstr "{minutes} min {seconds} s"
+
+msgid "{hours} h"
+msgstr "{hours} h"
+
+msgid "{hours} h {minutes} min"
+msgstr "{hours} h {minutes} min"
+
+msgid "Back to the calls"
+msgstr "Voltar para as chamadas"
+
+msgid "New call"
+msgstr "Nova chamada"
+
+msgid "Search name or number"
+msgstr "Pesquisar nome ou número"
+
+msgid "Video call"
+msgstr "Chamada de vídeo"
+
+msgid "Send as document"
+msgstr "Enviar como documento"
+
+msgid "Group calls happen on the phone"
+msgstr "Chamadas em grupo acontecem no celular"
+
+msgid "Open in the viewer"
+msgstr "Abrir no visualizador"
+
+msgid "Save all…"
+msgstr "Salvar tudo…"
+
+msgid "Back to the message (Esc)"
+msgstr "Voltar à mensagem (Esc)"
+
+msgid "Forward {count} message"
+msgid_plural "Forward {count} messages"
+msgstr[0] "Encaminhar {count} mensagem"
+msgstr[1] "Encaminhar {count} mensagens"
+
+msgid "Custom title bar"
+msgstr "Barra de título personalizada"
+
+msgid "Draw ZapFast's own title bar and window buttons instead of the desktop's."
+msgstr "Desenha a barra de título e os botões de janela do próprio ZapFast em vez dos da área de trabalho."
+
+msgid "Show message content in notifications"
+msgstr "Mostrar o conteúdo das mensagens nas notificações"
+
+msgid "When off, they say only “New message”."
+msgstr "Quando desativado, dizem apenas “Nova mensagem”."
+
+msgid "Limit repeat notifications"
+msgstr "Limitar notificações repetidas"
+
+msgid "After one notification, a chat stays quiet for 10 minutes. Opening the chat resets this. In groups, mentions and replies to you still notify."
+msgstr "Depois de uma notificação, a conversa fica em silêncio por 10 minutos. Abrir a conversa reinicia isso. Em grupos, menções e respostas a você ainda notificam."
+
+msgid "Wants to switch to video: turn on your camera to answer"
+msgstr "Quer mudar para vídeo: ative sua câmera para atender"
+
+msgid "Their camera is off"
+msgstr "A câmera da outra pessoa está desligada"
+
+msgid "Camera “{name}” is not available"
+msgstr "Câmera “{name}” indisponível"
+
+msgid "The other side's audio is not getting through"
+msgstr "O áudio da outra pessoa não está chegando"
+
+msgid "Start video"
+msgstr "Iniciar vídeo"
+
+msgid "Turn the camera off"
+msgstr "Desligar a câmera"
+
+msgid "Turn the camera on"
+msgstr "Ligar a câmera"
+
+msgid "Devices"
+msgstr "Dispositivos"
+
+msgid "Camera"
+msgstr "Câmera"
+
+msgid "First camera"
+msgstr "Primeira câmera"
+
+msgid "Incoming video call"
+msgstr "Chamada de vídeo recebida"
+
+msgid "Group voice call from {name}"
+msgstr "Chamada de voz em grupo de {name}"
+
+msgid "Group video call from {name}"
+msgstr "Chamada de vídeo em grupo de {name}"
+
+msgid "Incoming group voice call"
+msgstr "Chamada de voz em grupo recebida"
+
+msgid "Incoming group video call"
+msgstr "Chamada de vídeo em grupo recebida"
+
+msgid "Invited"
+msgstr "Convidado"
+
+msgid "Missed voice call"
+msgstr "Chamada de voz perdida"
+
+msgid "Missed video call"
+msgstr "Chamada de vídeo perdida"
+
+msgid "Missed group voice call"
+msgstr "Chamada de voz em grupo perdida"
+
+msgid "Missed group video call"
+msgstr "Chamada de vídeo em grupo perdida"
+
+msgid "Group voice call"
+msgstr "Chamada de voz em grupo"
+
+msgid "Group video call"
+msgstr "Chamada de vídeo em grupo"
+
+msgid "Call link"
+msgstr "Link de chamada"
+
+msgid "Calls from your phone's call log and the ones you make here appear here."
+msgstr "As chamadas do histórico do seu celular e as que você fizer aqui aparecem aqui."
+
+msgid "Reading this account's calls."
+msgstr "Lendo as chamadas desta conta."
+
+msgid "No matching calls"
+msgstr "Nenhuma chamada encontrada"
+
+msgid "Frequently contacted"
+msgstr "Contatos frequentes"
+
+msgid "All contacts"
+msgstr "Todos os contatos"
+
+msgid "Video call {name}"
+msgstr "Chamada de vídeo para {name}"
+
+msgid "Voice call {name}"
+msgstr "Chamada de voz para {name}"
+
+msgid "Start call"
+msgstr "Iniciar chamada"
+
+msgid "Call one person by voice or video, or choose a call in the list to see it."
+msgstr "Ligue para uma pessoa por voz ou vídeo, ou escolha uma chamada na lista para vê-la."
+
+msgid "Hang up the current call first"
+msgstr "Desligue a chamada atual primeiro"
+
+msgid "Cancel (Esc)"
+msgstr "Cancelar (Esc)"
+
+msgid "Keep this crop"
+msgstr "Manter este recorte"
+
+msgid "Reset"
+msgstr "Redefinir"
+
+msgid "Turn right"
+msgstr "Girar à direita"
+
+msgid "Turn left"
+msgstr "Girar à esquerda"
+
+msgid "Close preview (Esc)"
+msgstr "Fechar o visualizador (Esc)"
+
+msgid "Zoom in"
+msgstr "Ampliar"
+
+msgid "Fit"
+msgstr "Ajustar"
+
+msgid "Show at original size"
+msgstr "Mostrar no tamanho original"
+
+msgid "Zoom out"
+msgstr "Reduzir"
+
+msgid "Show in the chat"
+msgstr "Mostrar na conversa"
+
+msgid "Show the photo"
+msgstr "Mostrar a foto"
+
+msgid "Play or pause the video"
+msgstr "Reproduzir ou pausar o vídeo"
+
+msgid "Minimize"
+msgstr "Minimizar"
+
+msgid "Maximize"
+msgstr "Maximizar"
+
+msgid "Restore"
+msgstr "Restaurar"
+
+msgid "Crop and rotate"
+msgstr "Cortar e girar"
+
+msgid "Dismiss the current action, return from search, Calls or Starred, or close the chat"
+msgstr "Cancelar a ação atual, sair da pesquisa, de Chamadas ou de Com estrela, ou fechar a conversa"
+
+msgid "Previous / next item in the media viewer"
+msgstr "Item anterior / seguinte no visualizador de mídia"
+
+msgid "Back to the chats"
+msgstr "Voltar para as conversas"
+
+msgid "Call info"
+msgstr "Dados da chamada"
+
+msgid "Show in chat"
+msgstr "Mostrar na conversa"
+
+msgid "Missed"
+msgstr "Perdidas"
