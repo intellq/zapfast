@@ -853,7 +853,10 @@ impl Worker {
                 return;
             }
         }
-        self.ensure_chat(&entry.chat, None);
+        let link = entry.chat == crate::model::CALL_LINK_CHAT;
+        if !link {
+            self.ensure_chat(&entry.chat, None);
+        }
         let sender = if entry.from_me {
             self.me()
         } else {
@@ -885,6 +888,11 @@ impl Worker {
         };
         if let Err(error) = self.archive.insert_message(&message, None) {
             log::warn!("[CALL] a call entry could not be filed: {error}");
+            return;
+        }
+        if link {
+            // No chat shows it: the Calls page is where it goes.
+            self.emit_call_log();
             return;
         }
         self.emit(Event::Messages {
@@ -931,8 +939,15 @@ impl Worker {
         let Some(status) = update.outcome else {
             return;
         };
+        // A call joined through a link belongs to no chat, and is filed under
+        // the id kept for such calls.
+        let link = update.group.as_ref().is_some_and(|group| group.link);
         self.file_call_entry(CallEntry {
-            chat: update.chat.clone(),
+            chat: if link {
+                crate::model::CALL_LINK_CHAT.to_owned()
+            } else {
+                update.chat.clone()
+            },
             caller: update.group.as_ref().and_then(|group| group.caller.clone()),
             call_id: call.call_id().to_owned(),
             from_me: update.direction == crate::model::CallDirection::Outgoing,
@@ -1200,6 +1215,46 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// A call joined through a link is filed under the id kept for such calls, which no chat
+    /// has, and reaches the Calls page without making a chat of it.
+    #[test]
+    fn a_call_link_call_is_filed_for_the_calls_page_only() {
+        let (mut worker, events, _, _) = super::super::receipt_tests::worker();
+        worker.file_call_entry(CallEntry {
+            chat: crate::model::CALL_LINK_CHAT.to_owned(),
+            caller: None,
+            call_id: "LINKCALL".to_owned(),
+            from_me: true,
+            timestamp: 1_000,
+            video: true,
+            status: calls::CallOutcome::Answered,
+            duration: 75,
+            group: true,
+        });
+        let filed = worker.archive.call_log(10).unwrap();
+        assert_eq!(filed.len(), 1);
+        assert_eq!(filed[0].chat, crate::model::CALL_LINK_CHAT);
+        assert!(
+            worker
+                .archive
+                .chat(crate::model::CALL_LINK_CHAT)
+                .unwrap()
+                .is_none(),
+            "no chat is made for it"
+        );
+        let events: Vec<Event> = events.try_iter().collect();
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, Event::CallLog(_)))
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Event::Messages { .. } | Event::ChatUpdated(_)))
+        );
     }
 
     #[test]

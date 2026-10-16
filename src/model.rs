@@ -841,6 +841,11 @@ pub enum Content {
 /// reaction or deletion is ever sent for them.
 pub const CALL_ENTRY_PREFIX: &str = "zapfast-call-";
 
+/// The chat id the entries of calls joined through a call link are filed
+/// under. No chat has it: such a call belongs to none, so its entries show on
+/// the Calls page alone, never in the chat list.
+pub const CALL_LINK_CHAT: &str = "zapfast-call-link";
+
 /// How far apart, in seconds, two entries for one call may be: the phone's
 /// call-log message and the call's record are stamped by different clocks.
 pub const CALL_ENTRY_WINDOW: i64 = 120;

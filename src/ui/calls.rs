@@ -162,10 +162,20 @@ fn visible_calls(app: &App) -> Vec<Message> {
         .collect()
 }
 
+/// The name a row of the history goes by: its chat's, or "Call link" for
+/// the calls joined through one, which belong to no chat.
+fn row_name(app: &App, chat: &str) -> String {
+    if chat == crate::model::CALL_LINK_CHAT {
+        gettext(app.locale, "Call link").into_owned()
+    } else {
+        app.display_name(chat)
+    }
+}
+
 /// Whether `id`'s name or number matches `needle`, a `search_key`.
 fn matches(app: &App, id: &str, needle: &str) -> bool {
     needle.is_empty()
-        || crate::util::search_key(&app.display_name(id)).contains(needle)
+        || crate::util::search_key(&row_name(app, id)).contains(needle)
         || crate::model::phone_of(id).is_some_and(|phone| phone.contains(needle))
 }
 
@@ -308,8 +318,15 @@ fn history_row(app: &mut App, ui: &mut egui::Ui, row: &[Message], actions: &mut 
     };
     let palette = app.palette;
     let locale = app.locale;
-    let name = app.display_name(&message.chat);
-    let picture = app.avatar(&message.chat);
+    // A call joined through a link has no chat to open or call back, and no
+    // photo: its row only records the call.
+    let link = message.chat == crate::model::CALL_LINK_CHAT;
+    let name = row_name(app, &message.chat);
+    let picture = if link {
+        None
+    } else {
+        app.avatar(&message.chat)
+    };
     let selected = app.call_picked()
         && app
             .picked_call
@@ -338,7 +355,7 @@ fn history_row(app: &mut App, ui: &mut egui::Ui, row: &[Message], actions: &mut 
             spoken.as_str(),
         )
     });
-    if response.clicked() {
+    if response.clicked() && !link {
         actions.push(Action::PickCall {
             chat: message.chat.clone(),
             message: message.id.clone(),
@@ -349,7 +366,7 @@ fn history_row(app: &mut App, ui: &mut egui::Ui, row: &[Message], actions: &mut 
         pos2(rect.right() - 30.0, rect.center().y),
         Vec2::splat(34.0),
     );
-    if !entry.group {
+    if !entry.group && !link {
         let mut child = ui.new_child(
             egui::UiBuilder::new()
                 .max_rect(button_rect)
@@ -387,14 +404,18 @@ fn history_row(app: &mut App, ui: &mut egui::Ui, row: &[Message], actions: &mut 
     }
     let avatar_rect =
         Rect::from_center_size(pos2(rect.left() + 38.0, rect.center().y), Vec2::splat(48.0));
-    widgets::paint_avatar(
-        ui,
-        &palette,
-        avatar_rect,
-        &name,
-        &message.chat,
-        picture.as_deref(),
-    );
+    if link {
+        crate::ui::call::paint_link_avatar(ui, &palette, avatar_rect);
+    } else {
+        widgets::paint_avatar(
+            ui,
+            &palette,
+            avatar_rect,
+            &name,
+            &message.chat,
+            picture.as_deref(),
+        );
+    }
     let left = rect.left() + 76.0;
     let right = button_rect.left() - 6.0;
     let stamp_galley = ui
@@ -464,6 +485,7 @@ pub fn frequent(calls: &[Message], me: Option<&str>) -> Vec<String> {
             crate::model::ChatKind::from_id(&message.chat),
             crate::model::ChatKind::Direct
         ) || me == Some(message.chat.as_str())
+            || message.chat == crate::model::CALL_LINK_CHAT
         {
             continue;
         }
@@ -728,6 +750,13 @@ mod tests {
                 CallStatus::Missed,
             ),
             call("me@s.whatsapp.net", "5", true, 20, CallStatus::Answered),
+            call(
+                crate::model::CALL_LINK_CHAT,
+                "6",
+                true,
+                10,
+                CallStatus::Answered,
+            ),
         ];
         assert_eq!(frequent(&log, Some("me@s.whatsapp.net")), [ADA, GRACE]);
     }
@@ -791,6 +820,26 @@ mod tests {
             "{:?}",
             app.actions
         );
+    }
+
+    /// A call joined through a link is listed as "Call link", with nothing
+    /// to open and nobody to call back: a click on it does nothing.
+    #[test]
+    fn a_call_link_row_only_records_the_call() {
+        let (_directory, mut app, ctx) = calls_app();
+        let link = crate::model::CALL_LINK_CHAT;
+        app.call_log
+            .insert(0, call(link, "9", true, 90, CallStatus::Answered));
+        app.calls_search = "call link".to_owned();
+        frame(&mut app, &ctx, vec![]);
+        let row = ctx
+            .read_response(row_id(link, "9"))
+            .expect("the row is listed and found by its name")
+            .rect;
+        frame(&mut app, &ctx, click(row.left_center() + vec2(40.0, 0.0)));
+        frame(&mut app, &ctx, click(row.right_center() - vec2(30.0, 0.0)));
+        frame(&mut app, &ctx, vec![]);
+        assert!(app.actions.is_empty(), "{:?}", app.actions);
     }
 
     #[test]

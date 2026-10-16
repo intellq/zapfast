@@ -128,6 +128,23 @@ impl App {
         Some(self.with_call_account(|app| app.display_name(&caller)))
     }
 
+    /// Ourselves on a group call, as our own tile shows us: our photo under
+    /// "You". `None` on a one-to-one call.
+    pub fn call_self(&mut self) -> Option<CallPerson> {
+        self.call.as_ref()?.group.as_ref()?;
+        let you = crate::i18n::gettext(self.locale, "You").into_owned();
+        self.with_call_account(|app| {
+            let id = app.me.clone().unwrap_or_default();
+            Some(CallPerson {
+                picture: (!id.is_empty()).then(|| app.avatar(&id)).flatten(),
+                name: you,
+                id,
+                joined: true,
+                video: false,
+            })
+        })
+    }
+
     /// The people on a group call, named and pictured by the call's own
     /// account. Nobody while the lock hides the chat: a member's name says as
     /// much about the chat as its own does.

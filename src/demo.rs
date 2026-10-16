@@ -2415,6 +2415,13 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
             // A group's video call: three members' cameras on, Tom's off, and
             // ours in the corner.
             "call-group-video" => group_call_sample(app, false, true),
+            // The same call with our microphone muted: our own tile says so.
+            "call-group-muted" => {
+                group_call_sample(app, false, false);
+                if let Some(call) = app.call.as_mut() {
+                    call.muted = true;
+                }
+            }
             // A call link from a message, while the call service lets us in.
             "call-link" => {
                 call_sample(app, false, false);
@@ -2452,12 +2459,28 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
             // picked, that row's chat at the call.
             // The Missed chip picked, and with no missed call to show.
             "calls" | "calls-chat" | "calls-info" | "new-call" | "calls-missed"
-            | "calls-missed-none" => {
+            | "calls-missed-none" | "calls-link" => {
                 app.page = Page::Calls;
                 if part != "calls-chat" {
                     app.open_chat = None;
                 }
                 let mut log = call_entries(crate::util::now());
+                if part == "calls-link" {
+                    // A video call joined through a link half an hour ago,
+                    // which no chat holds.
+                    log.push(message(
+                        crate::model::CALL_LINK_CHAT,
+                        &format!("{}link-1", crate::model::CALL_ENTRY_PREFIX),
+                        true,
+                        crate::util::now() - 30,
+                        Content::Call {
+                            video: true,
+                            status: crate::model::CallStatus::Answered,
+                            duration: 1_260,
+                            group: true,
+                        },
+                    ));
+                }
                 if part.starts_with("calls-missed") {
                     app.call_filter = crate::model::CallFilter::Missed;
                 }
@@ -6029,7 +6052,9 @@ mod tests {
             "call-group",
             "call-group-active",
             "call-group-video",
+            "call-group-muted",
             "call-link",
+            "calls-link",
             "call-video",
             "call-video,light",
             "call-video-incoming",
@@ -6165,6 +6190,8 @@ mod tests {
             ("call-group-active", narrow),
             ("call-group-video", wide),
             ("call-group-video", narrow),
+            ("call-group-muted", wide),
+            ("calls-link", wide),
             ("settings", wide),
             ("settings", narrow),
             ("calls", wide),
@@ -16994,6 +17021,11 @@ mod call_surface_tests {
         }
         running.settings.set_chat_lock_code(Some("test-code"));
         assert!(running.call_people().is_empty());
+        assert_eq!(
+            running.call_self().map(|me| me.name).as_deref(),
+            Some("You"),
+            "our own tile is ours to name"
+        );
         assert_eq!(running.call_caller_name(), None);
     }
 

@@ -45,6 +45,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     let peer = app.call_name();
     let picture = app.call_avatar();
     let people = app.call_people();
+    let me = app.call_self();
     let caller = app.call_caller_name();
     // The whole window, minus the strip macOS keeps for the traffic lights.
     let screen = ctx.content_rect();
@@ -82,6 +83,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                     picture,
                     caller: caller.as_deref(),
                     people: &people,
+                    me: me.as_ref(),
                 };
                 if call.phase == CallPhase::Incoming {
                     ringing(ui, app, &call, &who, &palette, inner);
@@ -190,7 +192,13 @@ fn live(
         ui.vertical_centered(|ui| {
             ui.add_space(area.height() * 0.16);
             let size = (area.height() * 0.26).clamp(96.0, 168.0);
-            widgets::avatar(ui, palette, peer, &call.chat, size, picture);
+            if call.group.as_ref().is_some_and(|group| group.link) {
+                // A call link has no chat and no face: its own sign instead.
+                let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), egui::Sense::hover());
+                paint_link_avatar(ui, palette, rect);
+            } else {
+                widgets::avatar(ui, palette, peer, &call.chat, size, picture);
+            }
             ui.add_space(18.0);
             theme::text(ui, peer, theme::bold(26.0), palette.text);
             ui.add_space(6.0);
@@ -717,6 +725,8 @@ struct Who<'a> {
     picture: Option<&'a std::path::Path>,
     caller: Option<&'a str>,
     people: &'a [CallPerson],
+    /// Ourselves, as our own tile on a group call shows us.
+    me: Option<&'a CallPerson>,
 }
 
 /// What a ringing call says it is: a one-to-one call its kind, a group call
@@ -964,7 +974,7 @@ fn group_live(
     // Those in the call first, then our own camera while it runs, then those
     // only asked to it; past the most a grid holds, the last tile counts the
     // rest.
-    let me = (call.video && call.camera_on)
+    let camera = (call.video && call.camera_on)
         .then(|| app.call_local_frame.clone())
         .flatten();
     let mut tiles: Vec<Tile<'_>> = who
@@ -973,7 +983,13 @@ fn group_live(
         .filter(|person| person.joined)
         .map(Tile::Person)
         .collect();
-    tiles.extend(me.map(Tile::Me));
+    // Our own tile, in a voice call as in a video one: our camera while it
+    // runs, else our photo.
+    match (camera, who.me) {
+        (Some(image), _) => tiles.push(Tile::Me(image)),
+        (None, Some(me)) => tiles.push(Tile::MyPhoto(me)),
+        (None, None) => {}
+    }
     tiles.extend(
         who.people
             .iter()
@@ -1021,6 +1037,15 @@ fn group_live(
                     &image,
                 );
                 video_tile(ui, &you, texture, image_size(&image), rect);
+                if call.muted {
+                    muted_badge(ui, palette, rect);
+                }
+            }
+            Tile::MyPhoto(me) => {
+                person_tile(ui, locale, palette, me, rect);
+                if call.muted {
+                    muted_badge(ui, palette, rect);
+                }
             }
             Tile::More(rest) => {
                 ui.painter()
@@ -1042,8 +1067,31 @@ enum Tile<'a> {
     Person(&'a CallPerson),
     /// Our own camera's picture.
     Me(std::sync::Arc<egui::ColorImage>),
+    /// Ourselves while our camera is off, or on a voice call.
+    MyPhoto(&'a CallPerson),
     /// How many more are on the call than the grid holds.
     More(usize),
+}
+
+/// The sign a muted microphone wears in the corner of our own tile: only
+/// ours, since the library says nothing of anyone else's.
+fn muted_badge(ui: &egui::Ui, palette: &Palette, tile: Rect) {
+    let size = 30.0;
+    let at = Rect::from_min_size(
+        egui::pos2(tile.right() - size - 10.0, tile.top() + 10.0),
+        Vec2::splat(size),
+    );
+    ui.painter()
+        .circle_filled(at.center(), size / 2.0, palette.danger);
+    theme::paint_icon(ui, Icon::MicOff, at, 16.0, Color32::WHITE);
+}
+
+/// A call link's picture: a link on a plain disc, where a chat would have
+/// its photo.
+pub(crate) fn paint_link_avatar(ui: &egui::Ui, palette: &Palette, rect: Rect) {
+    ui.painter()
+        .circle_filled(rect.center(), rect.width() / 2.0, palette.surface_active);
+    theme::paint_icon(ui, Icon::Link, rect, rect.width() * 0.45, palette.text);
 }
 
 /// A tile's ground: a shade off the window in either theme, where a light
