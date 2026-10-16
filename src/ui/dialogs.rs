@@ -1351,7 +1351,28 @@ fn confirm_delete_message(
             },
         )
     };
-    title(ui, app, crate::i18n::gettext(app.locale, heading).as_ref());
+    // Several messages say how many, so a selection that grew past what the
+    // reader meant is caught before it is gone.
+    let heading = if several && for_everyone {
+        crate::i18n::ngettext(
+            app.locale,
+            "Delete {} message for everyone?",
+            "Delete {} messages for everyone?",
+            ids.len() as u32,
+        )
+        .replace("{}", &ids.len().to_string())
+    } else if several {
+        crate::i18n::ngettext(
+            app.locale,
+            "Delete {} message for me?",
+            "Delete {} messages for me?",
+            ids.len() as u32,
+        )
+        .replace("{}", &ids.len().to_string())
+    } else {
+        crate::i18n::gettext(app.locale, heading).into_owned()
+    };
+    title(ui, app, &heading);
     theme::paragraph(
         ui,
         crate::i18n::gettext(app.locale, body).to_string(),
