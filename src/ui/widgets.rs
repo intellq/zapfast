@@ -993,7 +993,12 @@ pub fn paint_vertical_gradient(ui: &Ui, rect: Rect, top: Color32, bottom: Color3
 /// The hover or selection behind a chat-list row: a rounded card inset from
 /// the list's edges rather than a full-width band.
 pub fn row_highlight(ui: &Ui, palette: &Palette, rect: Rect, color: Color32) {
-    let card = rect.shrink2(vec2(8.0, 2.0));
+    highlight_card(ui, palette, rect.shrink2(vec2(8.0, 2.0)), color);
+}
+
+/// The card `row_highlight` paints, over `card` itself: the rail's lit and
+/// hovered plates look as the selected and hovered chat rows do.
+pub fn highlight_card(ui: &Ui, palette: &Palette, card: Rect, color: Color32) {
     let radius = CornerRadius::same(theme::RADIUS + 2);
     // Raised like a message bubble, only more gently: the list sits on a
     // flat panel, and a hovered row should not jump out.

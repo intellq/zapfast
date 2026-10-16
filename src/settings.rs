@@ -539,9 +539,6 @@ pub struct Settings {
     /// Hides the row of chat filters (All, Unread, Private, ...) under the
     /// search field. The list then shows every chat.
     pub hide_chat_filters: bool,
-    /// Moves the profile picture and the chat list's buttons into a column
-    /// left of the list, which then starts with the search field.
-    pub side_bar: bool,
     /// Recently used emoji, newest first.
     pub recent_emoji: Vec<String>,
     /// Emoji reaction usage on this device, most-used first (recent breaks ties).
@@ -657,7 +654,7 @@ impl Default for Settings {
             custom_theme_cache: None,
             system_theme_cache: None,
             zoom: 1.0,
-            sidebar_width: 320.0,
+            sidebar_width: 300.0,
             search_pane_width: 380.0,
             info_pane_width: 380.0,
             enter_sends: true,
@@ -684,7 +681,6 @@ impl Default for Settings {
             last_chat: None,
             show_shortcut_hints: true,
             hide_chat_filters: false,
-            side_bar: false,
             recent_emoji: Vec::new(),
             reaction_emoji: Vec::new(),
             giphy_key: String::new(),

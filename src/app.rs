@@ -2296,7 +2296,7 @@ impl App {
         let reading = !self.events_hidden
             && !self.window_hidden
             && self.window_focused
-            && self.page == Page::Chats
+            && self.chat_view()
             && self.open_chat.as_deref() == Some(chat_id);
         if reading {
             return;
@@ -2619,6 +2619,19 @@ impl App {
             self.recording = None;
             self.player.stop();
         }
+    }
+
+    /// Whether the main pane can show the open chat: on the chat list's
+    /// page, and on the Calls tab beside its history.
+    pub fn chat_view(&self) -> bool {
+        matches!(self.page, Page::Chats | Page::Calls)
+    }
+
+    /// Whether the open chat is the one picked from the Calls tab's history.
+    pub fn call_picked(&self) -> bool {
+        self.picked_call
+            .as_ref()
+            .is_some_and(|(chat, _)| self.open_chat.as_deref() == Some(chat.as_str()))
     }
 
     pub fn current_chat(&self) -> Option<&Chat> {
@@ -3273,6 +3286,14 @@ impl App {
             .sort_by_key(|contact| contact.display_name().unwrap_or(&contact.id).to_lowercase());
         contacts.truncate(15);
         contacts
+    }
+
+    /// Archived chats with unread messages, for the rail's Archived badge.
+    pub fn archived_unread(&self) -> usize {
+        self.chats
+            .iter()
+            .filter(|chat| chat.archived && !chat.locked && chat.unread > 0 && self.listed(chat))
+            .count()
     }
 
     pub fn archived_count(&self) -> usize {
@@ -4635,7 +4656,7 @@ impl App {
         // A hidden account's remembered chat is not being read: marking it
         // read would send receipts for messages nobody has seen.
         let remembered = self.open_chat.as_deref() == Some(chat.id.as_str());
-        let is_open = live && remembered && self.page == Page::Chats;
+        let is_open = live && remembered && self.chat_view();
         let mut chat = chat;
         if chat.unread == 0 {
             self.clear_chat_notifications(&chat.id);
@@ -4864,13 +4885,13 @@ impl App {
     /// Whether the search pane is on screen: it belongs to the open chat and
     /// only the chat view shows it.
     pub fn chat_search_visible(&self) -> bool {
-        self.chat_search_open && self.page == Page::Chats && self.open_chat.is_some()
+        self.chat_search_open && self.chat_view() && self.open_chat.is_some()
     }
 
     /// Opens the search pane beside the open chat, or focuses its field when
     /// it is already open.
     fn open_chat_search(&mut self) {
-        if self.open_chat.is_none() || self.page != Page::Chats {
+        if self.open_chat.is_none() || !self.chat_view() {
             return;
         }
         // The pane takes the info panel's place beside the chat.
@@ -4887,14 +4908,14 @@ impl App {
     /// Whether the info panel is on screen: it sits beside the open chat and
     /// only the chat view shows it.
     pub fn info_visible(&self) -> bool {
-        self.info.is_some() && self.page == Page::Chats && self.open_chat.is_some()
+        self.info.is_some() && self.chat_view() && self.open_chat.is_some()
     }
 
     /// Opens the info panel on a chat's overview, in the search pane's
     /// place. The listing is asked for once per chat shown; opening the
     /// same chat again only returns to the overview.
     fn open_info(&mut self, chat: ChatId) {
-        if self.open_chat.is_none() || self.page != Page::Chats {
+        if self.open_chat.is_none() || !self.chat_view() {
             return;
         }
         self.close_chat_search();
@@ -5879,7 +5900,11 @@ impl App {
         self.emoji_start = None;
         self.mention_start = None;
         self.set_open_chat(Some(id.clone()));
-        self.page = Page::Chats;
+        // The Calls tab keeps its history beside the chat; every other page
+        // gives way to the chat list.
+        if self.page != Page::Calls {
+            self.page = Page::Chats;
+        }
         self.scroll_to_bottom = true;
         self.at_bottom = true;
         self.focus_composer = true;
@@ -5918,7 +5943,7 @@ impl App {
     /// overlay is active.
     fn refocus_composer(&mut self, ctx: &egui::Context) {
         let search_focused = ctx.memory(|memory| memory.has_focus(egui::Id::new("chat-search")));
-        if self.page == Page::Chats
+        if self.chat_view()
             && self.dialog.is_none()
             && self.picker.is_none()
             && self.reaction_target.is_none()
@@ -6667,7 +6692,11 @@ impl App {
                     self.backend.send(Command::LoadCallLog);
                     if self.page != Page::Calls {
                         self.new_call = false;
+                        self.picked_call = None;
                     }
+                    // The rail's destinations take turns: Calls replaces the
+                    // starred messages as it replaces the chats.
+                    self.show_starred = false;
                 }
                 // Typed passwords do not wait in a form nobody sees.
                 if page != Page::Settings && !self.app_lock.checking() {
@@ -6723,11 +6752,24 @@ impl App {
             | Action::LeaveCallSurface
             | Action::ReturnToCall
             | Action::ToggleCallFullscreen => {}
-            Action::OpenCallInfo { chat, message } => {
+            Action::PickCall { chat, message } => {
                 self.new_call = false;
-                self.call_info = Some((chat, message));
+                self.picked_call = Some((chat.clone(), message.clone()));
+                if self.chat(&chat).is_some() {
+                    self.apply(Action::OpenMessage { chat, message }, ctx);
+                } else {
+                    // A call from the phone's log with nobody we chat with.
+                    let name = self.display_name(&chat);
+                    self.apply(
+                        Action::StartChat {
+                            id: chat,
+                            name,
+                            dismiss_dialog: false,
+                        },
+                        ctx,
+                    );
+                }
             }
-            Action::CloseCallInfo => self.call_info = None,
             Action::ShowNewCall(open) => {
                 self.new_call = open;
                 self.new_call_search.clear();
@@ -6798,6 +6840,9 @@ impl App {
             }
             Action::CloseChat => {
                 self.close_info();
+                // A narrow window's Back from a picked call returns to the
+                // call history.
+                self.picked_call = None;
                 if let Some(chat) = self.open_chat.take() {
                     self.save_attachment_draft(&chat);
                     self.stop_composing(&chat);
@@ -8403,7 +8448,7 @@ impl App {
                 self.unread_kept.clear();
             }
             Action::ToggleStarred => {
-                // The header button and the shortcut both land here. The
+                // The rail, the list header's Back and Escape all land here. The
                 // sidebar has to be open for the list to be visible.
                 self.sidebar_visible = true;
                 self.show_starred = !self.show_starred;
@@ -9923,7 +9968,7 @@ impl App {
         let regained_focus = focused && !self.window_focused;
         // Mark messages received while hidden as read on window return.
         if regained_focus
-            && self.page == Page::Chats
+            && self.chat_view()
             && let Some(open) = self.open_chat.clone()
             && self.chat(&open).is_some_and(|chat| chat.unread > 0)
         {
@@ -10206,7 +10251,7 @@ impl App {
         });
         if requested
             && composing
-            && self.page == Page::Chats
+            && self.chat_view()
             && self.dialog.is_none()
             && self.image_preview.is_none()
             && self.picker.is_none()
@@ -11129,7 +11174,7 @@ mod tests {
         let ctx = egui::Context::default();
         app.apply(Action::Open(Page::Calls), &ctx);
         app.apply(
-            Action::OpenCallInfo {
+            Action::PickCall {
                 chat: "15550003333@s.whatsapp.net".into(),
                 message: "call-1".into(),
             },
@@ -11144,14 +11189,18 @@ mod tests {
                 .any(|command| matches!(command, Command::LoadCallLog)),
             "the second account reads its own calls"
         );
-        assert!(!app.new_call && app.call_info.is_none());
-        assert!(app.accounts[0].new_call && app.accounts[0].call_info.is_some());
+        assert!(!app.new_call && app.picked_call.is_none());
+        assert!(app.accounts[0].new_call && app.accounts[0].picked_call.is_some());
         // Coming back to the tab from elsewhere starts at the history.
         app.apply(Action::SwitchAccount(AccountId::parse("1").unwrap()), &ctx);
         app.apply(Action::Open(Page::Chats), &ctx);
         app.apply(Action::Open(Page::Calls), &ctx);
         assert!(!app.new_call);
-        assert!(app.call_info.is_some(), "the chosen call stays chosen");
+        assert!(
+            app.picked_call.is_none(),
+            "a narrow window opens the tab on its history, not the last picked chat"
+        );
+        assert_eq!(app.page, Page::Calls);
     }
 
     #[test]

@@ -119,9 +119,9 @@ pub struct Account {
     /// The call entries the Calls page lists, newest first, once read.
     pub call_log: Vec<Message>,
     pub call_log_loaded: bool,
-    /// The call history row whose details show beside the Calls list: its
-    /// chat and its first call.
-    pub call_info: Option<(ChatId, String)>,
+    /// The call history row last picked on the Calls page, whose chat shows
+    /// beside the list: its chat and its first call.
+    pub picked_call: Option<(ChatId, String)>,
     /// Whether the new-call list covers the call history.
     pub new_call: bool,
     /// What the Calls list's search field holds.
@@ -225,7 +225,7 @@ impl Account {
             media_progress: HashMap::new(),
             call_log: Vec::new(),
             call_log_loaded: false,
-            call_info: None,
+            picked_call: None,
             new_call: false,
             calls_search: String::new(),
             new_call_search: String::new(),

@@ -319,9 +319,15 @@ wearing it, channels included. A label is one more chip: picking it lets go of
 the other chips, it does not narrow search or the archive. Click the active
 label chip again, or **All**, to see every chat.
 
-The button beside **New chat** (`Ctrl+B`) collapses the list to a narrow column
-of avatars: unread chats show their badge, hovering names a chat, clicking opens
-it, and `Ctrl+B` brings the full list back.
+A thin rail runs down the left of the chat list: **Chats**, **Calls**
+(`Ctrl+Shift+1` and `Ctrl+Shift+2`, Command on macOS) and **Starred** at the
+top, the one on screen lit; **Archived** and **Locked** (while you have
+archived or locked chats), **Settings**, and your own picture (the account
+switcher) at the bottom. The chat list's header keeps its title, **New
+chat**, and the button beside it (`Ctrl+B`), which hides the list: the chats'
+avatars then fill the rail between its top and bottom buttons. Unread chats
+show their badge, hovering names a chat, clicking opens it, and `Ctrl+B` or
+the button under **Starred** brings the full list back.
 
 ## Notifications and the tray
 

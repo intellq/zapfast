@@ -2409,14 +2409,30 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
                 }
                 app.scroll_to_bottom = true;
             }
-            "calls" | "calls-info" | "new-call" => {
+            // The Calls tab: with no chat open, its start pane; with the
+            // chat that was open, that chat beside the history; with a row
+            // picked, that row's chat at the call.
+            "calls" | "calls-chat" | "calls-info" | "new-call" => {
                 app.page = Page::Calls;
-                app.open_chat = None;
+                if part != "calls-chat" {
+                    app.open_chat = None;
+                }
                 let mut log = call_entries(crate::util::now());
                 log.sort_by_key(|message| std::cmp::Reverse(message.timestamp));
                 if part == "calls-info" {
-                    // The details of the newest row: Ada's two missed calls.
-                    app.call_info = Some((log[0].chat.clone(), log[0].id.clone()));
+                    // The newest row, Ada's two missed calls, picked: her
+                    // chat opens at the call, filed among its messages.
+                    let (chat, id) = (log[0].chat.clone(), log[0].id.clone());
+                    if let Some(conversation) = app.conversations.get_mut(&chat) {
+                        conversation
+                            .messages
+                            .extend(log.iter().filter(|entry| entry.chat == chat).cloned());
+                        conversation
+                            .messages
+                            .sort_by_key(|message| message.timestamp);
+                    }
+                    app.actions
+                        .push(crate::model::Action::PickCall { chat, message: id });
                 }
                 app.new_call = part == "new-call";
                 app.call_log = log;
@@ -2760,9 +2776,6 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
             }
             "whatsapp-dark" => {
                 app.settings.theme = ThemeChoice::WhatsAppDark;
-            }
-            "side-bar" => {
-                app.settings.side_bar = true;
             }
             "login" => {
                 unlink(app);
@@ -5855,6 +5868,7 @@ mod tests {
             "react-custom",
             "react-other",
             "calls",
+            "calls-chat",
             "calls-info",
             "new-call",
             "call-entries",
@@ -10465,17 +10479,12 @@ mod tests {
         );
     }
 
-    /// The archive works as Settings do: the gear is an X while it is open,
-    /// and the X leaves it for the chat list.
+    /// The rail's Chats button leaves the archive for the chat list.
     #[test]
-    fn the_x_leaves_the_archive_for_the_chat_list() {
+    fn the_rail_leaves_the_archive_for_the_chat_list() {
         use crate::ui::focus::Stop;
         let mut app = app();
         let ctx = egui::Context::default();
-        // The macOS header carries no gear.
-        if crate::theme::macos_chrome(&ctx) {
-            return;
-        }
         app.attach(&ctx);
         render(&mut app, &ctx);
         app.actions.push(crate::model::Action::ShowArchived(true));
@@ -10485,9 +10494,9 @@ mod tests {
         assert!(app.show_archived);
         let id = crate::ui::focus::stops(&ctx)
             .into_iter()
-            .find(|(stop, _)| *stop == Stop::Settings)
+            .find(|(stop, _)| *stop == Stop::Chats)
             .map(|(_, id)| id)
-            .expect("the settings button is drawn");
+            .expect("the rail's Chats button is drawn");
         let pos = ctx
             .read_response(id)
             .expect("it publishes its rect")
@@ -10510,7 +10519,7 @@ mod tests {
             );
         }
         frame_sized(&mut app, &ctx, 780.0, Vec::new());
-        assert!(!app.show_archived, "the X closes the archive");
+        assert!(!app.show_archived, "Chats closes the archive");
         assert_eq!(
             app.page,
             crate::model::Page::Chats,
@@ -14292,6 +14301,7 @@ mod tests {
 
     #[test]
     fn filters_stay_on_one_line_and_locked_is_only_shown_when_needed() {
+        use crate::ui::rail::{Destination, destination_id};
         let mut app = app();
         for chat in &mut app.chats {
             chat.locked = false;
@@ -14300,21 +14310,33 @@ mod tests {
         let ctx = egui::Context::default();
         app.attach(&ctx);
         render(&mut app, &ctx);
-        let locked_id = egui::Id::new("locked-chip");
         assert!(
-            ctx.data(|data| data.get_temp::<egui::Rect>(locked_id))
-                .is_none()
+            ctx.read_response(destination_id(Destination::Locked))
+                .is_none(),
+            "no locked chats: no Locked in the rail"
         );
         app.chats[0].locked = true;
         render(&mut app, &ctx);
         let locked = ctx
-            .data(|data| data.get_temp::<egui::Rect>(locked_id))
-            .unwrap();
-        for filter in crate::model::ChatFilter::EVERY {
-            let rect = ctx
-                .data(|data| data.get_temp::<egui::Rect>(crate::ui::chats::filter_chip_id(filter)))
-                .unwrap();
-            assert!((rect.top() - locked.top()).abs() < 0.1);
+            .read_response(destination_id(Destination::Locked))
+            .expect("Locked joins the rail's bottom group")
+            .rect;
+        let settings = ctx
+            .read_response(destination_id(Destination::Settings))
+            .unwrap()
+            .rect;
+        assert!(locked.bottom() <= settings.top());
+        let chips: Vec<_> = crate::model::ChatFilter::EVERY
+            .into_iter()
+            .map(|filter| {
+                ctx.data(|data| {
+                    data.get_temp::<egui::Rect>(crate::ui::chats::filter_chip_id(filter))
+                })
+                .unwrap()
+            })
+            .collect();
+        for rect in &chips {
+            assert!((rect.top() - chips[0].top()).abs() < 0.1);
         }
     }
 
@@ -15047,18 +15069,23 @@ mod tests {
             for _ in 0..20 {
                 frame_sized(&mut app, &ctx, 780.0, Vec::new());
             }
-            let expected: Vec<_> = [
+            // The same on macOS: the rail carries Settings there too, beside
+            // the app menu.
+            let expected = vec![
                 Stop::Composer,
                 Stop::Send,
                 Stop::Attach,
                 Stop::Emoji,
                 Stop::ChatSearch,
-                Stop::Profile,
+                Stop::Chats,
                 Stop::Calls,
+                Stop::Starred,
                 Stop::Archived,
-                Stop::Sidebar,
-                Stop::NewChat,
+                Stop::Locked,
                 Stop::Settings,
+                Stop::Profile,
+                Stop::NewChat,
+                Stop::Sidebar,
                 Stop::Search,
                 Stop::All,
                 Stop::Unread,
@@ -15066,15 +15093,7 @@ mod tests {
                 Stop::Favorites,
                 Stop::Groups,
                 Stop::Channels,
-                Stop::Locked,
-            ]
-            .into_iter()
-            .filter(|stop| {
-                // The Mac header keeps the account switcher; the settings
-                // live in the app menu there.
-                !crate::theme::macos_chrome(&ctx) || *stop != Stop::Settings
-            })
-            .collect();
+            ];
             assert_eq!(
                 crate::ui::focus::stops(&ctx)
                     .iter()
@@ -15125,7 +15144,7 @@ mod tests {
             assert!(ctx.read_response(row).unwrap().sense.is_focusable());
             for (modifiers, expected_stop) in [
                 (egui::Modifiers::NONE, Stop::Composer),
-                (egui::Modifiers::SHIFT, Stop::Locked),
+                (egui::Modifiers::SHIFT, Stop::Channels),
             ] {
                 ctx.memory_mut(|memory| memory.request_focus(row));
                 frame_sized(&mut app, &ctx, 780.0, vec![key(egui::Key::Tab, modifiers)]);
@@ -15174,6 +15193,13 @@ mod tests {
                         Stop::Attach,
                         Stop::Emoji,
                         Stop::ChatSearch,
+                        Stop::Chats,
+                        Stop::Calls,
+                        Stop::Starred,
+                        Stop::Archived,
+                        Stop::Locked,
+                        Stop::Settings,
+                        Stop::Profile,
                         Stop::Sidebar
                     ]
                 );
@@ -16579,5 +16605,411 @@ mod call_preview_tests {
             Some([540, 720]),
             "the peer's picture keeps the shape a portrait phone sends"
         );
+    }
+}
+
+/// The navigation rail beside the chat list, and the Calls tab beside the
+/// open chat.
+#[cfg(test)]
+mod rail_tests {
+    use super::tests::app;
+    use super::*;
+    use crate::model::{Action, Page};
+    use crate::ui::focus::{self, Stop};
+    use crate::ui::rail::{self, Destination};
+
+    /// One frame at `width` by 780 points, with the layout records of the
+    /// last one cleared, so a part not drawn leaves none.
+    fn frame(app: &mut App, ctx: &egui::Context, width: f32, events: Vec<egui::Event>) {
+        ctx.data_mut(|data| {
+            data.remove::<egui::Rect>(rail::rect_id());
+            data.remove::<egui::Rect>(crate::ui::chats::header_row_id());
+            data.remove::<egui::Rect>(crate::ui::conversation::header_row_id());
+        });
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(width, 780.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                let ctx = ui.ctx().clone();
+                app.background_frame(&ctx);
+                app.frame_ui(ui);
+            },
+        );
+        output.textures_delta.clear();
+    }
+
+    /// The demo on `page`, laid out wide, in the macOS chrome when `macos`.
+    fn open(page: &str, macos: bool) -> (App, egui::Context) {
+        let mut app = app();
+        apply_flags(&mut app, Some(page));
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        if macos {
+            crate::theme::preview_macos(&ctx);
+        }
+        for _ in 0..3 {
+            frame(&mut app, &ctx, 1180.0, Vec::new());
+        }
+        (app, ctx)
+    }
+
+    fn recorded(ctx: &egui::Context, id: egui::Id) -> Option<egui::Rect> {
+        ctx.data(|data| data.get_temp::<egui::Rect>(id))
+    }
+
+    fn rail_rect(ctx: &egui::Context) -> Option<egui::Rect> {
+        recorded(ctx, rail::rect_id())
+    }
+
+    fn list_header(ctx: &egui::Context) -> Option<egui::Rect> {
+        recorded(ctx, crate::ui::chats::header_row_id())
+    }
+
+    fn conversation_header(ctx: &egui::Context) -> Option<egui::Rect> {
+        recorded(ctx, crate::ui::conversation::header_row_id())
+    }
+
+    /// Where the control registered for `stop` was drawn this frame.
+    fn stop_rect(ctx: &egui::Context, stop: Stop) -> Option<egui::Rect> {
+        focus::stops(ctx)
+            .into_iter()
+            .find(|(known, _)| *known == stop)
+            .and_then(|(_, id)| ctx.read_response(id))
+            .map(|response| response.rect)
+    }
+
+    fn destination_rect(ctx: &egui::Context, destination: Destination) -> egui::Rect {
+        ctx.read_response(rail::destination_id(destination))
+            .expect("the rail draws every destination")
+            .rect
+    }
+
+    fn click(app: &mut App, ctx: &egui::Context, width: f32, pos: egui::Pos2) {
+        frame(app, ctx, width, vec![egui::Event::PointerMoved(pos)]);
+        for pressed in [true, false] {
+            frame(
+                app,
+                ctx,
+                width,
+                vec![egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+            );
+        }
+        frame(app, ctx, width, Vec::new());
+    }
+
+    /// Ctrl+Shift (Cmd+Shift on macOS) and the digit at `physical`, which
+    /// the layout reports as `key` with Shift held.
+    fn shifted(key: egui::Key, physical: egui::Key) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: Some(physical),
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+        }
+    }
+
+    fn escape() -> egui::Event {
+        egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    /// The rail stands at the window's left edge beside the list, with Chats,
+    /// Calls and Starred at its top and Settings and our avatar at its foot;
+    /// with the list hidden, the chats' avatars fill it between the two. On
+    /// macOS it starts below the traffic lights.
+    #[test]
+    fn the_rail_carries_the_destinations_with_the_list_shown_or_hidden() {
+        for macos in [false, true] {
+            let (app, ctx) = open("chat", macos);
+            let rail = rail_rect(&ctx).expect("the rail is drawn");
+            assert!(rail.left() < 1.0, "{macos}: at the left edge: {rail:?}");
+            assert!(
+                (rail.width() - crate::ui::chats::compact_width(&ctx)).abs() < 1.0,
+                "{macos}: as wide as the collapsed list was: {rail:?}"
+            );
+            let header = list_header(&ctx).expect("the list is drawn");
+            assert!(
+                header.left() >= rail.right(),
+                "{macos}: the list is beside it"
+            );
+            let top = [Destination::Chats, Destination::Calls, Destination::Starred]
+                .map(|destination| destination_rect(&ctx, destination));
+            let settings = destination_rect(&ctx, Destination::Settings);
+            let shown_settings = settings;
+            let me = stop_rect(&ctx, Stop::Profile).expect("our avatar is drawn");
+            for rect in top.iter().chain([&settings, &me]) {
+                assert!(rail.contains_rect(*rect), "{macos}: {rect:?} in {rail:?}");
+            }
+            assert!(top[0].bottom() <= top[1].top() && top[1].bottom() <= top[2].top());
+            assert!(
+                (me.top() - settings.bottom() - 8.0).abs() < 0.5
+                    && (rail.bottom() - me.bottom() - 8.0).abs() < 0.5,
+                "{macos}: Settings, our avatar and the edge 8 points apart: {settings:?} {me:?}"
+            );
+            assert_eq!(settings.size(), egui::vec2(36.0, 36.0));
+            assert_eq!(me.size(), egui::vec2(32.0, 32.0));
+            if macos {
+                assert!(
+                    top[0].top() >= 36.0 && top[0].top() < 60.0,
+                    "just below the traffic lights: {:?}",
+                    top[0]
+                );
+                // The lights reach over the list header, whose title makes
+                // way for them.
+                assert!(header.left() + 14.0 + crate::ui::rail::lights_overhang(&ctx) >= 84.0);
+            } else {
+                // Chats sits level with the list header's title row.
+                assert!((top[0].center().y - header.center().y).abs() < 3.0);
+            }
+            assert!(Destination::Chats.lit(&app));
+            // Only the hidden list's avatars are in the rail.
+            let first = app.visible_chats()[0].id.clone();
+            assert!(recorded(&ctx, crate::ui::chats::compact_chat_id(&first)).is_none());
+
+            let (app, ctx) = open("rail", macos);
+            let rail = rail_rect(&ctx).expect("the rail is drawn with the list hidden");
+            assert!(list_header(&ctx).is_none(), "{macos}: the list is hidden");
+            let chats = destination_rect(&ctx, Destination::Chats);
+            let starred = destination_rect(&ctx, Destination::Starred);
+            let settings = destination_rect(&ctx, Destination::Settings);
+            let show = stop_rect(&ctx, Stop::Sidebar).expect("Show the chat list");
+            assert!(rail.contains_rect(show) && show.top() >= starred.bottom());
+            // Nothing the list's toggle leaves in place moves.
+            assert_eq!(chats, top[0], "{macos}: Chats stays put");
+            assert_eq!(starred, top[2], "{macos}: Starred stays put");
+            assert_eq!(settings, shown_settings, "{macos}: Settings stays put");
+            let first = app.visible_chats()[0].id.clone();
+            let avatar = recorded(&ctx, crate::ui::chats::compact_chat_id(&first))
+                .expect("the chats' avatars fill the rail");
+            assert!(
+                rail.contains_rect(avatar),
+                "{macos}: {avatar:?} in {rail:?}"
+            );
+            assert!(
+                avatar.top() >= starred.bottom() && avatar.bottom() <= settings.top(),
+                "{macos}: between the destinations and Settings: {avatar:?}"
+            );
+        }
+    }
+
+    /// Archived sits in the rail's bottom group, lit while the archive fills
+    /// the list column, and Chats leads back; the chip row has no Archived.
+    #[test]
+    fn the_archive_opens_from_the_rail_into_the_list() {
+        let (mut app, ctx) = open("chat", false);
+        assert!(
+            Destination::Archived.offered(&app),
+            "the demo archives chats"
+        );
+        let archived = destination_rect(&ctx, Destination::Archived);
+        let settings = destination_rect(&ctx, Destination::Settings);
+        let rail = rail_rect(&ctx).unwrap();
+        assert!(rail.contains_rect(archived) && archived.bottom() <= settings.top());
+        assert!(
+            ctx.data(|data| data.get_temp::<egui::Rect>(egui::Id::new("archived-chip")))
+                .is_none(),
+            "no Archived chip"
+        );
+        click(&mut app, &ctx, 1180.0, archived.center());
+        assert!(app.show_archived && Destination::Archived.lit(&app));
+        assert!(!Destination::Chats.lit(&app));
+        assert!(
+            list_header(&ctx).is_some(),
+            "the archive is in the list column"
+        );
+        let chats = destination_rect(&ctx, Destination::Chats);
+        click(&mut app, &ctx, 1180.0, chats.center());
+        assert!(!app.show_archived && Destination::Chats.lit(&app));
+    }
+
+    /// The rail is one shade darker than the list in every palette, light,
+    /// dark and the Messages theme's.
+    #[test]
+    fn the_rail_is_a_shade_darker_than_the_list() {
+        let luma = |color: egui::Color32| {
+            u32::from(color.r()) + u32::from(color.g()) + u32::from(color.b())
+        };
+        for palette in [
+            crate::theme::Palette::light(),
+            crate::theme::Palette::dark(),
+        ] {
+            assert!(luma(palette.rail()) < luma(palette.panel));
+            assert!(palette.rail().a() >= palette.panel.a());
+        }
+    }
+
+    /// The list header keeps only New chat and Hide the chat list beside its
+    /// title; the starred messages' header has only Back and its title, and
+    /// the Calls tab's only New call.
+    #[test]
+    fn the_list_header_has_only_its_own_buttons() {
+        let in_header = |ctx: &egui::Context| {
+            let header = list_header(ctx).expect("the list header is drawn");
+            focus::stops(ctx)
+                .into_iter()
+                .filter(|(_, id)| {
+                    ctx.read_response(*id)
+                        .is_some_and(|response| header.intersects(response.rect))
+                })
+                .map(|(stop, _)| stop)
+                .collect::<Vec<_>>()
+        };
+        for macos in [false, true] {
+            let (_app, ctx) = open("chat", macos);
+            assert_eq!(in_header(&ctx), [Stop::NewChat, Stop::Sidebar], "{macos}");
+            let (_app, ctx) = open("starred", macos);
+            assert_eq!(in_header(&ctx), [Stop::Back], "{macos}");
+            let (_app, ctx) = open("calls", macos);
+            assert_eq!(in_header(&ctx), [Stop::NewChat], "{macos}: New call");
+        }
+    }
+
+    /// Opening Calls keeps the open chat beside the history; picking a row
+    /// opens that row's chat there, still on Calls. With no chat open the
+    /// pane offers to start a call.
+    #[test]
+    fn the_calls_tab_keeps_the_open_chat_beside_its_history() {
+        let (mut app, ctx) = open("chat", false);
+        let chat = app.open_chat.clone().expect("a chat is open to start");
+        let calls = destination_rect(&ctx, Destination::Calls);
+        click(&mut app, &ctx, 1180.0, calls.center());
+        assert_eq!(app.page, Page::Calls);
+        assert!(Destination::Calls.lit(&app) && !Destination::Chats.lit(&app));
+        assert_eq!(app.open_chat.as_deref(), Some(chat.as_str()));
+        assert!(
+            conversation_header(&ctx).is_some(),
+            "the chat stays on the right"
+        );
+        assert!(list_header(&ctx).is_some(), "the history is on the left");
+
+        let (mut app, ctx) = open("calls-chat", false);
+        let opened = app.open_chat.clone().unwrap();
+        assert!(conversation_header(&ctx).is_some());
+        let other = app
+            .call_log
+            .iter()
+            .find(|call| call.chat != opened)
+            .cloned()
+            .expect("a call with someone else");
+        let row = ctx
+            .read_response(crate::ui::calls::row_id(&other.chat, &other.id))
+            .expect("the row is drawn")
+            .rect;
+        click(
+            &mut app,
+            &ctx,
+            1180.0,
+            row.left_center() + egui::vec2(40.0, 0.0),
+        );
+        assert_eq!(app.page, Page::Calls, "picking a call stays on Calls");
+        assert_eq!(app.open_chat.as_deref(), Some(other.chat.as_str()));
+        assert!(app.call_picked());
+        assert!(conversation_header(&ctx).is_some());
+
+        let (app, ctx) = open("calls-info", false);
+        assert_eq!(app.page, Page::Calls);
+        assert!(app.call_picked() && conversation_header(&ctx).is_some());
+
+        let (_app, ctx) = open("calls", false);
+        assert!(
+            conversation_header(&ctx).is_none(),
+            "no chat: the start pane"
+        );
+    }
+
+    /// Calls and Starred are left through Chats or Escape, and Ctrl+Shift+1
+    /// and Ctrl+Shift+2 lead to Chats and Calls from anywhere.
+    #[test]
+    fn escape_and_the_shortcuts_return_to_the_chats() {
+        let (mut app, ctx) = open("calls-chat", false);
+        let chat = app.open_chat.clone().unwrap();
+        frame(&mut app, &ctx, 1180.0, vec![escape()]);
+        frame(&mut app, &ctx, 1180.0, Vec::new());
+        assert_eq!(app.page, Page::Chats);
+        assert_eq!(
+            app.open_chat.as_deref(),
+            Some(chat.as_str()),
+            "the chat stays open"
+        );
+
+        frame(
+            &mut app,
+            &ctx,
+            1180.0,
+            vec![shifted(egui::Key::Num2, egui::Key::Num2)],
+        );
+        frame(&mut app, &ctx, 1180.0, Vec::new());
+        assert_eq!(app.page, Page::Calls);
+        frame(
+            &mut app,
+            &ctx,
+            1180.0,
+            vec![shifted(egui::Key::Exclamationmark, egui::Key::Num1)],
+        );
+        frame(&mut app, &ctx, 1180.0, Vec::new());
+        assert_eq!(app.page, Page::Chats);
+        assert_eq!(app.open_chat.as_deref(), Some(chat.as_str()));
+
+        let starred = destination_rect(&ctx, Destination::Starred);
+        click(&mut app, &ctx, 1180.0, starred.center());
+        assert!(app.show_starred && Destination::Starred.lit(&app));
+        click(&mut app, &ctx, 1180.0, starred.center());
+        assert!(app.show_starred, "Starred is not a toggle");
+        frame(&mut app, &ctx, 1180.0, vec![escape()]);
+        frame(&mut app, &ctx, 1180.0, Vec::new());
+        assert!(!app.show_starred && Destination::Chats.lit(&app));
+        click(&mut app, &ctx, 1180.0, starred.center());
+        assert!(app.show_starred);
+        let chats = destination_rect(&ctx, Destination::Chats);
+        click(&mut app, &ctx, 1180.0, chats.center());
+        assert!(!app.show_starred && app.page == Page::Chats);
+    }
+
+    /// A narrow window keeps the rail beside the list, and the rail goes
+    /// with the list when a picked call's chat slides over it; Escape
+    /// brings the history back.
+    #[test]
+    fn a_narrow_window_hides_the_rail_with_the_list() {
+        let (mut app, ctx) = open("calls", false);
+        for _ in 0..30 {
+            frame(&mut app, &ctx, 480.0, Vec::new());
+        }
+        let rail = rail_rect(&ctx).expect("the rail stands beside the history");
+        let header = list_header(&ctx).expect("the history fills the window");
+        assert!(rail.right() <= header.left());
+        let call = app.call_log[0].clone();
+        app.actions.push(Action::PickCall {
+            chat: call.chat.clone(),
+            message: call.id.clone(),
+        });
+        for _ in 0..30 {
+            frame(&mut app, &ctx, 480.0, Vec::new());
+        }
+        assert!(conversation_header(&ctx).is_some(), "the chat slides over");
+        assert!(rail_rect(&ctx).is_none() && list_header(&ctx).is_none());
+        frame(&mut app, &ctx, 480.0, vec![escape()]);
+        for _ in 0..30 {
+            frame(&mut app, &ctx, 480.0, Vec::new());
+        }
+        assert_eq!(app.page, Page::Calls);
+        assert!(app.open_chat.is_none());
+        assert!(rail_rect(&ctx).is_some() && list_header(&ctx).is_some());
     }
 }

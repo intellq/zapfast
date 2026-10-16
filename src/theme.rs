@@ -179,6 +179,27 @@ impl Palette {
         }
     }
 
+    /// The navigation rail's background: the chat list's, one shade darker,
+    /// so the two read as separate columns without a line between them. A
+    /// translucent sidebar darkens the same way, with a little more of it
+    /// opaque.
+    pub fn rail(&self) -> Color32 {
+        let sidebar = self.panel;
+        let shade = if self.dark {
+            DARK_RAIL_SHADE
+        } else {
+            RAIL_SHADE
+        };
+        let keep = 1.0 - shade;
+        let channel = |value: u8| (f32::from(value) * keep).round() as u8;
+        Color32::from_rgba_premultiplied(
+            channel(sidebar.r()),
+            channel(sidebar.g()),
+            channel(sidebar.b()),
+            (f32::from(sidebar.a()) + (255.0 - f32::from(sidebar.a())) * shade).round() as u8,
+        )
+    }
+
     /// The palette for a message bubble's contents. Secondary and dim text,
     /// and the read ticks, move toward the text colour just far enough to
     /// stay readable on the bubble: a grey that reads on the panel can vanish
@@ -336,6 +357,11 @@ impl fastframe_theme::Palette for Palette {
     }
 }
 
+/// How much black the rail lays over the chat list's colour in a light
+/// palette.
+const RAIL_SHADE: f32 = 0.05;
+/// The same in a dark palette, whose panel is already near black.
+const DARK_RAIL_SHADE: f32 = 0.22;
 /// How much denser than the palette's shadow colour a bubble's shadow is.
 const SHADOW_DENSITY: f32 = 1.04;
 /// How far a dark theme's raised edge moves from the surface toward the text.
@@ -742,6 +768,10 @@ pub fn paint_icon(ui: &egui::Ui, icon: Icon, rect: egui::Rect, size: f32, color:
     icon.image(color, size).paint_at(ui, icon_rect);
 }
 
+/// The room an icon button keeps around its icon: one is this much wider
+/// than its icon.
+pub const ICON_BUTTON_PAD: f32 = 12.0;
+
 /// Frameless icon button with hover color.
 pub fn icon_button(
     ui: &mut egui::Ui,
@@ -751,7 +781,7 @@ pub fn icon_button(
     hover: Color32,
     tooltip: &str,
 ) -> Response {
-    let edge = size + 12.0;
+    let edge = size + ICON_BUTTON_PAD;
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(edge), Sense::click());
     reveal_focus(&response);
     response.widget_info(|| {

@@ -1,7 +1,7 @@
 //! Calls as the history shows them: the entry a call leaves among a chat's
 //! messages, and the Calls tab, laid out as WhatsApp's: the call history in
-//! the list pane (or the new-call list over it), and beside it a call's
-//! details or the way to start one.
+//! the list pane (or the new-call list over it), and beside it the open chat
+//! or, with none open, the way to start a call.
 //!
 //! Both read the same entries, which come from WhatsApp's own records (the
 //! phone's call log and the call-log messages in history) and from the calls
@@ -11,7 +11,7 @@ use egui::{Align, Frame, Layout, Margin, Rect, Sense, Vec2, pos2, vec2};
 
 use crate::app::App;
 use crate::i18n::{Locale, gettext};
-use crate::model::{Action, CallStatus, Content, Message, Page};
+use crate::model::{Action, CallStatus, Content, Message};
 use crate::theme::{self, Icon};
 use crate::ui::widgets;
 
@@ -242,8 +242,8 @@ pub fn row_id(chat: &str, message: &str) -> egui::Id {
 
 /// One history row, as WhatsApp draws it: the person, a count when calls
 /// fold together, the way the newest went and what it was, when, and a
-/// button to call back the same way. A click shows the call details beside
-/// the list.
+/// button to call back the same way. A click opens the chat beside the
+/// list at that call.
 fn history_row(app: &mut App, ui: &mut egui::Ui, row: &[Message], actions: &mut Vec<Action>) {
     let message = &row[0];
     let Some(entry) = Entry::of(message) else {
@@ -253,10 +253,11 @@ fn history_row(app: &mut App, ui: &mut egui::Ui, row: &[Message], actions: &mut 
     let locale = app.locale;
     let name = app.display_name(&message.chat);
     let picture = app.avatar(&message.chat);
-    let selected = app
-        .call_info
-        .as_ref()
-        .is_some_and(|(chat, id)| *chat == message.chat && *id == message.id);
+    let selected = app.call_picked()
+        && app
+            .picked_call
+            .as_ref()
+            .is_some_and(|(chat, id)| *chat == message.chat && *id == message.id);
     let width = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(vec2(width, theme::ROW_HEIGHT), Sense::hover());
     // The row's own target goes first, so the call-back button inside keeps
@@ -281,7 +282,7 @@ fn history_row(app: &mut App, ui: &mut egui::Ui, row: &[Message], actions: &mut 
         )
     });
     if response.clicked() {
-        actions.push(Action::OpenCallInfo {
+        actions.push(Action::PickCall {
             chat: message.chat.clone(),
             message: message.id.clone(),
         });
@@ -559,72 +560,15 @@ fn person(app: &mut App, ui: &mut egui::Ui, id: &str, actions: &mut Vec<Action>)
     }
 }
 
-/// The Calls tab's main pane: a history row's call details, or WhatsApp's
-/// start of a call when no row is chosen.
+/// The Calls tab's main pane when no chat is open beside the history:
+/// WhatsApp's start of a call. An open chat shows there instead, the one
+/// picked from the history or the one that was open before.
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
-    let calls = visible_calls(app);
-    let chosen = app.call_info.clone().and_then(|(chat, _)| {
-        let mine: Vec<Message> = calls
-            .iter()
-            .filter(|message| message.chat == chat)
-            .cloned()
-            .collect();
-        (!mine.is_empty()).then_some((chat, mine))
-    });
-    match chosen {
-        Some((chat, calls)) => info(app, ui, &chat, &calls),
-        None => start(app, ui),
-    }
+    start(app, ui);
 }
 
-/// Where a call details header stands, as the conversation header does, so
-/// the two panes' first rows line up.
-fn pane_header(app: &mut App, ui: &mut egui::Ui, title: &str, close: Option<Action>) {
-    let palette = app.palette;
-    let header = Frame::new()
-        .fill(palette.panel)
-        .inner_margin(Margin::symmetric(14, 8))
-        .show(ui, |ui| {
-            ui.set_min_width(ui.available_width());
-            if theme::macos_chrome(ui.ctx()) {
-                super::titlebar_drag(ui, ui.max_rect());
-            }
-            ui.horizontal(|ui| {
-                ui.set_min_height(super::conversation::HEADER_ROW);
-                if super::narrow(ui.ctx()) && theme::macos_chrome(ui.ctx()) {
-                    ui.add_space(theme::traffic_light_inset(ui.ctx()));
-                }
-                if let Some(close) = close {
-                    // A narrow window shows the details instead of the list:
-                    // Back returns to it. Beside the list, they close.
-                    let (icon, label) = if super::narrow(ui.ctx()) {
-                        (Icon::ArrowLeft, gettext(app.locale, "Back to the calls"))
-                    } else {
-                        (Icon::X, gettext(app.locale, "Close"))
-                    };
-                    if theme::icon_button(
-                        ui,
-                        icon,
-                        18.0,
-                        palette.secondary,
-                        palette.text,
-                        label.as_ref(),
-                    )
-                    .clicked()
-                    {
-                        app.actions.push(close);
-                    }
-                    ui.add_space(2.0);
-                }
-                theme::text(ui, title, theme::bold(17.0), palette.text);
-            });
-        });
-    let rect = header.response.rect;
-    widgets::paint_shadow_below(ui, &palette, rect.left(), rect.right(), rect.bottom());
-}
-
-/// The pane with no call chosen: what WhatsApp shows there, a way to start
-/// a call, and what ZapFast's calls are.
+/// The pane with no chat open: what WhatsApp shows there, a way to start a
+/// call, and what ZapFast's calls are.
 fn start(app: &mut App, ui: &mut egui::Ui) {
     let palette = app.palette;
     let locale = app.locale;
@@ -661,179 +605,6 @@ fn start(app: &mut App, ui: &mut egui::Ui) {
             .selectable(false),
         );
     });
-}
-
-/// A history row's details, as WhatsApp's call info shows them: the person
-/// with Message, Voice call and Video call, and every call with them by
-/// day. A call opens the chat at it.
-fn info(app: &mut App, ui: &mut egui::Ui, chat: &str, calls: &[Message]) {
-    let palette = app.palette;
-    let locale = app.locale;
-    pane_header(
-        app,
-        ui,
-        gettext(locale, "Call info").as_ref(),
-        Some(Action::CloseCallInfo),
-    );
-    let name = app.display_name(chat);
-    let picture = app.avatar(chat);
-    let group = calls.iter().filter_map(Entry::of).any(|entry| entry.group);
-    let mut actions = Vec::new();
-    egui::ScrollArea::vertical()
-        .id_salt("call-info")
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            Frame::new()
-                .inner_margin(Margin::symmetric(24, 18))
-                .show(ui, |ui| {
-                    ui.set_max_width(640.0_f32.min(ui.available_width()));
-                    ui.horizontal(|ui| {
-                        widgets::avatar(ui, &palette, &name, chat, 56.0, picture.as_deref());
-                        ui.add_space(12.0);
-                        ui.vertical(|ui| {
-                            ui.add_space(6.0);
-                            theme::text(ui, &name, theme::semibold(17.0), palette.text);
-                            if let Some(phone) = crate::model::phone_of(chat)
-                                .map(crate::util::phone)
-                                .filter(|phone| *phone != name)
-                            {
-                                theme::text(ui, phone, theme::regular(13.0), palette.secondary);
-                            }
-                        });
-                    });
-                    ui.add_space(14.0);
-                    ui.horizontal_wrapped(|ui| {
-                        let message = gettext(locale, "Message");
-                        if theme::soft_button(
-                            ui,
-                            &palette,
-                            Some(Icon::MessageCircle),
-                            message.as_ref(),
-                            false,
-                        )
-                        .clicked()
-                        {
-                            actions.push(Action::Open(Page::Chats));
-                            actions.push(Action::OpenChat(chat.to_owned()));
-                        }
-                        if !group {
-                            let voice = gettext(locale, "Voice call");
-                            if theme::soft_button(
-                                ui,
-                                &palette,
-                                Some(Icon::Phone),
-                                voice.as_ref(),
-                                false,
-                            )
-                            .clicked()
-                            {
-                                actions.push(Action::StartCall(chat.to_owned()));
-                            }
-                            let video = gettext(locale, "Video call");
-                            if theme::soft_button(
-                                ui,
-                                &palette,
-                                Some(Icon::Video),
-                                video.as_ref(),
-                                false,
-                            )
-                            .clicked()
-                            {
-                                actions.push(Action::StartVideoCall(chat.to_owned()));
-                            }
-                        }
-                    });
-                    ui.add_space(18.0);
-                    let mut day = String::new();
-                    for message in calls {
-                        let label = crate::util::day_label(locale, message.timestamp);
-                        if label != day {
-                            ui.add_space(8.0);
-                            theme::text(ui, &label, theme::medium(13.0), palette.secondary);
-                            ui.add_space(4.0);
-                            day = label;
-                        }
-                        info_row(app, ui, message, &mut actions);
-                    }
-                });
-        });
-    app.actions.extend(actions);
-}
-
-/// One call in the details: which way it went and what it was, at what
-/// time, and how it went.
-fn info_row(app: &App, ui: &mut egui::Ui, message: &Message, actions: &mut Vec<Action>) {
-    let Some(entry) = Entry::of(message) else {
-        return;
-    };
-    let palette = app.palette;
-    let locale = app.locale;
-    let width = ui.available_width();
-    let (rect, response) = ui.allocate_exact_size(vec2(width, 44.0), Sense::click());
-    theme::reveal_focus(&response);
-    let title = entry.title(locale);
-    let time = crate::util::clock(message.timestamp);
-    let detail = entry.detail(locale).unwrap_or_default();
-    let spoken = format!("{title}, {time}, {detail}");
-    response.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), spoken.as_str())
-    });
-    let response = response
-        .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text(gettext(locale, "Show in chat"));
-    if response.clicked() {
-        actions.push(Action::Open(Page::Chats));
-        actions.push(Action::OpenMessage {
-            chat: message.chat.clone(),
-            message: message.id.clone(),
-        });
-    }
-    if !ui.is_rect_visible(rect) {
-        return;
-    }
-    if response.hovered() {
-        widgets::row_highlight(ui, &palette, rect, palette.surface_hover);
-    }
-    let glyph =
-        Rect::from_center_size(pos2(rect.left() + 18.0, rect.center().y), Vec2::splat(16.0));
-    theme::paint_icon(
-        ui,
-        entry.direction_icon(),
-        glyph,
-        16.0,
-        if entry.status.is_bad() {
-            palette.danger
-        } else {
-            palette.accent
-        },
-    );
-    let left = rect.left() + 40.0;
-    let detail_galley =
-        ui.painter()
-            .layout_no_wrap(detail, theme::regular(13.0), palette.secondary);
-    let right = rect.right() - 12.0;
-    ui.painter().galley(
-        pos2(
-            right - detail_galley.size().x,
-            rect.center().y - detail_galley.size().y / 2.0,
-        ),
-        detail_galley.clone(),
-        palette.secondary,
-    );
-    let text = format!("{title} · {time}");
-    let line = widgets::line(
-        ui,
-        &text,
-        theme::regular(14.0),
-        palette.text,
-        (right - detail_galley.size().x - 12.0 - left).max(0.0),
-        1,
-    );
-    line.paint(
-        ui,
-        pos2(left, rect.center().y - line.size().y / 2.0),
-        palette.text,
-    );
 }
 
 #[cfg(test)]
@@ -910,7 +681,7 @@ mod tests {
             crate::paths::AppDirs::under(directory.path()),
             crate::settings::Settings::default(),
         );
-        app.page = Page::Calls;
+        app.page = crate::model::Page::Calls;
         app.call_log = vec![
             call(ADA, "1", false, 60, CallStatus::Missed),
             call(GRACE, "2", true, 30, CallStatus::Answered),
@@ -944,7 +715,7 @@ mod tests {
     }
 
     #[test]
-    fn a_history_row_opens_its_details_and_its_button_calls_back() {
+    fn a_history_row_opens_its_chat_and_its_button_calls_back() {
         let (_directory, mut app, ctx) = calls_app();
         frame(&mut app, &ctx, vec![]);
         let row = ctx.read_response(row_id(ADA, "1")).unwrap().rect;
@@ -952,7 +723,7 @@ mod tests {
         frame(&mut app, &ctx, vec![]);
         assert!(matches!(
             app.actions.as_slice(),
-            [Action::OpenCallInfo { chat, message }] if chat == ADA && message == "1"
+            [Action::PickCall { chat, message }] if chat == ADA && message == "1"
         ));
         app.actions.clear();
         // The call-back button sits at the row's right end.

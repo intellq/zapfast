@@ -19,6 +19,7 @@ pub mod message_info;
 pub mod pane;
 pub mod picker;
 pub mod polls;
+pub mod rail;
 pub mod settings;
 pub mod update;
 pub mod widgets;
@@ -48,7 +49,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     keys::handle(app, ctx);
     history_buttons(app, ctx);
     let main_navigation = app.is_linked()
-        && app.page == Page::Chats
+        && app.chat_view()
         && app.dialog.is_none()
         && !app.show_update
         && app.picker.is_none()
@@ -123,12 +124,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
 }
 
 /// Whether a narrow window shows the list pane: the chat list with no chat
-/// open, or the Calls tab's history with no call chosen. Its header's
-/// buttons and rows lead on to the rest.
+/// open, or the Calls tab's history with no call picked from it. Its header's
+/// buttons, its rows and the rail beside it lead on to the rest.
 fn list_pane_only(app: &App) -> bool {
     match app.page {
         Page::Chats => app.current_chat().is_none(),
-        Page::Calls => app.call_info.is_none(),
+        Page::Calls => app.current_chat().is_none() || !app.call_picked(),
         Page::Settings | Page::Wallpaper => false,
     }
 }
@@ -147,24 +148,22 @@ fn main_view(app: &mut App, ui: &mut egui::Ui, list_only: bool) -> Option<egui::
         return None;
     }
     // A narrow window gives the open chat or page all of its width; the
-    // conversation header's Back returns to the list. The info panel takes
-    // a column of its own, and when the list leaves too little room for it
-    // and the conversation, the list steps aside while the panel is open.
-    let list_width = match app.sidebar_mode() {
-        SidebarDisplayMode::Expanded => app.settings.sidebar_width,
-        SidebarDisplayMode::CollapsedIconsOnly => chats::compact_width(ui.ctx()),
-    };
+    // conversation header's Back returns to the list, and the rail beside
+    // it. The info panel takes a column of its own, and when the list leaves
+    // too little room for it and the conversation, the list and the rail
+    // step aside while the panel is open. The Calls tab's history needs the
+    // full list pane: only the chats collapse into the rail's avatars.
+    let full_list = app.sidebar_mode() == SidebarDisplayMode::Expanded || app.page == Page::Calls;
+    let mut list_width = chats::compact_width(ui.ctx());
+    if full_list {
+        list_width += app.settings.sidebar_width;
+    }
     let crowded = app.info_visible()
         && ui.available_width() - list_width < pane::INFO_MIN + pane::INFO_CONVERSATION_MIN;
     if !narrow(ui.ctx()) && !crowded {
-        // The Calls tab's history needs the full list pane: the collapsed
-        // rail is the chats' own.
-        match app.sidebar_mode() {
-            SidebarDisplayMode::Expanded => chats::show(app, ui),
-            SidebarDisplayMode::CollapsedIconsOnly if app.page == Page::Calls => {
-                chats::show(app, ui);
-            }
-            SidebarDisplayMode::CollapsedIconsOnly => chats::compact_show(app, ui),
+        rail::show(app, ui, !full_list);
+        if full_list {
+            chats::show(app, ui);
         }
     }
     let search_overlay = pane::show(app, ui);
@@ -174,6 +173,8 @@ fn main_view(app: &mut App, ui: &mut egui::Ui, list_only: bool) -> Option<egui::
         .show(ui, |ui| match app.page {
             Page::Settings => settings::show(app, ui),
             Page::Chats => conversation::show(app, ui),
+            // The open chat stays beside the call history.
+            Page::Calls if app.current_chat().is_some() => conversation::show(app, ui),
             Page::Calls => calls::show(app, ui),
             Page::Wallpaper => settings::wallpaper_show(app, ui),
         });
@@ -296,7 +297,10 @@ pub(crate) fn narrow(ctx: &egui::Context) -> bool {
 }
 
 fn central_background(app: &App) -> egui::Color32 {
-    if app.page == Page::Chats {
+    // The Calls tab shows the open chat beside its history, or its own pane.
+    let conversation =
+        app.page == Page::Chats || (app.page == Page::Calls && app.current_chat().is_some());
+    if conversation {
         app.settings.wallpaper_background(&app.palette)
     } else {
         app.palette.panel
@@ -1096,6 +1100,7 @@ mod idle_tests {
             ctx.data_mut(|data| {
                 data.remove::<egui::Rect>(chats::header_row_id());
                 data.remove::<egui::Rect>(conversation::header_row_id());
+                data.remove::<egui::Rect>(rail::rect_id());
             });
             // Frame times a click apart; egui ignores a press held too long.
             frame.set(frame.get() + 1.0 / 60.0);
@@ -1125,11 +1130,19 @@ mod idle_tests {
         let (list, header) = run(&mut app, 1180.0, Vec::new());
         assert!(list.is_some() && header.is_some());
 
-        // Narrow with no chat open: the list takes the whole window.
+        // Narrow with no chat open: the list takes the whole window beside
+        // the rail.
         app.open_chat = None;
         let (list, header) = run(&mut app, 480.0, Vec::new());
         let list = list.expect("the chat list is drawn");
-        assert!(list.width() > 400.0, "the list fills the window: {list:?}");
+        let rail = ctx
+            .data(|data| data.get_temp::<egui::Rect>(rail::rect_id()))
+            .expect("the rail stands beside the narrow list");
+        assert!(rail.left() < 1.0 && rail.right() <= list.left());
+        assert!(
+            list.width() > 400.0 - rail.width(),
+            "the list fills the rest of the window: {list:?}"
+        );
         assert!(header.is_none());
 
         // Narrow with a chat open: only the conversation, from the left edge.
@@ -1139,6 +1152,11 @@ mod idle_tests {
         settle();
         let (list, header) = run(&mut app, 480.0, Vec::new());
         assert!(list.is_none(), "no chat list beside a narrow conversation");
+        assert!(
+            ctx.data(|data| data.get_temp::<egui::Rect>(rail::rect_id()))
+                .is_none(),
+            "the rail goes with the list"
+        );
         let header = header.expect("the conversation header is drawn");
         assert!(
             header.left() < 20.0,
