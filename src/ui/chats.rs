@@ -2126,8 +2126,9 @@ fn context_menu(app: &mut App, ui: &mut egui::Ui, chat: &Chat, palette: &Palette
         };
         if widgets::menu_item(ui, palette, Some(Icon::User), label) {
             let name = app.chat_title(chat);
-            app.actions
-                .push(Action::ShowDialog(Dialog::ChatInfo(chat.id.clone())));
+            // The editor opens in the info panel, beside the chat.
+            app.actions.push(Action::OpenChat(chat.id.clone()));
+            app.actions.push(Action::OpenInfo(chat.id.clone()));
             app.actions.push(Action::EditContact {
                 id: chat.id.clone(),
                 name: name.trim_start_matches('~').to_owned(),
@@ -2141,8 +2142,9 @@ fn context_menu(app: &mut App, ui: &mut egui::Ui, chat: &Chat, palette: &Palette
         app.actions.push(Action::CopyText(format!("+{phone}")));
     }
     if widgets::menu_item(ui, palette, Some(Icon::Info), tr("Info")) {
-        app.actions
-            .push(Action::ShowDialog(Dialog::ChatInfo(chat.id.clone())));
+        // The panel sits beside the conversation, so the chat opens first.
+        app.actions.push(Action::OpenChat(chat.id.clone()));
+        app.actions.push(Action::OpenInfo(chat.id.clone()));
     }
     // Deleting reaches the phone, so it waits for a connection.
     let connected = matches!(app.link, LinkStatus::Connected);
