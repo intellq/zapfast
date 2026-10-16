@@ -160,7 +160,7 @@ pub enum Command {
     SendText {
         chat: ChatId,
         text: String,
-        quoting: Option<String>,
+        quoting: Option<crate::model::ReplyTarget>,
         mentions: Vec<String>,
         /// The preview of a link in the text, sent with it.
         preview: Option<LinkCard>,
@@ -173,7 +173,7 @@ pub enum Command {
         chat: ChatId,
         latitude: f64,
         longitude: f64,
-        quoting: Option<String>,
+        quoting: Option<crate::model::ReplyTarget>,
     },
     ReplyInteractive {
         chat: ChatId,
@@ -383,7 +383,7 @@ pub enum Command {
         caption: Option<String>,
         mentions: Vec<String>,
         /// The message the first file replies to.
-        quoting: Option<String>,
+        quoting: Option<crate::model::ReplyTarget>,
     },
     /// Sends a clipboard image as straight-alpha RGBA.
     SendImage {
@@ -393,7 +393,7 @@ pub enum Command {
         rgba: Vec<u8>,
         caption: Option<String>,
         mentions: Vec<String>,
-        quoting: Option<String>,
+        quoting: Option<crate::model::ReplyTarget>,
     },
     /// Syncs chat mute state. `Some(0)` is indefinite and `None` unmutes.
     SetMuted(ChatId, Option<i64>),
@@ -421,7 +421,7 @@ pub enum Command {
     SendVoice {
         chat: ChatId,
         samples: Vec<f32>,
-        quoting: Option<String>,
+        quoting: Option<crate::model::ReplyTarget>,
     },
     /// Sends again an own message that failed to go out: text, attachment,
     /// voice message, sticker, location…
@@ -468,7 +468,7 @@ pub enum Command {
     SendSticker {
         chat: ChatId,
         path: PathBuf,
-        quoting: Option<String>,
+        quoting: Option<crate::model::ReplyTarget>,
     },
     /// Saves a sticker file.
     SaveSticker {
@@ -634,11 +634,13 @@ pub enum Command {
         transparent: bool,
         emojis: Vec<String>,
         chat: Option<ChatId>,
+        quoting: Option<crate::model::ReplyTarget>,
     },
     /// Internal: a made sticker, and where it goes.
     StickerMade {
         result: Result<PathBuf, String>,
         chat: Option<ChatId>,
+        quoting: Option<crate::model::ReplyTarget>,
     },
     /// Creates an empty local sticker pack under the given name.
     CreateStickerPack {
@@ -689,7 +691,7 @@ pub enum Command {
     SendGif {
         chat: ChatId,
         gif: Gif,
-        quoting: Option<String>,
+        quoting: Option<crate::model::ReplyTarget>,
     },
     /// Searches GIPHY or lists trending results for an empty query.
     SearchGifs {
@@ -1285,7 +1287,7 @@ pub enum Event {
     /// what was being sent so the user loses neither text nor a recording.
     SendRefused {
         chat: ChatId,
-        quoting: Option<String>,
+        quoting: Option<crate::model::ReplyTarget>,
         unsent: Unsent,
         reason: Refusal,
     },
