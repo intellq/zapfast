@@ -8851,7 +8851,8 @@ fn rounded_corners(corners: &[egui::Pos2], radius: f32) -> Vec<egui::Pos2> {
     points
 }
 
-/// In-chat voice and audio player.
+/// Draws the in-chat player with a waveform for voice notes or a track and music badge
+/// for audio files. Playback, seeking and speed controls remain shared between both types.
 #[allow(clippy::too_many_arguments)]
 fn voice_player(
     ui: &mut egui::Ui,
@@ -8898,7 +8899,19 @@ fn voice_player(
     // The chip appears with the playable clip; the waveform takes its space
     // back while the audio is still downloading.
     let shows_chip = playable.is_some();
-    let wave_width = (width - button - 10.0 - if shows_chip { chip + 10.0 } else { 0.0 }).max(0.0);
+    let voice_note = matches!(
+        message.content,
+        Content::Audio {
+            voice_note: true,
+            ..
+        }
+    );
+    let wave_width = (width
+        - button
+        - 10.0
+        - if shows_chip { chip + 10.0 } else { 0.0 }
+        - if voice_note { 0.0 } else { button + 10.0 })
+    .max(0.0);
     let bars: Vec<u8> = if !waveform.is_empty() {
         waveform.to_vec()
     } else if let Some(bars) = view.player.bars(&message.id) {
@@ -9000,7 +9013,25 @@ fn voice_player(
                 };
                 let played_until = rect.left() + fraction * rect.width();
                 let quiet = palette.secondary.gamma_multiply(0.7);
-                if count > 0 {
+                let kind = if voice_note {
+                    "voice-waveform"
+                } else {
+                    "audio-track"
+                };
+                ui.ctx().data_mut(|data| {
+                    data.insert_temp(bubble_id(&view.chat.id, &message.id).with(kind), rect);
+                });
+                if !voice_note {
+                    let track = Rect::from_center_size(rect.center(), vec2(rect.width(), 4.0));
+                    ui.painter().rect_filled(track, 2.0, quiet);
+                    if fraction > 0.0 {
+                        ui.painter().rect_filled(
+                            Rect::from_min_max(track.min, pos2(played_until, track.bottom())),
+                            2.0,
+                            palette.accent,
+                        );
+                    }
+                } else if count > 0 {
                     for index in 0..count {
                         let level = f32::from(bars[index * bars.len() / count]) / 100.0;
                         let height = (2.0 + level * (bar_height - 4.0)).max(2.0);
@@ -9020,7 +9051,9 @@ fn voice_player(
                         );
                     }
                 }
-                if matches!(status.state, State::Playing | State::Paused) && rect.width() >= 10.0 {
+                if (!voice_note || matches!(status.state, State::Playing | State::Paused))
+                    && rect.width() >= 10.0
+                {
                     let knob = played_until.clamp(rect.left() + 5.0, rect.right() - 5.0);
                     ui.painter().circle_filled(
                         egui::pos2(knob, rect.center().y),
@@ -9079,6 +9112,22 @@ fn voice_player(
                         Some(theme::text(ui, text, theme::regular(11.5), palette.secondary).rect);
                 }
             });
+            if !voice_note {
+                let (slot, response) = ui.allocate_exact_size(Vec2::splat(button), Sense::hover());
+                let at = Rect::from_center_size(
+                    pos2(slot.center().x, wave_middle.unwrap_or(slot.center().y)),
+                    Vec2::splat(button),
+                );
+                ui.painter().circle_filled(at.center(), button / 2.0, fill);
+                theme::paint_icon(ui, Icon::Music, at, 20.0, palette.accent);
+                let label = crate::i18n::gettext(view.locale, "Audio");
+                response.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::Label, true, label.as_ref())
+                });
+                ui.ctx().data_mut(|data| {
+                    data.insert_temp(bubble_id(&view.chat.id, &message.id).with("audio-file"), at);
+                });
+            }
             // Speed chip, cycling 1x, 1.5x, and 2x like the phone. The
             // message menu lists every speed, including 1.25x and 1.75x.
             if shows_chip {
