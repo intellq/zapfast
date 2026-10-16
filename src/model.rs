@@ -2272,8 +2272,11 @@ pub enum Action {
         message: String,
         starred: bool,
     },
-    /// Opens the attachment picker for the current chat.
-    Attach,
+    /// Opens the attachment picker for the current chat. With `documents`
+    /// the picked files go as documents, pictures included.
+    Attach {
+        documents: bool,
+    },
     /// Opens or closes the composer tools menu.
     SetComposerTools(bool),
     SendFiles(Vec<PathBuf>),

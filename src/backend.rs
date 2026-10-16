@@ -377,12 +377,19 @@ pub enum Command {
         id: String,
         result: Result<(), String>,
     },
-    /// Selects and sends files with the desktop picker.
-    PickFiles(ChatId),
+    /// Selects files with the desktop picker for the composer. `documents`
+    /// stages them to go as documents, pictures included.
+    PickFiles {
+        chat: ChatId,
+        documents: bool,
+    },
     /// Sends files with the caption on the first.
     SendFiles {
         chat: ChatId,
         paths: Vec<PathBuf>,
+        /// Sends every file as a document with its original bytes, instead
+        /// of turning pictures, videos and audio into media messages.
+        documents: bool,
         caption: Option<String>,
         mentions: Vec<String>,
         /// The message the first file replies to.
@@ -861,6 +868,7 @@ pub enum Command {
     Picked {
         chat: ChatId,
         paths: Vec<PathBuf>,
+        documents: bool,
     },
     /// Internal encoded voice message, saved before its upload so that a
     /// failed send can be retried from the file.
@@ -1110,10 +1118,11 @@ pub enum Event {
         token: u64,
         cleared: bool,
     },
-    /// Files selected for the composer.
+    /// Files selected for the composer, to go as documents when `documents`.
     Picked {
         chat: ChatId,
         paths: Vec<PathBuf>,
+        documents: bool,
     },
     /// Live incoming message for desktop notification.
     Incoming {
@@ -1371,6 +1380,7 @@ pub enum Unsent {
     Voice(Vec<f32>),
     Files {
         paths: Vec<PathBuf>,
+        documents: bool,
         caption: Option<String>,
     },
     Image {

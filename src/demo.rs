@@ -3088,6 +3088,9 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
                     rgba: std::sync::Arc::new(rgba),
                     texture: None,
                 });
+                // The same picture staged to go as a document shows as a file.
+                app.pending
+                    .push(crate::app::Pending::Document(photo.clone()));
                 app.pending.push(crate::app::Pending::File(photo));
                 app.pending
                     .push(crate::app::Pending::File("/tmp/notes.pdf".into()));
@@ -13772,8 +13775,9 @@ mod tests {
                 .expect("the plus button is a tab stop");
             (id, ctx.read_response(id).unwrap().rect.center())
         };
-        // Row 0 sends files, row 1 sends a location, row 2 creates a poll.
-        for row in [0.0, 1.0, 2.0] {
+        // Row 0 sends files, row 1 documents, row 2 sends a location, row 3
+        // creates a poll.
+        for row in [0.0, 1.0, 2.0, 3.0] {
             let mut app = app();
             app.settings.show_shortcut_hints = false;
             let chat = app.open_chat.clone().unwrap();
@@ -13793,7 +13797,7 @@ mod tests {
             );
             let item = egui::pos2(
                 menu.center().x,
-                menu.top() + menu.height() * (1.0 + 2.0 * row) / 6.0,
+                menu.top() + menu.height() * (1.0 + 2.0 * row) / 8.0,
             );
             click(&mut app, &ctx, item);
             assert!(
@@ -13801,17 +13805,24 @@ mod tests {
                 "choosing an entry closes the menu"
             );
             let commands = app.backend.take_demo_commands();
-            let picked = commands.iter().any(
-                |command| matches!(command, crate::backend::Command::PickFiles(id) if *id == chat),
-            );
+            let picked = commands.iter().find_map(|command| match command {
+                crate::backend::Command::PickFiles {
+                    chat: id,
+                    documents,
+                } if *id == chat => Some(*documents),
+                _ => None,
+            });
             if row == 0.0 {
-                assert!(picked, "Send files opens the file picker");
+                assert_eq!(picked, Some(false), "Send files opens the file picker");
                 assert_eq!(app.dialog, None);
             } else if row == 1.0 {
-                assert!(!picked);
+                assert_eq!(picked, Some(true), "documents open the file picker");
+                assert_eq!(app.dialog, None);
+            } else if row == 2.0 {
+                assert_eq!(picked, None);
                 assert_eq!(app.dialog, Some(crate::model::Dialog::SendLocation(chat)));
             } else {
-                assert!(!picked);
+                assert_eq!(picked, None);
                 assert_eq!(app.dialog, Some(crate::model::Dialog::CreatePoll(chat)));
             }
         }

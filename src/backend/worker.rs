@@ -6410,14 +6410,18 @@ impl Worker {
                 Ok(()) => self.delete_for_me_local(chat, id),
                 Err(error) => self.emit(Event::Error(error)),
             },
-            Command::PickFiles(chat) => {
+            Command::PickFiles { chat, documents } => {
                 let commands = self.commands.clone();
                 tokio::task::spawn_blocking(move || {
                     let paths = rfd::FileDialog::new()
                         .set_title(tr("Send to WhatsApp"))
                         .pick_files()
                         .unwrap_or_default();
-                    let _ = commands.send(Command::Picked { chat, paths });
+                    let _ = commands.send(Command::Picked {
+                        chat,
+                        paths,
+                        documents,
+                    });
                 });
             }
             Command::LoadStorageStats { token } => self.measure_storage(token, false),
@@ -6438,15 +6442,24 @@ impl Worker {
                     cleared,
                 });
             }
-            Command::Picked { chat, paths } => self.emit(Event::Picked { chat, paths }),
+            Command::Picked {
+                chat,
+                paths,
+                documents,
+            } => self.emit(Event::Picked {
+                chat,
+                paths,
+                documents,
+            }),
             Command::SendFiles {
                 chat,
                 paths,
+                documents,
                 caption,
                 mentions,
                 quoting,
             } => {
-                self.send_files(chat, paths, caption, mentions, quoting);
+                self.send_files(chat, paths, documents, caption, mentions, quoting);
             }
             Command::SendImage {
                 chat,
@@ -9850,24 +9863,25 @@ impl Worker {
         &mut self,
         chat: ChatId,
         paths: Vec<PathBuf>,
+        documents: bool,
         caption: Option<String>,
         mentions: Vec<String>,
         quoting: Option<crate::model::ReplyTarget>,
     ) {
+        let unsent = |paths, caption| Unsent::Files {
+            paths,
+            documents,
+            caption,
+        };
         let mut quote = match self.quote_target(&chat, quoting.as_ref()) {
             Ok(quote) => quote,
             Err(reason) => {
-                self.refuse(chat, quoting, Unsent::Files { paths, caption }, reason);
+                self.refuse(chat, quoting, unsent(paths, caption), reason);
                 return;
             }
         };
         let Some(client) = self.connected_client() else {
-            self.refuse(
-                chat,
-                quoting,
-                Unsent::Files { paths, caption },
-                Refusal::Offline,
-            );
+            self.refuse(chat, quoting, unsent(paths, caption), Refusal::Offline);
             return;
         };
         let mut mentions = mentions;
@@ -9897,6 +9911,9 @@ impl Worker {
                 let file_name = path
                     .file_name()
                     .map(|name| name.to_string_lossy().into_owned());
+                if documents {
+                    return Ok(stage_document(bytes, &mime, file_name.as_deref()));
+                }
                 let staged = stage_media(bytes, &mime, file_name.as_deref(), false).await?;
                 Ok(with_poster(path, staged).await)
             };
@@ -11999,16 +12016,30 @@ async fn stage_media(
         };
         return Ok(staged(content, mime_owned, bytes));
     }
+    Ok(stage_document(bytes, mime, file_name))
+}
+
+/// What a file's row shows when it goes as a document: its own bytes, name
+/// and type, whatever it holds, so a picture keeps its quality, transparency
+/// and metadata.
+fn stage_document(bytes: Vec<u8>, mime: &str, file_name: Option<&str>) -> Prepared {
     let name = file_name.unwrap_or("file").to_owned();
+    let size = bytes.len() as u64;
+    let mime_owned = mime.to_owned();
     let content = Content::Document {
         media: media(Some(&mime_owned), Some(size), None, None),
         file_name: name.clone(),
         caption: None,
         pages: None,
     };
-    let mut staged = staged(content, mime_owned, bytes);
-    staged.file_name = Some(name);
-    Ok(staged)
+    Prepared {
+        message: wa::Message::default(),
+        content,
+        thumbnail: None,
+        bytes,
+        mime: mime_owned,
+        file_name: Some(name),
+    }
 }
 
 /// Uploads an attachment from [`stage_media`] (or one rebuilt from its
@@ -20854,13 +20885,30 @@ mod receipt_tests {
                 Command::SendFiles {
                     chat: PEER.into(),
                     paths: vec!["/fixture/a.pdf".into(), "/fixture/b.png".into()],
+                    documents: false,
                     caption: Some("Caption fixture".into()),
                     mentions: Vec::new(),
                     quoting: quoting.clone(),
                 },
                 Unsent::Files {
                     paths: vec!["/fixture/a.pdf".into(), "/fixture/b.png".into()],
+                    documents: false,
                     caption: Some("Caption fixture".into()),
+                },
+            ),
+            (
+                Command::SendFiles {
+                    chat: PEER.into(),
+                    paths: vec!["/fixture/c.png".into()],
+                    documents: true,
+                    caption: None,
+                    mentions: Vec::new(),
+                    quoting: quoting.clone(),
+                },
+                Unsent::Files {
+                    paths: vec!["/fixture/c.png".into()],
+                    documents: true,
+                    caption: None,
                 },
             ),
             (

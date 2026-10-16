@@ -2000,7 +2000,8 @@ fn composer_pill(palette: &Palette) -> Frame {
         })
 }
 
-/// The plus menu beside the composer: send files or create a poll.
+/// The plus menu beside the composer: send files, documents or a location,
+/// or create a poll.
 fn composer_tools_menu(app: &mut App, chat: &Chat, plus: &egui::Response) {
     let id = plus.id.with("composer-tools");
     let mut open = app.composer_tools_open;
@@ -2022,7 +2023,13 @@ fn composer_tools_menu(app: &mut App, chat: &Chat, plus: &egui::Response) {
             .show(|ui| {
                 let send_files = crate::i18n::gettext(app.locale, "Send files");
                 if widgets::menu_item(ui, &app.palette, Some(Icon::Paperclip), &send_files) {
-                    app.actions.push(Action::Attach);
+                    app.actions.push(Action::Attach { documents: false });
+                }
+                // Pictures picked here keep their own bytes instead of
+                // becoming compressed photos.
+                let document = crate::i18n::gettext(app.locale, "Send as document");
+                if widgets::menu_item(ui, &app.palette, Some(Icon::FileText), &document) {
+                    app.actions.push(Action::Attach { documents: true });
                 }
                 let send_location = crate::i18n::gettext(app.locale, "Send location");
                 if widgets::menu_item(ui, &app.palette, Some(Icon::MapPin), &send_location) {
@@ -11593,7 +11600,7 @@ fn pending_preview(app: &mut App, ui: &mut egui::Ui) {
     );
     let title = match &app.pending[selected] {
         crate::app::Pending::Picture { .. } => tr("Pasted picture").to_owned(),
-        crate::app::Pending::File(path) => path
+        crate::app::Pending::File(path) | crate::app::Pending::Document(path) => path
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default(),
@@ -11691,7 +11698,7 @@ fn pending_preview(app: &mut App, ui: &mut egui::Ui) {
     );
     theme::paint_icon(ui, Icon::Plus, add, 22.0, palette.secondary);
     if add_response.clicked() {
-        app.actions.push(Action::Attach);
+        app.actions.push(Action::Attach { documents: false });
     }
 
     if let Some(index) = remove {
@@ -11880,6 +11887,8 @@ fn pending_large(
     stage: Rect,
 ) {
     let ppp = ui.ctx().pixels_per_point();
+    // A document shows as the file it arrives as, even a picture.
+    let document = matches!(item, crate::app::Pending::Document(_));
     match item {
         crate::app::Pending::Picture {
             width,
@@ -11893,8 +11902,8 @@ fn pending_large(
                 .corner_radius(6.0)
                 .paint_at(ui, Rect::from_center_size(stage.center(), size));
         }
-        crate::app::Pending::File(path) => {
-            if crate::app::Pending::is_video_file(path) {
+        crate::app::Pending::File(path) | crate::app::Pending::Document(path) => {
+            if !document && crate::app::Pending::is_video_file(path) {
                 match pending_poster(ui.ctx(), path) {
                     Some(Some((texture, length))) => {
                         let size = fit_contain(texture.size_vec2(), stage.size(), ppp);
@@ -11912,7 +11921,7 @@ fn pending_large(
                     Some(None) => {}
                 }
             }
-            if crate::app::Pending::is_picture_file(path) {
+            if !document && crate::app::Pending::is_picture_file(path) {
                 let image = widgets::file_image(ui, path);
                 match image.load_for_size(ui.ctx(), stage.size()) {
                     Ok(egui::load::TexturePoll::Ready { texture }) => {
@@ -11967,6 +11976,7 @@ fn pending_thumbnail(
     index: usize,
     rect: Rect,
 ) {
+    let document = matches!(item, crate::app::Pending::Document(_));
     match item {
         crate::app::Pending::Picture {
             width,
@@ -11980,8 +11990,9 @@ fn pending_thumbnail(
                 .corner_radius(6.0)
                 .paint_at(ui, rect);
         }
-        crate::app::Pending::File(path) => {
-            if crate::app::Pending::is_video_file(path)
+        crate::app::Pending::File(path) | crate::app::Pending::Document(path) => {
+            if !document
+                && crate::app::Pending::is_video_file(path)
                 && let Some(Some((texture, length))) = pending_poster(ui.ctx(), path)
             {
                 egui::Image::from_texture((texture.id(), texture.size_vec2()))
@@ -11991,7 +12002,8 @@ fn pending_thumbnail(
                 paint_poster_marks(ui, rect, length, false);
                 return;
             }
-            if crate::app::Pending::is_picture_file(path)
+            if !document
+                && crate::app::Pending::is_picture_file(path)
                 && let Ok(egui::load::TexturePoll::Ready { texture }) =
                     widgets::file_image(ui, path).load_for_size(ui.ctx(), rect.size())
             {
