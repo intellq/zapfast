@@ -705,6 +705,12 @@ pub struct VideoPipeline {
     /// path has not changed because the camera did.
     rate: RateControl,
     rate_share: Arc<RateShare>,
+    /// What the peer's RTCP feedback has asked of our video, for the heartbeat's log line.
+    feedback: crate::video_rate::PeerFeedback,
+    /// The WhatsApp extension of the peer's latest report on our video: 24 bytes of transport
+    /// statistics after the standard report block, whose fields are not decoded yet. Logged so a
+    /// call's numbers can be set beside what we know we sent.
+    report_extension: Vec<u8>,
 }
 
 impl VideoPipeline {
@@ -746,6 +752,8 @@ impl VideoPipeline {
                 device,
                 rate,
                 rate_share,
+                feedback: Default::default(),
+                report_extension: Vec::new(),
             },
             tick_rx,
         ))
@@ -2508,6 +2516,17 @@ impl Call {
                 ..
             } => {
                 let pipe = self.video_pipe.as_mut()?;
+                for item in feedback {
+                    pipe.feedback.note(item.packet_type, item.fmt, &item.fci);
+                }
+                // The peer's native video report covers our video stream alone.
+                if *reports_video
+                    && !*reports_audio
+                    && let Some(block) = report_blocks.first()
+                    && !block.profile_extension.is_empty()
+                {
+                    pipe.report_extension.clone_from(&block.profile_extension);
+                }
                 let blocks: Vec<(u32, u8)> = report_blocks
                     .iter()
                     .map(|block| (block.ssrc, block.fraction_lost))
@@ -2585,13 +2604,24 @@ impl Call {
         );
         if let Some(pipe) = &self.video_pipe {
             let rate = pipe.rate();
+            let feedback = pipe.feedback;
             log::info!(
-                "[CALL] video send call_id={} at={} bitrate_kbps={} picture={} max_fps={}",
+                "[CALL] video send call_id={} at={} bitrate_kbps={} picture={} max_fps={} \
+                 peer_nacked_packets={} peer_plis={} peer_firs={} peer_estimates={} \
+                 peer_estimate_kbps={} peer_report_extension={}",
                 self.call_id,
                 marker,
                 rate.bitrate / 1000,
                 rate.tier().name,
                 rate.tier().fps,
+                feedback.nacked_packets,
+                feedback.picture_loss,
+                feedback.full_intra,
+                feedback.estimates,
+                feedback
+                    .last_estimate
+                    .map_or_else(|| "none".to_owned(), |bps| (bps / 1000).to_string()),
+                crate::settings::hex(&pipe.report_extension),
             );
         }
         self.log_audio_path(marker);
@@ -3182,6 +3212,8 @@ mod tests {
             device: None,
             rate: RateControl::new(Arc::clone(&rate_share)),
             rate_share,
+            feedback: Default::default(),
+            report_extension: Vec::new(),
         }
     }
 
@@ -4023,6 +4055,65 @@ mod tests {
         assert!(call.became_active().is_some());
         call.check_video_queue();
         assert_eq!(pipe(&call).rate().bitrate, crate::video_rate::START_BITRATE);
+    }
+
+    /// The peer's NACKs, keyframe requests and estimates are tallied for the heartbeat's log line,
+    /// with the extension of its latest report on our video.
+    #[test]
+    fn the_peers_feedback_on_our_video_is_tallied() {
+        use whatsapp_rust::voip_control::{MediaRtcpFeedback, MediaRtcpReportBlock};
+        let feedback = |packet_type: u8, fmt: u8, fci: &[u8]| {
+            MediaRtcpFeedback::builder()
+                .packet_type(packet_type)
+                .fmt(fmt)
+                .sender_ssrc(1)
+                .media_ssrc(9)
+                .fci(fci.to_vec())
+                .build()
+        };
+        let block = MediaRtcpReportBlock::builder()
+            .ssrc(9)
+            .fraction_lost(0)
+            .cumulative_lost(0)
+            .extended_highest_sequence(0)
+            .jitter(0)
+            .last_sender_report(0)
+            .delay_since_last_sender_report(0)
+            .profile_extension(vec![0xab; 24])
+            .build();
+        let mut call = dialing();
+        call.video = true;
+        call.video_pipe = Some(pipeline_with_a_running_camera());
+        call.media(&CallEvent::RtcpReceived {
+            packet_types: vec![201, 205, 206, 206],
+            sender_ssrc: 1,
+            referenced_ssrcs: vec![9],
+            reports_audio: false,
+            reports_video: true,
+            report_blocks: vec![block],
+            feedback: vec![
+                // One packet and the two its bitmask names.
+                feedback(205, 1, &[0, 10, 0b101, 0]),
+                feedback(206, 1, &[]),
+                feedback(
+                    206,
+                    15,
+                    &[b'R', b'E', b'M', b'B', 1, 4 << 2, 0x30, 0xD4, 0, 0, 0, 9],
+                ),
+            ],
+        });
+        let pipe = call.video_pipe.as_ref().expect("video");
+        assert_eq!(
+            pipe.feedback,
+            crate::video_rate::PeerFeedback {
+                nacked_packets: 3,
+                picture_loss: 1,
+                full_intra: 0,
+                estimates: 1,
+                last_estimate: Some(200_000),
+            }
+        );
+        assert_eq!(pipe.report_extension, vec![0xab; 24]);
     }
 
     #[test]

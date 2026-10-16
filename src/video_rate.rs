@@ -398,6 +398,50 @@ pub fn remb_bitrate(fci: &[u8]) -> Option<u32> {
     Some(u32::try_from(mantissa << exponent.min(40)).unwrap_or(u32::MAX))
 }
 
+/// What the peer's feedback has asked of our video over the call, for the log.
+///
+/// Counted rather than acted on here: the engine answers keyframe requests on its own and the
+/// rate control reads the estimates. What these say is whether the peer recovers lost video by
+/// asking for packets again (NACK) or for a whole new picture (PLI, FIR), and whether anyone sends
+/// an estimate at all, which a freeze or a stuck rate cannot tell apart from the outside.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PeerFeedback {
+    /// Packets named in generic NACKs, the bitmask's included.
+    pub nacked_packets: u32,
+    pub picture_loss: u32,
+    pub full_intra: u32,
+    pub estimates: u32,
+    /// The latest estimate, in bits per second.
+    pub last_estimate: Option<u32>,
+}
+
+impl PeerFeedback {
+    /// One feedback message (RFC 4585): its RTCP packet type, FMT and FCI.
+    pub fn note(&mut self, packet_type: u8, fmt: u8, fci: &[u8]) {
+        const TRANSPORT_FEEDBACK: u8 = 205;
+        const PAYLOAD_FEEDBACK: u8 = 206;
+        match (packet_type, fmt) {
+            (TRANSPORT_FEEDBACK, 1) => {
+                for row in fci.as_chunks::<4>().0 {
+                    let following = u16::from_be_bytes([row[2], row[3]]);
+                    self.nacked_packets = self
+                        .nacked_packets
+                        .saturating_add(1 + following.count_ones());
+                }
+            }
+            (PAYLOAD_FEEDBACK, 1) => self.picture_loss = self.picture_loss.saturating_add(1),
+            (PAYLOAD_FEEDBACK, 4) => self.full_intra = self.full_intra.saturating_add(1),
+            (PAYLOAD_FEEDBACK, 15) => {
+                if let Some(bitrate) = remb_bitrate(fci) {
+                    self.estimates = self.estimates.saturating_add(1);
+                    self.last_estimate = Some(bitrate);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// How many camera frames to let go for each one sent, so the frames that are sent are evenly
 /// spaced: every `n`th frame of a steady camera is a steady stream.
 ///
@@ -805,6 +849,23 @@ mod tests {
         now += Duration::from_secs(2);
         let third = held_at_top(&mut control, &mut now);
         assert!(third < Duration::from_secs(16), "{third:?}");
+    }
+
+    #[test]
+    fn the_peers_feedback_is_counted_by_kind() {
+        let mut feedback = PeerFeedback::default();
+        // Two NACK rows: 1 + 2 packets, and 1 + 16.
+        feedback.note(205, 1, &[0, 1, 0, 0b11, 0, 40, 0xff, 0xff]);
+        feedback.note(206, 1, &[]);
+        feedback.note(206, 4, &[0, 0, 0, 9, 1, 0, 0, 0]);
+        feedback.note(206, 15, b"REMB\x01\x10\x30\xd4\x00\x00\x00\x09");
+        feedback.note(206, 15, b"NOPE");
+        feedback.note(201, 0, &[]);
+        assert_eq!(feedback.nacked_packets, 3 + 17);
+        assert_eq!(feedback.picture_loss, 1);
+        assert_eq!(feedback.full_intra, 1);
+        assert_eq!(feedback.estimates, 1);
+        assert_eq!(feedback.last_estimate, Some(200_000));
     }
 
     #[test]
