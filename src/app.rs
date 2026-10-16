@@ -575,6 +575,8 @@ pub struct App {
     pub image_preview: Option<PreviewState>,
     /// The motion photo whose clip plays over it: its chat and message.
     pub motion_playing: Option<(ChatId, String)>,
+    /// Sticker currently shown large.
+    pub sticker_view: Option<crate::image_preview::StickerPreview>,
     /// Message bodies registered for transcript copy formatting.
     pub copy_rows: std::sync::Arc<std::sync::Mutex<Vec<crate::transcript::Row>>>,
     /// Previous message-list rect used by the selection hook.
@@ -1415,6 +1417,7 @@ impl App {
             lid_phones: HashMap::new(),
             image_preview: None,
             motion_playing: None,
+            sticker_view: None,
             copy_rows: Default::default(),
             selection_view: Default::default(),
             gif_query: String::new(),
@@ -6343,6 +6346,24 @@ impl App {
             }
             Action::CloseImagePreview => {
                 self.image_preview = None;
+                self.refocus_composer(ctx);
+            }
+            Action::PreviewSticker(path) => {
+                if path.is_file() {
+                    self.sticker_view = Some(crate::image_preview::StickerPreview::new(path));
+                    self.dialog = None;
+                    self.picker = None;
+                    // As for the image preview: the composer must not take
+                    // Enter in the frame before the modal is known.
+                    ctx.memory_mut(|memory| {
+                        if let Some(focused) = memory.focused() {
+                            memory.surrender_focus(focused);
+                        }
+                    });
+                }
+            }
+            Action::CloseStickerPreview => {
+                self.sticker_view = None;
                 self.refocus_composer(ctx);
             }
             Action::OpenFile(path) => {

@@ -3014,6 +3014,15 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
             "sticker-search" => sticker_sample(app, crate::model::StickerShelf::Recent, "laugh"),
             "sticker-animated" => animated_sticker_sample(app),
             "sticker-add" => sticker_sample(app, crate::model::StickerShelf::Add, ""),
+            // A received sticker shown large, not yet a favorite.
+            "sticker-view" => {
+                sticker_sample(app, crate::model::StickerShelf::Recent, "");
+                app.picker = None;
+                app.sticker_view = app
+                    .stickers_received
+                    .first()
+                    .map(|path| crate::image_preview::StickerPreview::new(path.clone()));
+            }
             "sticker-maker" => {
                 let (photo, _) = sample_files(app);
                 let crop = crate::model::StickerCrop::centered(900, 1200).resized(620, 900, 1200);
@@ -5234,6 +5243,7 @@ mod tests {
             "sticker-search",
             "sticker-animated",
             "sticker-add",
+            "sticker-view",
             "sticker-pack-message",
             "sticker-maker",
             "sticker-pack-view",

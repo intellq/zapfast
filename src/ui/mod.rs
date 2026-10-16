@@ -54,6 +54,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         && app.recording.is_none()
         && app.image_preview.is_none()
         && app.video_expanded.is_none()
+        && app.sticker_view.is_none()
         && app.emoji_start.is_none()
         && app.mention_start.is_none()
         // Selection keeps egui's order so Tab can reach message checkboxes.
@@ -101,6 +102,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     picker::show(app, ctx);
     dialogs::show(app, ctx);
     image_preview::show(app, ctx);
+    image_preview::show_sticker(app, ctx);
     video_view::show(app, ctx);
     call::show(app, ctx);
     app.history_rect = central.filter(|_| app.page == Page::Chats);

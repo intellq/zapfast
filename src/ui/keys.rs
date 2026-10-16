@@ -15,6 +15,10 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
         video_keys(app, ctx);
         return;
     }
+    if app.sticker_view.is_some() {
+        sticker_view_keys(app, ctx);
+        return;
+    }
     let editing_text = ctx.text_edit_focused();
     let composer_focused = ctx.memory(|memory| memory.has_focus(egui::Id::new("composer-text")));
     // Home/End (and Ctrl+End) keep moving the text cursor in a non-empty
@@ -521,6 +525,21 @@ fn jump_fraction(
 ) -> Option<f32> {
     let total = total.as_secs_f32();
     (total > 0.0).then(|| ((position.as_secs_f32() + seconds) / total).clamp(0.0, 1.0))
+}
+
+/// Handles keys while a sticker is shown large: Escape closes it, and no
+/// chat shortcut or typing reaches the chat behind it.
+fn sticker_view_keys(app: &mut App, ctx: &egui::Context) {
+    let close = ctx.input_mut(|input| {
+        let close = input.consume_key(Modifiers::NONE, Key::Escape);
+        input
+            .events
+            .retain(|event| !crate::image_preview::consumes_key(event));
+        close
+    });
+    if close {
+        app.actions.push(Action::CloseStickerPreview);
+    }
 }
 
 /// Ctrl+F searches the open chat, as in WhatsApp, the chat list when no
