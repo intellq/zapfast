@@ -812,13 +812,14 @@ fn group_call<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<bool,
     #[serde(untagged)]
     enum Group {
         Flag(bool),
-        People(u32),
         Absent(()),
+        // A count, even zero when the phone did not say, is a group call.
+        People(serde::de::IgnoredAny),
     }
     Ok(match Group::deserialize(deserializer)? {
         Group::Flag(flag) => flag,
-        Group::People(_) => true,
         Group::Absent(()) => false,
+        Group::People(_) => true,
     })
 }
 
