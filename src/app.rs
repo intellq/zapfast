@@ -390,6 +390,9 @@ pub struct UnreadDivider {
 pub struct App {
     pub dirs: AppDirs,
     pub settings: Settings,
+    /// Writes settings and the account roster on a thread of its own, so
+    /// a save never stalls the window; flushed at exit and before a suspend.
+    pub files: fastframe_file::Writer,
     /// Resolved interface language, from the setting or the system locale.
     pub locale: Locale,
     settings_dirty: bool,
@@ -1382,7 +1385,7 @@ impl App {
             }
             app.whatsapp_links = Some(crate::wa_link::handler::registered());
         }
-        let _ = app.roster.save(&app.dirs.accounts_file());
+        let _ = app.roster.save_to(&app.files, &app.dirs.accounts_file());
         Ok(app)
     }
 
@@ -1470,6 +1473,7 @@ impl App {
             locale,
             settings_dirty: false,
             last_settings_save: Instant::now(),
+            files: fastframe_file::Writer::new(),
             roster,
             accounts,
             active,
@@ -1767,7 +1771,7 @@ impl App {
             .iter()
             .map(|account| account.id.0.clone())
             .collect();
-        if let Err(error) = self.roster.save(&self.dirs.accounts_file()) {
+        if let Err(error) = self.roster.save_to(&self.files, &self.dirs.accounts_file()) {
             log::warn!("could not save accounts.json: {error}");
         }
     }
@@ -6307,7 +6311,7 @@ impl App {
         }
         for account in &mut self.accounts {
             if account.settings_dirty {
-                account.save_settings();
+                account.save_settings(&self.files);
             }
         }
         if !self.typing.is_empty() || self.composing {
@@ -6402,7 +6406,10 @@ impl App {
     fn save_settings(&mut self) {
         self.settings_dirty = false;
         self.last_settings_save = Instant::now();
-        if let Err(error) = self.settings.save(&self.dirs.settings_file()) {
+        if let Err(error) = self
+            .settings
+            .save_to(&self.files, &self.dirs.settings_file())
+        {
             log::warn!("could not save settings: {error}");
         }
     }
@@ -9286,6 +9293,8 @@ impl App {
                 fastframe_power::Event::Suspending(ack)
                 | fastframe_power::Event::EndingSession(ack) => {
                     self.save_state();
+                    // Within the time the system waits for the app.
+                    self.files.flush(Duration::from_millis(1500));
                     ack.done();
                 }
                 fastframe_power::Event::Resumed => {
@@ -10254,7 +10263,7 @@ impl App {
         }
         for account in &mut self.accounts {
             if account.settings_dirty {
-                account.save_settings();
+                account.save_settings(&self.files);
             }
         }
     }
@@ -10270,6 +10279,7 @@ impl App {
         for account in &mut self.accounts {
             account.backend.shutdown();
         }
+        self.files.flush(fastframe_file::FLUSH_TIMEOUT);
     }
 
     /// Stores the open chat's unsent text, which otherwise only moves into
@@ -11892,6 +11902,7 @@ mod tests {
         let first = AccountId::first();
         app.apply(Action::SwitchAccount(first.clone()), &ctx);
         assert_eq!(app.account().id, first);
+        assert!(app.files.flush(Duration::from_secs(10)));
         let roster = AccountRoster::load(&app.dirs.accounts_file()).unwrap();
         assert_eq!(roster.order, ["1".to_string(), "2".to_string()]);
         assert_eq!(roster.active, "1");
@@ -12499,6 +12510,58 @@ mod tests {
         app.handle_power();
         assert!(!app.settings_dirty, "saved before sleeping");
         assert!(commands.try_recv().is_err());
+    }
+
+    /// A settings save hands its bytes to the file writer and returns while
+    /// the disk is still busy, so the window never waits for it.
+    #[test]
+    fn a_settings_save_does_not_wait_for_the_disk() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut app, _events) = App::headless(AppDirs::under(root.path()), Settings::default());
+        let (release, gate) = std::sync::mpsc::channel::<()>();
+        let gate = std::sync::Mutex::new(gate);
+        let (written, writes) = std::sync::mpsc::channel();
+        app.files = fastframe_file::Writer::with_write(move |path, contents, access| {
+            gate.lock().unwrap().recv().unwrap();
+            written
+                .send((path.to_owned(), contents.to_vec(), access))
+                .unwrap();
+            Ok(())
+        });
+        app.settings.check_for_updates = false;
+        app.save_settings();
+        assert!(writes.try_recv().is_err(), "nothing written yet");
+        release.send(()).unwrap();
+        assert!(app.files.flush(Duration::from_secs(10)));
+        let (path, contents, access) = writes.try_recv().expect("written after the flush");
+        assert_eq!(path, app.dirs.settings_file());
+        assert_eq!(access, fastframe_file::Access::Default);
+        let saved: serde_json::Value = serde_json::from_slice(&contents).unwrap();
+        assert_eq!(saved["check_for_updates"], false);
+    }
+
+    /// Settings and account settings waiting for their save are on the disk
+    /// by the time a sleep is acknowledged, and again when the app quits.
+    #[test]
+    fn sleeping_and_quitting_wait_for_the_settings_to_reach_the_disk() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut app, _events) = App::headless(AppDirs::under(root.path()), Settings::default());
+        app.settings.check_for_updates = false;
+        app.mark_settings_dirty();
+        app.account_mut().settings.history_prefetch = true;
+        app.account_mut().mark_settings_dirty();
+        app.power.send(fastframe_power::Event::Suspending(
+            fastframe_power::Ack::default(),
+        ));
+        app.handle_power();
+        assert!(!Settings::load(&app.dirs.settings_file()).check_for_updates);
+        let account_file = app.account().dirs.settings_file();
+        assert!(crate::settings::AccountSettings::load(&account_file).history_prefetch);
+
+        app.settings.check_for_updates = true;
+        app.mark_settings_dirty();
+        app.shutdown();
+        assert!(Settings::load(&app.dirs.settings_file()).check_for_updates);
     }
 
     /// The window's geometry is remembered in the logic pass, which eframe

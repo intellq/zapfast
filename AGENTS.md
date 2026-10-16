@@ -287,10 +287,14 @@ protocol. These notes are for coding agents and new contributors.
   on sets `hide_intent`, the window is destroyed, and a headless loop keeps
   calling `App::background_frame` (the link, the archive, the tray) until
   the tray, a clicked notification, or another launch sets `wants_show`,
-  when a new window is made. The tray item is fastframe-tray (ksni on
-  Linux, tray-icon on Windows and macOS; on macOS made with the first window
-  and pumped by `fastframe_tray::idle` while none exists), and `src/macos.rs`
-  hands its menu events to `fastframe_tray::claim_menu_event` first.
+  when a new window is made. `Shell::run` marks its thread as the UI thread,
+  where `fastframe_file::write` panics in debug: settings and the roster go
+  through `App::files` (a `fastframe_file::Writer`) with `save_to`, flushed
+  in `App::shutdown` and before a suspend is acknowledged, and `StallWatch`
+  in `main` logs any update of 250 ms or more. The tray item is
+  fastframe-tray (ksni on Linux, tray-icon on Windows and macOS; on macOS
+  made with the first window and pumped by `fastframe_tray::idle` while none
+  exists), and `src/macos.rs` hands its menu events to `fastframe_tray::claim_menu_event` first.
   Closing keeps ZapFast running only while `Tray::is_shown`: on Linux the
   item exists before a panel shows it (a start at login beats the panel, and
   GNOME's tray watcher) and registers once one appears. A hidden start with

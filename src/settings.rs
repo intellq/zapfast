@@ -855,9 +855,20 @@ impl Settings {
     }
 
     /// Replaces the settings file whole, never leaving it half written.
+    /// Waits for the disk, so never on the thread that draws the window:
+    /// there, [`Self::save_to`].
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
-        let contents = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
-        fastframe_file::write(path, contents)
+        fastframe_file::write(path, self.contents()?)
+    }
+
+    /// Hands the settings file to `files`, which replaces it off this thread.
+    pub fn save_to(&self, files: &fastframe_file::Writer, path: &Path) -> std::io::Result<()> {
+        files.write(path, self.contents()?, fastframe_file::Access::Default);
+        Ok(())
+    }
+
+    fn contents(&self) -> std::io::Result<String> {
+        serde_json::to_string_pretty(self).map_err(std::io::Error::other)
     }
 
     /// Brings a file written before [`SETTINGS_VERSION`] up to date. Each
@@ -1051,9 +1062,18 @@ impl AccountSettings {
         }
     }
 
+    /// Replaces the file whole, waiting for the disk: only before the
+    /// window's thread is running (the first account's migration).
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
         let contents = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
         fastframe_file::write(path, contents)
+    }
+
+    /// Hands the file to `files`, which replaces it off this thread.
+    pub fn save_to(&self, files: &fastframe_file::Writer, path: &Path) -> std::io::Result<()> {
+        let contents = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
+        files.write(path, contents, fastframe_file::Access::Default);
+        Ok(())
     }
 }
 
@@ -1105,9 +1125,11 @@ impl AccountRoster {
         self.next_id = self.next_id.max(highest + 1).max(2);
     }
 
-    pub fn save(&self, path: &Path) -> std::io::Result<()> {
+    /// Hands the file to `files`, which replaces it off this thread.
+    pub fn save_to(&self, files: &fastframe_file::Writer, path: &Path) -> std::io::Result<()> {
         let contents = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
-        fastframe_file::write(path, contents)
+        files.write(path, contents, fastframe_file::Access::Default);
+        Ok(())
     }
 
     pub fn allocate(&mut self) -> crate::model::AccountId {
@@ -1501,6 +1523,36 @@ mod tests {
             egui::Color32::from_rgb(15, 36, 36)
         );
         assert_eq!(chosen.wallpaper_background(&light), light.chat);
+    }
+
+    /// Saves handed to the file writer write the same files `save` does,
+    /// once the writer is flushed.
+    #[test]
+    fn saves_through_the_writer_land_after_a_flush() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = fastframe_file::Writer::new();
+        let settings = Settings {
+            theme: ThemeChoice::Light,
+            check_for_updates: false,
+            ..Settings::default()
+        };
+        let settings_path = dir.path().join("settings.json");
+        settings.save_to(&files, &settings_path).unwrap();
+        let account = AccountSettings {
+            history_prefetch: true,
+            ..AccountSettings::default()
+        };
+        let account_path = dir.path().join("accounts").join("2").join("settings.json");
+        account.save_to(&files, &account_path).unwrap();
+        let mut roster = AccountRoster::default();
+        roster.allocate();
+        let roster_path = dir.path().join("accounts.json");
+        roster.save_to(&files, &roster_path).unwrap();
+
+        assert!(files.flush(std::time::Duration::from_secs(10)));
+        assert_eq!(Settings::load(&settings_path), settings);
+        assert_eq!(AccountSettings::load(&account_path), account);
+        assert_eq!(AccountRoster::load(&roster_path).unwrap(), roster);
     }
 
     #[test]

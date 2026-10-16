@@ -247,6 +247,9 @@ impl Account {
         let mut settings = if path.exists() {
             AccountSettings::load(&path)
         } else if id.as_str() == "1" {
+            // Only `App::new` spawns account 1 (an added account is numbered
+            // 2 or higher), before the window's thread is marked, so this
+            // write may wait for the disk and still fail the start.
             let migrated = AccountSettings::from_legacy(legacy);
             migrated.save(&path)?;
             migrated
@@ -340,9 +343,10 @@ impl Account {
         self.settings_dirty = true;
     }
 
-    pub fn save_settings(&mut self) {
+    /// Hands the account's settings to the app's file writer.
+    pub fn save_settings(&mut self, files: &fastframe_file::Writer) {
         self.settings_dirty = false;
-        if let Err(error) = self.settings.save(&self.dirs.settings_file()) {
+        if let Err(error) = self.settings.save_to(files, &self.dirs.settings_file()) {
             log::warn!("could not save account settings: {error}");
         }
     }
