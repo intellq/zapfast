@@ -23,8 +23,9 @@ See **[zapfast.rocks](https://zapfast.rocks)** for downloads and guides.
 ## Alterações deste fork (`intellq`)
 
 Este fork acompanha o [projeto original](https://github.com/crmne/zapfast)
-até o commit [`df01459`](https://github.com/crmne/zapfast/commit/df01459)
-(versão 0.19.0 e ajustes seguintes).
+até o commit [`6caabf6`](https://github.com/crmne/zapfast/commit/6caabf6)
+(16/10/2026), trazendo o que se aplica ao fork; o que ele já fazia de outro
+jeito ou ainda não foi trazido fica de fora.
 Além das novidades do upstream, esta branch inclui as seguintes mudanças:
 
 ### Instalar este fork
@@ -552,6 +553,67 @@ Da sincronização com o upstream 0.18.2:
 - **Responder (citar)** uma mensagem de qualquer ponto do histórico rola até o
   fim ao enviar, para mostrá-la. `Shift+Insert` cola, como `Ctrl+V`, no
   compositor.
+
+Desde a 0.19.7 (sincronização com o upstream de 13 a 16/10/2026):
+
+- **Enviar localização:** **Enviar localização**, nas ferramentas da caixa de
+  mensagem, manda um ponto a partir de coordenadas (como `-5.37, -49.11`) ou
+  de um link completo de mapa. Links curtos, que só abrem online, são
+  recusados com um aviso.
+- **Menção não lida:** um grupo em que alguém mencionou você (ou todos) e que
+  ainda não foi lido mostra um **@** na lista, e a conversa abre na menção,
+  não na primeira mensagem não lida.
+- **Figurinha ampliada:** clicar numa figurinha a mostra grande sobre a
+  conversa, com a estrela que a põe ou tira das favoritas; um clique nela ou
+  Esc fecha. Antes ela abria num programa externo.
+- **Armazenamento usado:** em **Configurações > Arquivos**, quanto os anexos
+  baixados da conta aberta ocupam (imagens, vídeos e GIFs, figurinhas e
+  outros), com **Limpar…**, que apaga o cache de mídia só dessa conta depois
+  de confirmar. As mensagens ficam, os anexos baixam de novo quando abertos, e
+  uma pasta de download escolhida por você não é tocada.
+- **Anexos por conversa:** um anexo escolhido e ainda não enviado fica na
+  conversa em que foi escolhido, ao trocar de conversa ou de conta.
+- **Apagar várias mensagens** diz quantas no título da confirmação ("Apagar 3
+  mensagens para todos?").
+- **Downloads grandes** têm mais tempo: 2 minutos mais 1 segundo a cada
+  128 KiB, em vez de 2 minutos fixos. Um vídeo grande numa conexão lenta não
+  é mais cortado enquanto baixa; um download travado ainda termina com a
+  opção de tentar de novo.
+- **Copiar mensagens selecionadas** com `Ctrl+C`.
+- **Vídeos a 1,5x e 2x**, como as mensagens de voz.
+- **Notificações:** opção de esconder o conteúdo das mensagens (mostram só
+  "Nova mensagem") e de limitar as notificações repetidas de uma mesma
+  conversa.
+- **Informações da conversa** mostram o tempo das mensagens temporárias e a
+  descrição do grupo.
+- **Tema "Seguir sistema" no Linux** acompanha a preferência clara ou escura
+  do desktop.
+- **Leitor de tela** anuncia quando a conexão cai e quando volta a conectar.
+- **Lista de conversas:** o filtro escolhido fica salvo entre reinícios, uma
+  conversa sobe quando alguém reage a uma mensagem sua, um grupo criado no
+  celular e uma foto de conversa trocada aparecem na hora, e há a opção de
+  manter a posição da lista depois de enviar.
+- **Áudios:** arquivos de áudio e mensagens de voz gravadas aparecem
+  diferentes; a gravação continua depois de um erro passageiro do microfone,
+  e um fluxo de áudio que só falha é fechado em vez de ocupar o processador.
+- **Figurinhas:** remover um pacote pede confirmação, e as figurinhas das
+  conversas chegam ao seletor aos poucos, sem novos envios.
+- **Documentos** baixados para uma pasta escolhida mantêm o nome original.
+- **Linux:** o atalho do menu de aplicativos ganha **Sair do ZapFast**; no
+  GNOME com Wayland a janela ganha a moldura Adwaita; links abertos não
+  deixam processos do navegador para trás; um início oculto espera a bandeja
+  antes de mostrar a janela.
+- **KDE Plasma 6.8:** a regra de janela que o ZapFast cria entra na lista
+  `Order` do KWin e não apaga mais as outras regras de janela do usuário.
+- **Correções:** a conversa abre no fim sem piscar as mensagens antigas; o
+  cursor fica no fim ao editar uma mensagem enviada; uma mensagem enviada sem
+  conexão volta à caixa de mensagem; uma edição inválida é recusada e o
+  original se mantém se o envio falhar; os tiques de leitura somem quando os
+  recibos da conta estão desligados; uma conversa curta fica junto da caixa
+  de mensagem; o nome do remetente numa mensagem de texto de grupo volta a
+  abrir o painel ao clicar.
+- **Bibliotecas:** whatsapp-rust oficial na revisão `5e72baf`, rodio com
+  cpal 0.18 e rustls 0.23.46 (avisos de segurança).
 
 Na 0.19.7:
 
