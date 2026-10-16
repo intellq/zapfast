@@ -6158,7 +6158,12 @@ impl Worker {
             Command::SetAttachmentLimit(limit) => {
                 self.attachment_limit = limit.clamp(1024 * 1024, ATTACHMENT_DOWNLOAD_LIMIT);
             }
-            Command::StartCall { chat, video } => self.start_call(chat, video).await,
+            Command::StartCall {
+                chat,
+                video,
+                generation,
+                cancel,
+            } => self.start_call(chat, video, generation, cancel).await,
             Command::AnswerCall => self.answer_call().await,
             Command::DeclineCall => self.decline_call().await,
             Command::HangupCall => self.hangup_call().await,
@@ -8812,6 +8817,19 @@ impl Worker {
                     pending: false,
                 });
                 self.emit(Event::Error(error));
+            }
+            Command::StartCall {
+                chat,
+                video,
+                generation,
+                ..
+            } => {
+                self.emit(Event::Error(error));
+                // The window already drew the call as placing.
+                self.emit(Event::Call(Box::new(
+                    crate::calls::CallUpdate::placing(*generation, chat.to_string(), *video)
+                        .not_placed(),
+                )));
             }
             _ => self.emit(Event::Error(error)),
         }
@@ -15465,6 +15483,8 @@ mod tests {
             .handle_command(Command::StartCall {
                 chat: chat.into(),
                 video: false,
+                generation: 1,
+                cancel: Default::default(),
             })
             .await;
         let emitted: Vec<Event> = events.try_iter().collect();
@@ -15481,7 +15501,11 @@ mod tests {
             matches!(&emitted[2], Event::Error(error) if error == "Unblock this contact to call them"),
             "{emitted:?}"
         );
-        assert_eq!(emitted.len(), 3, "{emitted:?}");
+        assert!(
+            matches!(&emitted[3], Event::Call(update) if update.phase == crate::calls::CallPhase::Failed),
+            "the call the window drew as placing is told it failed: {emitted:?}"
+        );
+        assert_eq!(emitted.len(), 4, "{emitted:?}");
     }
 
     #[tokio::test]
@@ -15509,12 +15533,15 @@ mod tests {
             .handle_command(Command::StartCall {
                 chat: chat.into(),
                 video: false,
+                generation: 1,
+                cancel: Default::default(),
             })
             .await;
         let emitted: Vec<Event> = events.try_iter().collect();
         let refused = "Anonymous mode is on: nothing is sent";
         assert!(
-            matches!(&emitted[..], [Event::Error(a), Event::Error(b)] if a == refused && b == refused),
+            matches!(&emitted[..], [Event::Error(a), Event::Error(b), Event::Call(update)]
+                if a == refused && b == refused && update.phase == crate::calls::CallPhase::Failed),
             "typing is refused quietly: {emitted:?}"
         );
     }

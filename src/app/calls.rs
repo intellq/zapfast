@@ -3,19 +3,31 @@
 //! pushes, routed to the backend of the account the call belongs to.
 //!
 //! The call's state comes from the worker that owns it (`Event::Call`); the
-//! window never decides what a call is doing. One call at a time across
-//! every account, since there is one microphone: an offer to another account
-//! while a call is up is declined there.
+//! window never decides what a call is doing, with one exception: a call
+//! whose button was just pressed is drawn as placing at once, before the
+//! worker has answered, and the worker's updates take over from there. One
+//! call at a time across every account, since there is one microphone: an
+//! offer to another account while a call is up is declined there.
+//!
+//! The tones follow the phase: the ringback while the peer's phone rings (the
+//! protocol's `<preaccept>`), the ringtone while a call to us waits.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use super::{App, CALL_FAREWELL, notification_sound};
 use crate::backend::{Backend, Command};
+use crate::call_tones::Tone;
 use crate::calls::{CallPhase, CallUpdate};
-use crate::model::{AccountId, Action, Chat};
+use crate::model::{AccountId, Action, CallDirection, Chat, ChatId};
+use crate::settings::NotificationSound;
 
-/// How often an unanswered call rings again.
-const RING_EVERY: Duration = Duration::from_secs(3);
+/// How long a call may stay placing with no word from its worker before the
+/// screen gives up on it. Placing waits on device checks, the camera (whose
+/// first use on macOS asks permission) and the peer's devices, so this is
+/// generous; it is only there so a lost answer never leaves the screen stuck.
+const PLACING_TIMEOUT: Duration = Duration::from_secs(60);
 
 impl App {
     /// Whether a call is up or ringing, on any account.
@@ -177,13 +189,34 @@ impl App {
             }
             return;
         }
+        // The call the reader hung up or declined here already left the
+        // screen; whatever the worker still says about it is not drawn.
+        if self.call_dismissed == Some(update.generation) {
+            return;
+        }
+        // An older call's update is stale, except that an incoming call takes
+        // the place of one that is only being placed: the worker refuses the
+        // placing one as busy.
         if !other_account
-            && self
-                .call
-                .as_ref()
-                .is_some_and(|current| current.generation > update.generation)
+            && self.call.as_ref().is_some_and(|current| {
+                current.generation > update.generation && current.phase != CallPhase::Placing
+            })
         {
             return;
+        }
+        // The end of a call other than the one on screen, such as one placed
+        // here and refused because a call to us came first, is not drawn over
+        // the live one.
+        if !other_account
+            && !update.phase.is_live()
+            && self.call.as_ref().is_some_and(|current| {
+                current.generation != update.generation && current.phase.is_live()
+            })
+        {
+            return;
+        }
+        if update.phase != CallPhase::Placing {
+            self.call_placed = None;
         }
         // A call we announced that no longer rings was picked up or given up:
         // its notification goes, and only its own.
@@ -197,6 +230,7 @@ impl App {
                 .as_ref()
                 .is_none_or(|current| current.generation != update.generation);
         let finished = !update.phase.is_live();
+        let incoming = update.direction == CallDirection::Incoming;
         let was_live = self.call_live() && !other_account;
         // A peer who stopped sending video leaves no picture: the last frame
         // is not a live one, so the surface goes back to their photo.
@@ -227,13 +261,88 @@ impl App {
             // locked: then it waits in the bar under the folder's name.
             if !was_live {
                 self.call_surface_hidden = self.call_is_private();
-                self.call_rang = None;
             }
+        }
+        if finished || incoming {
+            self.call_cancel = None;
         }
         self.request_call_repaint();
         if ringing {
             self.notify_incoming_call();
         }
+        self.sync_call_tone();
+    }
+
+    /// Places a call from the chat header or the Calls page: the screen shows
+    /// it as placing in this same frame, with the peer's name and picture,
+    /// and the worker's updates move it on once its offer is out.
+    fn place_call(&mut self, chat: ChatId, video: bool) {
+        let generation = crate::calls::next_generation();
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.backend.send(Command::StartCall {
+            chat: chat.clone(),
+            video,
+            generation,
+            cancel: Arc::clone(&cancel),
+        });
+        self.handle_call_update(CallUpdate::placing(generation, chat.to_string(), video));
+        self.call_cancel = Some(cancel);
+        self.call_placed = Some(Instant::now());
+    }
+
+    /// Takes down the call the reader hung up or declined here at once: they
+    /// know how it ended, so there is no farewell to wait through. Its
+    /// notification goes with it, and the worker's last updates about it are
+    /// not drawn again.
+    fn dismiss_call(&mut self) {
+        if let Some(cancel) = self.call_cancel.take() {
+            // A call still being placed is not offered at all.
+            cancel.store(true, Ordering::Relaxed);
+        }
+        let Some(call) = self.call.take() else {
+            return;
+        };
+        self.call_dismissed = Some(call.generation);
+        if self.call_notified == Some(call.generation) {
+            self.call_notified = None;
+            if let Some(account) = self.call_account.clone() {
+                self.notifications.clear_call(&account, &call.chat);
+            }
+        }
+        self.call_account = None;
+        self.call_surface_until = None;
+        self.call_placed = None;
+        self.call_rings = None;
+        self.drop_call_frames();
+        self.sync_call_tone();
+        self.request_call_repaint();
+    }
+
+    /// Plays the tone the call's phase calls for, and stops the one it no
+    /// longer does: the ringback only while the peer's phone rings, the
+    /// ringtone only while a call to us waits and its notification may sound.
+    fn sync_call_tone(&mut self) {
+        let tone = match &self.call {
+            Some(call)
+                if call.phase == CallPhase::Ringing
+                    && call.direction == CallDirection::Outgoing =>
+            {
+                Some(Tone::Ringback)
+            }
+            Some(call)
+                if call.phase == CallPhase::Incoming
+                    && self.call_rings == Some(call.generation) =>
+            {
+                Some(Tone::Ringtone)
+            }
+            _ => None,
+        };
+        self.call_tones.set(tone);
+    }
+
+    /// The tone playing for the call now, if any.
+    pub fn call_tone(&self) -> Option<Tone> {
+        self.call_tones.current()
     }
 
     fn request_call_repaint(&self) {
@@ -278,13 +387,14 @@ impl App {
                 self.call_avatar(),
             )
         };
+        // A call rings with the ringtone whenever its notification would make
+        // a sound at all, whichever sound that is; with sounds off it only
+        // shows. The notification itself stays quiet so the two never play
+        // over each other.
         let sound = notification_sound(&self.settings, chat_sound, false, false);
-        // The ring repeats the notification's sound; the desktop's own sound
-        // only plays with a notification, so a call rings with the alert.
-        self.call_ring_sound = Some(match &sound {
-            crate::settings::NotificationSound::System => crate::settings::NotificationSound::Alert,
-            other => other.clone(),
-        });
+        if sound != NotificationSound::None {
+            self.call_rings = Some(call.generation);
+        }
         let waker = self.waker.clone();
         self.call_notified = Some(call.generation);
         self.wants_attention = true;
@@ -292,7 +402,7 @@ impl App {
             title,
             body,
             picture,
-            sound,
+            NotificationSound::None,
             crate::notify::NotificationTarget {
                 account: self.account().id.clone(),
                 chat: call.chat.clone(),
@@ -303,11 +413,11 @@ impl App {
             // A call is never held back.
             false,
         );
-        self.call_rang = Some(Instant::now());
     }
 
-    /// Per-frame upkeep: the farewell's end, full screen following the
-    /// surface, the running timer, and the ring of a call nobody answered.
+    /// Per-frame upkeep: the farewell's end, a placing call that never heard
+    /// back, full screen following the surface, the running timer, and the
+    /// call's tone.
     pub(super) fn tick_call(&mut self, ctx: &egui::Context) {
         let now = Instant::now();
         if self.call_surface_until.is_some_and(|until| now >= until) {
@@ -316,34 +426,32 @@ impl App {
             self.call_account = None;
             self.drop_call_frames();
         }
+        if let Some(placed) = self.call_placed
+            && now.duration_since(placed) >= PLACING_TIMEOUT
+            && let Some(call) = self
+                .call
+                .clone()
+                .filter(|call| call.phase == CallPhase::Placing)
+        {
+            log::warn!("[CALL] the call was not placed in time");
+            if let Some(cancel) = self.call_cancel.take() {
+                cancel.store(true, Ordering::Relaxed);
+            }
+            self.handle_call_update(call.not_placed());
+        }
         // Full screen belongs to the call surface while the reader is looking
         // at it: however the surface was put aside, the window comes back.
         if self.call_fullscreen && !self.call_surface_open() {
             self.set_call_fullscreen(ctx, false);
         }
-        let Some(call) = &self.call else {
-            return;
-        };
-        if call.phase.is_live() {
+        self.sync_call_tone();
+        if let Some(until) = self.call_surface_until {
+            // The farewell goes on time even with nothing else to draw.
+            ctx.request_repaint_after(until.saturating_duration_since(now));
+        }
+        if self.call.as_ref().is_some_and(|call| call.phase.is_live()) {
             // The duration changes every second.
             ctx.request_repaint_after(Duration::from_millis(500));
-        }
-        if call.phase == CallPhase::Incoming
-            && let Some(rang) = self.call_rang
-            && now.duration_since(rang) >= RING_EVERY
-            && let Some(sound) = self.call_ring_sound.clone()
-        {
-            // A call rings until it is answered, declined or given up, the
-            // way a phone does, with the sound its notification played.
-            self.call_rang = Some(now);
-            crate::notify::play_sound(sound);
-        }
-        if let Some(rang) = self.call_rang {
-            ctx.request_repaint_after(RING_EVERY.saturating_sub(now.duration_since(rang)));
-        }
-        if call.phase != CallPhase::Incoming {
-            self.call_rang = None;
-            self.call_ring_sound = None;
         }
     }
 
@@ -362,17 +470,21 @@ impl App {
                     "Hang up the current call first",
                 ));
             }
-            Action::StartCall(chat) => self.backend.send(Command::StartCall { chat, video: false }),
-            Action::StartVideoCall(chat) => {
-                self.backend.send(Command::StartCall { chat, video: true });
-            }
+            Action::StartCall(chat) => self.place_call(chat, false),
+            Action::StartVideoCall(chat) => self.place_call(chat, true),
             Action::SetCallCamera(on) => self.send_call_command(Command::SetCallCamera(on)),
             Action::SetCallCameraDevice(device) => {
                 self.send_call_command(Command::SetCallCameraDevice(device));
             }
             Action::AnswerCall => self.send_call_command(Command::AnswerCall),
-            Action::DeclineCall => self.send_call_command(Command::DeclineCall),
-            Action::HangupCall => self.send_call_command(Command::HangupCall),
+            Action::DeclineCall => {
+                self.send_call_command(Command::DeclineCall);
+                self.dismiss_call();
+            }
+            Action::HangupCall => {
+                self.send_call_command(Command::HangupCall);
+                self.dismiss_call();
+            }
             Action::SetCallMuted(muted) => self.send_call_command(Command::SetCallMuted(muted)),
             Action::SetCallMicrophone(device) => {
                 // Picked here means preferred from now on, so it is written to the settings the
@@ -415,9 +527,11 @@ impl App {
             self.call = None;
             self.call_account = None;
             self.call_surface_until = None;
-            self.call_rang = None;
-            self.call_ring_sound = None;
+            self.call_rings = None;
+            self.call_cancel = None;
+            self.call_placed = None;
             self.drop_call_frames();
+            self.sync_call_tone();
         }
     }
 }
@@ -716,5 +830,273 @@ mod tests {
         app.active = 0;
         app.forget_call_of(&AccountId::parse("2").unwrap());
         assert!(app.call.is_none());
+    }
+
+    /// An update from the worker about a call placed here.
+    fn outgoing(generation: u64, phase: CallPhase) -> CallUpdate {
+        let mut update = update(generation, phase);
+        update.direction = CallDirection::Outgoing;
+        update
+    }
+
+    /// Presses the call button, and returns the generation and the cancel
+    /// flag the worker was handed.
+    fn press_call(
+        app: &mut App,
+        commands: &mut tokio::sync::mpsc::UnboundedReceiver<Command>,
+        video: bool,
+    ) -> (u64, Arc<AtomicBool>) {
+        let ctx = egui::Context::default();
+        let action = if video {
+            Action::StartVideoCall(ADA.into())
+        } else {
+            Action::StartCall(ADA.into())
+        };
+        app.apply(action, &ctx);
+        let sent = sent(commands);
+        let [
+            Command::StartCall {
+                chat,
+                video: offered,
+                generation,
+                cancel,
+            },
+        ] = sent.as_slice()
+        else {
+            panic!("one StartCall, got {sent:?}");
+        };
+        assert_eq!(chat.as_str(), ADA);
+        assert_eq!(*offered, video);
+        (*generation, Arc::clone(cancel))
+    }
+
+    #[test]
+    fn a_call_shows_connecting_the_moment_its_button_is_pressed() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, mut commands) = app(directory.path());
+        let ctx = egui::Context::default();
+        let (generation, _) = press_call(&mut app, &mut commands, true);
+        // In the same apply, before the worker has said anything.
+        let call = app.call.clone().expect("the call is on screen at once");
+        assert_eq!(call.phase, CallPhase::Placing);
+        assert_eq!(call.generation, generation);
+        assert!(call.video);
+        assert!(app.call_surface_open());
+        assert!(app.call_live_here(ADA), "the header offers to hang up");
+        assert_eq!(app.call_name(), "Ada");
+        assert_eq!(
+            crate::ui::call::status(app.locale, &call),
+            "Connecting…".to_owned()
+        );
+        assert_eq!(app.call_tone(), None, "nothing rings yet");
+        // A second press while it is placing does not place a second call.
+        app.apply(Action::StartCall(ADA.into()), &ctx);
+        assert!(sent(&mut commands).is_empty());
+
+        // The protocol moves it on: offer out, the peer's phone rings, answered.
+        app.handle_call_update(outgoing(generation, CallPhase::Dialing));
+        assert_eq!(app.call.as_ref().unwrap().phase, CallPhase::Dialing);
+        assert_eq!(app.call_tone(), None, "no device has said it rings");
+        app.handle_call_update(outgoing(generation, CallPhase::Ringing));
+        assert_eq!(app.call_tone(), Some(Tone::Ringback));
+        app.tick_call(&ctx);
+        assert_eq!(app.call_tone(), Some(Tone::Ringback), "it keeps ringing");
+        app.handle_call_update(outgoing(generation, CallPhase::Connecting));
+        assert_eq!(app.call_tone(), None, "the answer stops the ringback");
+        app.handle_call_update(outgoing(generation, CallPhase::Active));
+        assert!(app.call_surface_open());
+
+        // The peer hangs up: "Call ended" for about a second and a half.
+        let mut over = outgoing(generation, CallPhase::Ended);
+        over.outcome = Some(CallOutcome::Answered);
+        let before = Instant::now();
+        app.handle_call_update(over);
+        let until = app.call_surface_until.expect("a farewell");
+        let lingers = until.duration_since(before);
+        assert!(
+            lingers >= CALL_FAREWELL && lingers < Duration::from_millis(1600),
+            "{lingers:?}"
+        );
+        app.tick_call(&ctx);
+        assert!(app.call.is_some(), "still saying how it ended");
+        app.call_surface_until = Some(Instant::now() - Duration::from_millis(1));
+        app.tick_call(&ctx);
+        assert!(app.call.is_none(), "and then it goes");
+    }
+
+    #[test]
+    fn the_peer_declining_stops_the_ringback_and_says_so_briefly() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, mut commands) = app(directory.path());
+        let (generation, _) = press_call(&mut app, &mut commands, false);
+        app.handle_call_update(outgoing(generation, CallPhase::Ringing));
+        assert_eq!(app.call_tone(), Some(Tone::Ringback));
+        let mut declined = outgoing(generation, CallPhase::Failed);
+        declined.outcome = Some(CallOutcome::Declined);
+        app.handle_call_update(declined);
+        assert_eq!(app.call_tone(), None);
+        assert_eq!(
+            crate::ui::call::status(app.locale, app.call.as_ref().unwrap()),
+            "Declined".to_owned()
+        );
+        assert!(app.call_surface_until.is_some(), "shown briefly, then gone");
+    }
+
+    #[test]
+    fn hanging_up_while_connecting_never_rings_the_peer() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, mut commands) = app(directory.path());
+        let ctx = egui::Context::default();
+        let (generation, cancel) = press_call(&mut app, &mut commands, false);
+        app.apply(Action::HangupCall, &ctx);
+        assert!(
+            cancel.load(Ordering::Relaxed),
+            "the worker is told not to offer it"
+        );
+        assert!(
+            sent(&mut commands)
+                .iter()
+                .any(|command| matches!(command, Command::HangupCall)),
+            "and to end it if the offer already went"
+        );
+        assert!(app.call.is_none(), "the screen goes at once");
+        assert!(!app.call_live());
+        // Whatever the worker still reports about it is not drawn again.
+        app.handle_call_update(outgoing(generation, CallPhase::Dialing));
+        assert!(app.call.is_none());
+        app.handle_call_update(outgoing(generation, CallPhase::Placing).not_placed());
+        assert!(app.call.is_none());
+        assert_eq!(app.call_tone(), None);
+        // And a new call can be placed straight away.
+        let (next, _) = press_call(&mut app, &mut commands, false);
+        assert_ne!(next, generation);
+        assert_eq!(app.call.as_ref().unwrap().phase, CallPhase::Placing);
+    }
+
+    #[test]
+    fn hanging_up_a_ringing_call_ends_it_at_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, mut commands) = app(directory.path());
+        let ctx = egui::Context::default();
+        let (generation, _) = press_call(&mut app, &mut commands, false);
+        app.handle_call_update(outgoing(generation, CallPhase::Ringing));
+        app.apply(Action::HangupCall, &ctx);
+        assert!(app.call.is_none(), "no farewell for our own hang-up");
+        assert_eq!(app.call_tone(), None, "the ringback stops");
+        let mut ended = outgoing(generation, CallPhase::Ended);
+        ended.outcome = Some(CallOutcome::NoAnswer);
+        app.handle_call_update(ended);
+        assert!(app.call.is_none());
+    }
+
+    #[test]
+    fn a_call_that_cannot_be_placed_says_so_and_goes() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, mut commands) = app(directory.path());
+        let ctx = egui::Context::default();
+        let (generation, _) = press_call(&mut app, &mut commands, false);
+        app.handle_call_update(outgoing(generation, CallPhase::Placing).not_placed());
+        let call = app.call.clone().unwrap();
+        assert_eq!(call.phase, CallPhase::Failed);
+        assert_eq!(
+            crate::ui::call::status(app.locale, &call),
+            "Could not connect".to_owned()
+        );
+        assert!(!app.call_live(), "nothing is left to hang up");
+        assert!(app.call_surface_until.is_some());
+        app.call_surface_until = Some(Instant::now() - Duration::from_millis(1));
+        app.tick_call(&ctx);
+        assert!(app.call.is_none());
+    }
+
+    #[test]
+    fn a_call_the_worker_never_answers_for_does_not_stay_connecting() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, mut commands) = app(directory.path());
+        let ctx = egui::Context::default();
+        let (_, cancel) = press_call(&mut app, &mut commands, false);
+        app.call_placed = Some(Instant::now() - PLACING_TIMEOUT);
+        app.tick_call(&ctx);
+        assert_eq!(app.call.as_ref().unwrap().phase, CallPhase::Failed);
+        assert!(cancel.load(Ordering::Relaxed), "and it is not placed late");
+    }
+
+    #[test]
+    fn a_call_to_us_takes_the_place_of_one_still_being_placed() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, mut commands) = app(directory.path());
+        let (generation, _) = press_call(&mut app, &mut commands, false);
+        // The offer reached the worker first, under an older generation (no
+        // call is ever given generation 0).
+        app.handle_call_update(update(0, CallPhase::Incoming));
+        assert_eq!(app.call.as_ref().unwrap().phase, CallPhase::Incoming);
+        // The worker refuses the placing call as busy; that is not drawn.
+        app.handle_call_update(outgoing(generation, CallPhase::Placing).not_placed());
+        assert_eq!(app.call.as_ref().unwrap().phase, CallPhase::Incoming);
+    }
+
+    #[test]
+    fn a_call_to_us_rings_until_it_is_answered() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _) = app(directory.path());
+        // A new install plays no message sound, and a call rings only where
+        // its notification would sound.
+        app.settings.message_sound = NotificationSound::System;
+        app.handle_call_update(update(1, CallPhase::Incoming));
+        assert_eq!(app.call_tone(), Some(Tone::Ringtone));
+        assert_eq!(
+            app.notifications.shown[0].sound,
+            NotificationSound::None,
+            "the ringtone is the sound, not the notification"
+        );
+        app.handle_call_update(update(1, CallPhase::Accepted));
+        assert_eq!(app.call_tone(), None);
+    }
+
+    #[test]
+    fn declining_a_call_silences_it_and_takes_it_down_at_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, mut commands) = app(directory.path());
+        let ctx = egui::Context::default();
+        app.handle_call_update(update(1, CallPhase::Incoming));
+        app.apply(Action::DeclineCall, &ctx);
+        assert!(
+            sent(&mut commands)
+                .iter()
+                .any(|command| matches!(command, Command::DeclineCall))
+        );
+        assert!(app.call.is_none());
+        assert_eq!(app.call_tone(), None);
+        assert_eq!(app.call_notified, None, "its notification goes too");
+        app.handle_call_update(ended(1, CallOutcome::Declined));
+        assert!(app.call.is_none(), "the worker's own end is not drawn");
+    }
+
+    #[test]
+    fn a_call_the_caller_gives_up_on_stops_ringing_and_says_missed() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _) = app(directory.path());
+        app.handle_call_update(update(1, CallPhase::Incoming));
+        let mut missed = update(1, CallPhase::Failed);
+        missed.outcome = Some(CallOutcome::Missed);
+        app.handle_call_update(missed);
+        assert_eq!(app.call_tone(), None);
+        assert!(app.call_surface_until.is_some(), "missed, briefly");
+    }
+
+    #[test]
+    fn with_notification_sounds_off_a_call_shows_without_ringing() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _) = app(directory.path());
+        app.settings.message_sound = NotificationSound::None;
+        app.handle_call_update(update(1, CallPhase::Incoming));
+        assert_eq!(app.notifications.shown.len(), 1, "still announced");
+        assert_eq!(app.call_tone(), None);
+
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _) = self::app(directory.path());
+        app.chats[0].muted_until = Some(crate::util::now() + 3600);
+        app.handle_call_update(update(1, CallPhase::Incoming));
+        assert_eq!(app.call_tone(), None, "a muted chat does not ring");
     }
 }

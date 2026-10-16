@@ -4,8 +4,9 @@
 //! start or accept a second while it exists — a double click, a second chat's call button, and a
 //! second inbound offer all land on the same refusal.
 //!
-//! The state the UI renders is never computed here: it comes from the backend. `<accept>` moves an
-//! outgoing call out of dialing, the media plane's `RelayAllocated` is what makes a call Active and
+//! The state the UI renders is never computed here: it comes from the backend. The window draws a
+//! call as placing the moment its button is pressed; from there `<preaccept>` says the peer's
+//! phone rings, `<accept>` moves an outgoing call out of dialing, the media plane's `RelayAllocated` is what makes a call Active and
 //! starts the timer, and a `<reject>`/`<terminate>`/relay loss ends it with the reason the peer
 //! gave. Nothing is inferred from the button that was pressed.
 
@@ -143,7 +144,15 @@ impl Worker {
             runtime.last = update.clone();
         }
         self.emit(Event::Call(Box::new(update.clone())));
-        if finished && let Some(runtime) = self.call.take() {
+        // Only the call this update is about: a call refused before it was placed must not end the
+        // one that made it busy.
+        if finished
+            && self
+                .call
+                .as_ref()
+                .is_some_and(|runtime| runtime.call.generation() == update.generation)
+            && let Some(runtime) = self.call.take()
+        {
             self.file_finished_call(&runtime.call, &update);
         }
     }
@@ -157,13 +166,28 @@ impl Worker {
         false
     }
 
-    pub(super) async fn start_call(&mut self, chat: ChatId, video: bool) {
+    /// Places the call the window is already showing as placing under `generation`.
+    ///
+    /// Every way this can stop short of an offer answers the window with that generation failed,
+    /// so the screen it drew at once says so and goes instead of waiting on a call that will never
+    /// ring. A call hung up while it was still placing (`cancel`) is let go without a word: the
+    /// window already took it down, and the peer was never rung.
+    pub(super) async fn start_call(
+        &mut self,
+        chat: ChatId,
+        video: bool,
+        generation: u64,
+        cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        let placing = CallUpdate::placing(generation, chat.to_string(), video);
         if self.call_busy() {
+            self.emit_call(placing.not_placed());
             return;
         }
         if !callable_chat(&chat) {
             log::warn!("[CALL] refusing a call to a chat that is not one to one");
             self.emit(Event::Error("Calls are one to one only".to_owned()));
+            self.emit_call(placing.not_placed());
             return;
         }
         if self.is_blocked(&chat) {
@@ -171,6 +195,7 @@ impl Worker {
             self.emit(Event::Error(
                 crate::i18n::tr("Unblock this contact to call them").to_owned(),
             ));
+            self.emit_call(placing.not_placed());
             return;
         }
         let Some(client) = self.client.clone() else {
@@ -178,6 +203,7 @@ impl Worker {
             self.emit(Event::Error(
                 "ZapFast is not connected to WhatsApp".to_owned(),
             ));
+            self.emit_call(placing.not_placed());
             return;
         };
         // A call opens on the devices last picked, or the system's defaults when they are gone;
@@ -192,29 +218,43 @@ impl Worker {
         let camera = video
             .then(|| calls::default_camera(&devices, None))
             .flatten();
-        match Call::place(
+        let placed = Call::place(
             &client,
+            generation,
             chat.to_string(),
             video,
             resolved.microphone,
             resolved.speaker,
             camera,
+            &cancel,
         )
-        .await
-        {
+        .await;
+        match placed {
             Ok((mut call, frames)) => {
                 call.set_lost_devices(resolved.lost_devices);
                 let mut runtime = CallRuntime::new(call, frames);
                 runtime.watch();
                 let update = runtime.call.update();
                 self.call = Some(runtime);
-                self.emit_call(update);
+                if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                    // Hung up while the offer was on its way: it is ended with the peer at once,
+                    // and filed like any call nobody answered.
+                    log::info!("[CALL] the call was hung up while it was being placed");
+                    self.hangup_call().await;
+                } else {
+                    self.emit_call(update);
+                }
+            }
+            Err(error) if error.is::<calls::Cancelled>() => {
+                log::info!("[CALL] {error}");
+                self.emit_call(placing.not_placed());
             }
             Err(error) => {
                 log::error!("[CALL] could not start the call: {error}");
                 self.emit(Event::Error(format!(
                     "The call could not be started: {error}"
                 )));
+                self.emit_call(placing.not_placed());
             }
         }
     }

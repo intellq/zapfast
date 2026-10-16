@@ -48,8 +48,10 @@ pub const REVOKE_WINDOW: Duration = Duration::from_secs(2 * 24 * 60 * 60);
 /// input clock (`InputState::time`), not on the wall clock, so a slow frame
 /// is not taken for a pause and tests can run it at their pace.
 const SCROLL_GESTURE_GAP: f64 = 0.15;
-/// How long a finished call's outcome stays on screen before the surface goes away.
-const CALL_FAREWELL: Duration = Duration::from_secs(4);
+/// How long a finished call's outcome stays on screen before the surface goes away, about what
+/// WhatsApp's own clients show "Call ended" for. A call the reader hung up or declined here goes at
+/// once instead: they know how it ended.
+const CALL_FAREWELL: Duration = Duration::from_millis(1500);
 
 /// A video call's picture on the GPU, and the frame it was last filled from.
 pub struct CallTexture {
@@ -815,9 +817,22 @@ pub struct App {
     /// The incoming call the desktop was told about, so its notification can
     /// be taken back once it is answered or given up.
     call_notified: Option<u64>,
-    /// When an unanswered call last rang, and the sound it rings with.
-    call_rang: Option<Instant>,
-    call_ring_sound: Option<NotificationSound>,
+    /// The incoming call (by generation) whose notification may sound, so
+    /// its ringtone plays: notifications on, a sound chosen, and a chat that
+    /// is not muted, archived or locked.
+    call_rings: Option<u64>,
+    /// The ringback and ringtone, played on the default output in the real
+    /// app and only tracked in tests and demos.
+    call_tones: crate::call_tones::Tones,
+    /// The call the reader hung up or declined here: it left the screen at
+    /// once, and the worker's last updates about it are not drawn again.
+    call_dismissed: Option<u64>,
+    /// Set when the reader hangs up a call still being placed, so the worker
+    /// does not send its offer.
+    call_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// When the call on screen was placed here, while the worker has not
+    /// said anything about it yet.
+    call_placed: Option<Instant>,
     /// The newest camera preview and peer picture of a video call.
     pub call_local_frame: Option<std::sync::Arc<egui::ColorImage>>,
     pub call_remote_frame: Option<std::sync::Arc<egui::ColorImage>>,
@@ -1334,6 +1349,7 @@ impl App {
             .min(accounts.len() - 1);
         let mut app = Self::with_accounts(dirs, settings, roster, accounts, active, waker.clone());
         app.pauses_media = true;
+        app.call_tones = crate::call_tones::Tones::new(true);
         app.badge = Some(Default::default());
         app.custom_themes
             .enable_desktop_themes(crate::theme::DESKTOP_THEMES);
@@ -1676,8 +1692,11 @@ impl App {
             call_surface_hidden: false,
             call_fullscreen: false,
             call_notified: None,
-            call_rang: None,
-            call_ring_sound: None,
+            call_rings: None,
+            call_tones: Default::default(),
+            call_dismissed: None,
+            call_cancel: None,
+            call_placed: None,
             call_local_frame: None,
             call_remote_frame: None,
             call_local_texture: None,
@@ -10330,6 +10349,7 @@ impl App {
     }
 
     pub fn shutdown(&mut self) {
+        self.call_tones.set(None);
         self.save_state();
         self.flush_open_draft();
         self.recording = None;

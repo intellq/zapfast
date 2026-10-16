@@ -13,6 +13,7 @@ pub mod autostart;
 pub mod backend;
 pub mod bidi;
 pub mod call_audio;
+pub mod call_tones;
 pub mod calls;
 pub mod camera;
 #[cfg(any(test, feature = "demo"))]

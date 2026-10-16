@@ -57,11 +57,16 @@ const VIDEO_BITRATE: u32 = 1_500_000;
 
 /// Where a 1:1 call is in its life.
 ///
-/// Every value except the terminal ones comes from the backend: the offer that was sent or
-/// received, the peer's `<accept>`, and the media plane reporting itself live. Nothing is inferred
-/// from the button that started the call.
+/// Every value except [`CallPhase::Placing`] and the terminal ones comes from the backend: the
+/// offer that was sent or received, the peer's `<preaccept>` and `<accept>`, and the media plane
+/// reporting itself live. Nothing past placing is inferred from the button that started the call.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CallPhase {
+    /// The call button was pressed and our offer has not gone out yet: the devices are being
+    /// checked and the peer's devices looked up. Local only: the window draws it the moment the
+    /// button is pressed, before the backend has answered, so a call starts on screen at once. It
+    /// claims nothing about the peer; [`CallPhase::Dialing`] follows once the offer is sent.
+    Placing,
     /// Our offer went out and nobody has answered.
     Dialing,
     /// The peer's device is ringing: its `<preaccept>` arrived. Nobody has answered yet.
@@ -88,7 +93,8 @@ impl CallPhase {
     pub fn is_live(self) -> bool {
         matches!(
             self,
-            Self::Dialing
+            Self::Placing
+                | Self::Dialing
                 | Self::Ringing
                 | Self::Incoming
                 | Self::Connecting
@@ -172,6 +178,39 @@ pub struct CallUpdate {
     pub microphone: Option<String>,
     pub speaker: Option<String>,
     pub camera: Option<String>,
+}
+
+impl CallUpdate {
+    /// The snapshot of a call whose button was just pressed: ours, not yet offered, with no
+    /// devices picked. The window draws it at once; the worker's own updates replace it.
+    pub fn placing(generation: u64, chat: String, video: bool) -> Self {
+        Self {
+            generation,
+            chat,
+            direction: CallDirection::Outgoing,
+            video,
+            phase: CallPhase::Placing,
+            started: None,
+            muted: false,
+            camera_on: false,
+            remote_video: false,
+            video_requested: false,
+            outcome: None,
+            peer_audio: None,
+            lost_devices: Vec::new(),
+            microphone: None,
+            speaker: None,
+            camera: None,
+        }
+    }
+
+    /// The same call, failed before its offer went out: the screen says it could not connect and
+    /// goes, rather than waiting on a call that will never ring.
+    pub fn not_placed(mut self) -> Self {
+        self.phase = CallPhase::Failed;
+        self.outcome = Some(CallOutcome::Failed);
+        self
+    }
 }
 
 /// A microphone or speaker the platform reports.
@@ -939,10 +978,25 @@ fn decode_remote(
 // The call
 // ---------------------------------------------------------------------------
 
+/// The reader hung up a call that was still being placed, before its offer went out: nobody was
+/// rung, so there is nothing to end with the peer and nothing to file.
+#[derive(Debug)]
+pub struct Cancelled;
+
+impl std::fmt::Display for Cancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the call was cancelled before it was placed")
+    }
+}
+
+impl std::error::Error for Cancelled {}
+
 /// Counter behind [`CallUpdate::generation`].
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 
-fn next_generation() -> u64 {
+/// A generation no call has had yet. The window takes one when the call button is pressed, so the
+/// screen it draws at once and the worker's later updates are the same call.
+pub fn next_generation() -> u64 {
     GENERATION.fetch_add(1, Ordering::Relaxed) + 1
 }
 
@@ -996,14 +1050,22 @@ impl Call {
     }
 
     /// Places an outgoing 1:1 call. `video` offers video from the first frame, which is what makes
-    /// the peer's phone ring as a video call.
+    /// the peer's phone ring as a video call. `generation` is the one the window drew the call
+    /// under when its button was pressed.
+    ///
+    /// `cancel` is read once more right before anything is sent: a call hung up while its devices
+    /// were still being checked fails with [`Cancelled`] and never rings the peer. Once the offer
+    /// is out the library owns it, so a later hang-up goes through [`Call::hangup`] instead.
+    #[allow(clippy::too_many_arguments)]
     pub async fn place(
         client: &Arc<Client>,
+        generation: u64,
         chat: String,
         video: bool,
         microphone: Option<String>,
         speaker: Option<String>,
         camera: Option<String>,
+        cancel: &AtomicBool,
     ) -> Result<(Self, Option<async_channel::Receiver<VideoTick>>)> {
         let peer: Jid = chat
             .parse()
@@ -1023,6 +1085,10 @@ impl Call {
             }
         }
         require_video(video, pipe.is_some())?;
+        if cancel.load(Ordering::Relaxed) {
+            // The camera, if one started, is released as the pipeline drops.
+            return Err(Cancelled.into());
+        }
         let (mic, mic_rx) = AudioInput::spawn(microphone.clone());
         let (output, output_tx) = AudioOutput::spawn(speaker.clone());
 
@@ -1055,7 +1121,7 @@ impl Call {
         };
         Ok((
             Self {
-                generation: next_generation(),
+                generation,
                 call_id: handle.call_id().to_owned(),
                 chat,
                 direction: CallDirection::Outgoing,
@@ -2788,7 +2854,12 @@ mod tests {
             assert!(phase.is_connected(), "{phase:?}");
             assert!(phase.is_answered(), "{phase:?}");
         }
-        for phase in [CallPhase::Dialing, CallPhase::Ringing, CallPhase::Incoming] {
+        for phase in [
+            CallPhase::Placing,
+            CallPhase::Dialing,
+            CallPhase::Ringing,
+            CallPhase::Incoming,
+        ] {
             assert!(phase.is_live(), "{phase:?}");
             assert!(!phase.is_connected(), "{phase:?}");
             assert!(!phase.is_answered(), "{phase:?}");

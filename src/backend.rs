@@ -457,9 +457,14 @@ pub enum Command {
         message: String,
     },
     /// Places a 1:1 call, offering video from the first frame when asked.
+    ///
+    /// `generation` is the one the window already drew the call under, and `cancel` is set when
+    /// the reader hangs up before the offer has gone out, so the peer is never rung for it.
     StartCall {
         chat: ChatId,
         video: bool,
+        generation: u64,
+        cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     },
     /// Answers the ringing incoming call with the real `<accept>`.
     AnswerCall,

@@ -326,6 +326,9 @@ fn bottom_row(ui: &mut egui::Ui, area: Rect, height: f32, add: impl FnOnce(&mut 
 /// The line under the peer's name, from the backend's phase and nothing else.
 pub(crate) fn status(locale: Locale, call: &CallUpdate) -> String {
     match call.phase {
+        // The button was pressed and the offer is still on its way out.
+        CallPhase::Placing => gettext(locale, "Connecting…").into_owned(),
+        // The offer is out; no device of the peer's has said it rings yet.
         CallPhase::Dialing => gettext(locale, "Calling…").into_owned(),
         // The peer's phone rings: its preaccept arrived.
         CallPhase::Ringing => gettext(locale, "Ringing…").into_owned(),
