@@ -5684,3 +5684,228 @@ msgstr ""
 
 msgid "Put Chats, Calls, Starred, Archived and Settings in a bar beside the list. A right click on your picture switches it too."
 msgstr ""
+
+msgid "The sound output stopped working. Press play to try again"
+msgstr ""
+
+msgid "Could not start recording"
+msgstr ""
+
+msgid "Could not write the picture"
+msgstr ""
+
+msgid "This picture could not be read"
+msgstr ""
+
+msgid "Could not read the Signal certificate"
+msgstr ""
+
+msgid "The signal.art request failed"
+msgstr ""
+
+msgid "Could not read the signal.art response"
+msgstr ""
+
+msgid "Could not open the file"
+msgstr ""
+
+msgid "This file is not a sticker archive"
+msgstr ""
+
+msgid "This is not a sticker pack"
+msgstr ""
+
+msgid "Could not write the sticker pack"
+msgstr ""
+
+msgid "Could not create the pack folder"
+msgstr ""
+
+msgid "Could not delete the message for everyone"
+msgstr ""
+
+msgid "Could not send the file"
+msgstr ""
+
+msgid "Could not send the picture"
+msgstr ""
+
+msgid "Could not send the voice message"
+msgstr ""
+
+msgid "Could not send the sticker"
+msgstr ""
+
+msgid "Could not send the GIF"
+msgstr ""
+
+msgid "Invalid attachment name"
+msgstr ""
+
+msgid "upload cancelled"
+msgstr ""
+
+msgid "GIPHY request failed"
+msgstr ""
+
+msgid "Invalid GIPHY response"
+msgstr ""
+
+msgid "This message is not on this computer"
+msgstr ""
+
+msgid "Could not start WhatsApp"
+msgstr ""
+
+msgid "Could not change your name"
+msgstr ""
+
+msgid "Could not change your About"
+msgstr ""
+
+msgid "Could not read part of the chat history"
+msgstr ""
+
+msgid "Could not use this picture"
+msgstr ""
+
+msgid "Could not change your profile picture"
+msgstr ""
+
+msgid "Could not save the attachment"
+msgstr ""
+
+msgid "Could not save the attachments"
+msgstr ""
+
+msgid "Save album"
+msgstr ""
+
+msgid "Saved {saved} album attachments"
+msgstr ""
+
+msgid "Saved {saved} album attachments; {failed} could not be saved: {list}"
+msgstr ""
+
+msgid "Could not make the sticker"
+msgstr ""
+
+msgid "Could not save contact"
+msgstr ""
+
+msgid "Could not set the old archive aside"
+msgstr ""
+
+msgid "Could not create the pack"
+msgstr ""
+
+msgid "Message not sent"
+msgstr ""
+
+msgid "Could not search"
+msgstr ""
+
+msgid "Could not read the chat"
+msgstr ""
+
+msgid "Could not prepare the message edit"
+msgstr ""
+
+msgid "Could not send the edit"
+msgstr ""
+
+msgid "Calls are one to one only"
+msgstr ""
+
+msgid "The call could not be started"
+msgstr ""
+
+msgid "The call link could not be joined"
+msgstr ""
+
+msgid "The call could not be answered"
+msgstr ""
+
+msgid "Could not download the sticker pack"
+msgstr ""
+
+msgid "Could not send the sticker pack"
+msgstr ""
+
+msgid "Could not add to favorites"
+msgstr ""
+
+msgid "The call was cancelled before it was placed"
+msgstr ""
+
+msgid "WhatsApp refused the call"
+msgstr ""
+
+msgid "WhatsApp refused the answer"
+msgstr ""
+
+msgid "WhatsApp refused the rejection"
+msgstr ""
+
+msgid "Nothing is ringing"
+msgstr ""
+
+msgid "The call is not up"
+msgstr ""
+
+msgid "This call has no video"
+msgstr ""
+
+msgid "The camera could not be turned on"
+msgstr ""
+
+msgid "The camera was stopped, but the peer was not told"
+msgstr ""
+
+msgid "The peer could not be asked for video"
+msgstr ""
+
+msgid "No microphone is available; a call needs one"
+msgstr ""
+
+msgid "No speaker is available; a call needs one"
+msgstr ""
+
+msgid "Video could not be started; the camera or its encoder is not available"
+msgstr ""
+
+msgid "The camera thread could not be started"
+msgstr ""
+
+msgid "The camera did not start in time"
+msgstr ""
+
+msgid "View once photo"
+msgstr ""
+
+msgid "View once video"
+msgstr ""
+
+msgid "View once voice message"
+msgstr ""
+
+msgid "View once audio"
+msgstr ""
+
+msgid "Could not open {path}: {error}. Open it from its folder instead."
+msgstr ""
+
+msgid "Use another account"
+msgstr ""
+
+msgid "Download all"
+msgstr ""
+
+msgid "Downloading"
+msgstr ""
+
+msgid "Failed"
+msgstr ""
+
+msgid "Version {}"
+msgstr ""

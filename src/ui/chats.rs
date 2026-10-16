@@ -478,7 +478,7 @@ fn header_button_row(app: &mut App, ui: &mut egui::Ui, buttons: &[HeaderButton],
                     HEADER_ICON,
                     palette.secondary,
                     palette.text,
-                    "Archived chats",
+                    tr("Archived chats"),
                 )
                 .tab_stop(Stop::Archived)
                 .clicked()
@@ -496,9 +496,9 @@ fn header_button_row(app: &mut App, ui: &mut egui::Ui, buttons: &[HeaderButton],
                     settings_button_color(app),
                     palette.text,
                     &super::keys::label(if open {
-                        "Close settings (Ctrl+,)"
+                        tr("Close settings (Ctrl+,)")
                     } else {
-                        "Settings (Ctrl+,)"
+                        tr("Settings (Ctrl+,)")
                     }),
                 )
                 .tab_stop(Stop::Settings)
@@ -515,7 +515,11 @@ fn header_button_row(app: &mut App, ui: &mut egui::Ui, buttons: &[HeaderButton],
                     HEADER_ICON,
                     palette.secondary,
                     palette.text,
-                    if macos { "New chat (⌘N)" } else { "New chat" },
+                    if macos {
+                        tr("New chat (⌘N)")
+                    } else {
+                        tr("New chat")
+                    },
                 )
                 .tab_stop(Stop::NewChat)
                 .clicked()
@@ -546,9 +550,9 @@ fn header_button_row(app: &mut App, ui: &mut egui::Ui, buttons: &[HeaderButton],
                     palette.secondary,
                     palette.text,
                     if macos {
-                        "Hide the chat list (⌘B)"
+                        tr("Hide the chat list (⌘B)")
                     } else {
-                        "Hide the chat list (Ctrl+B)"
+                        tr("Hide the chat list (Ctrl+B)")
                     },
                 )
                 .tab_stop(Stop::Sidebar)
@@ -710,7 +714,7 @@ fn macos_header(app: &mut App, ui: &mut egui::Ui) {
                         18.0,
                         palette.secondary,
                         palette.text,
-                        "Back to chats",
+                        tr("Back to chats"),
                     )
                     .tab_stop(Stop::Back)
                     .clicked()
@@ -731,7 +735,7 @@ fn macos_header(app: &mut App, ui: &mut egui::Ui) {
                         18.0,
                         palette.secondary,
                         palette.text,
-                        "Back to chats",
+                        tr("Back to chats"),
                     )
                     .tab_stop(Stop::Back)
                     .clicked()
@@ -744,9 +748,9 @@ fn macos_header(app: &mut App, ui: &mut egui::Ui) {
                     header_title(
                         ui,
                         if app.locked_folder {
-                            "Locked chats"
+                            tr("Locked chats")
                         } else {
-                            "Archived"
+                            tr("Archived")
                         },
                         theme::bold(16.0),
                         palette.text,
@@ -2018,7 +2022,7 @@ pub fn compact_show(app: &mut App, ui: &mut egui::Ui) {
                     18.0,
                     palette.secondary,
                     palette.text,
-                    &super::keys::label("Show the chat list (Ctrl+B)"),
+                    &super::keys::label(tr("Show the chat list (Ctrl+B)")),
                 )
                 .tab_stop(Stop::Sidebar)
                 .clicked()

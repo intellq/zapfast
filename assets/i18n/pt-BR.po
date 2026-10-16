@@ -5856,3 +5856,228 @@ msgstr "Barra lateral de navegação"
 
 msgid "Put Chats, Calls, Starred, Archived and Settings in a bar beside the list. A right click on your picture switches it too."
 msgstr "Coloca Conversas, Ligações, Com estrela, Arquivadas e Configurações numa barra ao lado da lista. Um clique com o botão direito na sua foto também alterna."
+
+msgid "The sound output stopped working. Press play to try again"
+msgstr "A saída de som parou de funcionar. Toque em reproduzir para tentar de novo"
+
+msgid "Could not start recording"
+msgstr "Não foi possível iniciar a gravação"
+
+msgid "Could not write the picture"
+msgstr "Não foi possível gravar a imagem"
+
+msgid "This picture could not be read"
+msgstr "Não foi possível ler esta imagem"
+
+msgid "Could not read the Signal certificate"
+msgstr "Não foi possível ler o certificado do Signal"
+
+msgid "The signal.art request failed"
+msgstr "A requisição ao signal.art falhou"
+
+msgid "Could not read the signal.art response"
+msgstr "Não foi possível ler a resposta do signal.art"
+
+msgid "Could not open the file"
+msgstr "Não foi possível abrir o arquivo"
+
+msgid "This file is not a sticker archive"
+msgstr "Este arquivo não é um pacote de figurinhas"
+
+msgid "This is not a sticker pack"
+msgstr "Isto não é um pacote de figurinhas"
+
+msgid "Could not write the sticker pack"
+msgstr "Não foi possível gravar o pacote de figurinhas"
+
+msgid "Could not create the pack folder"
+msgstr "Não foi possível criar a pasta do pacote"
+
+msgid "Could not delete the message for everyone"
+msgstr "Não foi possível apagar a mensagem para todos"
+
+msgid "Could not send the file"
+msgstr "Não foi possível enviar o arquivo"
+
+msgid "Could not send the picture"
+msgstr "Não foi possível enviar a imagem"
+
+msgid "Could not send the voice message"
+msgstr "Não foi possível enviar a mensagem de voz"
+
+msgid "Could not send the sticker"
+msgstr "Não foi possível enviar a figurinha"
+
+msgid "Could not send the GIF"
+msgstr "Não foi possível enviar o GIF"
+
+msgid "Invalid attachment name"
+msgstr "Nome de anexo inválido"
+
+msgid "upload cancelled"
+msgstr "envio cancelado"
+
+msgid "GIPHY request failed"
+msgstr "A requisição ao GIPHY falhou"
+
+msgid "Invalid GIPHY response"
+msgstr "Resposta inválida do GIPHY"
+
+msgid "This message is not on this computer"
+msgstr "Esta mensagem não está neste computador"
+
+msgid "Could not start WhatsApp"
+msgstr "Não foi possível iniciar o WhatsApp"
+
+msgid "Could not change your name"
+msgstr "Não foi possível alterar o seu nome"
+
+msgid "Could not change your About"
+msgstr "Não foi possível alterar o seu recado"
+
+msgid "Could not read part of the chat history"
+msgstr "Não foi possível ler parte do histórico da conversa"
+
+msgid "Could not use this picture"
+msgstr "Não foi possível usar esta imagem"
+
+msgid "Could not change your profile picture"
+msgstr "Não foi possível alterar a sua foto de perfil"
+
+msgid "Could not save the attachment"
+msgstr "Não foi possível salvar o anexo"
+
+msgid "Could not save the attachments"
+msgstr "Não foi possível salvar os anexos"
+
+msgid "Save album"
+msgstr "Salvar álbum"
+
+msgid "Saved {saved} album attachments"
+msgstr "{saved} anexos do álbum salvos"
+
+msgid "Saved {saved} album attachments; {failed} could not be saved: {list}"
+msgstr "{saved} anexos do álbum salvos; {failed} não puderam ser salvos: {list}"
+
+msgid "Could not make the sticker"
+msgstr "Não foi possível criar a figurinha"
+
+msgid "Could not save contact"
+msgstr "Não foi possível salvar o contato"
+
+msgid "Could not set the old archive aside"
+msgstr "Não foi possível separar o arquivo antigo"
+
+msgid "Could not create the pack"
+msgstr "Não foi possível criar o pacote"
+
+msgid "Message not sent"
+msgstr "Mensagem não enviada"
+
+msgid "Could not search"
+msgstr "Não foi possível pesquisar"
+
+msgid "Could not read the chat"
+msgstr "Não foi possível ler a conversa"
+
+msgid "Could not prepare the message edit"
+msgstr "Não foi possível preparar a edição da mensagem"
+
+msgid "Could not send the edit"
+msgstr "Não foi possível enviar a edição"
+
+msgid "Calls are one to one only"
+msgstr "As chamadas são apenas entre duas pessoas"
+
+msgid "The call could not be started"
+msgstr "Não foi possível iniciar a chamada"
+
+msgid "The call link could not be joined"
+msgstr "Não foi possível entrar pelo link da chamada"
+
+msgid "The call could not be answered"
+msgstr "Não foi possível atender a chamada"
+
+msgid "Could not download the sticker pack"
+msgstr "Não foi possível baixar o pacote de figurinhas"
+
+msgid "Could not send the sticker pack"
+msgstr "Não foi possível enviar o pacote de figurinhas"
+
+msgid "Could not add to favorites"
+msgstr "Não foi possível adicionar aos favoritos"
+
+msgid "The call was cancelled before it was placed"
+msgstr "A chamada foi cancelada antes de ser feita"
+
+msgid "WhatsApp refused the call"
+msgstr "O WhatsApp recusou a chamada"
+
+msgid "WhatsApp refused the answer"
+msgstr "O WhatsApp recusou o atendimento"
+
+msgid "WhatsApp refused the rejection"
+msgstr "O WhatsApp recusou a rejeição"
+
+msgid "Nothing is ringing"
+msgstr "Nada está tocando"
+
+msgid "The call is not up"
+msgstr "A chamada ainda não está estabelecida"
+
+msgid "This call has no video"
+msgstr "Esta chamada não tem vídeo"
+
+msgid "The camera could not be turned on"
+msgstr "Não foi possível ligar a câmera"
+
+msgid "The camera was stopped, but the peer was not told"
+msgstr "A câmera foi desligada, mas a outra pessoa não foi avisada"
+
+msgid "The peer could not be asked for video"
+msgstr "Não foi possível pedir vídeo à outra pessoa"
+
+msgid "No microphone is available; a call needs one"
+msgstr "Nenhum microfone disponível; a chamada precisa de um"
+
+msgid "No speaker is available; a call needs one"
+msgstr "Nenhum alto-falante disponível; a chamada precisa de um"
+
+msgid "Video could not be started; the camera or its encoder is not available"
+msgstr "Não foi possível iniciar o vídeo; a câmera ou o codificador não está disponível"
+
+msgid "The camera thread could not be started"
+msgstr "Não foi possível iniciar o processo da câmera"
+
+msgid "The camera did not start in time"
+msgstr "A câmera não iniciou a tempo"
+
+msgid "View once photo"
+msgstr "Foto de visualização única"
+
+msgid "View once video"
+msgstr "Vídeo de visualização única"
+
+msgid "View once voice message"
+msgstr "Mensagem de voz de visualização única"
+
+msgid "View once audio"
+msgstr "Áudio de visualização única"
+
+msgid "Could not open {path}: {error}. Open it from its folder instead."
+msgstr "Não foi possível abrir {path}: {error}. Abra-o pela pasta."
+
+msgid "Use another account"
+msgstr "Usar outra conta"
+
+msgid "Download all"
+msgstr "Baixar tudo"
+
+msgid "Downloading"
+msgstr "Baixando"
+
+msgid "Failed"
+msgstr "Falhou"
+
+msgid "Version {}"
+msgstr "Versão {}"

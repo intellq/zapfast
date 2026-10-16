@@ -461,7 +461,10 @@ impl Worker {
         let hash = match super::super::sticker_store::save(&self.dirs.saved_sticker_dir(), path) {
             Ok(hash) => hash,
             Err(error) => {
-                self.emit(Event::Error(format!("Could not add to favorites: {error}")));
+                self.emit(Event::Error(format!(
+                    "{}: {error}",
+                    crate::i18n::tr("Could not add to favorites")
+                )));
                 return;
             }
         };
@@ -1013,7 +1016,12 @@ impl Worker {
                 let zip = client
                     .download(&pack, Default::default())
                     .await
-                    .map_err(|error| format!("Could not download the sticker pack: {error}"))?;
+                    .map_err(|error| {
+                        format!(
+                            "{}: {error}",
+                            crate::i18n::tr("Could not download the sticker pack")
+                        )
+                    })?;
                 let stickers: Vec<(String, Vec<String>)> = pack
                     .stickers
                     .iter()
@@ -1106,7 +1114,10 @@ impl Worker {
                     let _ = commands.send(Command::Sent {
                         chat,
                         id: String::new(),
-                        error: Some(format!("Could not send the sticker pack: {error}")),
+                        error: Some(format!(
+                            "{}: {error}",
+                            crate::i18n::tr("Could not send the sticker pack")
+                        )),
                     });
                 }
             }

@@ -4672,7 +4672,7 @@ impl App {
                 if !self.any_linked() {
                     self.forget_app_lock();
                 }
-                self.toast_error("This device was unlinked from your phone");
+                self.toast_error(tr("This device was unlinked from your phone"));
                 return;
             }
             LinkStatus::Failed(message) => self.toast_error(message.clone()),

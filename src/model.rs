@@ -1375,10 +1375,10 @@ impl Content {
             Self::PhoneOnly {
                 once: Some(kind), ..
             } => match kind {
-                OnceMedia::Photo => "View once photo",
-                OnceMedia::Video => "View once video",
-                OnceMedia::Voice => "View once voice message",
-                OnceMedia::Audio => "View once audio",
+                OnceMedia::Photo => tr("View once photo"),
+                OnceMedia::Video => tr("View once video"),
+                OnceMedia::Voice => tr("View once voice message"),
+                OnceMedia::Audio => tr("View once audio"),
             }
             .to_owned(),
             Self::PhoneOnly {
@@ -1392,16 +1392,15 @@ impl Content {
                 ..
             } => {
                 let label = match (status, video) {
-                    (CallStatus::Missed, false) => "Missed voice call",
-                    (CallStatus::Missed, true) => "Missed video call",
-                    (_, false) => "Voice call",
-                    (_, true) => "Video call",
+                    (CallStatus::Missed, false) => tr("Missed voice call"),
+                    (CallStatus::Missed, true) => tr("Missed video call"),
+                    (_, false) => tr("Voice call"),
+                    (_, true) => tr("Video call"),
                 };
                 if *status == CallStatus::Answered && *duration > 0 {
                     format!(
                         "{label} ({})",
-                        // Summaries are English, as every other one is.
-                        crate::util::call_length(crate::i18n::Locale::English, *duration)
+                        crate::util::call_length(crate::i18n::current(), *duration)
                     )
                 } else {
                     label.to_owned()

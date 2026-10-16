@@ -608,7 +608,7 @@ fn header(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> Rect {
                         let back_label = if app.page == crate::model::Page::Calls {
                             crate::i18n::gettext(app.locale, "Back to the calls").into_owned()
                         } else {
-                            "Back to chats".to_owned()
+                            tr("Back to chats").to_owned()
                         };
                         let back = theme::icon_button(
                             ui,
@@ -1281,7 +1281,7 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                     if theme::icon_button(
                                         ui, Icon::X, 16.0, palette.secondary, palette.text,
-                                        "Cancel reply (Esc)",
+                                        tr("Cancel reply (Esc)"),
                                     ).clicked() {
                                         app.actions.push(Action::CancelReply);
                                     }
@@ -5221,7 +5221,7 @@ const FORWARDED_HEIGHT: f32 = 15.0;
 fn forwarded_label(ui: &mut egui::Ui, palette: &Palette) -> (Rect, std::sync::Arc<egui::Galley>) {
     let mut job = egui::text::LayoutJob::default();
     job.append(
-        "Forwarded",
+        tr("Forwarded"),
         0.0,
         egui::TextFormat {
             font_id: theme::regular(12.5),
@@ -5234,7 +5234,8 @@ fn forwarded_label(ui: &mut egui::Ui, palette: &Palette) -> (Rect, std::sync::Ar
     let width = FORWARDED_ICON + FORWARDED_GAP + galley.size().x;
     let (reserved, response) =
         ui.allocate_exact_size(vec2(width, FORWARDED_HEIGHT), Sense::hover());
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, "Forwarded"));
+    response
+        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, tr("Forwarded")));
     // Sit closer to what follows than the bubble's usual spacing.
     ui.add_space(-1.0);
     (reserved, galley)
@@ -7391,15 +7392,15 @@ fn album_tile(
     let media = message.content.media()?;
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     let kind = if matches!(message.content, Content::Image { .. }) {
-        "Photo"
+        tr("Photo")
     } else {
-        "Video"
+        tr("Video")
     };
     let state = match (&media.path, &media.state) {
-        (Some(_), _) => "Open".to_owned(),
-        (None, MediaState::Downloading) => "Downloading".to_owned(),
-        (None, MediaState::Failed(error)) => format!("Failed: {error}"),
-        (None, MediaState::Idle) => "Download".to_owned(),
+        (Some(_), _) => tr("Open").to_owned(),
+        (None, MediaState::Downloading) => tr("Downloading").to_owned(),
+        (None, MediaState::Failed(error)) => format!("{}: {error}", tr("Failed")),
+        (None, MediaState::Idle) => tr("Download").to_owned(),
     };
     response.widget_info(|| {
         egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("{kind}, {state}"))
@@ -7486,7 +7487,7 @@ fn album_tile(
     // Each member keeps its own failure: the others stay usable, and a click
     // on this one retries it.
     let response = if let MediaState::Failed(error) = &media.state {
-        response.on_hover_text(format!("{error} · Click to retry"))
+        response.on_hover_text(format!("{error} · {}", tr("Click to retry")))
     } else {
         response
     };

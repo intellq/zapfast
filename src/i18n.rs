@@ -404,4 +404,41 @@ mod tests {
             "{} members"
         );
     }
+
+    /// Text the interface shows in more than one place is easy to hand to a
+    /// widget as a raw English literal. These are the ones that were, so the
+    /// Portuguese catalog must keep an entry that differs from the source.
+    #[test]
+    fn interface_texts_that_were_left_in_english_have_a_portuguese_entry() {
+        for source in [
+            "New chat",
+            "Hide the chat list (Ctrl+B)",
+            "Show the chat list (Ctrl+B)",
+            "Settings (Ctrl+,)",
+            "Close settings (Ctrl+,)",
+            "Back to chats",
+            "Archived chats",
+            "Menu",
+            "Calls",
+            "Missed",
+            "New call",
+            "Forwarded",
+            "Download all",
+            "Use another account",
+            "Missed voice call",
+            "View once photo",
+            "The call was cancelled before it was placed",
+            "Could not send the file",
+        ] {
+            let translated = gettext(Locale::PortugueseBrazil, source);
+            assert!(
+                !translated.is_empty(),
+                "{source:?} has an empty translation"
+            );
+            // "Menu" is the same word in Portuguese.
+            if source != "Menu" {
+                assert_ne!(translated, source, "{source:?} is not translated");
+            }
+        }
+    }
 }

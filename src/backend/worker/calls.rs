@@ -220,7 +220,9 @@ impl Worker {
         }
         if !callable_chat(&chat) {
             log::warn!("[CALL] refusing a call to a chat that is not one to one");
-            self.emit(Event::Error("Calls are one to one only".to_owned()));
+            self.emit(Event::Error(
+                crate::i18n::tr("Calls are one to one only").to_owned(),
+            ));
             self.emit_call(placing.not_placed());
             return;
         }
@@ -235,7 +237,7 @@ impl Worker {
         let Some(client) = self.client.clone() else {
             log::warn!("[CALL] cannot start a call: WhatsApp is not connected");
             self.emit(Event::Error(
-                "ZapFast is not connected to WhatsApp".to_owned(),
+                crate::i18n::tr("ZapFast is not connected to WhatsApp").to_owned(),
             ));
             self.emit_call(placing.not_placed());
             return;
@@ -286,7 +288,8 @@ impl Worker {
             Err(error) => {
                 log::error!("[CALL] could not start the call: {error}");
                 self.emit(Event::Error(format!(
-                    "The call could not be started: {error}"
+                    "{}: {error}",
+                    crate::i18n::tr("The call could not be started")
                 )));
                 self.emit_call(placing.not_placed());
             }
@@ -317,7 +320,7 @@ impl Worker {
         let Some(client) = self.client.clone() else {
             log::warn!("[CALL] cannot join a call link: WhatsApp is not connected");
             self.emit(Event::Error(
-                "ZapFast is not connected to WhatsApp".to_owned(),
+                crate::i18n::tr("ZapFast is not connected to WhatsApp").to_owned(),
             ));
             self.emit_call(placing.not_placed());
             return;
@@ -353,7 +356,8 @@ impl Worker {
             Err(error) => {
                 log::error!("[CALL] could not join the call link: {error}");
                 self.emit(Event::Error(format!(
-                    "The call link could not be joined: {error}"
+                    "{}: {error}",
+                    crate::i18n::tr("The call link could not be joined")
                 )));
                 self.emit_call(placing.not_placed());
             }
@@ -394,7 +398,8 @@ impl Worker {
                         log::error!("[CALL] could not answer the call: {error}");
                         let update = runtime.call.abandon(&client).await;
                         self.emit(Event::Error(format!(
-                            "The call could not be answered: {error}"
+                            "{}: {error}",
+                            crate::i18n::tr("The call could not be answered")
                         )));
                         Some(update)
                     }
@@ -547,7 +552,8 @@ impl Worker {
         };
         if let Some(error) = refused {
             self.emit(Event::Error(format!(
-                "The call link could not be joined: {error}"
+                "{}: {error}",
+                crate::i18n::tr("The call link could not be joined")
             )));
         }
         if let Some(update) = update {

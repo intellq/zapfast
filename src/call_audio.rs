@@ -203,7 +203,7 @@ pub fn microphones() -> Vec<(String, String)> {
                 .map(|input| {
                     let name = input.to_string();
                     let label = if name.is_empty() {
-                        "Microphone".to_owned()
+                        crate::i18n::tr("Microphone").to_owned()
                     } else {
                         name.clone()
                     };
@@ -241,7 +241,7 @@ pub fn speakers() -> Vec<(String, String)> {
             .filter_map(|device| {
                 let name = device.description().ok()?.name().to_string();
                 let label = if name.is_empty() {
-                    "Speaker".to_owned()
+                    crate::i18n::tr("Speaker").to_owned()
                 } else {
                     name.clone()
                 };

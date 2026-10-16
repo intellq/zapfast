@@ -20,6 +20,7 @@ use std::time::Instant;
 use anyhow::{Context, Result, anyhow};
 use egui::ColorImage;
 
+use crate::i18n::tr;
 use crate::model::CallDirection;
 use crate::video_rate::{Cadence, Change as RateChange, FrameClock, RateControl, RateShare};
 use whatsapp_rust::prelude::{Client, Jid};
@@ -487,6 +488,15 @@ fn missing_audio_device(microphone: Option<&str>, speaker: Option<&str>) -> Opti
     crate::call_audio::unavailable(microphone, speaker)
 }
 
+/// The error for a call that needs a sound device the machine lacks.
+fn no_device_message(missing: &str) -> String {
+    if missing == "microphone" {
+        tr("No microphone is available; a call needs one").to_owned()
+    } else {
+        tr("No speaker is available; a call needs one").to_owned()
+    }
+}
+
 /// The same check, run where it cannot stall the caller.
 ///
 /// `missing_audio_device` opens every device to name it, which is a blocking enumeration. Both
@@ -514,9 +524,9 @@ async fn missing_audio_device_off_thread(
 /// camera or encoder that will not start fails the call instead of quietly downgrading it.
 fn require_video(requested: bool, pipeline: bool) -> Result<()> {
     if requested && !pipeline {
-        return Err(anyhow!(
-            "video could not be started; the camera or its encoder is not available"
-        ));
+        return Err(anyhow!(tr(
+            "Video could not be started; the camera or its encoder is not available"
+        )));
     }
     Ok(())
 }
@@ -621,7 +631,7 @@ impl CameraCapture {
                 capture(device, frames, ticks, controls, ready);
                 let _ = done.send(());
             })
-            .context("camera thread could not be started")?;
+            .context(tr("The camera thread could not be started"))?;
         let capture = Self {
             timed,
             running,
@@ -631,7 +641,7 @@ impl CameraCapture {
         match came_up.recv_timeout(CAMERA_STARTUP) {
             Ok(Ok(())) => Ok(capture),
             Ok(Err(error)) => Err(anyhow!(error)),
-            Err(_) => Err(anyhow!("the camera did not start in time")),
+            Err(_) => Err(anyhow!(tr("The camera did not start in time"))),
         }
     }
 
@@ -1420,7 +1430,7 @@ pub struct Cancelled;
 
 impl std::fmt::Display for Cancelled {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("the call was cancelled before it was placed")
+        f.write_str(tr("The call was cancelled before it was placed"))
     }
 }
 
@@ -1667,7 +1677,7 @@ impl Call {
         if let Some(missing) =
             missing_audio_device_off_thread(microphone.clone(), speaker.clone()).await
         {
-            return Err(anyhow!("no {missing} is available; a call needs one"));
+            return Err(anyhow!(no_device_message(missing)));
         }
         // Video first: a camera or encoder that will not start refuses the call before any stream
         // exists and before the peer is rung, because a video call must not silently become voice.
@@ -1699,7 +1709,7 @@ impl Call {
         };
         let handle = match placed {
             Ok(handle) => Arc::new(handle),
-            Err(error) => return Err(anyhow!("WhatsApp refused the call: {error}")),
+            Err(error) => return Err(anyhow!("{}: {error}", tr("WhatsApp refused the call"))),
         };
         // The destination is deliberately not logged: a call's chat id is the peer's phone
         // number, and this log ships.
@@ -1801,7 +1811,7 @@ impl Call {
         done: async_channel::Sender<std::result::Result<CallHandle, String>>,
     ) -> Result<(Self, Option<async_channel::Receiver<VideoTick>>)> {
         if let Some(missing) = missing_audio_device_off_thread(None, None).await {
-            return Err(anyhow!("no {missing} is available; a call needs one"));
+            return Err(anyhow!(no_device_message(missing)));
         }
         let mut pipe = None;
         if video {
@@ -2120,14 +2130,14 @@ impl Call {
         camera: Option<String>,
     ) -> Result<Option<async_channel::Receiver<VideoTick>>> {
         let Some(incoming) = self.incoming.clone() else {
-            return Err(anyhow!("nothing is ringing"));
+            return Err(anyhow!(tr("Nothing is ringing")));
         };
         // Answering opens the same streams a call places, so the same checks apply: an answered call
         // without a microphone would be worse than a refused one.
         if let Some(missing) =
             missing_audio_device_off_thread(microphone.clone(), speaker.clone()).await
         {
-            return Err(anyhow!("no {missing} is available; a call needs one"));
+            return Err(anyhow!(no_device_message(missing)));
         }
         // The same rule as placing a call: a video offer that cannot start video is not accepted as
         // something else behind the user's back. Nothing has been sent yet, so the call stays
@@ -2159,7 +2169,7 @@ impl Call {
         };
         let handle = match accepted {
             Ok(handle) => Arc::new(handle),
-            Err(error) => return Err(anyhow!("WhatsApp refused the answer: {error}")),
+            Err(error) => return Err(anyhow!("{}: {error}", tr("WhatsApp refused the answer"))),
         };
         log::info!("[CALL] accepted call_id={}", handle.call_id());
         self.call_id = handle.call_id().to_owned();
@@ -2206,14 +2216,14 @@ impl Call {
     /// Declines a ringing call with the real `<reject>`.
     pub async fn decline(&mut self, client: &Arc<Client>) -> Result<()> {
         let Some(incoming) = self.incoming.clone() else {
-            return Err(anyhow!("nothing is ringing"));
+            return Err(anyhow!(tr("Nothing is ringing")));
         };
         log::info!("[CALL] rejecting call_id={}", self.call_id);
         client
             .voip()
             .reject(&incoming)
             .await
-            .map_err(|error| anyhow!("WhatsApp refused the rejection: {error}"))?;
+            .map_err(|error| anyhow!("{}: {error}", tr("WhatsApp refused the rejection")))?;
         self.incoming = None;
         self.phase = CallPhase::Ended;
         self.outcome = Some(CallOutcome::Declined);
@@ -2816,7 +2826,7 @@ impl Call {
     /// Turns the camera on or off through the engine's video direction.
     pub async fn set_camera(&mut self, on: bool) -> Result<CallUpdate> {
         let Some(handle) = self.handle.clone() else {
-            return Err(anyhow!("the call is not up"));
+            return Err(anyhow!(tr("The call is not up")));
         };
         self.note_transition(if on {
             "camera on requested"
@@ -2825,7 +2835,7 @@ impl Call {
         });
         if on {
             let Some(pipe) = self.video_pipe.as_mut() else {
-                return Err(anyhow!("this call has no video"));
+                return Err(anyhow!(tr("This call has no video")));
             };
             // The local capture comes up before the engine is asked to carry it. If the engine
             // refuses, the capture that was just started is rolled back: leaving it running would
@@ -2844,7 +2854,10 @@ impl Call {
                 self.camera_wanted = false;
                 self.media_stream_changed();
                 self.note_transition("camera on rolled back");
-                return Err(anyhow!("the camera could not be enabled: {error}"));
+                return Err(anyhow!(
+                    "{}: {error}",
+                    tr("The camera could not be turned on")
+                ));
             }
             self.camera_wanted = true;
         } else {
@@ -2860,7 +2873,8 @@ impl Call {
             if let Err(error) = notified {
                 self.note_transition("camera off, peer not told");
                 return Err(anyhow!(
-                    "the camera was stopped, but the peer was not told: {error}"
+                    "{}: {error}",
+                    tr("The camera was stopped, but the peer was not told")
                 ));
             }
         }
@@ -2888,7 +2902,7 @@ impl Call {
         camera: Option<String>,
     ) -> Result<Option<async_channel::Receiver<VideoTick>>> {
         let Some(handle) = self.handle.clone() else {
-            return Err(anyhow!("the call is not up"));
+            return Err(anyhow!(tr("The call is not up")));
         };
         self.note_transition("video requested");
         if self.video_pipe.is_none() {
@@ -2910,7 +2924,10 @@ impl Call {
             };
             if let Err(error) = started {
                 self.abandon_video();
-                return Err(anyhow!("the peer could not be asked for video: {error}"));
+                return Err(anyhow!(
+                    "{}: {error}",
+                    tr("The peer could not be asked for video")
+                ));
             }
             log::info!("[CALL] video upgrade requested call_id={}", self.call_id);
             self.note_transition("video requested ok");

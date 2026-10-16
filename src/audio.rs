@@ -579,7 +579,7 @@ impl Player {
         }
         if recent {
             loaded.paused = true;
-            return Err("The sound output stopped working. Press play to try again".to_owned());
+            return Err(tr("The sound output stopped working. Press play to try again").to_owned());
         }
         self.restart(fraction)
     }
@@ -921,7 +921,9 @@ fn record_from<M: Iterator<Item = f32>>(
                 let block = (chunk_len(channels, rate) / 5).max(1);
                 read_microphone(&mut microphone, block, &done, &samples_tx);
             })
-            .map_err(|error| format!("Could not start recording: {error}"))?;
+            .map_err(|error| {
+                format!("{}: {error}", crate::i18n::tr("Could not start recording"))
+            })?;
     }
     let outcome = loop {
         match opened.recv_timeout(POLL_MICROPHONE) {
@@ -935,7 +937,7 @@ fn record_from<M: Iterator<Item = f32>>(
             // Stopped before the microphone was open.
             Err(mpsc::RecvTimeoutError::Timeout) => break Ok((Vec::new(), 1, voice::RATE)),
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                break Err("Could not open the microphone".to_owned());
+                break Err(tr("Could not open the microphone").to_owned());
             }
         }
     };

@@ -47,7 +47,7 @@ pub fn cameras() -> Vec<(String, String)> {
     let mut cameras = backend::list();
     for (_, name) in &mut cameras {
         if name.trim().is_empty() {
-            *name = "Camera".to_owned();
+            *name = crate::i18n::tr("Camera").to_owned();
         } else {
             *name = name.trim().to_owned();
         }

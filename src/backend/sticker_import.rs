@@ -205,8 +205,12 @@ Lrsybb0z5gg8w7ZblEuB9zOW9M3l60DXuJO6l7g+deV6P96rv2unHS8UlvWiVWDy\n\
 /// HTTP client that trusts only Signal's sticker CDN authority.
 fn signal_agent() -> Result<ureq::Agent, String> {
     use ureq::tls::{Certificate, RootCerts, TlsConfig};
-    let ca = Certificate::from_pem(SIGNAL_CA.as_bytes())
-        .map_err(|error| format!("Could not read the Signal certificate: {error}"))?;
+    let ca = Certificate::from_pem(SIGNAL_CA.as_bytes()).map_err(|error| {
+        format!(
+            "{}: {error}",
+            crate::i18n::tr("Could not read the Signal certificate")
+        )
+    })?;
     let tls = TlsConfig::builder()
         .root_certs(RootCerts::new_with_certs(&[ca]))
         .build();
@@ -221,10 +225,20 @@ fn fetch(agent: &ureq::Agent, url: &str) -> Result<Vec<u8>, String> {
     agent
         .get(url)
         .call()
-        .map_err(|error| format!("signal.art request failed: {error}"))?
+        .map_err(|error| {
+            format!(
+                "{}: {error}",
+                crate::i18n::tr("The signal.art request failed")
+            )
+        })?
         .body_mut()
         .read_to_vec()
-        .map_err(|error| format!("Could not read the signal.art response: {error}"))
+        .map_err(|error| {
+            format!(
+                "{}: {error}",
+                crate::i18n::tr("Could not read the signal.art response")
+            )
+        })
 }
 
 /// Downloads a signal.art pack into a directory named after its title.
@@ -284,10 +298,14 @@ pub fn import_signal_pack(url: &str, packs: &Path) -> Result<String, String> {
 
 /// Imports a .wastickers or zip archive. Uses `title.txt` or the filename as title.
 pub fn import_archive(path: &Path, packs: &Path) -> Result<String, String> {
-    let file =
-        std::fs::File::open(path).map_err(|error| format!("Could not open the file: {error}"))?;
-    let mut archive = zip::ZipArchive::new(file)
-        .map_err(|error| format!("This file is not a sticker archive: {error}"))?;
+    let file = std::fs::File::open(path)
+        .map_err(|error| format!("{}: {error}", crate::i18n::tr("Could not open the file")))?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|error| {
+        format!(
+            "{}: {error}",
+            crate::i18n::tr("This file is not a sticker archive")
+        )
+    })?;
     let mut title: Option<String> = None;
     let mut pictures: Vec<(String, Vec<u8>)> = Vec::new();
     for index in 0..archive.len() {
@@ -339,7 +357,7 @@ pub fn extract_whatsapp_pack(
     dir: &Path,
 ) -> Result<Vec<PathBuf>, String> {
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip))
-        .map_err(|error| format!("This is not a sticker pack: {error}"))?;
+        .map_err(|error| format!("{}: {error}", crate::i18n::tr("This is not a sticker pack")))?;
     let mut files: Vec<(String, Vec<u8>)> = Vec::new();
     for index in 0..archive.len() {
         let Ok(mut entry) = archive.by_index(index) else {
@@ -447,8 +465,12 @@ fn write_pack(packs: &Path, title: &str, files: Vec<Vec<u8>>) -> Result<String, 
     }
     let dir = unique_pack_dir(packs, title)?;
     for (index, bytes) in files.iter().enumerate() {
-        std::fs::write(dir.join(format!("{index:03}.webp")), bytes)
-            .map_err(|error| format!("Could not write the sticker pack: {error}"))?;
+        std::fs::write(dir.join(format!("{index:03}.webp")), bytes).map_err(|error| {
+            format!(
+                "{}: {error}",
+                crate::i18n::tr("Could not write the sticker pack")
+            )
+        })?;
     }
     Ok(dir
         .file_name()
@@ -565,8 +587,12 @@ pub(super) fn unique_pack_dir(root: &Path, title: &str) -> Result<PathBuf, Strin
         };
         let dir = root.join(&name);
         if !dir.exists() {
-            std::fs::create_dir_all(&dir)
-                .map_err(|error| format!("Could not create the pack folder: {error}"))?;
+            std::fs::create_dir_all(&dir).map_err(|error| {
+                format!(
+                    "{}: {error}",
+                    crate::i18n::tr("Could not create the pack folder")
+                )
+            })?;
             return Ok(dir);
         }
     }

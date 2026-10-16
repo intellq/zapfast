@@ -10,7 +10,7 @@ use crate::qr::Qr;
 use crate::theme::{self, Icon};
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
-    card(app, ui, "login", "A native WhatsApp client.", body);
+    card(app, ui, "login", tr("A native WhatsApp client."), body);
 }
 
 /// The centred card of the linking and lock screens: the logo, the name,

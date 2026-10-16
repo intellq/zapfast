@@ -732,7 +732,8 @@ pub async fn run(
                                 ),
                                 Err(error) => {
                                     let _ = events.send(Event::Link(LinkStatus::Failed(format!(
-                                        "Could not set the old archive aside: {error}"
+                                        "{}: {error}",
+                                        crate::i18n::tr("Could not set the old archive aside")
                                     ))));
                                     waker.wake();
                                     continue;
@@ -1640,7 +1641,7 @@ impl Worker {
                 starred,
                 generation,
                 session,
-                result: Err("Not connected to WhatsApp".to_owned()),
+                result: Err(crate::i18n::tr("Not connected to WhatsApp").to_owned()),
             });
             return;
         };
@@ -1651,7 +1652,7 @@ impl Worker {
                 starred,
                 generation,
                 session,
-                result: Err("This message is not on this computer".to_owned()),
+                result: Err(crate::i18n::tr("This message is not on this computer").to_owned()),
             });
             return;
         };
@@ -2450,7 +2451,8 @@ impl Worker {
             Ok(store) => store,
             Err(error) => {
                 self.set_status(LinkStatus::Failed(format!(
-                    "Could not open the device store: {error}"
+                    "{}: {error}",
+                    crate::i18n::tr("Could not open the device store")
                 )));
                 return;
             }
@@ -2500,7 +2502,8 @@ impl Worker {
                 self.set_status(LinkStatus::Connecting);
             }
             Err(error) => self.set_status(LinkStatus::Failed(format!(
-                "Could not start WhatsApp: {error}"
+                "{}: {error}",
+                crate::i18n::tr("Could not start WhatsApp")
             ))),
         }
     }
@@ -3799,8 +3802,10 @@ impl Worker {
                         saved_name = Some(name);
                     }
                     Err(error) => {
-                        let _ = events
-                            .send(Event::Error(format!("Could not change your name: {error}")));
+                        let _ = events.send(Event::Error(format!(
+                            "{}: {error}",
+                            crate::i18n::tr("Could not change your name")
+                        )));
                     }
                 }
             }
@@ -3810,7 +3815,8 @@ impl Worker {
                     Ok(()) => saved_about = Some(about),
                     Err(error) => {
                         let _ = events.send(Event::Error(format!(
-                            "Could not change your About: {error}"
+                            "{}: {error}",
+                            crate::i18n::tr("Could not change your About")
                         )));
                     }
                 }
@@ -5176,7 +5182,8 @@ impl Worker {
             Ok(Err(error)) => {
                 log::warn!("a history chunk could not be read");
                 self.emit(Event::Error(format!(
-                    "Could not read part of the chat history: {error}"
+                    "{}: {error}",
+                    crate::i18n::tr("Could not read part of the chat history")
                 )));
             }
             Err(_error) => log::warn!("history parsing worker failed"),
@@ -6706,8 +6713,10 @@ impl Worker {
                             let _ = commands.send(Command::SetProfilePicture(bytes));
                         }
                         Err(error) => {
-                            let _ = events
-                                .send(Event::Error(format!("Could not use this picture: {error}")));
+                            let _ = events.send(Event::Error(format!(
+                                "{}: {error}",
+                                crate::i18n::tr("Could not use this picture")
+                            )));
                         }
                     }
                     waker.wake();
@@ -6734,7 +6743,8 @@ impl Worker {
                         }
                         Err(error) => {
                             let _ = events.send(Event::Error(format!(
-                                "Could not change your profile picture: {error}"
+                                "{}: {error}",
+                                crate::i18n::tr("Could not change your profile picture")
                             )));
                         }
                     }
@@ -6765,8 +6775,10 @@ impl Worker {
                             });
                         }
                         Err(error) => {
-                            let _ = events
-                                .send(Event::Error(format!("Could not use this picture: {error}")));
+                            let _ = events.send(Event::Error(format!(
+                                "{}: {error}",
+                                crate::i18n::tr("Could not use this picture")
+                            )));
                         }
                     }
                     waker.wake();
@@ -6828,9 +6840,10 @@ impl Worker {
                     };
                     let event = match std::fs::copy(&source, &target) {
                         Ok(_) => Event::Info(tr("File saved").to_owned()),
-                        Err(error) => {
-                            Event::Error(format!("Could not save the attachment: {error}"))
-                        }
+                        Err(error) => Event::Error(format!(
+                            "{}: {error}",
+                            crate::i18n::tr("Could not save the attachment")
+                        )),
                     };
                     let _ = events.send(event);
                     waker.wake();
@@ -6890,9 +6903,10 @@ impl Worker {
                         None => Event::Info(
                             tr("Files saved: {count}").replace("{count}", &saved.to_string()),
                         ),
-                        Some(error) => {
-                            Event::Error(format!("Could not save the attachments: {error}"))
-                        }
+                        Some(error) => Event::Error(format!(
+                            "{}: {error}",
+                            crate::i18n::tr("Could not save the attachments")
+                        )),
                     };
                     let _ = events.send(event);
                     waker.wake();
@@ -6912,7 +6926,8 @@ impl Worker {
                 let events = self.events.clone();
                 let waker = self.waker.clone();
                 tokio::task::spawn_blocking(move || {
-                    let mut dialog = rfd::FileDialog::new().set_title("Save album");
+                    let mut dialog =
+                        rfd::FileDialog::new().set_title(crate::i18n::tr("Save album"));
                     if let Some(downloads) = directories::UserDirs::new()
                         .and_then(|dirs| dirs.download_dir().map(Path::to_path_buf))
                     {
@@ -6930,13 +6945,17 @@ impl Worker {
                         }
                     }
                     let event = if failed.is_empty() {
-                        Event::Info(format!("Saved {saved} album attachments"))
+                        Event::Info(
+                            crate::i18n::tr("Saved {saved} album attachments")
+                                .replace("{saved}", &saved.to_string()),
+                        )
                     } else {
-                        Event::Error(format!(
-                            "Saved {saved} album attachments; {} could not be saved: {}",
-                            failed.len(),
-                            failed.join("; ")
-                        ))
+                        Event::Error(
+                            crate::i18n::tr("Saved {saved} album attachments; {failed} could not be saved: {list}")
+                                .replace("{saved}", &saved.to_string())
+                                .replace("{failed}", &failed.len().to_string())
+                                .replace("{list}", &failed.join("; ")),
+                        )
                     };
                     let _ = events.send(event);
                     waker.wake();
@@ -7029,9 +7048,10 @@ impl Worker {
                     self.favorite_sticker(&path);
                     self.emit(Event::Info(tr("Added to favorites").to_owned()));
                 }
-                (Err(error), _) => {
-                    self.emit(Event::Error(format!("Could not make the sticker: {error}")))
-                }
+                (Err(error), _) => self.emit(Event::Error(format!(
+                    "{}: {error}",
+                    crate::i18n::tr("Could not make the sticker")
+                ))),
             },
             Command::InspectPicture { target, path } => {
                 let commands = self.commands.clone();
@@ -7099,7 +7119,10 @@ impl Worker {
                     return;
                 }
                 if let Some(error) = error {
-                    self.emit(Event::Error(format!("Could not save contact: {error}")));
+                    self.emit(Event::Error(format!(
+                        "{}: {error}",
+                        crate::i18n::tr("Could not save contact")
+                    )));
                     return;
                 }
                 // A chat under a privacy id is named too, not only its number.
@@ -7218,9 +7241,10 @@ impl Worker {
                     ));
                 }
                 Err(error) if error.is_empty() => self.emit_stickers(),
-                Err(error) => {
-                    self.emit(Event::Error(format!("Could not add sticker pack: {error}")))
-                }
+                Err(error) => self.emit(Event::Error(format!(
+                    "{}: {error}",
+                    crate::i18n::tr("Could not add sticker pack")
+                ))),
             },
             Command::DeleteStickerPack { dir } => {
                 let root = self.packs_dir();
@@ -7450,9 +7474,10 @@ impl Worker {
                     crate::util::now(),
                 ) {
                     Ok(_) => self.emit_stickers(),
-                    Err(error) => {
-                        self.emit(Event::Error(format!("Could not create the pack: {error}")))
-                    }
+                    Err(error) => self.emit(Event::Error(format!(
+                        "{}: {error}",
+                        crate::i18n::tr("Could not create the pack")
+                    ))),
                 }
             }
             Command::SetStickerPack {
@@ -7820,7 +7845,8 @@ impl Worker {
                 Err(error) => {
                     self.pairing_phone = None;
                     self.emit(Event::Error(format!(
-                        "Could not link by phone number: {error}"
+                        "{}: {error}",
+                        crate::i18n::tr("Could not link by phone number")
                     )));
                     let status = self.unlinked();
                     self.set_status(status);
@@ -7914,7 +7940,10 @@ impl Worker {
                 self.emit_chat(&chat);
                 self.advance_serial_forward(&id);
                 if let Some(error) = error {
-                    self.emit(Event::Error(format!("Message not sent: {error}")));
+                    self.emit(Event::Error(format!(
+                        "{}: {error}",
+                        crate::i18n::tr("Message not sent")
+                    )));
                 }
             }
             Command::Downloaded {
@@ -9344,9 +9373,9 @@ impl Worker {
             (Some(client), Some(video)) => (client, video),
             (client, _) => {
                 let error = if client.is_none() {
-                    "Not connected to WhatsApp"
+                    crate::i18n::tr("Not connected to WhatsApp")
                 } else {
-                    "The clip has not arrived"
+                    crate::i18n::tr("The clip has not arrived")
                 };
                 self.emit(Event::Motion {
                     chat,
@@ -9784,7 +9813,10 @@ impl Worker {
                     truncated,
                 });
             }
-            Err(error) => self.emit(Event::Error(format!("Could not search: {error}"))),
+            Err(error) => self.emit(Event::Error(format!(
+                "{}: {error}",
+                crate::i18n::tr("Could not search")
+            ))),
         }
     }
 
@@ -9797,7 +9829,10 @@ impl Worker {
                 }
                 self.emit(Event::SearchHits { query, messages });
             }
-            Err(error) => self.emit(Event::Error(format!("Could not search: {error}"))),
+            Err(error) => self.emit(Event::Error(format!(
+                "{}: {error}",
+                crate::i18n::tr("Could not search")
+            ))),
         }
     }
 
@@ -9826,7 +9861,10 @@ impl Worker {
                     complete,
                 });
             }
-            Err(error) => self.emit(Event::Error(format!("Could not read the chat: {error}"))),
+            Err(error) => self.emit(Event::Error(format!(
+                "{}: {error}",
+                crate::i18n::tr("Could not read the chat")
+            ))),
         }
     }
 
@@ -9879,7 +9917,10 @@ impl Worker {
                     complete: false,
                 });
             }
-            Err(error) => self.emit(Event::Error(format!("Could not read the chat: {error}"))),
+            Err(error) => self.emit(Event::Error(format!(
+                "{}: {error}",
+                crate::i18n::tr("Could not read the chat")
+            ))),
         }
     }
 
@@ -9896,7 +9937,9 @@ impl Worker {
             match self.prepare_text_edit(&chat, &id, text, mentions) {
                 Ok(prepared) => prepared,
                 Err(_) => {
-                    self.emit(Event::Error("Could not prepare the message edit".into()));
+                    self.emit(Event::Error(
+                        crate::i18n::tr("Could not prepare the message edit").into(),
+                    ));
                     self.emit_message(&chat, &id);
                     return;
                 }
@@ -9913,7 +9956,9 @@ impl Worker {
                 )
                 .await
                 .map(|_| (content, mention_rows))
-                .map_err(|error| format!("Could not send the edit: {error}"));
+                .map_err(|error| {
+                    format!("{}: {error}", crate::i18n::tr("Could not send the edit"))
+                });
             let _ = commands.send(Command::EditSettled {
                 chat,
                 id,
@@ -10042,7 +10087,8 @@ impl Worker {
                     chat,
                     id: String::new(),
                     error: Some(format!(
-                        "Could not delete the message for everyone: {error}"
+                        "{}: {error}",
+                        crate::i18n::tr("Could not delete the message for everyone")
                     )),
                 });
             }
@@ -10115,7 +10161,7 @@ impl Worker {
                 caption,
                 mentions,
                 quote,
-                "Could not send the file",
+                crate::i18n::tr("Could not send the file"),
             );
         }
     }
@@ -10173,7 +10219,7 @@ impl Worker {
             caption,
             mentions,
             quote,
-            "Could not send the picture",
+            crate::i18n::tr("Could not send the picture"),
         );
     }
 
@@ -10395,7 +10441,10 @@ impl Worker {
                     let _ = commands.send(Command::Sent {
                         chat,
                         id: row.id,
-                        error: Some(format!("Could not send the file: {error}")),
+                        error: Some(format!(
+                            "{}: {error}",
+                            crate::i18n::tr("Could not send the file")
+                        )),
                     });
                 }
             }
@@ -10611,7 +10660,10 @@ impl Worker {
                     let _ = commands.send(Command::Sent {
                         chat,
                         id,
-                        error: Some(format!("Could not send the voice message: {error}")),
+                        error: Some(format!(
+                            "{}: {error}",
+                            crate::i18n::tr("Could not send the voice message")
+                        )),
                     });
                 }
             }
@@ -10685,7 +10737,10 @@ impl Worker {
                     let _ = commands.send(Command::Sent {
                         chat,
                         id: String::new(),
-                        error: Some(format!("Could not send the sticker: {error}")),
+                        error: Some(format!(
+                            "{}: {error}",
+                            crate::i18n::tr("Could not send the sticker")
+                        )),
                     });
                 }
             }
@@ -10744,7 +10799,10 @@ impl Worker {
                     let _ = commands.send(Command::Sent {
                         chat,
                         id: String::new(),
-                        error: Some(format!("Could not send the GIF: {error}")),
+                        error: Some(format!(
+                            "{}: {error}",
+                            crate::i18n::tr("Could not send the GIF")
+                        )),
                     });
                 }
             }
@@ -10858,7 +10916,7 @@ impl Worker {
                 generation,
                 session,
                 expires_at: now + PIN_SECS,
-                result: Err("Not connected to WhatsApp".to_owned()),
+                result: Err(crate::i18n::tr("Not connected to WhatsApp").to_owned()),
             });
             return;
         };
@@ -10871,7 +10929,9 @@ impl Worker {
                 generation,
                 session,
                 expires_at: now + PIN_SECS,
-                result: Err("This message is not stored on this computer".to_owned()),
+                result: Err(
+                    crate::i18n::tr("This message is not stored on this computer").to_owned(),
+                ),
             });
             return;
         };
@@ -11273,9 +11333,12 @@ fn media_path(dir: &Path, chat: &str, id: &str, mime: &str, file_name: Option<&s
 /// us. Checking existence before fs::copy could still overwrite a user's file.
 fn save_album_copy(source: &Path, folder: &Path, name: &str) -> std::io::Result<PathBuf> {
     use std::io::ErrorKind;
-    let name = Path::new(name)
-        .file_name()
-        .ok_or_else(|| std::io::Error::new(ErrorKind::InvalidInput, "Invalid attachment name"))?;
+    let name = Path::new(name).file_name().ok_or_else(|| {
+        std::io::Error::new(
+            ErrorKind::InvalidInput,
+            crate::i18n::tr("Invalid attachment name"),
+        )
+    })?;
     let path = Path::new(name);
     let stem = path.file_stem().unwrap_or(name).to_string_lossy();
     let extension = path
@@ -12475,7 +12538,7 @@ struct CountedReader {
 impl io::Read for CountedReader {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if self.progress.cancelled.load(Ordering::Relaxed) {
-            return Err(io::Error::other("upload cancelled"));
+            return Err(io::Error::other(crate::i18n::tr("upload cancelled")));
         }
         let rest = &self.data[self.at..];
         let read = rest.len().min(buf.len());
@@ -12619,10 +12682,12 @@ fn search_gifs(query: &str, key: &str, dir: &Path) -> Result<Vec<Gif>, GifError>
         )
     };
     let body = match crate::proxy::agent().get(&url).call() {
-        Ok(mut response) => response
-            .body_mut()
-            .read_to_string()
-            .map_err(|error| plain(format!("GIPHY request failed: {error}")))?,
+        Ok(mut response) => response.body_mut().read_to_string().map_err(|error| {
+            plain(format!(
+                "{}: {error}",
+                crate::i18n::tr("GIPHY request failed")
+            ))
+        })?,
         // Treat 401 and 403 as API-key failures for the picker.
         Err(ureq::Error::StatusCode(code @ (401 | 403))) => {
             return Err(GifError {
@@ -12631,10 +12696,19 @@ fn search_gifs(query: &str, key: &str, dir: &Path) -> Result<Vec<Gif>, GifError>
                 bad_key: true,
             });
         }
-        Err(error) => return Err(plain(format!("GIPHY request failed: {error}"))),
+        Err(error) => {
+            return Err(plain(format!(
+                "{}: {error}",
+                crate::i18n::tr("GIPHY request failed")
+            )));
+        }
     };
-    let json: serde_json::Value = serde_json::from_str(&body)
-        .map_err(|error| plain(format!("Invalid GIPHY response: {error}")))?;
+    let json: serde_json::Value = serde_json::from_str(&body).map_err(|error| {
+        plain(format!(
+            "{}: {error}",
+            crate::i18n::tr("Invalid GIPHY response")
+        ))
+    })?;
     if let Some(message) = json["meta"]["msg"].as_str()
         && let Some(status) = json["meta"]["status"]
             .as_u64()

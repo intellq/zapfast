@@ -12,8 +12,12 @@ const LIMIT: usize = 100 * 1024;
 
 /// A picture's size and whether it has any transparent pixel.
 pub fn inspect(bytes: &[u8]) -> Result<(u32, u32, bool), String> {
-    let picture = image::load_from_memory(bytes)
-        .map_err(|error| format!("This picture could not be read: {error}"))?;
+    let picture = image::load_from_memory(bytes).map_err(|error| {
+        format!(
+            "{}: {error}",
+            crate::i18n::tr("This picture could not be read")
+        )
+    })?;
     let transparent =
         picture.color().has_alpha() && picture.to_rgba8().pixels().any(|pixel| pixel[3] < 255);
     Ok((picture.width(), picture.height(), transparent))
@@ -27,7 +31,12 @@ pub fn make(
     emojis: &[String],
 ) -> Result<Vec<u8>, String> {
     let picture = image::load_from_memory(bytes)
-        .map_err(|error| format!("This picture could not be read: {error}"))?
+        .map_err(|error| {
+            format!(
+                "{}: {error}",
+                crate::i18n::tr("This picture could not be read")
+            )
+        })?
         .to_rgba8();
     let crop = crop.clamped(picture.width(), picture.height());
     let square =

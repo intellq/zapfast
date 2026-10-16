@@ -260,7 +260,7 @@ fn show_list_button(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
                 18.0,
                 palette.secondary,
                 palette.text,
-                &super::keys::label("Show the chat list (Ctrl+B)"),
+                &super::keys::label(crate::i18n::tr("Show the chat list (Ctrl+B)")),
             )
             .tab_stop(Stop::Sidebar)
             .clicked()
@@ -326,9 +326,9 @@ fn destination_button(
             Icon::Settings,
             Stop::Settings,
             super::keys::label(if lit {
-                "Close settings (Ctrl+,)"
+                crate::i18n::tr("Close settings (Ctrl+,)")
             } else {
-                "Settings (Ctrl+,)"
+                crate::i18n::tr("Settings (Ctrl+,)")
             }),
         ),
     };

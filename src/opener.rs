@@ -15,10 +15,9 @@ use std::path::Path;
 /// interface thread. The error names the file so the reader can go there.
 pub fn open_or_reveal(path: &Path) -> Result<(), String> {
     first_success(&attempts(path)).map_err(|error| {
-        format!(
-            "Could not open {}: {error}. Open it from its folder instead.",
-            path.display()
-        )
+        crate::i18n::tr("Could not open {path}: {error}. Open it from its folder instead.")
+            .replace("{path}", &path.display().to_string())
+            .replace("{error}", &error)
     })
 }
 

@@ -901,7 +901,7 @@ fn about(app: &mut App, ui: &mut egui::Ui) {
             theme::text(ui, "ZapFast", theme::bold(17.0), palette.text);
             theme::text(
                 ui,
-                format!("Version {}", env!("CARGO_PKG_VERSION")),
+                crate::i18n::tr("Version {}").replace("{}", env!("CARGO_PKG_VERSION")),
                 theme::regular(13.0),
                 palette.secondary,
             );

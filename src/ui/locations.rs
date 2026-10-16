@@ -4,6 +4,7 @@ use egui::{Align, Layout};
 
 use crate::app::App;
 use crate::geo;
+use crate::i18n::tr;
 use crate::model::Action;
 use crate::theme::{self, Icon};
 
@@ -18,8 +19,15 @@ pub fn send(app: &mut App, ui: &mut egui::Ui, chat: &str) {
             palette.text,
         );
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if theme::icon_button(ui, Icon::X, 16.0, palette.secondary, palette.text, "Close")
-                .clicked()
+            if theme::icon_button(
+                ui,
+                Icon::X,
+                16.0,
+                palette.secondary,
+                palette.text,
+                tr("Close"),
+            )
+            .clicked()
             {
                 app.actions.push(Action::CloseDialog);
             }
