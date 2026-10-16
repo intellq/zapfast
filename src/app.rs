@@ -8010,7 +8010,7 @@ impl App {
         }
         if let Some(error) = self.recording.as_ref().and_then(Recorder::failure) {
             self.recording = None;
-            self.toast_error(format!("{}: {error}", tr("Could not record")));
+            self.recording_failed(&error);
         }
         // The playback bar, the recording light and the waveform only show
         // progress, so they step while a screen reader is attached.
@@ -8214,8 +8214,15 @@ impl App {
                 });
                 self.follow_outgoing();
             }
-            Err(error) => self.toast_error(format!("{}: {error}", tr("Could not record"))),
+            Err(error) => self.recording_failed(&error),
         }
+    }
+
+    fn recording_failed(&mut self, error: &str) {
+        // Microphone errors name only the device and its stream, never what
+        // was said, so the log keeps them for bug reports (#382).
+        log::warn!("recording failed: {error}");
+        self.toast_error(format!("{}: {error}", tr("Could not record")));
     }
 
     pub fn frame_ui(&mut self, ui: &mut egui::Ui) {
