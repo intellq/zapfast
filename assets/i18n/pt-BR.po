@@ -5488,3 +5488,129 @@ msgstr "Outros"
 
 msgid "Media cache"
 msgstr "Cache de mídia"
+
+msgid "Starred"
+msgstr "Com estrela"
+
+msgid "Star removed"
+msgstr "Estrela removida"
+
+msgid "Pinned for 7 days"
+msgstr "Fixada por 7 dias"
+
+msgid "Pin removed"
+msgstr "Fixação removida"
+
+msgid "This chat already has three pinned messages"
+msgstr "Esta conversa já tem três mensagens fixadas"
+
+msgid "Could not check the number. Please try again."
+msgstr "Não foi possível verificar o número. Tente novamente."
+
+msgid "Enter a valid international phone number"
+msgstr "Informe um número de telefone internacional válido"
+
+msgid "Fetch older history"
+msgstr "Buscar histórico anterior"
+
+msgid "Media, links and docs"
+msgstr "Mídia, links e documentos"
+
+msgid "Starred messages"
+msgstr "Mensagens com estrela"
+
+msgid "No starred messages"
+msgstr "Nenhuma mensagem com estrela"
+
+msgid "Right-click a message and choose Star to keep it here."
+msgstr "Clique com o botão direito em uma mensagem e escolha Marcar com estrela para guardá-la aqui."
+
+msgid "Original group message unavailable"
+msgstr "Mensagem original do grupo indisponível"
+
+msgid "Pinned message {index} of {count}: {text}"
+msgstr "Mensagem fixada {index} de {count}: {text}"
+
+msgid "You pinned a message"
+msgstr "Você fixou uma mensagem"
+
+msgid "A message was pinned"
+msgstr "Uma mensagem foi fixada"
+
+msgid "{} pinned a message"
+msgstr "{} fixou uma mensagem"
+
+msgid "Unstar"
+msgstr "Desmarcar estrela"
+
+msgid "Star"
+msgstr "Marcar com estrela"
+
+msgid "Reply privately"
+msgstr "Responder em particular"
+
+msgid "Unpin message"
+msgstr "Desafixar mensagem"
+
+msgid "Pin message"
+msgstr "Fixar mensagem"
+
+msgid "Enter a phone number with its country code, using only digits, spaces, hyphens and brackets"
+msgstr "Informe um número de telefone com o código do país, usando apenas dígitos, espaços, hífens e parênteses"
+
+msgid "Enter a phone number with its country code. Add a name to save the contact, or leave it blank to message the number without saving it. WhatsApp uses the first name as the display name."
+msgstr "Informe um número de telefone com o código do país. Adicione um nome para salvar o contato ou deixe em branco para enviar mensagem ao número sem salvá-lo. O WhatsApp usa o primeiro nome como nome de exibição."
+
+msgid "No media"
+msgstr "Nenhuma mídia"
+
+msgid "Photos and videos shared in this chat will show here."
+msgstr "Fotos e vídeos compartilhados nesta conversa aparecerão aqui."
+
+msgid "No documents"
+msgstr "Nenhum documento"
+
+msgid "Files shared in this chat will show here."
+msgstr "Arquivos compartilhados nesta conversa aparecerão aqui."
+
+msgid "No links"
+msgstr "Nenhum link"
+
+msgid "Links shared in this chat will show here."
+msgstr "Links compartilhados nesta conversa aparecerão aqui."
+
+msgid "Only the newest items are listed."
+msgstr "Somente os itens mais recentes são listados."
+
+msgctxt "info tab"
+msgid "Media"
+msgstr "Mídia"
+
+msgctxt "info tab"
+msgid "Docs"
+msgstr "Documentos"
+
+msgctxt "info tab"
+msgid "Links"
+msgstr "Links"
+
+msgid "Group info"
+msgstr "Informações do grupo"
+
+msgid "Channel info"
+msgstr "Informações do canal"
+
+msgid "Contact info"
+msgstr "Informações do contato"
+
+msgid "Back"
+msgstr "Voltar"
+
+msgid "{}+"
+msgstr "{}+"
+
+msgid "Could not list the media."
+msgstr "Não foi possível listar a mídia."
+
+msgid "Asks your phone in the background for older messages in the open, pinned and ten most recent chats."
+msgstr "Pede ao seu celular, em segundo plano, mensagens mais antigas da conversa aberta, das fixadas e das dez mais recentes."

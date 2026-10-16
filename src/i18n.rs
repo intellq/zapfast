@@ -321,6 +321,22 @@ mod tests {
         );
     }
 
+    /// Checks that private reply controls use dedicated translated catalog entries.
+    #[test]
+    fn private_reply_labels_use_their_own_catalog_entries() {
+        assert_eq!(
+            gettext(Locale::PortugueseBrazil, "Reply privately"),
+            "Responder em particular"
+        );
+        assert_eq!(
+            gettext(
+                Locale::PortugueseBrazil,
+                "Original group message unavailable"
+            ),
+            "Mensagem original do grupo indisponível"
+        );
+    }
+
     #[test]
     fn contextual_lookups_stay_separate_from_plain_ones() {
         // An unknown context is distinct from gettext and still falls back to

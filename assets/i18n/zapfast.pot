@@ -5319,3 +5319,129 @@ msgstr ""
 
 msgid "Media cache"
 msgstr ""
+
+msgid "Starred"
+msgstr ""
+
+msgid "Star removed"
+msgstr ""
+
+msgid "Pinned for 7 days"
+msgstr ""
+
+msgid "Pin removed"
+msgstr ""
+
+msgid "This chat already has three pinned messages"
+msgstr ""
+
+msgid "Could not check the number. Please try again."
+msgstr ""
+
+msgid "Enter a valid international phone number"
+msgstr ""
+
+msgid "Fetch older history"
+msgstr ""
+
+msgid "Media, links and docs"
+msgstr ""
+
+msgid "Starred messages"
+msgstr ""
+
+msgid "No starred messages"
+msgstr ""
+
+msgid "Right-click a message and choose Star to keep it here."
+msgstr ""
+
+msgid "Original group message unavailable"
+msgstr ""
+
+msgid "Pinned message {index} of {count}: {text}"
+msgstr ""
+
+msgid "You pinned a message"
+msgstr ""
+
+msgid "A message was pinned"
+msgstr ""
+
+msgid "{} pinned a message"
+msgstr ""
+
+msgid "Unstar"
+msgstr ""
+
+msgid "Star"
+msgstr ""
+
+msgid "Reply privately"
+msgstr ""
+
+msgid "Unpin message"
+msgstr ""
+
+msgid "Pin message"
+msgstr ""
+
+msgid "Enter a phone number with its country code, using only digits, spaces, hyphens and brackets"
+msgstr ""
+
+msgid "Enter a phone number with its country code. Add a name to save the contact, or leave it blank to message the number without saving it. WhatsApp uses the first name as the display name."
+msgstr ""
+
+msgid "No media"
+msgstr ""
+
+msgid "Photos and videos shared in this chat will show here."
+msgstr ""
+
+msgid "No documents"
+msgstr ""
+
+msgid "Files shared in this chat will show here."
+msgstr ""
+
+msgid "No links"
+msgstr ""
+
+msgid "Links shared in this chat will show here."
+msgstr ""
+
+msgid "Only the newest items are listed."
+msgstr ""
+
+msgctxt "info tab"
+msgid "Media"
+msgstr ""
+
+msgctxt "info tab"
+msgid "Docs"
+msgstr ""
+
+msgctxt "info tab"
+msgid "Links"
+msgstr ""
+
+msgid "Group info"
+msgstr ""
+
+msgid "Channel info"
+msgstr ""
+
+msgid "Contact info"
+msgstr ""
+
+msgid "Back"
+msgstr ""
+
+msgid "{}+"
+msgstr ""
+
+msgid "Could not list the media."
+msgstr ""
+
+msgid "Asks your phone in the background for older messages in the open, pinned and ten most recent chats."
+msgstr ""
