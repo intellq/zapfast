@@ -68,8 +68,14 @@ const STEP_UP: [u32; 2] = [TIERS[0].max_bitrate, TIERS[1].max_bitrate];
 /// The rate below which the picture steps down from tier `n + 1` to `n`. Lower than the step up,
 /// so a rate hovering at a boundary does not flip the picture size back and forth.
 const STEP_DOWN: [u32; 2] = [450_000, 850_000];
-/// How long a rate has to hold before the picture grows.
+/// How long a rate has to hold before the picture grows, the first time.
 const STEP_UP_HOLD: Duration = Duration::from_secs(4);
+/// How soon after a step up a sign of congestion means the larger picture is what the path could
+/// not carry. A larger picture starts with its largest frame, a keyframe at the new size, so a
+/// path at its limit says so within a few reports.
+const STEP_UP_PROBATION: Duration = Duration::from_secs(10);
+/// The longest the hold before a step up grows to after steps up that failed.
+const MAX_STEP_UP_HOLD: Duration = Duration::from_secs(64);
 /// After a sign of congestion, how long before the rate may rise again.
 const CONGESTION_HOLD: Duration = Duration::from_secs(3);
 /// The rise for a clean report, and how often it may be applied.
@@ -165,6 +171,8 @@ pub enum Reason {
     Clean,
     /// The relay connection's send queue dropped video it could not take.
     SendDrops,
+    /// The camera's frames backed up on the way to the engine and some were let go.
+    CaptureDrops,
     /// The peer's own estimate of what it can receive.
     Estimate(u32),
 }
@@ -183,6 +191,12 @@ pub struct RateControl {
     setting: Setting,
     /// When the rate first stood high enough for the next step up, while it still does.
     above_since: Option<Instant>,
+    /// How long the rate has to stand there: doubled each time a step up meets congestion within
+    /// its probation, so a path that cannot carry the larger picture is not offered it every few
+    /// seconds, each try costing a keyframe and a burst of loss.
+    step_up_hold: Duration,
+    /// When the picture last grew, while that step is still on probation.
+    stepped_up_at: Option<Instant>,
     congested_at: Option<Instant>,
     raised_at: Option<Instant>,
     /// The peer's latest estimate of what it can receive, and when it said so.
@@ -200,6 +214,8 @@ impl RateControl {
         Self {
             setting,
             above_since: None,
+            step_up_hold: STEP_UP_HOLD,
+            stepped_up_at: None,
             congested_at: None,
             raised_at: None,
             estimate: None,
@@ -257,7 +273,7 @@ impl RateControl {
         let loss = f64::from(fraction_lost) / 256.0;
         let before = self.setting;
         let reason = if loss > LOSS_CONGESTED {
-            self.congested_at = Some(now);
+            self.congested(now);
             self.setting.bitrate = scale(self.setting.bitrate, 1.0 - loss / 2.0);
             Reason::Loss(loss)
         } else if loss < LOSS_CLEAN && self.may_rise(now) {
@@ -272,10 +288,20 @@ impl RateControl {
 
     /// The send queue dropped video it could not take: the path is carrying less than is sent.
     pub fn on_send_drops(&mut self, now: Instant) -> Option<Change> {
+        self.on_drops(now, Reason::SendDrops)
+    }
+
+    /// The camera's frames could not all be handed to the engine, which is behind for the same
+    /// reason.
+    pub fn on_capture_drops(&mut self, now: Instant) -> Option<Change> {
+        self.on_drops(now, Reason::CaptureDrops)
+    }
+
+    fn on_drops(&mut self, now: Instant, reason: Reason) -> Option<Change> {
         let before = self.setting;
-        self.congested_at = Some(now);
+        self.congested(now);
         self.setting.bitrate = scale(self.setting.bitrate, DROP_CUT);
-        self.restep(now, before, Reason::SendDrops)
+        self.restep(now, before, reason)
     }
 
     /// The peer's own estimate of what it can receive caps the rate while it is fresh.
@@ -283,6 +309,16 @@ impl RateControl {
         let before = self.setting;
         self.estimate = Some((bitrate, now));
         self.restep(now, before, Reason::Estimate(bitrate))
+    }
+
+    /// A sign of congestion: the rate holds off rising, and a step up still on probation failed.
+    fn congested(&mut self, now: Instant) {
+        self.congested_at = Some(now);
+        if let Some(at) = self.stepped_up_at.take()
+            && now.duration_since(at) < STEP_UP_PROBATION
+        {
+            self.step_up_hold = (self.step_up_hold * 2).min(MAX_STEP_UP_HOLD);
+        }
     }
 
     fn may_rise(&self, now: Instant) -> bool {
@@ -323,9 +359,10 @@ impl RateControl {
         if self.setting.tier + 1 < TIERS.len() && self.setting.bitrate >= STEP_UP[self.setting.tier]
         {
             let since = *self.above_since.get_or_insert(now);
-            if now.duration_since(since) >= STEP_UP_HOLD {
+            if now.duration_since(since) >= self.step_up_hold {
                 self.setting.tier += 1;
                 self.above_since = None;
+                self.stepped_up_at = Some(now);
             }
         } else {
             self.above_since = None;
@@ -382,16 +419,25 @@ pub fn decimation(camera_fps: u32, target_fps: u32) -> u32 {
         .unwrap_or(1)
 }
 
-/// The camera's real frame rate, measured over its last thirty frames.
+/// The camera's real frame rate, measured over windows of thirty frames.
 ///
 /// A driver reports the rate it was set to, and a camera does not always keep to it: many slow
 /// down in a dim room, and a capture card runs at whatever its HDMI source does. Thinning by a
 /// rate the camera is not keeping sends far fewer frames than intended, so the rate is measured,
 /// and a move of more than a sixth from what the thinning was planned for is reported once.
+///
+/// Only a move two windows in a row agree on. Frames are timed as they reach this thread, and
+/// while it is busy (a keyframe to encode, a new encoder to build) the driver's buffers fill and
+/// then hand over several frames at once: one window of a 50 fps capture card read 92 fps and
+/// another 75, and each reading rebuilt the encoder, which costs the peer a keyframe, only for the
+/// next to put it back. A camera that really changed its rate is still at the new one a window
+/// later; a backlog is not.
 #[derive(Debug)]
 pub struct Cadence {
     recent: std::collections::VecDeque<Instant>,
     basis: f64,
+    /// The last window's rate, while it stood apart from the basis.
+    pending: Option<f64>,
 }
 
 /// Frames over which the rate is measured: thirty intervals.
@@ -404,15 +450,13 @@ impl Cadence {
         Self {
             recent: std::collections::VecDeque::with_capacity(CADENCE_WINDOW),
             basis: planned_fps.max(1.0),
+            pending: None,
         }
     }
 
     /// One frame from the camera, taken at `at`. Returns the measured rate when it has moved far
     /// enough from the one planned for to plan again, which then becomes the new basis.
     pub fn observe(&mut self, at: Instant) -> Option<f64> {
-        if self.recent.len() == CADENCE_WINDOW {
-            self.recent.pop_front();
-        }
         self.recent.push_back(at);
         if self.recent.len() < CADENCE_WINDOW {
             return None;
@@ -422,17 +466,30 @@ impl Cadence {
             .back()?
             .saturating_duration_since(*self.recent.front()?)
             .as_secs_f64();
+        // The window's last frame opens the next one, so no interval goes unmeasured.
+        self.recent.drain(..CADENCE_WINDOW - 1);
         if span <= 0.0 {
             return None;
         }
         let measured = (CADENCE_WINDOW - 1) as f64 / span;
-        if (measured - self.basis).abs() / self.basis <= CADENCE_DRIFT {
-            return None;
+        if drifted(measured, self.basis) {
+            let confirmed = self
+                .pending
+                .replace(measured)
+                .filter(|previous| !drifted(measured, *previous))?;
+            self.pending = None;
+            self.basis = (confirmed + measured) / 2.0;
+            Some(self.basis)
+        } else {
+            self.pending = None;
+            None
         }
-        self.basis = measured;
-        self.recent.clear();
-        Some(measured)
     }
+}
+
+/// Whether `rate` is further than [`CADENCE_DRIFT`] from `from`.
+fn drifted(rate: f64, from: f64) -> bool {
+    (rate - from).abs() / from > CADENCE_DRIFT
 }
 
 /// Turns capture instants into evenly spaced RTP timestamps.
@@ -669,17 +726,85 @@ mod tests {
                 None
             );
         }
-        // Said to run at 30, really running at 15: noticed once a window of frames is in.
+        // Said to run at 30, really running at 15: noticed once two windows of frames agree.
         let mut dim = Cadence::new(30.0);
-        let measured = (0..31u64)
-            .find_map(|frame| dim.observe(start + Duration::from_micros(frame * 66_667)))
-            .expect("the slowdown is noticed");
+        let noticed = (0..62u64).find_map(|frame| {
+            dim.observe(start + Duration::from_micros(frame * 66_667))
+                .map(|measured| (frame, measured))
+        });
+        let (frame, measured) = noticed.expect("the slowdown is noticed");
+        assert_eq!(frame, 60, "at the end of the second window");
         assert!((measured - 15.0).abs() < 0.1, "{measured}");
         // And not reported again while it stays there.
-        assert!((31..120u64).all(|frame| {
+        assert!((62..150u64).all(|frame| {
             dim.observe(start + Duration::from_micros(frame * 66_667))
                 .is_none()
         }));
+    }
+
+    /// A capture card at 50 fps whose frames reach the thread in bunches while it encodes a
+    /// keyframe: one window reads far faster than the camera runs, the next is back to normal.
+    #[test]
+    fn a_backlog_handed_over_at_once_does_not_replan_the_camera() {
+        let start = Instant::now();
+        let mut cadence = Cadence::new(50.0);
+        let mut at = start;
+        let mut frame = |gap_ms: u64| {
+            at += Duration::from_millis(gap_ms);
+            cadence.observe(at)
+        };
+        // A steady window, then one with fourteen frames delivered back to back (92 fps read).
+        for _ in 0..30 {
+            assert_eq!(frame(20), None);
+        }
+        for n in 0..30 {
+            assert_eq!(frame(if n < 14 { 1 } else { 20 }), None, "frame {n}");
+        }
+        // And steady again: nothing to replan, ever.
+        for _ in 0..90 {
+            assert_eq!(frame(20), None);
+        }
+    }
+
+    /// The step up that triggered the peer's 75% loss report: a larger picture offered again and
+    /// again would cost a keyframe and a burst of loss every few seconds.
+    #[test]
+    fn a_step_up_that_meets_congestion_waits_longer_before_the_next() {
+        let (mut control, _) = control();
+        let mut now = Instant::now();
+        let climb_to_720p = |control: &mut RateControl, now: &mut Instant| -> Duration {
+            let began = *now;
+            while control.setting().tier().name != "720p" {
+                *now += Duration::from_secs(1);
+                control.on_loss(0, *now);
+                assert!(*now - began < Duration::from_secs(300), "never stepped up");
+            }
+            *now - began
+        };
+        climb_to_720p(&mut control, &mut now);
+        // Within its probation the larger picture is lost: down it goes.
+        now += Duration::from_secs(3);
+        control.on_loss(192, now);
+        control.on_loss(192, now + Duration::from_secs(1));
+        now += Duration::from_secs(1);
+        assert_ne!(control.setting().tier().name, "720p");
+        // Climbing back takes the doubled hold at the top of 540p: eight seconds, not four.
+        let held_at_top = |control: &mut RateControl, now: &mut Instant| {
+            while control.setting().bitrate < TIERS[1].max_bitrate || control.setting().tier != 1 {
+                *now += Duration::from_secs(1);
+                control.on_loss(0, *now);
+            }
+            climb_to_720p(control, now)
+        };
+        let second = held_at_top(&mut control, &mut now);
+        assert!(second >= Duration::from_secs(8), "{second:?}");
+        // A step up that holds through its probation leaves the hold where it is.
+        now += STEP_UP_PROBATION;
+        control.on_loss(0, now);
+        control.on_loss(192, now + Duration::from_secs(1));
+        now += Duration::from_secs(2);
+        let third = held_at_top(&mut control, &mut now);
+        assert!(third < Duration::from_secs(16), "{third:?}");
     }
 
     #[test]

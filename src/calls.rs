@@ -778,6 +778,11 @@ impl VideoPipeline {
         self.rate.on_send_drops(Instant::now())
     }
 
+    /// The camera thread could not hand all its frames to the engine.
+    fn on_capture_drops(&mut self) -> Option<RateChange> {
+        self.rate.on_capture_drops(Instant::now())
+    }
+
     fn source(&self) -> LocalVideoSource {
         let (empty_tx, empty) = async_channel::bounded::<Vec<u8>>(1);
         drop(empty_tx);
@@ -1353,6 +1358,7 @@ fn log_rate_change(call_id: &str, change: RateChange) {
         Reason::Loss(loss) => format!("the peer lost {:.0}% of it", loss * 100.0),
         Reason::Clean => "the peer reports a clean path".to_owned(),
         Reason::SendDrops => "video was dropped before it was sent".to_owned(),
+        Reason::CaptureDrops => "camera frames backed up before the engine".to_owned(),
         Reason::Estimate(bitrate) => format!("the peer can take {} kbps", bitrate / 1000),
     };
     let level = if change.from.tier != change.to.tier || change.reason != Reason::Clean {
@@ -2544,7 +2550,7 @@ impl Call {
         };
         if pipe.rate_share.take_queue_drops() > 0
             && active
-            && let Some(change) = pipe.on_send_drops()
+            && let Some(change) = pipe.on_capture_drops()
         {
             log_rate_change(&self.call_id, change);
         }
@@ -2682,6 +2688,11 @@ impl Call {
             return None;
         }
         self.phase = CallPhase::Active;
+        // Frames the camera could not hand over while the peer's phone rang say nothing about the
+        // path, and the first heartbeat would otherwise read them as congestion and cut the rate.
+        if let Some(pipe) = &self.video_pipe {
+            pipe.rate_share.take_queue_drops();
+        }
         // The timer starts here, when there is really a call, never at the button press.
         self.started = Some(Instant::now());
         log::info!(
@@ -3994,6 +4005,24 @@ mod tests {
         let mut voice = dialing();
         assert_eq!(voice.media(&report(128)), None);
         voice.check_video_queue();
+    }
+
+    /// Frames the camera could not hand over while the phone rang are not counted against the
+    /// path at the first heartbeat of the call.
+    #[test]
+    fn drops_from_before_the_call_was_up_do_not_cut_the_rate() {
+        let mut call = dialing();
+        call.video = true;
+        call.phase = CallPhase::Accepted;
+        call.media_ready = true;
+        call.video_pipe = Some(pipeline_with_a_running_camera());
+        fn pipe(call: &Call) -> &VideoPipeline {
+            call.video_pipe.as_ref().expect("video")
+        }
+        pipe(&call).rate_share.note_queue_drop();
+        assert!(call.became_active().is_some());
+        call.check_video_queue();
+        assert_eq!(pipe(&call).rate().bitrate, crate::video_rate::START_BITRATE);
     }
 
     #[test]
