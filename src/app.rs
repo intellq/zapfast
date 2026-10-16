@@ -683,6 +683,10 @@ pub struct App {
     pub actions: Vec<Action>,
     /// Actions queued by a backend event, applied on that account after the frame.
     deferred_account_actions: Vec<(AccountId, Action)>,
+    /// A private reply (source chat, message) waiting for the locked folder
+    /// to be unlocked; it goes on once the folder opens and is dropped when
+    /// the dialog is cancelled or the folder closes.
+    pending_private_reply: Option<(String, String)>,
     /// Set while the events of an account that is not on screen are being
     /// applied: they update that account only, never the window's composer,
     /// dialogs, playback, or read state.
@@ -1524,6 +1528,7 @@ impl App {
             toasts: Vec::new(),
             actions: Vec::new(),
             deferred_account_actions: Vec::new(),
+            pending_private_reply: None,
             events_hidden: false,
             update: None,
             last_update_check: None,
@@ -1913,6 +1918,7 @@ impl App {
         self.clear_chat_lock_entry();
         if self.dialog == Some(Dialog::UnlockLockedChats) {
             self.dialog = None;
+            self.pending_private_reply = None;
         }
         if self.locked_folder || self.secret_code_matched() {
             self.close_locked_folder();
@@ -4675,6 +4681,7 @@ impl App {
 
     fn close_locked_folder(&mut self) {
         self.locked_folder = false;
+        self.pending_private_reply = None;
         self.chat_lock_session = None;
         self.clear_chat_lock_entry();
         self.chat_lock_check.borrow_mut().take();
@@ -4700,6 +4707,39 @@ impl App {
         self.chat_lock_entry.clear();
         self.chat_lock_confirm.clear();
         self.chat_lock_error = false;
+    }
+
+    /// The private reply waiting on the unlock dialog, taken as the folder
+    /// is about to open.
+    fn take_private_reply_for_unlock(&mut self) -> Option<(String, String)> {
+        if self.dialog == Some(Dialog::UnlockLockedChats) {
+            self.pending_private_reply.take()
+        } else {
+            self.pending_private_reply = None;
+            None
+        }
+    }
+
+    fn resume_private_reply(&mut self, ctx: &egui::Context) {
+        let pending = self.pending_private_reply.take();
+        self.resume_private_reply_with(pending, ctx);
+    }
+
+    /// Goes on with a private reply the unlock dialog held back. The folder
+    /// is open now, so the source chat, shut again while it was locked, is
+    /// opened to quote from.
+    fn resume_private_reply_with(
+        &mut self,
+        pending: Option<(String, String)>,
+        ctx: &egui::Context,
+    ) {
+        let Some((chat, message)) = pending else {
+            return;
+        };
+        if self.open_chat.as_deref() != Some(chat.as_str()) {
+            self.open_chat(chat.clone());
+        }
+        self.apply(Action::ReplyPrivately { chat, message }, ctx);
     }
 
     fn enter_locked_folder(&mut self) {
@@ -7189,11 +7229,26 @@ impl App {
                 }
             }
             Action::ReplyPrivately { chat, message } => {
-                if self.open_chat.as_deref() != Some(chat.as_str())
-                    || self
-                        .chat(&chat)
-                        .is_some_and(|source| source.locked && !self.locked_folder_open())
+                if self.open_chat.as_deref() != Some(chat.as_str()) {
+                    return;
+                }
+                // A locked chat, the source or the one to answer in, asks to
+                // unlock the folder first, as Message yourself does, and the
+                // reply goes on once it opens.
+                let recipient_locked = self
+                    .conversations
+                    .get(&chat)
+                    .and_then(|conversation| conversation.message(&message))
+                    .and_then(|original| original.private_reply_recipient())
+                    .is_some_and(|recipient| self.chat(recipient).is_some_and(|c| c.locked));
+                if !self.locked_folder_open()
+                    && (recipient_locked || self.chat(&chat).is_some_and(|source| source.locked))
                 {
+                    self.pending_private_reply = Some((chat.clone(), message.clone()));
+                    self.apply(Action::OpenLockedFolder, ctx);
+                    if self.locked_folder_open() {
+                        self.resume_private_reply(ctx);
+                    }
                     return;
                 }
                 let Some(original) = self
@@ -7207,9 +7262,7 @@ impl App {
                 let Some(recipient) = original.private_reply_recipient().map(str::to_owned) else {
                     return;
                 };
-                if self.chat(&recipient).is_some_and(|chat| {
-                    chat.read_only || (chat.locked && !self.locked_folder_open())
-                }) {
+                if self.chat(&recipient).is_some_and(|chat| chat.read_only) {
                     return;
                 }
                 let name = self.display_name_or(&recipient, original.sender_name.as_deref());
@@ -8075,6 +8128,7 @@ impl App {
             Action::CloseDialog => {
                 self.cancel_contact_dialog_request();
                 self.clear_chat_lock_entry();
+                self.pending_private_reply = None;
                 self.dialog = None;
                 self.invite = None;
                 self.forward_search.clear();
@@ -8534,7 +8588,9 @@ impl App {
             }
             Action::UnlockLockedFolder(code) => {
                 if self.settings.verifies_chat_lock_code(code.trim()) {
+                    let resume = self.take_private_reply_for_unlock();
                     self.enter_locked_folder();
+                    self.resume_private_reply_with(resume, ctx);
                 } else {
                     self.chat_lock_entry.clear();
                     self.chat_lock_error = true;
@@ -8544,7 +8600,9 @@ impl App {
                 if self.settings.chat_lock_code_hash.is_none() && !code.trim().is_empty() {
                     self.settings.set_chat_lock_code(Some(code.trim()));
                     self.mark_settings_dirty();
+                    let resume = self.take_private_reply_for_unlock();
                     self.enter_locked_folder();
+                    self.resume_private_reply_with(resume, ctx);
                 }
             }
             Action::CloseLockedFolder => {
@@ -9211,6 +9269,7 @@ impl App {
         self.clear_chat_lock_entry();
         if self.dialog == Some(Dialog::UnlockLockedChats) {
             self.dialog = None;
+            self.pending_private_reply = None;
         }
         if self.locked_folder || self.secret_code_matched() {
             self.close_locked_folder();
@@ -16426,15 +16485,8 @@ mod tests {
 
     /// Only a visible incoming group message and an accessible sender can start a reply.
     #[test]
-    fn private_reply_ignores_own_deleted_invalid_and_locked_targets() {
-        for case in [
-            "own",
-            "deleted",
-            "invalid",
-            "locked",
-            "locked-source",
-            "stale",
-        ] {
+    fn private_reply_ignores_own_deleted_and_invalid_targets() {
+        for case in ["own", "deleted", "invalid", "stale"] {
             let mut app = app();
             let group = "12345@g.us";
             let sender = "15550002222@s.whatsapp.net";
@@ -16444,16 +16496,6 @@ mod tests {
                 "own" => original.from_me = true,
                 "deleted" => original.content = Content::REVOKED,
                 "invalid" => original.sender = group.into(),
-                "locked" => {
-                    let mut chat = Chat::new(sender.into(), "Locked fixture".into());
-                    chat.locked = true;
-                    app.chats.push(chat);
-                }
-                "locked-source" => {
-                    let mut chat = Chat::new(group.into(), "Locked group fixture".into());
-                    chat.locked = true;
-                    app.chats.push(chat);
-                }
                 _ => {}
             }
             app.open_chat = Some(if case == "stale" { sender } else { group }.into());
@@ -16475,6 +16517,96 @@ mod tests {
             assert_eq!(app.open_chat, previous, "{case}");
             assert!(app.reply_to.is_none(), "{case}");
         }
+    }
+
+    /// A locked source or recipient asks to unlock the folder, as Message
+    /// yourself does, and the reply goes on once the code opens it.
+    #[test]
+    fn private_reply_asks_to_unlock_and_goes_on_after_the_code() {
+        for case in ["locked", "locked-source"] {
+            let mut app = app();
+            let ctx = egui::Context::default();
+            let group = "12345@g.us";
+            let sender = "15550002222@s.whatsapp.net";
+            let mut original = message(group, "original", 100);
+            original.sender = sender.into();
+            let mut group_chat = Chat::new(group.into(), "Group fixture".into());
+            let mut sender_chat = Chat::new(sender.into(), "Sender fixture".into());
+            if case == "locked" {
+                sender_chat.locked = true;
+            } else {
+                group_chat.locked = true;
+            }
+            app.chats.extend([group_chat, sender_chat]);
+            app.conversations.insert(
+                group.into(),
+                Conversation {
+                    messages: vec![original],
+                    ..Default::default()
+                },
+            );
+            app.settings.set_chat_lock_code(Some("test-code"));
+            app.open_chat = Some(group.into());
+            let reply = Action::ReplyPrivately {
+                chat: group.into(),
+                message: "original".into(),
+            };
+            app.apply(reply, &ctx);
+            assert_eq!(app.dialog, Some(Dialog::UnlockLockedChats), "{case}");
+            assert_eq!(app.open_chat.as_deref(), Some(group), "{case}");
+            assert!(app.reply_to.is_none(), "{case}");
+            app.apply(Action::UnlockLockedFolder("wrong".into()), &ctx);
+            assert!(app.reply_to.is_none(), "{case}: a wrong code opens nothing");
+            app.apply(Action::UnlockLockedFolder("test-code".into()), &ctx);
+            // Opening the unlocked recipient leaves the folder, as always.
+            assert_eq!(app.open_chat.as_deref(), Some(sender), "{case}");
+            let target = app.reply_to.clone().expect(case);
+            assert_eq!(target.chat.as_deref(), Some(group), "{case}");
+            assert!(app.pending_private_reply.is_none(), "{case}");
+        }
+    }
+
+    /// Cancelling the unlock leaves the chats as they were and the reply is
+    /// not remembered: a later unlock does not start it.
+    #[test]
+    fn cancelling_the_unlock_drops_a_private_reply() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        let group = "12345@g.us";
+        let sender = "15550002222@s.whatsapp.net";
+        let mut original = message(group, "original", 100);
+        original.sender = sender.into();
+        let mut locked = Chat::new(sender.into(), "Sender fixture".into());
+        locked.locked = true;
+        app.chats
+            .extend([Chat::new(group.into(), "Group fixture".into()), locked]);
+        app.conversations.insert(
+            group.into(),
+            Conversation {
+                messages: vec![original],
+                ..Default::default()
+            },
+        );
+        app.settings.set_chat_lock_code(Some("test-code"));
+        app.open_chat = Some(group.into());
+        app.apply(
+            Action::ReplyPrivately {
+                chat: group.into(),
+                message: "original".into(),
+            },
+            &ctx,
+        );
+        assert_eq!(app.dialog, Some(Dialog::UnlockLockedChats));
+        app.apply(Action::CloseDialog, &ctx);
+        assert!(app.dialog.is_none());
+        assert_eq!(app.open_chat.as_deref(), Some(group));
+        assert!(app.reply_to.is_none());
+        assert!(!app.locked_folder_open());
+        app.apply(Action::OpenLockedFolder, &ctx);
+        app.apply(Action::UnlockLockedFolder("test-code".into()), &ctx);
+        assert!(app.locked_folder_open());
+        assert_eq!(app.open_chat.as_deref(), Some(group), "nothing resumed");
+        assert!(app.reply_to.is_none());
     }
 
     /// Cached source content stays hidden after switching out of an authenticated folder.
