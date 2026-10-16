@@ -1,11 +1,12 @@
 //! What becomes of an audio stream's errors, so a failing one cannot spin (#507).
 //!
-//! cpal 0.17's ALSA backend reports an underrun that leaves the device in its
-//! XRUN state as "`alsa::poll()` returned POLLERR" and polls again without
-//! recovering it: the error comes straight back, tens of thousands of times a
-//! second, for as long as the stream lives. rodio's default error callback
-//! prints each one to stderr. Every stream ZapFast opens reports to a
-//! [`Health`] instead. It logs the first error and then a count at most every
+//! cpal 0.17's ALSA backend reported an underrun that left the device in its
+//! XRUN state as "`alsa::poll()` returned POLLERR" and polled again without
+//! recovering it: the error came straight back, tens of thousands of times a
+//! second, for as long as the stream lived, and rodio's default error callback
+//! printed each one to stderr. cpal 0.18 recovers that one, but a backend that
+//! repeats an error must still not hold a core or fill the log, so every
+//! stream ZapFast opens reports to a [`Health`] instead. It logs the first error and then a count at most every
 //! [`LOG_EVERY`], and once errors arrive faster than a working stream reports
 //! them it marks the stream failed and slows the audio thread down, until the
 //! stream's owner sees [`Health::failed`], drops it and opens another.
@@ -14,7 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use rodio::cpal::StreamError;
+use rodio::cpal::{Error, ErrorKind};
 
 /// Errors within [`FLOOD_WINDOW`] that make a stream failed. A working
 /// stream reports an underrun now and then, never dozens in a second.
@@ -69,12 +70,12 @@ impl Health {
     }
 
     /// The error callback to hand rodio for this stream.
-    pub fn callback(&self) -> impl FnMut(StreamError) + Send + Clone + 'static {
+    pub fn callback(&self) -> impl FnMut(Error) + Send + Clone + 'static {
         let health = self.clone();
         move |error| health.report(&error, Instant::now())
     }
 
-    fn report(&self, error: &StreamError, now: Instant) {
+    fn report(&self, error: &Error, now: Instant) {
         let inner = &self.inner;
         let verdict = inner
             .tally
@@ -117,8 +118,14 @@ struct Tally {
 }
 
 impl Tally {
-    fn record(&mut self, error: &StreamError, now: Instant) -> Verdict {
+    fn record(&mut self, error: &Error, now: Instant) -> Verdict {
+        // Notices about a stream that plays on are logged, not counted.
+        let notice = matches!(
+            error.kind(),
+            ErrorKind::DeviceChanged | ErrorKind::RealtimeDenied
+        );
         match self.window_start {
+            _ if notice => {}
             Some(start) if now.saturating_duration_since(start) < FLOOD_WINDOW => {
                 self.in_window += 1;
             }
@@ -127,8 +134,14 @@ impl Tally {
                 self.in_window = 1;
             }
         }
-        let gone = matches!(error, StreamError::DeviceNotAvailable);
-        let fail = gone || self.in_window >= FLOOD;
+        // A stream cpal says is over is not one to wait on.
+        let over = matches!(
+            error.kind(),
+            ErrorKind::DeviceNotAvailable
+                | ErrorKind::StreamInvalidated
+                | ErrorKind::HostUnavailable
+        );
+        let fail = over || self.in_window >= FLOOD;
         let log = match self.logged_at {
             None => Some(format!("audio stream error: {error}")),
             Some(at) if now.saturating_duration_since(at) >= LOG_EVERY => Some(format!(
@@ -147,14 +160,10 @@ impl Tally {
     }
 }
 
-/// The error cpal 0.17 repeats in #507.
+/// The error cpal 0.17 repeated in #507, as cpal 0.18 would word it.
 #[cfg(test)]
-pub(crate) fn pollerr() -> StreamError {
-    StreamError::BackendSpecific {
-        err: rodio::cpal::BackendSpecificError {
-            description: "`alsa::poll()` returned POLLERR".to_owned(),
-        },
-    }
+pub(crate) fn pollerr() -> Error {
+    Error::with_message(ErrorKind::BackendError, "`alsa::poll()` returned POLLERR")
 }
 
 #[cfg(test)]
@@ -165,12 +174,12 @@ mod tests {
     fn an_occasional_underrun_is_logged_and_keeps_the_stream() {
         let mut tally = Tally::default();
         let start = Instant::now();
-        let first = tally.record(&StreamError::BufferUnderrun, start);
+        let first = tally.record(&Error::new(ErrorKind::Xrun), start);
         assert!(first.log.is_some());
         assert!(!first.fail);
         for second in 1..30 {
             let verdict = tally.record(
-                &StreamError::BufferUnderrun,
+                &Error::new(ErrorKind::Xrun),
                 start + Duration::from_secs(second),
             );
             assert!(!verdict.fail, "one underrun a second is not a flood");
@@ -217,11 +226,24 @@ mod tests {
     }
 
     #[test]
+    fn a_rerouted_stream_is_not_counted_towards_a_flood() {
+        let mut tally = Tally::default();
+        let now = Instant::now();
+        for _ in 0..FLOOD * 2 {
+            assert!(
+                !tally
+                    .record(&Error::new(ErrorKind::DeviceChanged), now)
+                    .fail
+            );
+        }
+    }
+
+    #[test]
     fn a_device_that_went_away_fails_at_once() {
         let mut tally = Tally::default();
         assert!(
             tally
-                .record(&StreamError::DeviceNotAvailable, Instant::now())
+                .record(&Error::new(ErrorKind::DeviceNotAvailable), Instant::now())
                 .fail
         );
     }

@@ -112,12 +112,15 @@ resvg = { version = "0.45", default-features = false }
 notify-rust = { version = "4", default-features = false, features = ["z"] }
 openh264 = "0.9"
 mp4 = "0.14"
-# The 0.22 release ends the sound of an interleaved MP4 at the first packet of
-# another track, so a video that has a picture and a sound track plays a tenth
-# of a second of audio and the listener hears silence. This revision is the
-# merge of upstream RustAudio/rodio#833, which skips the packets of every track
-# but the selected one. Drop the pin at the first release that carries it.
-rodio = { git = "https://github.com/RustAudio/rodio", rev = "e89e685d326a684b298c5138adf94caa49e5568c", default-features = false, features = ["playback", "recording", "mp3", "mp4", "wav", "vorbis"] }
+# The crmne/rodio fork (branch `zapfast`): upstream's master plus
+# MicrophoneBuilder::with_error_callback (RustAudio/rodio#931), so a
+# microphone's stream errors reach `audio::Health` instead of stderr (#507).
+# Master also carries what no release has yet: RustAudio/rodio#833, without
+# which a video with a picture and a sound track plays a tenth of a second of
+# its sound (0.23.0 was cut from the 0.22 branch without it), and cpal 0.18,
+# whose ALSA backend recovers from an underrun instead of reporting POLLERR in
+# a loop (RustAudio/cpal#1122). Drop the pin at the first release with both.
+rodio = { git = "https://github.com/crmne/rodio", rev = "742090d57a4c83b23bd990ba0dcf939d09dbeb94", default-features = false, features = ["playback", "recording", "mp3", "mp4", "wav", "vorbis"] }
 # rodio's own copy, named to decode a video's AAC track that `mp4` reads:
 # symphonia 0.5's MP4 reader refuses the sound of WhatsApp's videos (#265).
 symphonia = { version = "0.5.5", default-features = false, features = ["aac"] }
