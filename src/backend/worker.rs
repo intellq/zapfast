@@ -718,6 +718,8 @@ pub async fn run(
         subject_generation: HashMap::new(),
         description_generation: HashMap::new(),
         group_info_generation: HashMap::new(),
+        edits: HashMap::new(),
+        edit_sequence: 0,
         group_info_queue: std::collections::VecDeque::new(),
         group_info_tries: HashMap::new(),
         group_info_retry: Vec::new(),
@@ -967,6 +969,13 @@ enum WithheldPage {
     Until(ChatId, String, super::PageKey),
 }
 
+/// See `Worker::edits`.
+#[derive(Default)]
+struct EditGenerations {
+    sent: u64,
+    applied: u64,
+}
+
 struct Worker {
     attachment_limit: u64,
     keep_deleted: bool,
@@ -1049,6 +1058,10 @@ struct Worker {
     description_generation: HashMap<String, u64>,
     /// Superseded metadata operations cannot update the archive or retry queue.
     group_info_generation: HashMap<String, u64>,
+    /// The newest edit sent from here and the newest one applied, per
+    /// message. The archive changes only when WhatsApp accepts an edit.
+    edits: HashMap<(ChatId, String), EditGenerations>,
+    edit_sequence: u64,
     group_info_tries: HashMap<String, u32>,
     /// Next retry time for failed group metadata requests.
     group_info_retry: Vec<(Instant, String)>,
@@ -3295,6 +3308,7 @@ impl Worker {
 
     async fn on_logged_out(&mut self) {
         self.privacy_generation = self.privacy_generation.wrapping_add(1);
+        self.edits.clear();
         self.stop_bot().await;
         if let Err(error) = self.archive.clear() {
             log::warn!("could not clear the archive: {error}");
@@ -3719,6 +3733,9 @@ impl Worker {
             };
             match protocol.r#type {
                 Some(Type::REVOKE) => {
+                    // A late answer to an edit sent from here must not
+                    // replace what the phone did since.
+                    self.edits.remove(&(chat.clone(), target.clone()));
                     let revoked = self.revoked(&chat, &target);
                     if let Ok(true) = self.archive.set_content(&chat, &target, &revoked, false) {
                         self.emit_message(&chat, &target);
@@ -3726,6 +3743,7 @@ impl Worker {
                     }
                 }
                 Some(Type::MESSAGE_EDIT) => {
+                    self.edits.remove(&(chat.clone(), target.clone()));
                     if let Some(edited) = protocol.edited_message.as_option()
                         && let Some(mut content) = classify(edited)
                     {
@@ -5405,6 +5423,12 @@ impl Worker {
                 text,
                 mentions,
             } => self.edit_text(chat, id, text, mentions),
+            Command::EditSettled {
+                chat,
+                id,
+                generation,
+                accepted,
+            } => self.edit_settled(chat, id, generation, accepted),
             Command::Revoke { chat, id } => self.revoke(chat, id),
             Command::RemoveCall { chat, id } => self.remove_call(&chat, &id),
             Command::DeleteForMe { chat, id, on_phone } => {
@@ -8394,40 +8418,60 @@ impl Worker {
     }
 
     /// Sends an edited body without notifying everyone for an existing mention.
+    /// The interface already shows the new text; the archive takes it only
+    /// once WhatsApp accepts the edit, and a refusal puts the original back.
     fn edit_text(&mut self, chat: ChatId, id: String, text: String, mentions: Vec<String>) {
         let (Some(client), Some(jid)) = (self.client.clone(), Self::jid_of(&chat)) else {
             self.emit(Event::Error(tr("Not connected to WhatsApp").to_owned()));
+            self.emit_message(&chat, &id);
             return;
         };
-        let message = match self.prepare_text_edit(&chat, &id, text, mentions) {
-            Ok(message) => message,
-            Err(_) => {
-                self.emit(Event::Error("Could not prepare the message edit".into()));
-                return;
-            }
-        };
+        let (message, content, mention_rows) =
+            match self.prepare_text_edit(&chat, &id, text, mentions) {
+                Ok(prepared) => prepared,
+                Err(_) => {
+                    self.emit(Event::Error("Could not prepare the message edit".into()));
+                    self.emit_message(&chat, &id);
+                    return;
+                }
+            };
+        let generation = self.begin_edit(&chat, &id);
         let commands = self.commands.clone();
         tokio::spawn(async move {
-            if let Err(error) = client.edit_message(jid, id.clone(), message).await {
-                let _ = commands.send(Command::Sent {
-                    chat,
-                    id: String::new(),
-                    error: Some(format!("Could not send the edit: {error}")),
-                });
-            }
+            let accepted = client
+                .edit_message(jid, id.clone(), message)
+                .await
+                .map(|_| (content, mention_rows))
+                .map_err(|error| format!("Could not send the edit: {error}"));
+            let _ = commands.send(Command::EditSettled {
+                chat,
+                id,
+                generation,
+                accepted,
+            });
         });
     }
 
-    /// Stores the edited body and mentions, suppressing repeated everyone
-    /// notifications only in the outbound payload. Reads the original before
-    /// replacing its rows.
+    /// Numbers an edit about to be sent, the newest for its message.
+    fn begin_edit(&mut self, chat: &str, id: &str) -> u64 {
+        self.edit_sequence += 1;
+        self.edits
+            .entry((chat.to_owned(), id.to_owned()))
+            .or_default()
+            .sent = self.edit_sequence;
+        self.edit_sequence
+    }
+
+    /// Builds the outgoing edit, and the content and mentions the archive
+    /// takes once WhatsApp accepts it. A repeated everyone mention is
+    /// suppressed only in the outbound payload.
     fn prepare_text_edit(
         &mut self,
         chat: &ChatId,
         id: &str,
         text: String,
         mut mentions: Vec<String>,
-    ) -> crate::archive::Result<wa::Message> {
+    ) -> crate::archive::Result<(wa::Message, Content, Vec<MentionRef>)> {
         let existing = self.archive.message(chat, id)?;
         let content = match &existing {
             Some(row) => row.content.edited(text.clone()),
@@ -8440,13 +8484,6 @@ impl Worker {
             crate::mentions::push_everyone_id(&mut mentions);
         }
         let mention_rows = self.mentions_of(&mentions);
-        if let Ok(true) = self
-            .archive
-            .set_edited_content(chat, id, &content, &mention_rows)
-        {
-            self.emit_message(chat, id);
-            self.emit_chat(chat);
-        }
         if already_mentioned_everyone {
             mentions.retain(|id| id != crate::mentions::ALL_ID);
         }
@@ -8460,7 +8497,42 @@ impl Worker {
             .and_then(|original| edited_caption(&original, text.clone(), &mentions))
             .unwrap_or_else(|| outgoing_text(text, None, &mentions));
         self.apply_ephemeral(chat, &mut message);
-        Ok(message)
+        Ok((message, content, mention_rows))
+    }
+
+    /// Applies an accepted edit unless a newer one was applied already or the
+    /// phone changed the message since. A refusal of the newest edit puts the
+    /// archived text, which is what WhatsApp has, back in the bubble.
+    fn edit_settled(
+        &mut self,
+        chat: ChatId,
+        id: String,
+        generation: u64,
+        accepted: Result<(Content, Vec<MentionRef>), String>,
+    ) {
+        let edits = self.edits.get_mut(&(chat.clone(), id.clone()));
+        match (accepted, edits) {
+            (Ok((content, mentions)), Some(edits)) if generation > edits.applied => {
+                edits.applied = generation;
+                if let Ok(true) = self
+                    .archive
+                    .set_edited_content(&chat, &id, &content, &mentions)
+                {
+                    self.emit_message(&chat, &id);
+                    self.emit_chat(&chat);
+                }
+            }
+            // Superseded, unlinked, or the phone edited or revoked it since.
+            (Ok(_), _) => {}
+            (Err(error), edits) => {
+                // A newer edit still on its way settles the bubble itself.
+                let newest = edits.is_some_and(|edits| edits.sent == generation);
+                self.emit(Event::Error(error));
+                if newest {
+                    self.emit_message(&chat, &id);
+                }
+            }
+        }
     }
 
     fn revoked(&self, chat: &str, id: &str) -> Content {
@@ -14136,7 +14208,7 @@ mod tests {
                 original.mentions.push(crate::mentions::everyone_ref());
             }
             worker.archive.insert_message(&original, None).unwrap();
-            let message = worker
+            let (message, content, mentions) = worker
                 .prepare_text_edit(
                     &chat,
                     &original.id,
@@ -14152,6 +14224,22 @@ mod tests {
                 "only a newly added everyone mention should notify"
             );
             assert_eq!(context.mentioned_jid, vec![member.clone()]);
+            let unsent = worker
+                .archive
+                .message(&chat, &original.id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                unsent.content, original.content,
+                "nothing is stored before WhatsApp accepts the edit"
+            );
+            let generation = worker.begin_edit(&chat, &original.id);
+            worker.edit_settled(
+                chat.clone(),
+                original.id.clone(),
+                generation,
+                Ok((content, mentions)),
+            );
             let stored = worker
                 .archive
                 .message(&chat, &original.id)
@@ -14164,10 +14252,17 @@ mod tests {
                 worker.mentions_of(&[member.clone(), crate::mentions::ALL_ID.into()])
             );
 
-            let removed = worker
+            let (removed, content, mentions) = worker
                 .prepare_text_edit(&chat, &original.id, "No mentions".into(), vec![])
                 .unwrap();
             assert!(recorded_mention_ids(&removed).is_empty());
+            let generation = worker.begin_edit(&chat, &original.id);
+            worker.edit_settled(
+                chat.clone(),
+                original.id.clone(),
+                generation,
+                Ok((content, mentions)),
+            );
             let stored = worker
                 .archive
                 .message(&chat, &original.id)
@@ -14175,6 +14270,62 @@ mod tests {
                 .unwrap();
             assert!(stored.mentions.is_empty());
         }
+    }
+
+    /// A refused edit leaves the archive alone and puts the original back in
+    /// the bubble; a late answer to an older edit cannot replace a newer one,
+    /// and an edit from the phone wins over one still on its way from here.
+    #[test]
+    fn edits_reach_the_archive_only_once_whatsapp_accepts_them() {
+        let (mut worker, events, _inbox, _wa) = receipt_tests::worker();
+        let original = receipt_tests::own_message("edit-target", 1);
+        let chat = original.chat.clone();
+        let id = original.id.clone();
+        worker.archive.insert_message(&original, None).unwrap();
+        let stored = |worker: &Worker| worker.archive.message(&chat, &id).unwrap().unwrap();
+        let text = |body: &str| (Content::text(body), Vec::new());
+        let updates = |events: &std::sync::mpsc::Receiver<Event>| {
+            std::iter::from_fn(|| events.try_recv().ok())
+                .filter_map(|event| match event {
+                    Event::MessageUpdated(message) => Some(message.content),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let refused = worker.begin_edit(&chat, &id);
+        worker.edit_settled(chat.clone(), id.clone(), refused, Err("refused".into()));
+        assert_eq!(stored(&worker).content, original.content);
+        assert!(!stored(&worker).edited);
+        assert_eq!(
+            updates(&events),
+            vec![original.content.clone()],
+            "the bubble gets the original back"
+        );
+
+        let older = worker.begin_edit(&chat, &id);
+        let newer = worker.begin_edit(&chat, &id);
+        worker.edit_settled(chat.clone(), id.clone(), older, Err("refused".into()));
+        assert!(
+            updates(&events).is_empty(),
+            "a newer edit is still on its way"
+        );
+        worker.edit_settled(chat.clone(), id.clone(), newer, Ok(text("Newer")));
+        let older = worker.begin_edit(&chat, &id);
+        let newest = worker.begin_edit(&chat, &id);
+        worker.edit_settled(chat.clone(), id.clone(), newest, Ok(text("Newest")));
+        worker.edit_settled(chat.clone(), id.clone(), older, Ok(text("Late")));
+        assert_eq!(stored(&worker).content, Content::text("Newest"));
+        assert!(stored(&worker).edited);
+
+        let pending = worker.begin_edit(&chat, &id);
+        worker.edits.remove(&(chat.clone(), id.clone()));
+        worker.edit_settled(chat.clone(), id.clone(), pending, Ok(text("Stale")));
+        assert_eq!(
+            stored(&worker).content,
+            Content::text("Newest"),
+            "the phone's edit since stays"
+        );
     }
 
     #[test]
@@ -15651,6 +15802,8 @@ mod receipt_tests {
             subject_generation: HashMap::new(),
             description_generation: HashMap::new(),
             group_info_generation: HashMap::new(),
+            edits: HashMap::new(),
+            edit_sequence: 0,
             group_info_queue: std::collections::VecDeque::new(),
             group_info_tries: HashMap::new(),
             group_info_retry: Vec::new(),
