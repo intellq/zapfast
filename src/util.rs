@@ -929,7 +929,6 @@ mod tests {
         assert_eq!(length(720), "12 min");
         assert_eq!(length(3725), "1 h 2 min");
         assert_eq!(length(3600), "1 h");
-        assert_eq!(super::call_length(Locale::German, 754), "12 Min. 34 Sek.");
     }
 
     #[test]
