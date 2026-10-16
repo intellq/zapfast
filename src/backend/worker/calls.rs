@@ -136,6 +136,7 @@ impl Worker {
     /// The UI keeps rendering the snapshot it was handed; what is released here is the media, so a
     /// finished call holds no child process and no task.
     pub(super) fn emit_call(&mut self, update: CallUpdate) {
+        let update = self.canonical_call(update);
         let finished = !update.phase.is_live();
         // Remembered so the periodic check can tell a real change from a snapshot it already sent.
         if let Some(runtime) = self.call.as_mut()
@@ -155,6 +156,21 @@ impl Worker {
         {
             self.file_finished_call(&runtime.call, &update);
         }
+    }
+
+    /// Files a group call's people under the chat ids the rest of the app uses, as every other
+    /// `Jid` that reaches the window is: a privacy id becomes the phone number once it is known. Our
+    /// own entry on the roster is left out, since the call screen draws the others.
+    fn canonical_call(&self, mut update: CallUpdate) -> CallUpdate {
+        if let Some(group) = update.group.as_mut() {
+            group.caller = group.caller.as_deref().map(|id| self.canonical_str(id));
+            for person in &mut group.participants {
+                person.id = self.canonical_str(&person.id);
+            }
+            let me = self.me();
+            group.participants.retain(|person| person.id != me);
+        }
+        update
     }
 
     /// Whether a call is already up, which every entry point refuses to double.
@@ -475,7 +491,7 @@ impl Worker {
                     });
                 }
                 if first && let Some(runtime) = self.call.as_ref() {
-                    let update = runtime.call.update();
+                    let update = self.canonical_call(runtime.call.update());
                     self.emit(Event::Call(Box::new(update)));
                 }
             }
@@ -506,9 +522,6 @@ impl Worker {
         if !calls::is_offer(action) {
             return;
         }
-        // The offer carries the caller's number beside their privacy id, which the library has
-        // learned by now, so a stranger's call lands in the chat named by that number.
-        let chat = self.canonical_sync_chat(&incoming.from).await;
         if self.call_busy() {
             // Refuse it to the caller rather than dropping it. An offer that is only dropped leaves
             // the other side ringing until its own protocol timeout, believing this device might
@@ -528,19 +541,30 @@ impl Worker {
             }
             return;
         }
-        // A group, broadcast or newsletter offer never reaches the 1:1 call surface. The interface
-        // hides the buttons for those chats, but the worker is the boundary: a non-direct offer is
-        // refused here rather than rung, so no call is created and no history entry is written.
+        // A group call rings under its group, as WhatsApp files it; a call among several people
+        // with no group behind it rings under the person who started it. Either way the roster the
+        // offer carried says who else is on it.
+        let group = calls::offer_is_group(incoming);
+        let chat = match calls::offer_group(incoming) {
+            Some(jid) => self.canonical(&jid),
+            None if group => self.canonical(&incoming.action.call_creator().to_non_ad()),
+            // The offer carries the caller's number beside their privacy id, which the library
+            // has learned by now, so a stranger's call lands in the chat named by that number.
+            None => self.canonical_sync_chat(&incoming.from).await,
+        };
+        // A broadcast or newsletter offer never reaches the call surface, and neither does a
+        // group's offer that names something other than a group. The worker is the boundary: such
+        // an offer is refused here rather than rung, so no call is created and no history entry is
+        // written.
         //
         // Refuse it to the caller instead of only dropping it: a dropped offer leaves the other
         // side ringing until its own protocol timeout, believing this device might still answer,
-        // while a real `<reject>` ends it there and then. Only a 1:1 offer rings, so an offer that
-        // reaches here is one the caller is told we will not take.
-        if !callable_chat(&chat) {
+        // while a real `<reject>` ends it there and then.
+        if !rings_in(&chat, group) {
             match self.client.as_ref() {
                 Some(client) => match client.voip().reject(incoming).await {
                     Ok(()) => log::warn!(
-                        "[CALL] refused an incoming offer from a chat that is not one to one"
+                        "[CALL] refused an incoming offer from a chat that cannot be called group={group}"
                     ),
                     Err(error) => {
                         log::warn!("[CALL] a non-direct offer could not be refused: {error}")
@@ -561,9 +585,17 @@ impl Worker {
 
     /// A call we were ringing for was resolved on another of the account's devices (`elsewhere`
     /// says how), or the caller gave up before anyone answered (`None`).
-    pub(super) fn call_resolved(&mut self, call_id: &str, elsewhere: Option<calls::CallOutcome>) {
+    ///
+    /// Returns whether the call was this worker's own, which files its entry as it ends.
+    pub(super) fn call_resolved(
+        &mut self,
+        call_id: &str,
+        elsewhere: Option<calls::CallOutcome>,
+    ) -> bool {
+        let mut mine = false;
         let update = match self.call.as_mut() {
             Some(runtime) if runtime.call.call_id() == call_id => {
+                mine = true;
                 runtime.call.resolved_elsewhere(elsewhere)
             }
             _ => None,
@@ -571,12 +603,14 @@ impl Worker {
         if let Some(update) = update {
             self.emit_call(update);
         }
+        mine
     }
 
     /// Releases the call on the way out, so quitting leaves no child process or task behind.
     pub(super) async fn shutdown_call(&mut self) {
         if let Some(mut runtime) = self.call.take() {
             let update = runtime.call.hangup(self.client.as_ref()).await;
+            let update = self.canonical_call(update);
             // The window lets the call go as it lets any other finished one.
             self.emit(Event::Call(Box::new(update.clone())));
             self.file_finished_call(&runtime.call, &update);
@@ -645,12 +679,19 @@ impl Worker {
         }
         // Compared against the snapshot the UI was handed, so a camera that stopped on its own or a
         // mute another device set reaches the screen even though no user pressed anything.
-        let changed = self.call.as_mut().and_then(|runtime| {
-            let current = runtime.call.update();
-            let changed = current != runtime.last;
-            runtime.last = current.clone();
-            changed.then_some(current)
-        });
+        let current = self
+            .call
+            .as_ref()
+            .map(|runtime| self.canonical_call(runtime.call.update()));
+        let changed = self
+            .call
+            .as_mut()
+            .zip(current)
+            .and_then(|(runtime, current)| {
+                let changed = current != runtime.last;
+                runtime.last = current.clone();
+                changed.then_some(current)
+            });
         if let Some(update) = changed {
             self.emit_call(update);
         }
@@ -660,6 +701,9 @@ impl Worker {
 /// A call to file among a chat's messages.
 pub(super) struct CallEntry {
     pub chat: ChatId,
+    /// Who placed a call we did not: the chat itself for a one-to-one call, the member who rang
+    /// for a group's. `None` reads as the chat.
+    pub caller: Option<String>,
     pub call_id: String,
     pub from_me: bool,
     pub timestamp: i64,
@@ -694,7 +738,7 @@ impl Worker {
         let sender = if entry.from_me {
             self.me()
         } else {
-            entry.chat.clone()
+            entry.caller.clone().unwrap_or_else(|| entry.chat.clone())
         };
         let message = Message {
             id,
@@ -770,6 +814,7 @@ impl Worker {
         };
         self.file_call_entry(CallEntry {
             chat: update.chat.clone(),
+            caller: update.group.as_ref().and_then(|group| group.caller.clone()),
             call_id: call.call_id().to_owned(),
             from_me: update.direction == crate::model::CallDirection::Outgoing,
             timestamp: call.began(),
@@ -778,15 +823,21 @@ impl Worker {
             duration: update
                 .started
                 .map_or(0, |started| started.elapsed().as_secs()),
-            group: false,
+            group: call.is_group(),
         });
     }
 
     /// Files a call the phone reports as missed while this device was away.
     pub(super) fn missed_call_entry(&mut self, call: &whatsapp_rust::types::call::MissedCall) {
+        // A group call's notice can come from the call service itself (`@call`), which is no chat
+        // to file it in; the phone's own call log files that one in its group.
+        if matches!(call.from.server, whatsapp_rust::prelude::Server::Call) {
+            return;
+        }
         let chat = self.canonical(&call.from);
         self.file_call_entry(CallEntry {
             chat,
+            caller: None,
             call_id: call.call_id.clone(),
             from_me: false,
             timestamp: call.timestamp.timestamp(),
@@ -834,8 +885,13 @@ impl Worker {
                 None => return,
             },
         };
+        // The phone's record names who placed a group call it did not.
+        let caller = (group.is_some() && !from_me)
+            .then(|| creator.map(|creator| self.canonical(&creator.to_non_ad())))
+            .flatten();
         self.file_call_entry(CallEntry {
             chat,
+            caller,
             call_id: call_id.to_owned(),
             from_me,
             timestamp: record.start_time.unwrap_or(0),
@@ -940,9 +996,91 @@ fn callable_chat(chat: &str) -> bool {
     )
 }
 
+/// Whether an offer may ring in `chat`: a one-to-one offer in a direct chat, a group call's in its
+/// group, or, for a call among several people with no group behind it, in its creator's chat.
+fn rings_in(chat: &str, group: bool) -> bool {
+    match crate::model::ChatKind::from_id(chat) {
+        crate::model::ChatKind::Direct => true,
+        crate::model::ChatKind::Group => group,
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A group call reaches the window under the app's own ids, without our own roster entry, and
+    /// is filed in its group, under the member who rang, once it is over.
+    #[test]
+    fn a_group_call_is_drawn_and_filed_under_its_group() {
+        use crate::calls::test_offers::{GROUP, group_offer, member};
+        let (mut worker, events, _, _) = super::super::receipt_tests::worker();
+        worker.archive.ensure_chat(GROUP, "Book club").unwrap();
+        // The caller's privacy id is known to be this phone number; ours is our own.
+        worker
+            .lid_to_pn
+            .insert("200000000000001".to_owned(), "15550002222".to_owned());
+        worker.me_lid = Some("200000000000009@lid".to_owned());
+        let incoming = group_offer(vec![
+            member("200000000000001", true),
+            member("200000000000002", true),
+            member("200000000000009", true),
+        ]);
+        let call = Call::ringing(GROUP.to_owned(), Box::new(incoming), false);
+        let update = call.update();
+        worker.call = Some(CallRuntime::new(call, None));
+        worker.emit_call(update);
+        let drawn = events
+            .try_iter()
+            .find_map(|event| match event {
+                Event::Call(update) => Some(update),
+                _ => None,
+            })
+            .expect("the call rings");
+        assert_eq!(drawn.chat, GROUP);
+        let group = drawn.group.expect("a group call");
+        assert_eq!(group.caller.as_deref(), Some("15550002222@s.whatsapp.net"));
+        let ids: Vec<&str> = group.participants.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["15550002222@s.whatsapp.net", "200000000000002@lid"],
+            "named by phone number where known, and without us"
+        );
+
+        // The caller gives up before we answer: a missed group call, in the group.
+        assert!(worker.call_resolved(crate::calls::test_offers::CALL_ID, None));
+        let filed = worker.archive.call_log(10).unwrap();
+        assert_eq!(filed.len(), 1);
+        let entry = &filed[0];
+        assert_eq!(entry.chat, GROUP);
+        assert_eq!(entry.sender, "15550002222@s.whatsapp.net");
+        assert!(!entry.from_me);
+        assert!(matches!(
+            entry.content,
+            Content::Call {
+                group: true,
+                status: calls::CallOutcome::Missed,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_group_call_rings_in_its_group_and_nowhere_else() {
+        assert!(rings_in("15551234567@s.whatsapp.net", false));
+        assert!(
+            rings_in("15551234567@s.whatsapp.net", true),
+            "a call with no group"
+        );
+        assert!(rings_in("12345-67890@g.us", true));
+        assert!(
+            !rings_in("12345-67890@g.us", false),
+            "a one-to-one offer never rings as a group's"
+        );
+        assert!(!rings_in("1234567890@broadcast", true));
+        assert!(!rings_in("1234567890@newsletter", true));
+    }
 
     #[test]
     fn only_a_one_to_one_chat_can_be_called() {

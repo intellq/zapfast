@@ -10816,6 +10816,7 @@ fn notification_eligible(chat: &Chat, now: i64, message_at: i64) -> bool {
 }
 
 mod calls;
+pub use calls::CallPerson;
 
 #[cfg(test)]
 mod tests {
@@ -21709,6 +21710,7 @@ mod tests {
             started: None,
             muted: false,
             camera_on: false,
+            group: None,
             remote_video: false,
             video_requested: false,
             outcome: None,

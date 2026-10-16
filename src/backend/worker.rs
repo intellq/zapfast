@@ -3313,8 +3313,11 @@ impl Worker {
             // that moves a call out of dialing, never the fact that dialing started.
             E::IncomingCall(call) => self.call_signaling(call).await,
             E::MissedCall(call) => {
-                self.call_resolved(&call.call_id, None);
-                self.missed_call_entry(call);
+                // A call that rang here is filed as it ends, under its own chat (a group call's
+                // under its group); the notice is filed only for a call this device never rang.
+                if !self.call_resolved(&call.call_id, None) {
+                    self.missed_call_entry(call);
+                }
             }
             E::CallLogSync(sync) => self.call_log_entry(
                 &sync.call_id,
@@ -3332,15 +3335,17 @@ impl Worker {
                     );
                 }
             }
-            E::CallEndedElsewhere(call) => self.call_resolved(
-                &call.call_id,
-                Some(match call.outcome {
-                    whatsapp_rust::types::call::ElsewhereOutcome::Rejected => {
-                        crate::calls::CallOutcome::DeclinedElsewhere
-                    }
-                    _ => crate::calls::CallOutcome::AnsweredElsewhere,
-                }),
-            ),
+            E::CallEndedElsewhere(call) => {
+                self.call_resolved(
+                    &call.call_id,
+                    Some(match call.outcome {
+                        whatsapp_rust::types::call::ElsewhereOutcome::Rejected => {
+                            crate::calls::CallOutcome::DeclinedElsewhere
+                        }
+                        _ => crate::calls::CallOutcome::AnsweredElsewhere,
+                    }),
+                );
+            }
             E::PairingQrCode(qr) => {
                 // The prefix lets the phone camera open WhatsApp at Linked devices.
                 self.qr = Some(format!("{NATIVE_CAMERA_DEEP_LINK_PREFIX}{}", qr.code));

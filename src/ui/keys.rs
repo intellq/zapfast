@@ -901,6 +901,7 @@ mod tests {
             microphone: None,
             speaker: None,
             camera: None,
+            group: None,
         });
         app.call_fullscreen = true;
         let ctx = egui::Context::default();

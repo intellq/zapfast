@@ -23,6 +23,16 @@ use crate::calls::{CallPhase, CallUpdate};
 use crate::model::{AccountId, Action, CallDirection, Chat, ChatId};
 use crate::settings::NotificationSound;
 
+/// One person on a group call, as the call screen draws them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CallPerson {
+    pub id: String,
+    pub name: String,
+    pub picture: Option<std::path::PathBuf>,
+    /// Whether the call service counts them as in the call, not only asked.
+    pub joined: bool,
+}
+
 /// How long a call may stay placing with no word from its worker before the
 /// screen gives up on it. Placing waits on device checks, the camera (whose
 /// first use on macOS asks permission) and the peer's devices, so this is
@@ -88,8 +98,9 @@ impl App {
         locked && !(on_screen && self.locked_folder_open())
     }
 
-    /// The name the call shows for the other side: the chat's own title, or
-    /// "Locked chat" while the lock hides it.
+    /// The name the call shows for the other side: the chat's own title (a
+    /// group's subject for a group call), or "Locked chat" while the lock
+    /// hides it.
     pub fn call_name(&mut self) -> String {
         let Some(chat) = self.call.as_ref().map(|call| call.chat.clone()) else {
             return String::new();
@@ -97,7 +108,41 @@ impl App {
         if self.call_is_private() {
             return crate::i18n::gettext(self.locale, "Locked chat").into_owned();
         }
-        self.with_call_account(|app| app.display_name(&chat))
+        self.with_call_account(|app| app.chat_title_of(&chat))
+    }
+
+    /// Who rang a group call, by name: `None` for a one-to-one call, whose
+    /// chat already says who, and while the lock hides the chat.
+    pub fn call_caller_name(&mut self) -> Option<String> {
+        let caller = self.call.as_ref()?.group.as_ref()?.caller.clone()?;
+        if self.call_is_private() {
+            return None;
+        }
+        Some(self.with_call_account(|app| app.display_name(&caller)))
+    }
+
+    /// The people on a group call, named and pictured by the call's own
+    /// account. Nobody while the lock hides the chat: a member's name says as
+    /// much about the chat as its own does.
+    pub fn call_people(&mut self) -> Vec<CallPerson> {
+        let Some(group) = self.call.as_ref().and_then(|call| call.group.clone()) else {
+            return Vec::new();
+        };
+        if self.call_is_private() {
+            return Vec::new();
+        }
+        self.with_call_account(|app| {
+            group
+                .participants
+                .into_iter()
+                .map(|person| CallPerson {
+                    name: app.display_name(&person.id),
+                    picture: app.avatar(&person.id),
+                    joined: person.joined,
+                    id: person.id,
+                })
+                .collect()
+        })
     }
 
     /// The picture the call shows for the other side: none while the chat is
@@ -377,13 +422,11 @@ impl App {
                 None,
             )
         } else {
+            // A group call names its group, and in the body who is calling.
+            let caller = self.call_caller_name();
             (
                 self.call_name(),
-                if call.video {
-                    crate::i18n::gettext(self.locale, "Incoming video call").into_owned()
-                } else {
-                    crate::i18n::gettext(self.locale, "Incoming voice call").into_owned()
-                },
+                crate::ui::call::incoming_text(self.locale, &call, caller.as_deref()),
                 self.call_avatar(),
             )
         };
@@ -605,6 +648,7 @@ mod tests {
             microphone: None,
             speaker: None,
             camera: None,
+            group: None,
         }
     }
 

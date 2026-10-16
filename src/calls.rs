@@ -24,6 +24,7 @@ use crate::model::CallDirection;
 use crate::video_rate::{Cadence, Change as RateChange, FrameClock, RateControl, RateShare};
 use whatsapp_rust::prelude::{Client, Jid};
 use whatsapp_rust::types::call::{CallAction, IncomingCall};
+use whatsapp_rust::types::group_call::{GroupCallParticipant, GroupCallUpdate};
 use whatsapp_rust::voip::{
     CallEvent, CallHandle, TimedVideoFrame, VideoFrame, VideoSink, VideoSource,
 };
@@ -184,6 +185,36 @@ pub struct CallUpdate {
     pub microphone: Option<String>,
     pub speaker: Option<String>,
     pub camera: Option<String>,
+    /// Who else is on the call, for a group call; `None` for a one-to-one call.
+    pub group: Option<GroupCall>,
+}
+
+/// The people on a group call besides us, as the call's roster names them.
+///
+/// The roster is the call service's own: who it says has joined, and who it says was asked. The
+/// ids are the library's until the worker files them under the chat ids the rest of the app uses
+/// (`Worker::canonical`), and our own entry is left out there.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct GroupCall {
+    /// Who rang us: the person who started the call, or who added us to one already running.
+    pub caller: Option<String>,
+    /// Everyone else on the roster, in the order the call service lists them.
+    pub participants: Vec<Participant>,
+}
+
+/// One person on a group call's roster.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Participant {
+    pub id: String,
+    /// Whether the call service counts them as in the call, rather than only asked to it.
+    pub joined: bool,
+}
+
+impl GroupCall {
+    /// The people the call service counts as in the call.
+    pub fn joined(&self) -> impl Iterator<Item = &Participant> {
+        self.participants.iter().filter(|person| person.joined)
+    }
 }
 
 impl CallUpdate {
@@ -207,6 +238,7 @@ impl CallUpdate {
             microphone: None,
             speaker: None,
             camera: None,
+            group: None,
         }
     }
 
@@ -1354,6 +1386,115 @@ pub struct Call {
     /// When the call was placed or began to ring, Unix seconds: the time its
     /// entry in the chat carries.
     began: i64,
+    /// The roster of a group call; `None` for a one-to-one call.
+    group: Option<GroupRoster>,
+}
+
+/// What a group call's own signaling says about who is on it.
+///
+/// Kept in the library's terms (its JIDs and its participant records) and translated for the window
+/// in [`Call::update`]; the worker then files each id under the app's own chat ids.
+#[derive(Clone, Debug, Default)]
+struct GroupRoster {
+    /// Who rang us: the offer's sender, or the member who added us to a running call.
+    caller: Option<Jid>,
+    /// The transaction of the newest snapshot applied. A snapshot is the whole roster, and the call
+    /// service numbers them, so one that arrives late never replaces a newer one.
+    transaction: Option<u32>,
+    participants: Vec<GroupCallParticipant>,
+}
+
+impl GroupRoster {
+    /// The roster an offer rang with: `None` unless the offer is a group call's.
+    ///
+    /// A group offer names its group (`group-jid`), carries the call's roster, or both; a call
+    /// among several people with no group behind it carries the roster alone.
+    fn of_offer(incoming: &IncomingCall) -> Option<Self> {
+        let named = matches!(
+            &incoming.action,
+            CallAction::Offer {
+                group_jid: Some(_),
+                ..
+            }
+        );
+        if incoming.group.is_none() && !named {
+            return None;
+        }
+        let mut roster = Self {
+            caller: Some(offer_caller(incoming)),
+            ..Self::default()
+        };
+        if let Some(update) = incoming.group.as_deref() {
+            roster.apply(update);
+        }
+        Some(roster)
+    }
+
+    /// Takes a newer snapshot of the roster; an older one is ignored. Returns whether it changed.
+    fn apply(&mut self, update: &GroupCallUpdate) -> bool {
+        if self
+            .transaction
+            .is_some_and(|applied| update.transaction_id < applied)
+        {
+            return false;
+        }
+        self.transaction = Some(update.transaction_id);
+        if self.participants == update.participants {
+            return false;
+        }
+        self.participants = update.participants.clone();
+        true
+    }
+
+    fn view(&self) -> GroupCall {
+        GroupCall {
+            caller: self.caller.as_ref().map(Jid::to_non_ad_string),
+            participants: self
+                .participants
+                .iter()
+                .map(|person| Participant {
+                    // The phone number when the roster carries it, so the person is named the way
+                    // their chat is; otherwise their privacy id.
+                    id: person.pn.as_ref().unwrap_or(&person.jid).to_non_ad_string(),
+                    joined: person.is_connected(),
+                })
+                .collect(),
+        }
+    }
+}
+
+/// Who rang us with `incoming`: the member named on the call wrapper when the call service sent it
+/// (an invitation into a call already running), else the device that sent the offer, else the call's
+/// creator.
+fn offer_caller(incoming: &IncomingCall) -> Jid {
+    let from_service = matches!(incoming.from.server, whatsapp_rust::prelude::Server::Call);
+    let caller = if from_service {
+        incoming.participant.as_ref()
+    } else {
+        Some(&incoming.from)
+    };
+    caller
+        .unwrap_or_else(|| incoming.action.call_creator())
+        .to_non_ad()
+}
+
+/// The group an offer belongs to, when it names one.
+pub fn offer_group(incoming: &IncomingCall) -> Option<Jid> {
+    match &incoming.action {
+        CallAction::Offer {
+            group_jid: Some(group),
+            ..
+        } => Some(group.clone()),
+        _ => incoming
+            .group
+            .as_deref()
+            .and_then(|update| update.group_jid.clone()),
+    }
+}
+
+/// Whether an offer is a group call's, which rings under its group rather than its sender.
+pub fn offer_is_group(incoming: &IncomingCall) -> bool {
+    GroupRoster::of_offer(incoming).is_some()
 }
 
 impl Call {
@@ -1461,6 +1602,7 @@ impl Call {
                 speaker_device: speaker,
                 camera,
                 lost_devices: Vec::new(),
+                group: None,
             },
             frames,
         ))
@@ -1470,7 +1612,12 @@ impl Call {
     /// and answering opens the system's default devices unless others are picked meanwhile.
     pub fn ringing(chat: String, incoming: Box<IncomingCall>, video: bool) -> Self {
         let call_id = incoming.action.call_id().to_owned();
-        log::info!("[CALL] incoming offer call_id={call_id} video={video}");
+        let group = GroupRoster::of_offer(&incoming);
+        log::info!(
+            "[CALL] incoming offer call_id={call_id} video={video} group={} participants={}",
+            group.is_some(),
+            group.as_ref().map_or(0, |roster| roster.participants.len())
+        );
         Self {
             generation: next_generation(),
             call_id,
@@ -1495,6 +1642,7 @@ impl Call {
             camera_wanted: false,
             peer_video_request: None,
             began: crate::util::now(),
+            group,
         }
     }
 
@@ -1526,6 +1674,7 @@ impl Call {
             camera_wanted: false,
             peer_video_request: None,
             began: crate::util::now(),
+            group: None,
         }
     }
 
@@ -1574,7 +1723,14 @@ impl Call {
             microphone: self.microphone.clone(),
             speaker: self.speaker_device.clone(),
             camera: self.camera.clone(),
+            group: self.group.as_ref().map(GroupRoster::view),
         }
+    }
+
+    /// Whether this is a group call: one rung with a group's roster, which more than one other
+    /// person can join.
+    pub fn is_group(&self) -> bool {
+        self.group.is_some()
     }
 
     /// When the call was placed or began to ring, Unix seconds.
@@ -1870,6 +2026,23 @@ impl Call {
             );
             return None;
         }
+        if let Some(roster) = self.group.as_mut() {
+            match action {
+                // A newer roster: someone joined, left, or was asked in.
+                CallAction::GroupUpdate { update } => {
+                    return roster.apply(update).then(|| self.update());
+                }
+                // One invited member's answer speaks for that member alone; the call goes on for
+                // everyone else, and the roster says who is on it. The library leaves the call
+                // registered for the same reason.
+                CallAction::Reject { .. }
+                | CallAction::PreAccept { .. }
+                | CallAction::Accept { .. } => {
+                    return None;
+                }
+                _ => {}
+            }
+        }
         match action {
             CallAction::PreAccept { .. } => {
                 if self.phase == CallPhase::Dialing {
@@ -1925,6 +2098,24 @@ impl Call {
     /// Applies one media-plane event.
     pub fn media(&mut self, event: &CallEvent) -> Option<CallUpdate> {
         match event {
+            // The committed roster of a group call: who joined, who left.
+            CallEvent::GroupUpdated(update) => {
+                let changed = self.group.as_mut()?.apply(update);
+                if changed {
+                    log::info!(
+                        "[CALL] group roster call_id={} transaction={} joined={} listed={}",
+                        self.call_id,
+                        update.transaction_id,
+                        update
+                            .participants
+                            .iter()
+                            .filter(|person| person.is_connected())
+                            .count(),
+                        update.participants.len()
+                    );
+                }
+                changed.then(|| self.update())
+            }
             CallEvent::RelayAllocated => {
                 self.media_ready = true;
                 self.became_active()
@@ -3001,6 +3192,7 @@ mod tests {
             microphone: None,
             speaker: None,
             camera: None,
+            group: None,
         }
     }
 
@@ -3589,6 +3781,7 @@ mod tests {
             camera_wanted: false,
             peer_video_request: None,
             began: crate::util::now(),
+            group: None,
         }
     }
 
@@ -3620,6 +3813,142 @@ mod tests {
             duration: None,
             audio_duration: None,
         }
+    }
+
+    use test_offers::{GROUP, group_offer, member, roster};
+
+    #[test]
+    fn a_group_offer_rings_with_its_caller_and_roster() {
+        let incoming = group_offer(vec![
+            member("200000000000001", true),
+            member("200000000000002", false),
+        ]);
+        assert!(offer_is_group(&incoming));
+        assert_eq!(
+            offer_group(&incoming).map(|jid| jid.to_string()),
+            Some(GROUP.to_owned())
+        );
+        let call = Call::ringing(GROUP.to_owned(), Box::new(incoming), false);
+        assert!(call.is_group());
+        let group = call.update().group.expect("a group call");
+        assert_eq!(
+            group.caller.as_deref(),
+            Some("200000000000001@lid"),
+            "the device that rang, without its device number"
+        );
+        assert_eq!(
+            group.participants,
+            vec![
+                Participant {
+                    id: "200000000000001@lid".to_owned(),
+                    joined: true,
+                },
+                Participant {
+                    id: "200000000000002@lid".to_owned(),
+                    joined: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_one_to_one_offer_is_no_group_call() {
+        let incoming = IncomingCall::builder()
+            .from(creator())
+            .stanza_id("STANZA".to_owned())
+            .offline(false)
+            .action(CallAction::Offer {
+                call_id: CALL_ID.to_owned(),
+                call_creator: creator(),
+                caller_pn: None,
+                caller_country_code: None,
+                device_class: None,
+                joinable: false,
+                is_video: false,
+                audio: Vec::new(),
+                group_jid: None,
+            })
+            .build();
+        assert!(!offer_is_group(&incoming));
+        let call = Call::ringing(PEER.to_owned(), Box::new(incoming), false);
+        assert!(call.update().group.is_none());
+    }
+
+    #[test]
+    fn an_invitation_from_the_call_service_names_the_member_who_added_us() {
+        let mut incoming = group_offer(vec![member("200000000000003", true)]);
+        incoming.from = format!("{CALL_ID}@call").parse().unwrap();
+        incoming.participant = Some("200000000000003:7@lid".parse().unwrap());
+        let call = Call::ringing(GROUP.to_owned(), Box::new(incoming), false);
+        assert_eq!(
+            call.update()
+                .group
+                .and_then(|group| group.caller)
+                .as_deref(),
+            Some("200000000000003@lid")
+        );
+    }
+
+    /// Joining and leaving are new roster snapshots; a late one never undoes a newer one, and one
+    /// member saying no leaves the call to everyone else.
+    #[test]
+    fn a_group_calls_roster_follows_the_newest_snapshot() {
+        let incoming = group_offer(vec![member("200000000000001", true)]);
+        let mut call = Call::ringing(GROUP.to_owned(), Box::new(incoming), false);
+        call.phase = CallPhase::Active;
+        call.started = Some(Instant::now());
+
+        let joined = roster(
+            3,
+            vec![
+                member("200000000000001", true),
+                member("200000000000002", true),
+            ],
+        );
+        let update = call
+            .media(&CallEvent::GroupUpdated(Box::new(joined.clone())))
+            .expect("someone joined");
+        assert_eq!(update.group.unwrap().joined().count(), 2);
+        assert!(
+            call.media(&CallEvent::GroupUpdated(Box::new(joined)))
+                .is_none(),
+            "the same roster again changes nothing"
+        );
+
+        let stale = roster(2, vec![member("200000000000001", true)]);
+        assert!(
+            call.signaling(&CallAction::GroupUpdate {
+                update: Box::new(stale)
+            })
+            .is_none(),
+            "an older snapshot is not applied"
+        );
+        assert_eq!(call.update().group.unwrap().participants.len(), 2);
+
+        let left = roster(4, vec![member("200000000000002", true)]);
+        let update = call
+            .signaling(&CallAction::GroupUpdate {
+                update: Box::new(left),
+            })
+            .expect("someone left");
+        assert_eq!(update.group.unwrap().participants.len(), 1);
+
+        assert!(
+            call.signaling(&CallAction::Reject {
+                call_id: CALL_ID.to_owned(),
+                call_creator: creator(),
+                reason: None,
+            })
+            .is_none(),
+            "one member's refusal is not the end of the call"
+        );
+        assert_eq!(call.phase(), CallPhase::Active);
+
+        let ended = call
+            .signaling(&terminate(Some("group_call_ended")))
+            .expect("the call service ends it");
+        assert_eq!(ended.phase, CallPhase::Ended);
+        assert_eq!(ended.outcome, Some(CallOutcome::Answered));
     }
 
     #[test]
@@ -3918,5 +4247,62 @@ mod hardware_tests {
                 camera.label
             );
         }
+    }
+}
+
+/// Group call offers and rosters as the library hands them over, for the tests here and the
+/// worker's.
+#[cfg(test)]
+pub(crate) mod test_offers {
+    use super::*;
+
+    pub const CALL_ID: &str = "3EB0CALLID";
+    pub const CREATOR: &str = "200000000000001@lid";
+
+    pub const GROUP: &str = "120363000000000001@g.us";
+
+    /// One member on a group call's roster, by privacy id, joined or only asked.
+    pub fn member(lid: &str, joined: bool) -> GroupCallParticipant {
+        let mut person =
+            GroupCallParticipant::new(format!("{lid}@lid").parse().unwrap(), Vec::new());
+        person.state = joined.then(|| "connected".to_owned());
+        person
+    }
+
+    pub fn roster(transaction: u32, participants: Vec<GroupCallParticipant>) -> GroupCallUpdate {
+        GroupCallUpdate::builder()
+            .call_id(CALL_ID.to_owned())
+            .call_creator(CREATOR.parse::<Jid>().unwrap())
+            .group_jid(GROUP.parse().unwrap())
+            .transaction_id(transaction)
+            .media("audio".to_owned())
+            .connected_limit(32)
+            .joinable(true)
+            .av_upgradable(false)
+            .rekey_requested(false)
+            .participants(participants)
+            .build()
+    }
+
+    /// A group's offer as it rings here: sent by the member who started the call, naming the
+    /// group and carrying the roster.
+    pub fn group_offer(participants: Vec<GroupCallParticipant>) -> IncomingCall {
+        IncomingCall::builder()
+            .from("200000000000001:3@lid".parse().unwrap())
+            .stanza_id("STANZA".to_owned())
+            .offline(false)
+            .action(CallAction::Offer {
+                call_id: CALL_ID.to_owned(),
+                call_creator: CREATOR.parse::<Jid>().unwrap(),
+                caller_pn: None,
+                caller_country_code: None,
+                device_class: None,
+                joinable: true,
+                is_video: false,
+                audio: Vec::new(),
+                group_jid: Some(GROUP.parse().unwrap()),
+            })
+            .group(Box::new(roster(1, participants)))
+            .build()
     }
 }

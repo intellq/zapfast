@@ -2408,6 +2408,10 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
                     call.outcome = Some(crate::calls::CallOutcome::Answered);
                 }
             }
+            // A group's call: ringing with who started it and who is on it, and
+            // up with a tile for each member, one of them only asked to it.
+            "call-group" => group_call_sample(app, true, false),
+            "call-group-active" => group_call_sample(app, false, false),
             "call-strip" => {
                 call_sample(app, false, false);
                 app.call_surface_hidden = true;
@@ -3685,6 +3689,7 @@ pub fn call_sample(app: &mut App, incoming: bool, video: bool) {
         microphone: None,
         speaker: None,
         camera: None,
+        group: None,
     });
     app.call_account = Some(app.account().id.clone());
     if video && !incoming {
@@ -3700,6 +3705,32 @@ pub fn call_sample(app: &mut App, incoming: bool, video: bool) {
             false,
             320,
         )));
+    }
+}
+
+/// A call in the Rust Berlin group, started by Jonas: Mira, Tom and Ada are
+/// on it, and Grace was asked and has not joined.
+pub fn group_call_sample(app: &mut App, incoming: bool, video: bool) {
+    call_sample(app, incoming, video);
+    let roster = [
+        ("491701111111@s.whatsapp.net", true),
+        ("491702222222@s.whatsapp.net", true),
+        ("491703333333@s.whatsapp.net", true),
+        (SAMPLES[0].id, true),
+        (SAMPLES[2].id, false),
+    ];
+    if let Some(call) = app.call.as_mut() {
+        call.chat = SAMPLES[1].id.to_owned();
+        call.group = Some(crate::calls::GroupCall {
+            caller: Some(roster[0].0.to_owned()),
+            participants: roster
+                .iter()
+                .map(|(id, joined)| crate::calls::Participant {
+                    id: (*id).to_owned(),
+                    joined: *joined,
+                })
+                .collect(),
+        });
     }
 }
 
@@ -5960,6 +5991,8 @@ mod tests {
             "call-devices",
             "call-ended",
             "call-strip",
+            "call-group",
+            "call-group-active",
             "call-video",
             "call-video,light",
             "call-video-incoming",
@@ -6090,6 +6123,9 @@ mod tests {
             ("call-active", wide),
             ("call", wide),
             ("call-active", narrow),
+            ("call-group", wide),
+            ("call-group-active", wide),
+            ("call-group-active", narrow),
             ("settings", wide),
             ("settings", narrow),
             ("calls", wide),
@@ -16862,6 +16898,64 @@ mod call_surface_tests {
                 "{tip} is disabled once the call is over: {shown:?}"
             );
         }
+    }
+
+    /// A group's call rings under the group's name and says who started it, and once up it has a
+    /// tile for everyone on its roster, saying who has not joined. A voice call in a group offers
+    /// no camera: WhatsApp takes video only in a group call that began as one.
+    #[test]
+    fn a_group_call_names_its_group_who_rang_and_who_is_on_it() {
+        let mut ringing = app();
+        apply_flags(&mut ringing, Some("call-group"));
+        assert_eq!(ringing.call_name(), "Rust Berlin", "named by its group");
+        let caller = ringing.call_caller_name();
+        assert_eq!(caller.as_deref(), Some("Jonas"));
+        let call = ringing.call.clone().unwrap();
+        assert_eq!(
+            crate::ui::call::incoming_text(ringing.locale, &call, caller.as_deref()),
+            "Group voice call from Jonas"
+        );
+
+        let mut running = app();
+        apply_flags(&mut running, Some("call-group-active"));
+        let people: Vec<(String, bool)> = running
+            .call_people()
+            .into_iter()
+            .map(|person| (person.name, person.joined))
+            .collect();
+        assert_eq!(
+            people,
+            [
+                ("Jonas".to_owned(), true),
+                ("Mira".to_owned(), true),
+                ("Tom".to_owned(), true),
+                ("Ada Lovelace".to_owned(), true),
+                ("Grace Hopper".to_owned(), false),
+            ]
+        );
+        let ctx = egui::Context::default();
+        running.attach(&ctx);
+        ctx.enable_accesskit();
+        let shown = labels(&mut running, &ctx);
+        for expected in ["Mute", "Devices", "Hang up"] {
+            assert!(
+                shown.contains(&expected.to_owned()),
+                "{expected} is on the call screen: {shown:?}"
+            );
+        }
+        assert!(
+            !shown.contains(&"Start video".to_owned()),
+            "a group voice call offers no camera: {shown:?}"
+        );
+
+        // A locked group's call names nobody on it.
+        let group = running.call.as_ref().unwrap().chat.clone();
+        for chat in running.chats.iter_mut().filter(|chat| chat.id == group) {
+            chat.locked = true;
+        }
+        running.settings.set_chat_lock_code(Some("test-code"));
+        assert!(running.call_people().is_empty());
+        assert_eq!(running.call_caller_name(), None);
     }
 
     #[test]
