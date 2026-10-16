@@ -2276,14 +2276,14 @@ mod tests {
         call.video = true;
         call.video_pipe = Some(pipeline_with_a_running_camera());
         assert!(
-            !call.speaker.as_ref().is_some_and(AudioOutput::relink_open),
+            !call.speaker.as_ref().is_some_and(AudioOutput::relink_told),
             "nothing has relinked yet"
         );
         // Whether this machine has a tenth camera is not what is under test: the stream is
         // torn down either way, so the sink is told either way.
         let _ = call.set_camera_device(Some("9".to_owned())).await;
         assert!(
-            call.speaker.as_ref().is_some_and(AudioOutput::relink_open),
+            call.speaker.as_ref().is_some_and(AudioOutput::relink_told),
             "switching the camera tells the sink the graph is relinking"
         );
         call.cleanup();

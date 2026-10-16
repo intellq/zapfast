@@ -872,10 +872,17 @@ impl AudioOutput {
         )
     }
 
-    /// Whether a relink window is open right now, which is what a call's own test asks.
+    /// Whether the call has ever opened a relink window, which is what a call's own test asks.
+    ///
+    /// Not whether one is open now: the test's switch to a camera that does not exist can take
+    /// longer than the window to fail (macOS's camera stack does), and the window has then already
+    /// closed again by the time the test looks.
     #[cfg(test)]
-    pub(crate) fn relink_open(&self) -> bool {
-        relink_left(&self.relink).is_some()
+    pub(crate) fn relink_told(&self) -> bool {
+        self.relink
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .is_some()
     }
 
     /// Says a new media stream has just been opened or closed here, which relinks the streams
