@@ -36,6 +36,14 @@ pub struct Account {
     pub open_chat: Option<ChatId>,
     pub scroll_chat_into_view: Option<ChatId>,
     pub drafts: HashMap<ChatId, String>,
+    /// This account's media cache as last measured, for Settings. `None`
+    /// until a measurement succeeds, so a failed one shows no numbers
+    /// rather than zeroes.
+    pub storage_stats: Option<crate::model::StorageStats>,
+    /// The measurement being waited for; an older answer is dropped.
+    pub storage_token: u64,
+    /// Whether the media cache is being emptied.
+    pub storage_clearing: bool,
     pub(crate) attachment_drafts: HashMap<ChatId, AttachmentDraft>,
     pub(crate) draft_mentions: HashMap<ChatId, Vec<ComposerMention>>,
     pub search: String,
@@ -130,6 +138,9 @@ impl Account {
             open_chat,
             scroll_chat_into_view: None,
             drafts: HashMap::new(),
+            storage_stats: None,
+            storage_token: 0,
+            storage_clearing: false,
             draft_mentions: HashMap::new(),
             attachment_drafts: HashMap::new(),
             search: String::new(),

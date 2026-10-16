@@ -967,6 +967,17 @@ pub fn populate(app: &mut App) {
     // The privacy rows read like a linked account, so the sample shows them
     // filled instead of disabled.
     app.account_privacy = crate::privacy::Snapshot::demo();
+    // The storage rows read like a cache in use, not an empty one.
+    app.storage_stats = Some(crate::model::StorageStats {
+        images: 12,
+        image_bytes: 8_388_608,
+        videos: 3,
+        video_bytes: 25_165_824,
+        stickers: 18,
+        sticker_bytes: 2_097_152,
+        other: 4,
+        other_bytes: 524_288,
+    });
     app.scroll_to_bottom = true;
     app.focus_composer = false;
 }
@@ -2426,6 +2437,9 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
                 });
             }
             "unlink" => app.dialog = Some(Dialog::ConfirmUnlink),
+            "clear-media" => {
+                app.dialog = Some(Dialog::ConfirmClearMediaCache(app.account().id.clone()));
+            }
             "leave-group" => {
                 let group = SAMPLES[1].id.to_owned();
                 app.open_chat = Some(group.clone());
@@ -5169,6 +5183,8 @@ mod tests {
             "settings",
             "settings-search=Notifications",
             "settings-search=System",
+            "settings-search=Storage",
+            "clear-media",
             "wallpaper",
             "wallpaper,light",
             "wallpaper,wallpaper-image",

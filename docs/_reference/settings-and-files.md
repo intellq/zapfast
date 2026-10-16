@@ -24,6 +24,11 @@ Back up the archive if you need its history. WhatsApp sends only recent
 history to a new device, although ZapFast can request some older messages from
 the phone. Clearing the media cache makes ZapFast download attachments again.
 Expired attachments may still be available through the phone.
+**Settings > Files > Storage used** shows how much space the account on screen
+has in its media cache, split into images, videos and GIFs, stickers, and other
+files. **Clear…** there deletes that account's cached attachments after asking:
+its messages, its other caches, and the other accounts' files stay, and so do
+files in a download folder you chose.
 **Settings > Files > Change…** sends new downloads to another folder, leaving
 earlier ones in place. There, documents keep the name they were sent with; a
 file already in the folder is never replaced, and the download becomes

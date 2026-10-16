@@ -9,7 +9,7 @@
 //! adds it to or removes it from the favorites.
 
 use crate::i18n::tr;
-use egui::{Color32, Layout, Rect, Sense, Vec2, pos2, vec2};
+use egui::{Color32, CornerRadius, Frame, Layout, Margin, Rect, Sense, Stroke, Vec2, pos2, vec2};
 
 use crate::app::App;
 use crate::model::{Action, Content, MediaState};

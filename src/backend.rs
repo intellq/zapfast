@@ -9,7 +9,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 use crate::model::{
-    Chat, ChatId, Contact, Gif, GifError, LinkCard, Message, PollDraft, StickerPack,
+    Chat, ChatId, Contact, Gif, GifError, LinkCard, Message, PollDraft, StickerPack, StorageStats,
 };
 use crate::paths::AccountDirs;
 
@@ -764,6 +764,24 @@ pub enum Command {
         query: String,
         results: Result<Vec<Gif>, GifError>,
     },
+    /// Measures this account's media cache for Settings, answered by
+    /// `Event::StorageStats` with the same `token`.
+    LoadStorageStats {
+        token: u64,
+    },
+    /// Deletes the files in this account's media cache, never the archive,
+    /// so attachments download again when viewed. Answered like
+    /// `LoadStorageStats`, with `cleared` set.
+    ClearMediaCache {
+        token: u64,
+    },
+    /// Internal: a measurement made off the runtime, after a clear when
+    /// `cleared`.
+    StorageMeasured {
+        stats: Option<StorageStats>,
+        token: u64,
+        cleared: bool,
+    },
     /// Internal file-picker result.
     Picked {
         chat: ChatId,
@@ -973,6 +991,14 @@ pub enum Event {
         complete: bool,
     },
     MessageUpdated(Box<Message>),
+    /// The account's media cache as measured, `None` when it could not be
+    /// read. `cleared` says the cache was just emptied, so files the
+    /// interface still points into it are gone.
+    StorageStats {
+        stats: Option<StorageStats>,
+        token: u64,
+        cleared: bool,
+    },
     /// Files selected for the composer.
     Picked {
         chat: ChatId,

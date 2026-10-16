@@ -338,6 +338,65 @@ fn temporary_attachment_file(path: &Path) -> Result<(PathBuf, std::fs::File), St
     Err(tr("Could not create a unique attachment staging file").to_owned())
 }
 
+/// Adds up the files under `dir`, the account's media cache. Downloads still
+/// being written (hidden `.part` files) are left out.
+pub(crate) fn measure_media(dir: &Path) -> io::Result<crate::model::StorageStats> {
+    let mut stats = crate::model::StorageStats::default();
+    walk_media(dir, &mut |path, metadata| {
+        stats.add(path, metadata.len());
+        Ok(())
+    })?;
+    Ok(stats)
+}
+
+/// Deletes the files under `dir`, the account's media cache, leaving the
+/// folders and any download still being written.
+pub(crate) fn clear_media(dir: &Path) -> io::Result<()> {
+    let mut failed = None;
+    walk_media(dir, &mut |path, _| {
+        if let Err(error) = std::fs::remove_file(path) {
+            failed = Some(error);
+        }
+        Ok(())
+    })?;
+    failed.map_or(Ok(()), Err)
+}
+
+/// Visits every finished file under `dir`, an absent folder being empty.
+fn walk_media(
+    dir: &Path,
+    visit: &mut dyn FnMut(&Path, &std::fs::Metadata) -> io::Result<()>,
+) -> io::Result<()> {
+    let mut folders = vec![dir.to_path_buf()];
+    while let Some(folder) = folders.pop() {
+        let entries = match std::fs::read_dir(&folder) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        for entry in entries {
+            let entry = entry?;
+            let metadata = entry.metadata()?;
+            let path = entry.path();
+            if metadata.is_dir() {
+                folders.push(path);
+            } else if metadata.is_file() && !is_staging(&path) {
+                visit(&path, &metadata)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Whether `path` is a download still being written.
+fn is_staging(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_default();
+    name.starts_with('.') && name.ends_with(".part")
+}
+
 /// Removes incomplete, unreferenced downloads left by an interrupted process.
 fn discard_attachment_staging(dir: &Path) {
     let entries = match std::fs::read_dir(dir) {
@@ -1746,6 +1805,30 @@ impl Worker {
         self.emit(Event::Contacts(self.contacts.values().cloned().collect()));
         self.emit_chats();
         self.emit_call_log();
+    }
+
+    /// Measures the media cache off the runtime, emptying it first when
+    /// `clear`, and hands the result back as `Command::StorageMeasured`.
+    fn measure_storage(&mut self, token: u64, clear: bool) {
+        let dir = self.dirs.media_cache_dir();
+        let commands = self.commands.clone();
+        tokio::task::spawn_blocking(move || {
+            if clear && clear_media(&dir).is_err() {
+                log::warn!("could not delete every cached attachment");
+            }
+            let stats = match measure_media(&dir) {
+                Ok(stats) => Some(stats),
+                Err(_) => {
+                    log::warn!("could not measure the attachment cache");
+                    None
+                }
+            };
+            let _ = commands.send(Command::StorageMeasured {
+                stats,
+                token,
+                cleared: clear,
+            });
+        });
     }
 
     /// Re-derives archived rows from raw protobufs after parser changes. Also
@@ -5626,6 +5709,24 @@ impl Worker {
                         .pick_files()
                         .unwrap_or_default();
                     let _ = commands.send(Command::Picked { chat, paths });
+                });
+            }
+            Command::LoadStorageStats { token } => self.measure_storage(token, false),
+            Command::ClearMediaCache { token } => self.measure_storage(token, true),
+            Command::StorageMeasured {
+                stats,
+                token,
+                cleared,
+            } => {
+                if cleared {
+                    // The archive forgets the files that are gone, so they
+                    // download again instead of drawing as broken.
+                    self.relocate_media();
+                }
+                self.emit(Event::StorageStats {
+                    stats,
+                    token,
+                    cleared,
                 });
             }
             Command::Picked { chat, paths } => self.emit(Event::Picked { chat, paths }),
@@ -18170,6 +18271,108 @@ mod receipt_tests {
             read.read_at, None,
             "\"Message info\" says the time was not recorded"
         );
+    }
+
+    /// The cache is measured by kind and emptied without touching a download
+    /// still being written.
+    #[test]
+    fn the_media_cache_is_measured_and_emptied_but_not_mid_download() {
+        let root = tempfile::tempdir().expect("temp");
+        let dir = root.path().join("media");
+        assert_eq!(
+            measure_media(&dir).expect("an absent cache is empty"),
+            crate::model::StorageStats::default()
+        );
+        std::fs::create_dir_all(dir.join("cards")).expect("dirs");
+        for (name, bytes) in [
+            ("a.jpg", 10),
+            ("b.mp4", 20),
+            ("c.webp", 3),
+            ("cards/d.pdf", 4),
+            (".e.part", 99),
+        ] {
+            std::fs::write(dir.join(name), vec![0u8; bytes]).expect("write");
+        }
+        let stats = measure_media(&dir).expect("measured");
+        assert_eq!(
+            stats.files_total(),
+            4,
+            "the download in progress is left out"
+        );
+        assert_eq!(stats.bytes_total(), 37);
+        assert_eq!((stats.other, stats.other_bytes), (1, 4));
+        clear_media(&dir).expect("cleared");
+        assert_eq!(measure_media(&dir).expect("measured").files_total(), 0);
+        assert!(
+            dir.join(".e.part").exists(),
+            "a download still being written stays"
+        );
+        assert!(dir.join("cards").is_dir(), "the folders stay");
+    }
+
+    /// After the cache is emptied, the archive forgets the files that went,
+    /// so they download again, and keeps a file in a chosen download folder.
+    #[tokio::test]
+    async fn a_cleared_cache_is_forgotten_by_the_archive_only_where_it_was() {
+        use crate::model::{Media, MediaState};
+        let (mut worker, events, _inbox, _wa) = receipt_tests::worker();
+        let elsewhere = tempfile::tempdir().expect("temp");
+        let cache = worker.dirs.media_cache_dir();
+        std::fs::create_dir_all(&cache).expect("cache");
+        let cached = cache.join("photo.jpg");
+        let kept = elsewhere.path().join("kept.jpg");
+        for (id, path) in [("photo", &cached), ("kept", &kept)] {
+            std::fs::write(path, b"jpeg").expect("file");
+            let mut picture = incoming(id, 100);
+            picture.content = Content::Image {
+                motion: None,
+                media: Media {
+                    mime: "image/jpeg".into(),
+                    size: 4,
+                    width: None,
+                    height: None,
+                    path: None,
+                    state: MediaState::Idle,
+                },
+                caption: None,
+            };
+            worker.store_message(picture, None, None);
+            worker
+                .archive
+                .set_media_path(PEER, id, path)
+                .expect("path")
+                .expect("row");
+        }
+        clear_media(&cache).expect("cleared");
+        worker
+            .handle_command(Command::StorageMeasured {
+                stats: Some(measure_media(&cache).expect("measured")),
+                token: 7,
+                cleared: true,
+            })
+            .await;
+        let path = |id: &str| {
+            worker
+                .archive
+                .message(PEER, id)
+                .expect("read")
+                .expect("row")
+                .content
+                .media()
+                .and_then(|media| media.path.clone())
+        };
+        assert_eq!(path("photo"), None, "the cached photo downloads again");
+        assert_eq!(
+            path("kept"),
+            Some(kept.clone()),
+            "a chosen folder's file stays"
+        );
+        assert!(kept.exists());
+        assert!(events.try_iter().any(|event| matches!(
+            event,
+            Event::StorageStats { token: 7, cleared: true, stats: Some(stats) }
+                if stats.files_total() == 0
+        )));
     }
 
     /// A duplicate delivery or a history replay reclassifies the same message,

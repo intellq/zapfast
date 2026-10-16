@@ -27,6 +27,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                 Dialog::About => 380.0,
                 Dialog::ConfirmUnlink => 380.0,
                 Dialog::ConfirmRemoveAccount(_) => 380.0,
+                Dialog::ConfirmClearMediaCache(_) => 380.0,
                 Dialog::ConfirmLeaveGroup(_) | Dialog::ConfirmBlock(_) => 380.0,
                 Dialog::PairWithPhone => 380.0,
                 Dialog::NewContact => 380.0,
@@ -68,6 +69,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                 Dialog::About => about(app, ui),
                 Dialog::ConfirmUnlink => confirm_unlink(app, ui),
                 Dialog::ConfirmRemoveAccount(id) => confirm_remove(app, ui, id),
+                Dialog::ConfirmClearMediaCache(id) => confirm_clear_media(app, ui, id),
                 Dialog::ConfirmLeaveGroup(id) => confirm_leave_group(app, ui, &id),
                 Dialog::ConfirmBlock(id) => confirm_block(app, ui, &id),
                 Dialog::PairWithPhone => pair_with_phone(app, ui),
@@ -1508,6 +1510,34 @@ fn confirm_remove_sticker_pack(
         &[&body],
         &crate::i18n::gettext(locale, "Remove"),
         Action::DeleteStickerPack(dir),
+    );
+}
+
+fn confirm_clear_media(app: &mut App, ui: &mut egui::Ui, id: crate::model::AccountId) {
+    let locale = app.locale;
+    let account = app
+        .accounts
+        .iter()
+        .find(|account| account.id == id)
+        .map(|account| account.display_label(locale))
+        .unwrap_or_default();
+    confirm_destructive(
+        app,
+        ui,
+        &crate::i18n::gettext(locale, "Clear the media cache?"),
+        &[
+            &crate::i18n::gettext(
+                locale,
+                "This deletes the photos, videos, stickers and files {account} downloaded to this computer. Messages stay, and attachments download again when you open them, while WhatsApp still has them.",
+            )
+            .replace("{account}", &account),
+            &crate::i18n::gettext(
+                locale,
+                "Files in a download folder you chose are kept.",
+            ),
+        ],
+        &crate::i18n::gettext(locale, "Clear"),
+        Action::ClearMediaCache(id),
     );
 }
 

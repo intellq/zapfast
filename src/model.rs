@@ -1219,6 +1219,38 @@ impl Content {
         }
     }
 
+    /// Forgets every downloaded file of this message kept under `dir`, so
+    /// it downloads again: the attachment, a motion photo's clip, and each
+    /// carousel card's picture. Files elsewhere, such as a chosen download
+    /// folder, are kept.
+    pub fn forget_files_in(&mut self, dir: &std::path::Path) {
+        let forget = |path: &mut Option<PathBuf>, state: &mut MediaState| {
+            if path.as_deref().is_some_and(|path| path.starts_with(dir)) {
+                *path = None;
+                *state = MediaState::Idle;
+            }
+        };
+        if let Some(media) = self.media_mut() {
+            forget(&mut media.path, &mut media.state);
+        }
+        match self {
+            Self::Image {
+                motion: Some(motion),
+                ..
+            } => forget(&mut motion.path, &mut motion.state),
+            Self::Interactive {
+                card: Some(card), ..
+            } => {
+                for item in &mut card.carousel {
+                    if let Some(media) = item.image.as_mut() {
+                        forget(&mut media.path, &mut media.state);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     pub fn media_mut(&mut self) -> Option<&mut Media> {
         match self {
             Self::Revoked { kept: Some(kept) } => kept.media_mut(),
@@ -1312,6 +1344,68 @@ pub struct Motion {
     /// Non-persisted download state.
     #[serde(skip)]
     pub state: MediaState,
+}
+
+/// Counts and sizes of the files in an account's media cache, for the
+/// storage rows in Settings. The kind comes from each file's extension.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StorageStats {
+    pub images: u64,
+    pub image_bytes: u64,
+    pub videos: u64,
+    pub video_bytes: u64,
+    pub stickers: u64,
+    pub sticker_bytes: u64,
+    pub other: u64,
+    pub other_bytes: u64,
+}
+
+impl StorageStats {
+    /// Counts one cached file of `bytes` under the kind its name says.
+    /// Animated GIFs arrive as MP4 videos, so they count with the videos.
+    pub fn add(&mut self, path: &std::path::Path, bytes: u64) {
+        let extension = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(str::to_ascii_lowercase)
+            .unwrap_or_default();
+        let (count, total) = match extension.as_str() {
+            "jpg" | "jpeg" | "png" | "heic" | "heif" | "bmp" | "tif" | "tiff" => {
+                (&mut self.images, &mut self.image_bytes)
+            }
+            "mp4" | "m4v" | "mov" | "3gp" | "3gpp" | "webm" | "mkv" | "gif" => {
+                (&mut self.videos, &mut self.video_bytes)
+            }
+            "webp" => (&mut self.stickers, &mut self.sticker_bytes),
+            _ => (&mut self.other, &mut self.other_bytes),
+        };
+        *count += 1;
+        *total = total.saturating_add(bytes);
+    }
+
+    /// Every cached byte counted.
+    pub fn bytes_total(self) -> u64 {
+        self.image_bytes
+            .saturating_add(self.video_bytes)
+            .saturating_add(self.sticker_bytes)
+            .saturating_add(self.other_bytes)
+    }
+
+    /// Every cached file counted.
+    pub fn files_total(self) -> u64 {
+        self.images + self.videos + self.stickers + self.other
+    }
+
+    /// Filled width for `bytes` out of `total` on a track of `track` pixels.
+    /// Empty when there is nothing to measure, so an empty cache draws no
+    /// bar instead of dividing by zero.
+    pub fn bar_width(bytes: u64, total: u64, track: f32) -> f32 {
+        if total == 0 || track <= 0.0 {
+            0.0
+        } else {
+            track * (bytes as f32 / total as f32)
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -1521,6 +1615,8 @@ pub enum Dialog {
     About,
     ConfirmUnlink,
     ConfirmRemoveAccount(AccountId),
+    /// Confirms emptying one account's media cache.
+    ConfirmClearMediaCache(AccountId),
     /// Phone number used for pairing-code linking.
     PairWithPhone,
     /// Contacts and the self-chat shortcut.
@@ -2321,6 +2417,8 @@ pub enum Action {
     CancelAddAccount,
     /// Unlinks an account and deletes what is stored here for it.
     RemoveAccount(AccountId),
+    /// Deletes one account's cached attachments, never its archive.
+    ClearMediaCache(AccountId),
     /// Mutes until Unix time, indefinitely with `Some(0)`, or unmutes with `None`.
     SetMuted(ChatId, Option<i64>),
     /// Moves a chat into or out of the locked folder.
@@ -2345,6 +2443,67 @@ pub enum ComposerTextCommand {
     Copy,
     Paste,
     SelectAll,
+}
+
+#[cfg(test)]
+mod storage_tests {
+    use super::StorageStats;
+
+    #[test]
+    fn cached_files_are_counted_by_kind() {
+        let mut stats = StorageStats::default();
+        for (name, bytes) in [
+            ("a.jpg", 10),
+            ("b.PNG", 5),
+            ("c.mp4", 100),
+            ("d.webp", 3),
+            ("e.pdf", 7),
+            ("f", 1),
+        ] {
+            stats.add(std::path::Path::new(name), bytes);
+        }
+        assert_eq!((stats.images, stats.image_bytes), (2, 15));
+        assert_eq!((stats.videos, stats.video_bytes), (1, 100));
+        assert_eq!((stats.stickers, stats.sticker_bytes), (1, 3));
+        assert_eq!((stats.other, stats.other_bytes), (2, 8));
+        assert_eq!(stats.bytes_total(), 126);
+        assert_eq!(stats.files_total(), 6);
+    }
+
+    /// An empty cache draws no bar instead of dividing by zero.
+    #[test]
+    fn a_storage_bar_is_empty_when_there_is_nothing_to_measure() {
+        assert_eq!(StorageStats::bar_width(0, 0, 100.0), 0.0);
+        assert_eq!(StorageStats::bar_width(50, 0, 100.0), 0.0);
+        assert_eq!(StorageStats::bar_width(50, 100, 200.0), 100.0);
+    }
+
+    #[test]
+    fn forgetting_the_cache_keeps_files_kept_elsewhere() {
+        let media = |path: &str| super::Media {
+            mime: "image/jpeg".into(),
+            size: 1,
+            width: None,
+            height: None,
+            path: Some(path.into()),
+            state: super::MediaState::Idle,
+        };
+        let mut cached = super::Content::Image {
+            caption: None,
+            media: media("/cache/media/a.jpg"),
+            motion: None,
+        };
+        let mut kept = super::Content::Image {
+            caption: None,
+            media: media("/home/me/Downloads/b.jpg"),
+            motion: None,
+        };
+        for content in [&mut cached, &mut kept] {
+            content.forget_files_in(std::path::Path::new("/cache/media"));
+        }
+        assert_eq!(cached.media().unwrap().path, None);
+        assert!(kept.media().unwrap().path.is_some());
+    }
 }
 
 #[cfg(test)]

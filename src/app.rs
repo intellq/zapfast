@@ -3444,6 +3444,36 @@ impl App {
                     self.forward_inspected(from_chat, messages, limits);
                 }
             }
+            Event::StorageStats {
+                stats,
+                token,
+                cleared,
+            } => {
+                if cleared {
+                    // The files are gone whichever measurement this answers:
+                    // what is on screen downloads again rather than drawing
+                    // as broken.
+                    let dir = self.account().dirs.media_cache_dir();
+                    for conversation in self.conversations.values_mut() {
+                        for message in &mut conversation.messages {
+                            message.content.forget_files_in(&dir);
+                        }
+                    }
+                    if live {
+                        let done = crate::i18n::gettext(self.locale, "Media cache cleared");
+                        self.toast(done.into_owned());
+                    }
+                }
+                if token == self.storage_token {
+                    if cleared {
+                        self.storage_clearing = false;
+                    }
+                    // A failed measurement leaves the last numbers in place.
+                    if stats.is_some() {
+                        self.storage_stats = stats;
+                    }
+                }
+            }
             Event::Link(status) => self.handle_link(status, live),
             Event::Me {
                 id,
@@ -5955,6 +5985,13 @@ impl App {
                     // So is the blocklist, unless it came a moment ago.
                     self.backend.send(Command::RefreshBlocklist);
                 }
+                // The cache grows with every download: measure it again
+                // whenever Settings opens.
+                if page == Page::Settings && self.page != Page::Settings {
+                    self.storage_token += 1;
+                    let token = self.storage_token;
+                    self.backend.send(Command::LoadStorageStats { token });
+                }
                 // Typed passwords do not wait in a form nobody sees.
                 if page != Page::Settings && !self.app_lock.checking() {
                     self.app_lock.form = None;
@@ -8014,6 +8051,14 @@ impl App {
                 }
             }
             Action::RemoveAccount(id) => self.remove_account(id),
+            Action::ClearMediaCache(id) => {
+                if let Some(account) = self.accounts.iter_mut().find(|known| known.id == id) {
+                    account.storage_token += 1;
+                    account.storage_clearing = true;
+                    let token = account.storage_token;
+                    account.backend.send(Command::ClearMediaCache { token });
+                }
+            }
         }
     }
 

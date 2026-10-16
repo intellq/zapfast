@@ -3,7 +3,7 @@
 use crate::i18n::tr;
 use std::borrow::Cow;
 
-use egui::{Align, CornerRadius, Frame, Layout, Margin, Rect, Stroke, Vec2, pos2, vec2};
+use egui::{Align, CornerRadius, Frame, Layout, Margin, Rect, Sense, Stroke, Vec2, pos2, vec2};
 
 use crate::app::App;
 use crate::i18n::Locale;
@@ -1244,6 +1244,18 @@ fn sections(app: &App) -> Vec<Section> {
             }
         },
     );
+    files.block(
+        vec![
+            translated(locale, "Storage used"),
+            translated(locale, "Media cache"),
+            translated(locale, "Images"),
+            translated(locale, "Videos and GIFs"),
+            translated(locale, "Stickers"),
+            translated(locale, "Other"),
+            translated(locale, "Clear…"),
+        ],
+        storage_usage,
+    );
     let log = app.dirs.log_file();
     files.row_with_width(
         translated(locale, "Log"),
@@ -2084,6 +2096,138 @@ fn wallpaper_color_button(
         )
     });
     response.clicked()
+}
+
+/// The space this account's media cache takes, split by kind, with the
+/// button that empties it.
+fn storage_usage(ui: &mut egui::Ui, app: &mut App) {
+    let palette = app.palette;
+    let locale = app.locale;
+    let stats = app.storage_stats.unwrap_or_default();
+    let measured = app.storage_stats.is_some();
+    let total = stats.bytes_total();
+    ui.horizontal(|ui| {
+        theme::text(
+            ui,
+            crate::i18n::gettext(locale, "Storage used"),
+            theme::medium(14.0),
+            palette.text,
+        );
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let clearing = app.storage_clearing;
+            let label = crate::i18n::gettext(locale, "Clear…");
+            let clear = ui
+                .add_enabled_ui(measured && total > 0 && !clearing, |ui| {
+                    theme::soft_button(ui, &palette, Some(Icon::Trash), &label, false)
+                })
+                .inner;
+            if clear.clicked() {
+                let id = app.account().id.clone();
+                app.actions
+                    .push(Action::ShowDialog(Dialog::ConfirmClearMediaCache(id)));
+            }
+            // A reading that never arrived shows no size rather than zero.
+            if measured {
+                theme::text(
+                    ui,
+                    crate::util::bytes(total),
+                    theme::semibold(14.0),
+                    palette.text,
+                );
+            }
+        });
+    });
+    ui.add_space(2.0);
+    // Each number has a cache of its own: say whose this is.
+    let account = app.account().display_label(locale);
+    let hint = widgets::line(
+        ui,
+        &crate::i18n::gettext(
+            locale,
+            "Photos, videos, stickers and files {account} downloaded to this computer. Clearing them keeps your messages; attachments download again when you open them.",
+        )
+        .replace("{account}", &account),
+        theme::regular(12.5),
+        palette.secondary,
+        ui.available_width(),
+        usize::MAX,
+    );
+    let (rect, _) = ui.allocate_exact_size(hint.size(), Sense::hover());
+    if ui.is_rect_visible(rect) {
+        hint.paint(ui, rect.min, palette.secondary);
+    }
+    if !measured {
+        return;
+    }
+    ui.add_space(10.0);
+    // Other only shows when there is something in it.
+    for (label, count, bytes, always) in [
+        (
+            crate::i18n::gettext(locale, "Images"),
+            stats.images,
+            stats.image_bytes,
+            true,
+        ),
+        (
+            crate::i18n::gettext(locale, "Videos and GIFs"),
+            stats.videos,
+            stats.video_bytes,
+            true,
+        ),
+        (
+            crate::i18n::gettext(locale, "Stickers"),
+            stats.stickers,
+            stats.sticker_bytes,
+            true,
+        ),
+        (
+            crate::i18n::gettext(locale, "Other"),
+            stats.other,
+            stats.other_bytes,
+            false,
+        ),
+    ] {
+        if always || count > 0 {
+            storage_bar_row(ui, &palette, &label, count, bytes, total);
+        }
+    }
+}
+
+/// One labelled bar: the kind, how many files and how much they weigh, and
+/// the share of the total they take.
+fn storage_bar_row(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    label: &str,
+    count: u64,
+    bytes: u64,
+    total: u64,
+) {
+    ui.horizontal(|ui| {
+        theme::text(ui, label, theme::medium(14.0), palette.text);
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            theme::text(
+                ui,
+                format!("{count} · {}", crate::util::bytes(bytes)),
+                theme::regular(12.5),
+                palette.secondary,
+            );
+        });
+    });
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 6.0), Sense::hover());
+    if ui.is_rect_visible(rect) {
+        ui.painter()
+            .rect_filled(rect, rect.height() / 2.0, palette.outline);
+        let width = crate::model::StorageStats::bar_width(bytes, total, rect.width());
+        if width > 0.5 {
+            ui.painter().rect_filled(
+                Rect::from_min_size(rect.min, vec2(width, rect.height())),
+                rect.height() / 2.0,
+                palette.accent,
+            );
+        }
+    }
+    ui.add_space(8.0);
 }
 
 /// A titled group of settings on a rounded card.
