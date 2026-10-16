@@ -2888,6 +2888,18 @@ impl Worker {
             E::GroupUpdate(update) => {
                 let chat = self.canonical(&update.group_jid);
                 use whatsapp_rust::wacore::stanza::groups::GroupNotificationAction;
+                // A group made on the phone can announce itself before any
+                // message arrives; without a row the metadata has nowhere to land.
+                // The row is dated by the notice, or it would sort last.
+                if matches!(&*update.action, GroupNotificationAction::Create { .. })
+                    && !self.predates_removal(&chat, update.timestamp.timestamp())
+                {
+                    self.ensure_chat(&chat, None);
+                    let _ = self
+                        .archive
+                        .touch_activity(&chat, update.timestamp.timestamp());
+                    self.emit_chat(&chat);
+                }
                 if let GroupNotificationAction::Ephemeral { expiration, .. } = &*update.action {
                     self.ensure_chat(&chat, None);
                     let timestamp = update.timestamp.timestamp();
@@ -14457,6 +14469,77 @@ mod receipt_tests {
                 "the metadata is refreshed too"
             );
         }
+    }
+
+    /// A group created on the phone gets a chat row before its first message.
+    #[tokio::test]
+    async fn created_group_notice_files_the_chat() {
+        use whatsapp_rust::wacore::stanza::groups::GroupNotificationAction;
+        use whatsapp_rust::wacore_binary::Node;
+        let (mut worker, _events, _inbox, _wa) = worker();
+        let group = "123-789@g.us";
+        assert!(worker.archive.chat(group).unwrap().is_none());
+        let update = wa_events::GroupUpdate::builder()
+            .group_jid(group.parse().unwrap())
+            .timestamp(whatsapp_rust::wacore::time::from_secs(100).unwrap())
+            .is_lid_addressing_mode(false)
+            .action(Box::new(GroupNotificationAction::Create {
+                raw: Node::default(),
+            }))
+            .build();
+        worker
+            .handle_wa_event(Arc::new(wa_events::Event::GroupUpdate(update)))
+            .await;
+        let chat = worker.archive.chat(group).unwrap().unwrap();
+        assert_eq!(chat.last_activity, 100, "dated by the notice, not last");
+        assert_eq!(
+            worker.group_info_queue.front().map(String::as_str),
+            Some(group)
+        );
+    }
+
+    /// A create notice never brings back a group deleted after it, nor
+    /// moves an existing chat's activity back in time.
+    #[tokio::test]
+    async fn created_group_notice_respects_removal_and_newer_activity() {
+        use whatsapp_rust::wacore::stanza::groups::GroupNotificationAction;
+        use whatsapp_rust::wacore_binary::Node;
+        let notice = |group: &str, at: i64| {
+            wa_events::Event::GroupUpdate(
+                wa_events::GroupUpdate::builder()
+                    .group_jid(group.parse().unwrap())
+                    .timestamp(whatsapp_rust::wacore::time::from_secs(at).unwrap())
+                    .is_lid_addressing_mode(false)
+                    .action(Box::new(GroupNotificationAction::Create {
+                        raw: Node::default(),
+                    }))
+                    .build(),
+            )
+        };
+        let (mut worker, _events, _inbox, _wa) = worker();
+
+        let deleted = "123-111@g.us";
+        worker.archive.ensure_chat(deleted, "Deleted").unwrap();
+        worker
+            .archive
+            .remove_chat_through(deleted, 200, true)
+            .unwrap();
+        assert!(worker.archive.chat(deleted).unwrap().is_none());
+        worker.handle_wa_event(Arc::new(notice(deleted, 150))).await;
+        assert!(
+            worker.archive.chat(deleted).unwrap().is_none(),
+            "a notice older than the deletion does not refile the chat"
+        );
+
+        let active = "123-222@g.us";
+        worker.archive.ensure_chat(active, "Active").unwrap();
+        worker.archive.touch_activity(active, 500).unwrap();
+        worker.handle_wa_event(Arc::new(notice(active, 300))).await;
+        assert_eq!(
+            worker.archive.chat(active).unwrap().unwrap().last_activity,
+            500,
+            "an older notice never moves activity back"
+        );
     }
 
     fn errors(events: &std::sync::mpsc::Receiver<Event>) -> Vec<String> {
