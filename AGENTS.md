@@ -313,7 +313,7 @@ protocol. These notes are for coding agents and new contributors.
   reader is away from that chat; a click carries the chat and the message
   id, so the reader lands on the announced message. macOS has no title bar:
   the content runs to the top. `src/macos.rs` keeps native application menus alive across window
-  recreation; `fastframe_macos::align_traffic_lights` centres the traffic
+  recreation; `fastframe_titlebar::align_traffic_lights` centres the traffic
   lights on the chat header. Linking retains
   `ui::titlebar_strip`; other headers reserve horizontal space for the buttons.
 - Group delivery uses `archive::receipts`: save the recipients when filing an

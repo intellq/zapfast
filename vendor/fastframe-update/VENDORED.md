@@ -1,8 +1,8 @@
 # fastframe-update (cópia do fork intellq)
 
 Cópia de `crates/fastframe-update` de
-[crmne/fastframe](https://github.com/crmne/fastframe) na tag `v0.5.1`
-(commit `491f719`), usada pelo ZapFast do fork no lugar da dependência git.
+[crmne/fastframe](https://github.com/crmne/fastframe) na tag `v0.6.0`
+(commit `0d65ca9`), usada pelo ZapFast do fork no lugar da dependência git.
 
 Mudanças de comportamento:
 
@@ -14,7 +14,7 @@ sistema, atualiza-se sozinho sem o arquivo `zapfast-portable.txt`. É onde o
   nunca apaga (cada uma guarda `helper` e `previous`, cerca de 160 MB):
   `Receipt::clean_up` (`src/startup.rs`), chamado pelo app depois do
   `acknowledge`, espera o `result.txt` do helper por até dois minutos e apaga
-  a pasta se a atualização deu certo; `stage::sweep` (`src/stage.rs`), chamado
+  a pasta se a atualização deu certo; `stage::sweep_beside` (`src/stage.rs`; a `stage::sweep` de outra assinatura é do upstream), chamado
   pelo `intercept` a cada abertura, apaga ao lado do executável as pastas de
   atualizações bem-sucedidas e, uma semana depois da última alteração, as
   demais (falhas, downloads não instalados). `stage::UPDATED` passou a ser o

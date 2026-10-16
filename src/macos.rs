@@ -1,6 +1,6 @@
 //! Main-thread AppKit application menus. The menu outlives windows, just like
 //! the link and tray; reopening replaces only its repaint callback. The
-//! traffic lights are placed by fastframe-macos.
+//! traffic lights are placed by fastframe-titlebar.
 
 use std::cell::RefCell;
 use std::sync::{Arc, LazyLock, Mutex};

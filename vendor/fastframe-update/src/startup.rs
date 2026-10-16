@@ -121,7 +121,7 @@ pub fn intercept(config: &UpdateConfig) -> Launch {
         Parsed::Launch(launch) => {
             crate::rename::tidy(config, &OsHost, crate::detect::Platform::current());
             if let Ok(executable) = OsHost.current_exe() {
-                crate::stage::sweep(config, &executable);
+                crate::stage::sweep_beside(config, &executable);
             }
             *launch
         }

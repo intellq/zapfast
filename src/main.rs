@@ -784,7 +784,7 @@ impl Shell {
         } else {
             28.0 / ctx.zoom_factor()
         };
-        fastframe_macos::align_traffic_lights(frame, ctx, title_bar);
+        fastframe_titlebar::align_traffic_lights(frame, ctx, title_bar);
         #[cfg(feature = "demo")]
         {
             // Keep requesting the configured screenshot size until it is applied.

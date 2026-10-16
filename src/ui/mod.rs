@@ -774,17 +774,10 @@ fn titlebar_strip(app: &App, ui: &mut egui::Ui) {
         });
 }
 
-/// Makes `rect` drag the window.
+/// Makes `rect` drag the window, and answers a double click on it as the
+/// platform does (fastframe-titlebar).
 pub fn titlebar_drag(ui: &mut egui::Ui, rect: egui::Rect) {
-    let response = ui.interact(
-        rect,
-        ui.id().with("titlebar-drag"),
-        egui::Sense::click_and_drag(),
-    );
-    // AppKit requires StartDrag during the original mouse-down event.
-    if response.is_pointer_button_down_on() && ui.input(|input| input.pointer.primary_pressed()) {
-        ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
-    }
+    fastframe_titlebar::drag(ui, rect);
 }
 
 #[cfg(test)]
