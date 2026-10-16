@@ -347,9 +347,10 @@ taskbar button while the window is open, using `99+` above 99. Windows must use
 its regular taskbar icon size for overlays to appear. The count
 does not count toasts remaining in Windows notification history. On Linux and
 Windows, notifications show the chat picture. On Linux, Windows, and macOS, a
-click on a notification opens the chat at the message it announced. On Linux
-and macOS this holds for the 32 most recent notifications (older ones only
-bring ZapFast forward), and reading a chat removes its notifications. macOS
+click on a notification opens the chat at the message it announced. This holds for the 32 most recent tracked notifications on all three platforms;
+older notifications remain in system history without a message click listener.
+Reading a chat removes its tracked notifications, including Windows toasts.
+Fastframe provides the same delivery and cancellation interface on each platform. macOS
 asks once for permission to show notifications. On Linux, a notification that arrives while the
 window is open behind others also highlights ZapFast in the taskbar until you
 switch to it. Muted chats do not send notifications, and

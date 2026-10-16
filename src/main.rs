@@ -504,11 +504,25 @@ fn report_missing_opengl() {
     #[cfg(not(windows))]
     {
         eprintln!("{text}");
-        let _ = notify_rust::Notification::new()
-            .appname("ZapFast")
-            .summary("ZapFast")
-            .body(text)
-            .show();
+        // The notification worker runs off this thread; wait briefly for the
+        // desktop to take it, since the process exits right after.
+        use fastframe_notifications::{App, Client, Notification};
+        if let Ok(client) = Client::new(
+            App::new("me.paolino.zapfast", "ZapFast")
+                .desktop_entry("zapfast")
+                .icon("zapfast"),
+        ) {
+            let (sender, receiver) = std::sync::mpsc::channel();
+            let shown = client.show_with(
+                Notification::new("ZapFast").body(text).category("im.error"),
+                move |event| {
+                    let _ = sender.send(event);
+                },
+            );
+            if shown.is_ok() {
+                let _ = receiver.recv_timeout(std::time::Duration::from_secs(2));
+            }
+        }
     }
 }
 

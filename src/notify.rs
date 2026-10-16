@@ -4,7 +4,6 @@
 //! its own thread because delivery and click handling can block. A click hands
 //! back the chat and the message it announced.
 
-#[cfg(target_os = "linux")]
 use crate::i18n::tr;
 use crate::settings::NotificationSound;
 use std::path::PathBuf;
@@ -15,10 +14,6 @@ use std::time::{Duration, Instant};
 mod badge;
 #[cfg(target_os = "windows")]
 mod badge_windows;
-#[cfg(target_os = "macos")]
-mod macos;
-#[cfg(target_os = "windows")]
-mod windows;
 #[cfg(target_os = "linux")]
 pub use badge::Badge;
 #[cfg(target_os = "windows")]
@@ -329,6 +324,17 @@ impl Notifications {
 const RECEIVE: &[u8] = include_bytes!("../assets/sounds/receive.wav");
 const ALERT: &[u8] = include_bytes!("../assets/sounds/alert.wav");
 
+/// What a native notification asks of the desktop's sound. The system sound
+/// is the platform's own; ZapFast's sounds and a chosen audio file are played
+/// by ZapFast itself, so the notification stays silent for them.
+fn native_sound(system_sound: bool) -> fastframe_notifications::Sound {
+    if system_sound {
+        fastframe_notifications::Sound::Default
+    } else {
+        fastframe_notifications::Sound::Silent
+    }
+}
+
 /// Plays a notification sound on its own thread, for notifications and
 /// their preview in Settings. System sounds and silence play nothing here.
 pub fn play_sound(sound: NotificationSound) {
@@ -399,20 +405,20 @@ pub fn lines(chat_name: &str, is_group: bool, sender: &str, summary: &str) -> (S
     (chat_name.to_owned(), body)
 }
 
-/// What a Linux notification asks of the desktop's sound. The system sound is
-/// named, because notification servers such as Plasma's play nothing for an
-/// application without its own notification configuration. ZapFast's own sounds
-/// and silence keep the desktop quiet.
-#[cfg(target_os = "linux")]
-fn sound_hint(system_sound: bool) -> notify_rust::Hint {
-    if system_sound {
-        notify_rust::Hint::SoundName("message-new-instant".into())
-    } else {
-        notify_rust::Hint::SuppressSound(true)
+/// The desktop file the notification belongs to; only Linux reads it.
+fn desktop_entry() -> String {
+    #[cfg(target_os = "linux")]
+    {
+        badge::desktop_file()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        "zapfast".to_owned()
     }
 }
 
-#[cfg(target_os = "linux")]
+/// Fastframe owns the platform adapters and one bounded native worker. This
+/// thread only keeps ZapFast's account-scoped cancellation and click routing.
 #[expect(clippy::too_many_arguments)]
 fn deliver(
     title: &str,
@@ -425,141 +431,78 @@ fn deliver(
     mut cancelled: tokio::sync::oneshot::Receiver<Stop>,
     failed: impl FnOnce(),
 ) {
+    use fastframe_notifications::{App, Client, Event, Notification};
+    static CLIENT: std::sync::OnceLock<Result<Client, fastframe_notifications::Error>> =
+        std::sync::OnceLock::new();
     let Some(may_wait) = before_showing(&mut cancelled) else {
         return;
     };
-    let mut notification = notify_rust::Notification::new();
-    notification
-        .appname("ZapFast")
-        // Ties the notification to the installed application, so desktops
-        // list ZapFast in their notification settings and group by it.
-        .hint(notify_rust::Hint::DesktopEntry(badge::desktop_file()))
-        .summary(title)
-        .body(body)
-        // The freedesktop category for a received instant message, which
-        // notification servers can sort, filter, or style by.
-        .hint(notify_rust::Hint::Category("im.received".into()))
-        .icon("zapfast")
-        .action("default", tr("Open"));
-    notification.hint(sound_hint(system_sound));
-    if let Some(picture) = picture {
-        notification.image_path(&picture.to_string_lossy());
-    }
-    match notification.show() {
-        Ok(handle) => {
-            if !may_wait {
-                // Shown, and left to the desktop: the handle does not close it.
-                return;
-            }
-            let runtime = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(runtime) => runtime,
-                Err(error) => {
-                    handle.close();
-                    log::debug!("no notification action runtime: {error}");
+    let client = match CLIENT.get_or_init(|| {
+        Client::new(
+            App::new("me.paolino.zapfast", "ZapFast")
+                // Ties the notification to the installed application, so
+                // desktops list ZapFast in their notification settings.
+                .desktop_entry(desktop_entry())
+                .icon("zapfast"),
+        )
+    }) {
+        Ok(client) => client,
+        Err(_) => {
+            failed();
+            return;
+        }
+    };
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(_) => {
+            failed();
+            return;
+        }
+    };
+    runtime.block_on(async {
+        // Retain the existing permission request on first notification. The
+        // framework rechecks OS settings without caching a permission denial.
+        if let Err(error) = client.request_permission().await {
+            log::debug!("native notification permission unavailable: {error}");
+            failed();
+            return;
+        }
+        // Reading the chat during a permission prompt must suppress delivery.
+        let may_wait = if may_wait {
+            let Some(wait) = before_showing(&mut cancelled) else { return; };
+            wait
+        } else { false };
+        let mut notification = Notification::new(title).body(body).category("im.received").sound(native_sound(system_sound)).action("default", tr("Open"));
+        if let Some(picture) = picture { notification = notification.image(picture); }
+        let (events, mut responses) = tokio::sync::mpsc::unbounded_channel();
+        let handle = match client.show_with(notification, move |event| { let _ = events.send(event); }) {
+            Ok(handle) => handle,
+            Err(error) => { log::debug!("native notification unavailable: {error}"); failed(); return; }
+        };
+        loop {
+            tokio::select! {
+                biased;
+                stop = &mut cancelled, if may_wait => {
+                    if stop != Ok(Stop::Release) { handle.close(); }
                     return;
                 }
-            };
-            runtime.block_on(async {
-                tokio::select! {
-                    biased;
-                    stop = &mut cancelled => {
-                        if stop != Ok(Stop::Release) {
-                            handle.close_async().await;
-                        }
+                response = responses.recv() => match response {
+                    Some(Event::Shown) if may_wait => {},
+                    Some(Event::Shown) => return,
+                    Some(Event::Activated) => {
+                        opened.lock().unwrap_or_else(|p| p.into_inner()).push(target);
+                        wake();
+                        return;
                     }
-                    _ = handle.wait_for_action_async(|action| {
-                        if matches!(action, notify_rust::NotificationResponse::Default) {
-                            opened.lock().unwrap_or_else(|p| p.into_inner()).push(target);
-                            wake();
-                        }
-                    }) => {}
+                    Some(Event::Failed(error)) => { log::debug!("native notification unavailable: {error}"); failed(); return; }
+                    _ => return,
                 }
-            });
+            }
         }
-        Err(error) => {
-            log::debug!("no notification: {error}");
-            failed();
-        }
-    }
-}
-
-#[cfg(target_os = "windows")]
-#[expect(clippy::too_many_arguments)]
-fn deliver(
-    title: &str,
-    body: &str,
-    picture: Option<&std::path::Path>,
-    system_sound: bool,
-    target: NotificationTarget,
-    opened: Arc<Mutex<Vec<NotificationTarget>>>,
-    wake: impl Fn() + Send + 'static,
-    mut cancelled: tokio::sync::oneshot::Receiver<Stop>,
-    failed: impl FnOnce(),
-) {
-    if before_showing(&mut cancelled).is_some()
-        && let Err(error) = windows::show(title, body, picture, system_sound, target, opened, wake)
-    {
-        log::debug!("no Windows notification: {error}");
-        failed();
-    }
-}
-
-#[cfg(target_os = "macos")]
-#[expect(clippy::too_many_arguments)]
-fn deliver(
-    title: &str,
-    body: &str,
-    _picture: Option<&std::path::Path>,
-    system_sound: bool,
-    target: NotificationTarget,
-    opened: Arc<Mutex<Vec<NotificationTarget>>>,
-    wake: impl Fn() + Send + 'static,
-    mut cancelled: tokio::sync::oneshot::Receiver<Stop>,
-    failed: impl FnOnce(),
-) {
-    if let Some(may_wait) = before_showing(&mut cancelled) {
-        macos::deliver(
-            title,
-            body,
-            system_sound,
-            target,
-            opened,
-            wake,
-            cancelled,
-            may_wait,
-            failed,
-        );
-    }
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
-#[expect(clippy::too_many_arguments)]
-fn deliver(
-    title: &str,
-    body: &str,
-    picture: Option<&std::path::Path>,
-    _system_sound: bool,
-    _target: NotificationTarget,
-    _opened: Arc<Mutex<Vec<NotificationTarget>>>,
-    _wake: impl Fn() + Send + 'static,
-    mut cancelled: tokio::sync::oneshot::Receiver<Stop>,
-    failed: impl FnOnce(),
-) {
-    if before_showing(&mut cancelled).is_none() {
-        return;
-    }
-    let mut notification = notify_rust::Notification::new();
-    notification.appname("ZapFast").summary(title).body(body);
-    if let Some(picture) = picture {
-        notification.image_path(&picture.to_string_lossy());
-    }
-    if let Err(error) = notification.show() {
-        log::debug!("no notification: {error}");
-        failed();
-    }
+    });
 }
 
 #[cfg(test)]
@@ -570,14 +513,27 @@ mod tests {
     fn account(id: &str) -> AccountId {
         AccountId(id.into())
     }
-    #[cfg(target_os = "linux")]
     #[test]
-    fn the_system_sound_names_the_theme_message_sound() {
-        assert_eq!(
-            sound_hint(true),
-            notify_rust::Hint::SoundName("message-new-instant".into())
-        );
-        assert_eq!(sound_hint(false), notify_rust::Hint::SuppressSound(true));
+    fn native_sound_preserves_system_sound_and_silence() {
+        assert_eq!(native_sound(true), fastframe_notifications::Sound::Default);
+        // Pidgin's sounds and a chosen file are played by ZapFast itself.
+        assert_eq!(native_sound(false), fastframe_notifications::Sound::Silent);
+    }
+
+    #[test]
+    fn the_windows_shortcut_uses_the_notification_identity() {
+        let installer = include_str!("../packaging/windows/zapfast.iss");
+        let shortcuts: Vec<_> = installer
+            .lines()
+            .filter(|line| {
+                line.starts_with("Name: \"{autoprograms}")
+                    || line.starts_with("Name: \"{autodesktop}")
+            })
+            .collect();
+        assert_eq!(shortcuts.len(), 2);
+        for shortcut in shortcuts {
+            assert!(shortcut.contains("AppUserModelID: \"me.paolino.zapfast\""));
+        }
     }
 
     /// Answering a call takes back its own notification and leaves a
