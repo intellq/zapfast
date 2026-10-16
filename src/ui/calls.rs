@@ -107,7 +107,7 @@ impl Entry {
     pub fn detail(&self, locale: Locale) -> Option<String> {
         let text = match self.status {
             CallStatus::Answered if self.duration > 0 => {
-                return Some(crate::util::call_duration(self.duration));
+                return Some(crate::util::call_length(locale, self.duration));
             }
             CallStatus::Answered | CallStatus::Missed => return None,
             CallStatus::AnsweredElsewhere => gettext(locale, "Answered on another device"),
@@ -386,7 +386,7 @@ fn history_row(app: &mut App, ui: &mut egui::Ui, row: &[Message], actions: &mut 
     detail.paint(ui, pos2(left + 21.0, rect.top() + 38.0), palette.secondary);
 }
 
-/// What a call was and how it went, on one line: "Video call · 12:34".
+/// What a call was and how it went, on one line: "Video call · 12 min 34 s".
 fn summary(entry: &Entry, locale: Locale) -> String {
     match entry.detail(locale) {
         Some(detail) => format!("{} · {detail}", entry.title(locale)),
@@ -1029,7 +1029,7 @@ mod tests {
         let mut answered = entry(true, false, CallStatus::Answered);
         answered.duration = 221;
         assert_eq!(answered.title(locale), "Voice call");
-        assert_eq!(answered.detail(locale).as_deref(), Some("3:41"));
+        assert_eq!(answered.detail(locale).as_deref(), Some("3 min 41 s"));
         let missed = entry(false, true, CallStatus::Missed);
         assert_eq!(missed.title(locale), "Missed video call");
         assert_eq!(missed.detail(locale), None, "the title already says it");

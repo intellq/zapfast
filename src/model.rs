@@ -1354,7 +1354,11 @@ impl Content {
                     (_, true) => "Video call",
                 };
                 if *status == CallStatus::Answered && *duration > 0 {
-                    format!("{label} ({})", crate::util::call_duration(*duration))
+                    format!(
+                        "{label} ({})",
+                        // Summaries are English, as every other one is.
+                        crate::util::call_length(crate::i18n::Locale::English, *duration)
+                    )
                 } else {
                     label.to_owned()
                 }

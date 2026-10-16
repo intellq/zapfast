@@ -724,7 +724,28 @@ pub fn is_masked_number(name: &str) -> bool {
         })
 }
 
-/// A call's length as the phone shows it: `m:ss`, or `h:mm:ss` past an hour.
+/// A finished call's length in words, as WhatsApp's call info gives it:
+/// "45 s" under a minute, "12 min 34 s" under an hour, "1 h 2 min" past
+/// one. A part that is zero is left out ("12 min", "1 h"), and each form is
+/// a message of its own so a language orders and abbreviates the units its
+/// own way.
+pub fn call_length(locale: Locale, seconds: u64) -> String {
+    use crate::i18n::gettext;
+    let (hours, minutes, seconds) = (seconds / 3600, seconds % 3600 / 60, seconds % 60);
+    let text = match (hours, minutes, seconds) {
+        (0, 0, _) => gettext(locale, "{seconds} s"),
+        (0, _, 0) => gettext(locale, "{minutes} min"),
+        (0, _, _) => gettext(locale, "{minutes} min {seconds} s"),
+        (_, 0, _) => gettext(locale, "{hours} h"),
+        _ => gettext(locale, "{hours} h {minutes} min"),
+    };
+    text.replace("{hours}", &hours.to_string())
+        .replace("{minutes}", &minutes.to_string())
+        .replace("{seconds}", &seconds.to_string())
+}
+
+/// A running call's clock, as the call screen counts it: `m:ss`, or
+/// `h:mm:ss` past an hour.
 pub fn call_duration(seconds: u64) -> String {
     let (hours, minutes, seconds) = (seconds / 3600, seconds % 3600 / 60, seconds % 60);
     if hours > 0 {
@@ -897,6 +918,18 @@ mod tests {
         assert_eq!(super::call_duration(0), "0:00");
         assert_eq!(super::call_duration(65), "1:05");
         assert_eq!(super::call_duration(3600 + 2 * 60 + 3), "1:02:03");
+    }
+
+    #[test]
+    fn a_finished_call_length_reads_in_words() {
+        use crate::i18n::Locale;
+        let length = |seconds| super::call_length(Locale::English, seconds);
+        assert_eq!(length(45), "45 s");
+        assert_eq!(length(754), "12 min 34 s");
+        assert_eq!(length(720), "12 min");
+        assert_eq!(length(3725), "1 h 2 min");
+        assert_eq!(length(3600), "1 h");
+        assert_eq!(super::call_length(Locale::German, 754), "12 Min. 34 Sek.");
     }
 
     #[test]
