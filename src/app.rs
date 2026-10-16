@@ -760,6 +760,9 @@ pub struct App {
     pub hide_intent: bool,
     /// Whether a headless app should create a window.
     pub wants_show: bool,
+    /// A hidden start whose tray item no panel shows yet waits until then
+    /// for one to appear, and shows the window if none has (#429).
+    tray_wait: Option<Instant>,
     /// Whether this session draws through Wayland, where a compositor ignores
     /// a programmatic focus or unminimize request and the window is closed and
     /// reopened instead.
@@ -901,6 +904,7 @@ impl fastframe_shell::Resident for App {
 
     fn headless_frame(&mut self, ctx: &egui::Context) -> fastframe_shell::Headless {
         self.background_frame(ctx);
+        self.check_tray_wait(Instant::now());
         if self.quit_requested {
             fastframe_shell::Headless::Quit
         } else if self.wants_show
@@ -913,9 +917,16 @@ impl fastframe_shell::Resident for App {
     }
 
     /// Without a tray there is no way back to a hidden window, so show it.
+    /// A tray item no panel shows yet may only be early: a start at login
+    /// can beat the desktop's tray watcher (GNOME's AppIndicator extension
+    /// loads after the session's autostart apps), so the window waits
+    /// `TRAY_WAIT` for a panel before it shows.
     fn start_hidden(&mut self) -> bool {
-        if !self.hides_to_tray() {
+        if !self.has_tray() || !self.settings.keep_running_in_background {
             return false;
+        }
+        if !self.tray_shown() {
+            self.tray_wait = Some(Instant::now() + TRAY_WAIT);
         }
         App::start_hidden(self);
         true
@@ -989,6 +1000,9 @@ fn anonymous_refuses(action: &Action) -> bool {
             | Action::SendPending { .. }
     )
 }
+
+/// How long a hidden start waits for a panel to show the tray item.
+const TRAY_WAIT: Duration = Duration::from_secs(30);
 
 const TRAY_SHOW: &str = "show";
 const TRAY_LOCK: &str = "lock";
@@ -1480,6 +1494,7 @@ impl App {
             window_hidden: false,
             hide_intent: false,
             wants_show: false,
+            tray_wait: None,
             wayland: wayland_session(),
             reopen: false,
             control_commands: None,
@@ -1854,6 +1869,31 @@ impl App {
             .is_some_and(fastframe_tray::Tray::is_shown)
     }
 
+    /// Whether there is a tray item at all, shown by a panel or not.
+    fn has_tray(&self) -> bool {
+        #[cfg(test)]
+        if self.test_tray_shown.is_some() {
+            return true;
+        }
+        self.tray.is_some()
+    }
+
+    /// Ends a hidden start's wait for a panel: a panel showing the tray item
+    /// keeps the window hidden, and none by the deadline shows it, since
+    /// nothing else could bring it back.
+    fn check_tray_wait(&mut self, now: Instant) {
+        let Some(deadline) = self.tray_wait else {
+            return;
+        };
+        if self.tray_shown() {
+            self.tray_wait = None;
+        } else if now >= deadline {
+            log::info!("no panel showed the tray item; showing the window");
+            self.tray_wait = None;
+            self.wants_show = true;
+        }
+    }
+
     fn handle_tray(&mut self) {
         let Some(events) = self.tray.as_ref().map(fastframe_tray::Tray::events) else {
             return;
@@ -2134,6 +2174,8 @@ impl App {
         }
         self.system_focused = false;
         self.focus_lost_at = None;
+        // A window is here, so a hidden start's wait for a panel is over.
+        self.tray_wait = None;
         // Register transcript copy formatting once per egui context.
         ctx.add_plugin(crate::transcript::CopyAnnotator {
             rows: std::sync::Arc::clone(&self.copy_rows),
@@ -10854,8 +10896,9 @@ mod tests {
 
     /// On Linux the tray item exists before a panel shows it (ZapFast started
     /// at login before the panel, or a desktop without one). Until a panel
-    /// shows it, closing quits, a hidden start opens the window, and the
-    /// window is not hidden, since nothing could bring it back.
+    /// shows it, closing quits and the window is not hidden, since nothing
+    /// could bring it back. A hidden start waits for a panel instead; see
+    /// `a_hidden_start_waits_for_a_panel_to_show_the_tray`.
     #[test]
     fn a_tray_no_panel_shows_does_not_keep_the_app_running() {
         use fastframe_shell::Resident;
@@ -10864,7 +10907,6 @@ mod tests {
         assert!(app.settings.keep_running_in_background);
         app.test_tray_shown = Some(false);
         assert!(!app.hides_to_tray());
-        assert!(!Resident::start_hidden(&mut app));
         app.apply(Action::HideWindow, &ctx);
         assert!(!app.hide_intent);
 
@@ -10878,6 +10920,38 @@ mod tests {
 
         app.settings.keep_running_in_background = false;
         assert!(!app.hides_to_tray(), "the setting still decides");
+        assert!(!Resident::start_hidden(&mut app));
+    }
+
+    /// At login on GNOME the tray watcher comes up after ZapFast (#429): a
+    /// hidden start keeps the window hidden while it waits for a panel, stays
+    /// hidden once one shows the item, and shows the window if none has
+    /// within `TRAY_WAIT`.
+    #[test]
+    fn a_hidden_start_waits_for_a_panel_to_show_the_tray() {
+        use fastframe_shell::{Headless, Resident};
+        let ctx = egui::Context::default();
+        let mut app = app();
+        app.test_tray_shown = Some(false);
+        assert!(Resident::start_hidden(&mut app), "waits for a panel");
+        assert!(app.hide_intent);
+        let started = Instant::now();
+        app.check_tray_wait(started + Duration::from_secs(5));
+        assert!(!app.wants_show, "still waiting");
+        assert_eq!(app.headless_frame(&ctx), Headless::Wait);
+        app.test_tray_shown = Some(true);
+        app.check_tray_wait(started + Duration::from_secs(10));
+        assert!(app.tray_wait.is_none(), "a panel showed it");
+        app.test_tray_shown = Some(false);
+        app.check_tray_wait(started + TRAY_WAIT * 2);
+        assert!(!app.wants_show, "the panel came; nothing more to wait for");
+
+        let mut app = self::app();
+        app.test_tray_shown = Some(false);
+        assert!(Resident::start_hidden(&mut app));
+        app.check_tray_wait(Instant::now() + TRAY_WAIT + Duration::from_secs(1));
+        assert!(app.wants_show, "no panel came: the window shows");
+        assert_eq!(app.headless_frame(&ctx), Headless::Show);
     }
 
     /// eframe runs only the logic pass for a minimized window, so closing one
