@@ -1592,6 +1592,7 @@ impl Worker {
                     | Event::ChatSharedChanged(_)
                     | Event::Call(_)
                     | Event::CallDevices(_)
+                    | Event::ChatMedia { .. }
             )
         {
             return;
@@ -1875,6 +1876,28 @@ impl Worker {
         if let Ok(Some(mut chat)) = self.archive.chat(id) {
             self.polish_chat(&mut chat);
             self.emit(Event::ChatUpdated(Box::new(chat)));
+        }
+    }
+
+    /// Hands the chat's viewer album to the interface, centred on `around`
+    /// when the viewer opened on a message rather than on the newest page.
+    fn emit_chat_media(&mut self, chat: ChatId, around: Option<String>) {
+        let page = match around.as_deref() {
+            Some(message) => {
+                self.archive
+                    .gallery_around(&chat, message, crate::archive::GALLERY_PAGE)
+            }
+            None => self
+                .archive
+                .gallery_media(&chat, crate::archive::GALLERY_PAGE),
+        };
+        match page {
+            Ok(items) => self.emit(Event::ChatMedia {
+                chat,
+                around,
+                items,
+            }),
+            Err(error) => self.emit(Event::Error(error.to_string())),
         }
     }
 
@@ -6398,6 +6421,7 @@ impl Worker {
                 }
             }
             Command::FetchAvatar { id, full } => self.fetch_avatar(id, full),
+            Command::LoadChatMedia { chat, around } => self.emit_chat_media(chat, around),
             Command::EditText {
                 chat,
                 id,
@@ -15719,6 +15743,35 @@ mod tests {
         );
     }
 
+    /// An album carries private thumbnails and paths, so it waits for the
+    /// same authorized replay the rest of the archive content waits for.
+    #[test]
+    fn an_album_is_withheld_until_lock_state_is_confirmed() {
+        let (mut worker, events, _, _) = receipt_tests::worker();
+        const PEER: &str = "fixture@s.whatsapp.net";
+        worker.archive.ensure_chat(PEER, "Fixture").unwrap();
+        let row = Message {
+            chat: PEER.into(),
+            ..receipt_tests::own_message("photo", 100)
+        };
+        worker.archive.insert_message(&row, None).unwrap();
+        unconfirmed(&mut worker);
+        worker.emit_chat_media(PEER.into(), None);
+        assert!(
+            !events
+                .try_iter()
+                .any(|event| matches!(event, Event::ChatMedia { .. })),
+            "no album is sent while lock state is unknown"
+        );
+        worker.preferences_recovered(0, false, false);
+        worker.emit_chat_media(PEER.into(), None);
+        assert!(
+            events
+                .try_iter()
+                .any(|event| matches!(event, Event::ChatMedia { .. })),
+            "the album arrives once lock state is confirmed"
+        );
+    }
     /// A chat opened while lock state was still being recovered asked for its
     /// messages once; the answer was withheld, and the interface never asked
     /// again, so the chat stayed empty until a new message came in (#180).

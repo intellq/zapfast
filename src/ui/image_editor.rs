@@ -380,6 +380,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_picture_fills_the_room_in_one_direction() {
+        let room = Rect::from_min_size(egui::pos2(10.0, 10.0), vec2(1000.0, 500.0));
+        let wide = fitted(vec2(1920.0, 1080.0), room);
+        assert!((wide.height() - 500.0).abs() < 0.01);
+        assert!((wide.width() - 500.0 * 16.0 / 9.0).abs() < 0.01);
+        assert_eq!(wide.center(), room.center());
+        let tall = fitted(vec2(100.0, 1000.0), room);
+        assert!((tall.height() - 500.0).abs() < 0.01 && tall.width() < 60.0);
+    }
+
+    #[test]
     fn a_quarter_turn_clockwise_puts_the_top_left_at_the_top_right() {
         assert_eq!(
             turned_corners(1),

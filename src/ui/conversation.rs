@@ -2640,7 +2640,13 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
         transcripts: &app.transcripts,
         transcripts_folded: &app.transcripts_folded,
         video: &app.video,
-        video_expanded: app.video_expanded.as_deref(),
+        // The clip the full-window viewer shows plays there only; its message
+        // shows the poster meanwhile.
+        video_expanded: app
+            .image_preview
+            .as_ref()
+            .filter(|preview| preview.shows_video(&app.viewer_media))
+            .map(|preview| preview.message()),
         // Whole-message exports are already formatted. Do not let the
         // text-selection annotator reinterpret them as drawn body text.
         copy_rows: (!app.selection.as_ref().is_some_and(|(id, _)| *id == chat.id))
@@ -5818,6 +5824,23 @@ fn quick_reactions<'a>(message: &'a Message, preferred: &'a [(String, u32)]) -> 
     list
 }
 
+/// The file the menu's viewer item would open, when the message has one to
+/// show.
+///
+/// The album decides what belongs in the viewer: a sticker, a GIF or a card's
+/// image is not in it, so none of them offers the item. The recorded path has
+/// to still be a file: a path the archive kept after the file was deleted or
+/// moved elsewhere would open a viewer with nothing to show, and the click
+/// would fall back to opening a file that is not there.
+pub(crate) fn viewer_file(message: &Message) -> Option<&Path> {
+    message.content.gallery_kind()?;
+    message
+        .content
+        .media()
+        .and_then(|media| media.path.as_deref())
+        .filter(|path| crate::image_preview::can_view(path) && path.is_file())
+}
+
 /// Offers actions supported by the selected message, including private replies for eligible group senders.
 fn context_menu(
     ui: &mut egui::Ui,
@@ -5985,6 +6008,24 @@ fn context_menu(
             chat: chat.clone(),
             messages: group.clone(),
         }));
+    }
+    // A photo opens the viewer on its own click; a clip plays in its bubble
+    // there, so this is how the album is reached from a chat that holds no
+    // pictures.
+    if let Some(path) = viewer_file(message)
+        && widgets::menu_item(
+            ui,
+            &palette,
+            Some(Icon::Maximize),
+            &crate::i18n::gettext(view.locale, "Open in the viewer"),
+        )
+    {
+        actions.push(Action::PreviewImage {
+            path: path.to_owned(),
+            chat: chat.clone(),
+            message: message.id.clone(),
+            card: None,
+        });
     }
     if crate::app::can_select(&message.content)
         && widgets::menu_item(ui, &palette, Some(Icon::Check), tr("Select"))
@@ -7415,10 +7456,16 @@ fn album_tile(
         .clicked()
     {
         if let Some(path) = &media.path {
-            actions.push(if matches!(message.content, Content::Image { .. }) {
-                Action::PreviewImage(path.clone())
-            } else {
-                Action::OpenFile(path.clone())
+            // A photo or a clip the viewer plays opens there, over the
+            // chat's album; anything else goes to the system's own viewer.
+            actions.push(match crate::image_preview::open_target(path, true) {
+                crate::image_preview::OpenTarget::Preview => Action::PreviewImage {
+                    path: path.clone(),
+                    chat: message.chat.clone(),
+                    message: message.id.clone(),
+                    card: None,
+                },
+                crate::image_preview::OpenTarget::External => Action::OpenFile(path.clone()),
             });
         } else if !matches!(media.state, MediaState::Downloading) {
             actions.push(Action::Download {
@@ -7552,7 +7599,17 @@ fn carousel_picture(
     }
     if let Some(path) = &media.path {
         if clicked {
-            actions.push(Action::OpenFile(path.clone()));
+            // A card's picture opens in the viewer, among the chat's album,
+            // as any other photo does.
+            actions.push(match crate::image_preview::open_target(path, true) {
+                crate::image_preview::OpenTarget::Preview => Action::PreviewImage {
+                    path: path.clone(),
+                    chat: message.chat.clone(),
+                    message: message.id.clone(),
+                    card: Some(index),
+                },
+                crate::image_preview::OpenTarget::External => Action::OpenFile(path.clone()),
+            });
         }
     } else if !matches!(media.state, MediaState::Downloading)
         && (clicked
@@ -8201,7 +8258,7 @@ fn location_card(
     });
 }
 
-fn thumbnail_uri(ctx: &egui::Context, chat: &str, id: &str, bytes: &[u8]) -> String {
+pub(crate) fn thumbnail_uri(ctx: &egui::Context, chat: &str, id: &str, bytes: &[u8]) -> String {
     let uri = format!(
         "bytes://thumb-{}-{}",
         chat.chars()
@@ -8414,9 +8471,12 @@ fn picture(
                     let action = match sticker {
                         Some(_) => Action::PreviewSticker(path.clone()),
                         None => match crate::image_preview::open_target(path, true) {
-                            crate::image_preview::OpenTarget::Preview => {
-                                Action::PreviewImage(path.clone())
-                            }
+                            crate::image_preview::OpenTarget::Preview => Action::PreviewImage {
+                                path: path.clone(),
+                                chat: view.chat.id.clone(),
+                                message: message.id.clone(),
+                                card: None,
+                            },
                             crate::image_preview::OpenTarget::External => {
                                 Action::OpenFile(path.clone())
                             }
@@ -8957,9 +9017,10 @@ fn video(
                         video: view.video,
                         message: &message.id,
                         path,
+                        expanded: false,
                     };
                     video_controls(ui, &controls, rect, status, actions);
-                    expand_button(ui, view.locale, &message.id, rect, actions);
+                    expand_button(ui, view.locale, &message.id, path, rect, actions);
                 }
             }
             _ => {
@@ -9029,8 +9090,10 @@ fn video(
 
 /// What a click on a video does: a downloaded video plays or pauses, a GIF
 /// that cannot play here opens in the system viewer, and a video still on
-/// WhatsApp's servers downloads and then plays. `downloading` is set when
-/// this frame already asked for the download.
+/// WhatsApp's servers downloads and then plays. The full-window viewer is a
+/// separate way in, from the message's own menu, so a clip keeps playing in
+/// its bubble here. `downloading` is set when this frame already asked for the
+/// download.
 fn video_clicked(
     view: &View<'_>,
     message: &Message,
@@ -9147,6 +9210,9 @@ pub(crate) struct VideoControls<'a> {
     pub video: &'a crate::video::Player,
     pub message: &'a str,
     pub path: &'a Path,
+    /// Shown in the full-window viewer: the corner button puts the video
+    /// back in its message instead of filling the window.
+    pub expanded: bool,
 }
 
 pub(crate) fn video_controls(
@@ -9162,6 +9228,7 @@ pub(crate) fn video_controls(
         video,
         message,
         path,
+        expanded,
     } = *controls;
     let bar = Rect::from_min_max(pos2(rect.left(), rect.bottom() - 32.0), rect.max);
     ui.painter().rect_filled(
@@ -9200,7 +9267,29 @@ pub(crate) fn video_controls(
             path: path.to_owned(),
         });
     }
-    let sound = Rect::from_center_size(pos2(bar.right() - 18.0, bar.center().y), Vec2::splat(26.0));
+    // In the full-window viewer the corner of the bar puts the video back in
+    // its message; in a bubble the video's own corner button expands it.
+    let window =
+        Rect::from_center_size(pos2(bar.right() - 18.0, bar.center().y), Vec2::splat(26.0));
+    if expanded {
+        theme::paint_icon(ui, Icon::Minimize, window, 16.0, Color32::WHITE);
+        if ui
+            .interact(window, id.with("window"), Sense::click())
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text(crate::i18n::gettext(locale, "Back to the message (Esc)").as_ref())
+            .clicked()
+        {
+            actions.push(Action::CloseImagePreview);
+        }
+    }
+    let sound = if expanded {
+        Rect::from_center_size(
+            pos2(window.left() - 15.0, bar.center().y),
+            Vec2::splat(26.0),
+        )
+    } else {
+        window
+    };
     let muted = video.muted();
     theme::paint_icon(
         ui,
@@ -9314,6 +9403,7 @@ fn expand_button(
     ui: &mut egui::Ui,
     locale: crate::i18n::Locale,
     message: &str,
+    path: &Path,
     rect: Rect,
     actions: &mut Vec<Action>,
 ) {
@@ -9337,7 +9427,10 @@ fn expand_button(
         .on_hover_text(crate::i18n::gettext(locale, "Expand video").as_ref())
         .clicked()
     {
-        actions.push(Action::ExpandVideo(message.to_owned()));
+        actions.push(Action::ExpandVideo {
+            message: message.to_owned(),
+            path: path.to_owned(),
+        });
     }
 }
 
@@ -11157,6 +11250,74 @@ mod tests {
             album_picture("two", Some("album-1"), "bob"),
         ];
         assert!(album_run(&senders, 0).is_none());
+    }
+
+    fn message(content: Content) -> Message {
+        Message {
+            id: "m1".into(),
+            chat: "peer@s.whatsapp.net".into(),
+            sender: "me".into(),
+            sender_name: None,
+            from_me: true,
+            timestamp: 0,
+            content,
+            status: Delivery::None,
+            delivered_at: None,
+            read_at: None,
+            quoted: None,
+            reactions: Vec::new(),
+            edited: false,
+            mentions: Vec::new(),
+            forwarded: false,
+            thumbnail: None,
+            history_order: None,
+        }
+    }
+
+    /// The menu offers the viewer for a message the album takes and a file
+    /// that is still on disk. A recorded path whose file was deleted elsewhere
+    /// offers nothing, or the click would fall back to opening a file that is
+    /// not there.
+    #[test]
+    fn the_viewer_item_needs_a_file_that_is_still_here() {
+        let dir = tempfile::tempdir().unwrap();
+        let picture = |path: &Path| {
+            message(Content::Image {
+                media: Media {
+                    path: Some(path.to_path_buf()),
+                    ..media(None, None)
+                },
+                caption: None,
+                motion: None,
+            })
+        };
+
+        let photo = dir.path().join("photo.png");
+        std::fs::write(&photo, b"jpeg").unwrap();
+        let downloaded = picture(&photo);
+        assert_eq!(viewer_file(&downloaded), Some(photo.as_path()));
+
+        let deleted = dir.path().join("deleted.png");
+        let gone = picture(&deleted);
+        assert_eq!(
+            viewer_file(&gone),
+            None,
+            "a path with no file offers nothing"
+        );
+
+        // A GIF plays inline as an animation, so the album leaves it out.
+        let animation = dir.path().join("animation.gif");
+        std::fs::write(&animation, b"gif").unwrap();
+        let inline = picture(&animation);
+        assert_eq!(viewer_file(&inline), None);
+
+        // Neither does a message whose file was never downloaded.
+        let pending = message(Content::Image {
+            media: media(None, None),
+            caption: None,
+            motion: None,
+        });
+        assert_eq!(viewer_file(&pending), None);
     }
 
     #[test]

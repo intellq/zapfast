@@ -257,6 +257,16 @@ pub enum Command {
         on: bool,
         focused: Option<ChatId>,
     },
+    /// A page of the chat's photos and playable videos, answered by
+    /// `Event::ChatMedia`. `None` asks for the newest page; `around` centres it
+    /// on one message, so a viewer opened on a photo older than the newest
+    /// page still has an album to step through. Any view that lists a chat's
+    /// photos and clips (the viewer's album, a chat's media panel) asks this
+    /// way and tells its answer apart by `chat` and `around`.
+    LoadChatMedia {
+        chat: ChatId,
+        around: Option<String>,
+    },
     Download {
         card: Option<usize>,
         chat: ChatId,
@@ -1120,6 +1130,13 @@ pub enum Event {
     /// picture, a video, a document or a linked text was filed, imported,
     /// edited, revoked or deleted, or the chat was cleared.
     ChatSharedChanged(ChatId),
+    /// A page of a chat's photos and playable videos, oldest first, answering
+    /// `Command::LoadChatMedia` with the `around` it was asked with.
+    ChatMedia {
+        chat: ChatId,
+        around: Option<String>,
+        items: Vec<crate::model::MediaItem>,
+    },
     ChatUpdated(Box<Chat>),
     /// Active pins of one chat, for the line under its header.
     Pins {

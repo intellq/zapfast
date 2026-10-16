@@ -1107,7 +1107,20 @@ fn media_cell(
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .clicked()
     {
-        go_to(app, message, overlay);
+        // A downloaded photo or clip opens in the media viewer, over the
+        // chat's album, without leaving the panel; anything else is shown in
+        // the chat.
+        match super::conversation::viewer_file(message) {
+            Some(path) if app.open_chat.as_deref() == Some(message.chat.as_str()) => {
+                app.actions.push(Action::PreviewImage {
+                    path: path.to_owned(),
+                    chat: message.chat.clone(),
+                    message: message.id.clone(),
+                    card: None,
+                });
+            }
+            _ => go_to(app, message, overlay),
+        }
     }
 }
 

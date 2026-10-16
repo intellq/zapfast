@@ -771,6 +771,12 @@ impl Player {
         if self.detail { DETAIL_SIDE } else { MAX_SIDE }
     }
 
+    /// The longest side frames are decoded at, for tests.
+    #[cfg(test)]
+    pub fn side(&self) -> u32 {
+        self.max_side()
+    }
+
     /// Decodes larger frames for the expanded view. Turning it on decodes the
     /// playing video again from where it is; turning it off keeps the large
     /// frames until the next video or seek, so the picture does not blink.
@@ -801,6 +807,18 @@ impl Player {
         if let Some(sound) = &mut session.sound {
             sound.restart(&session.path, at, level, speed);
         }
+    }
+
+    /// Plays the loaded video if it is paused.
+    pub fn resume(&mut self) {
+        if let Some(session) = self.session.as_mut() {
+            session.play(Instant::now());
+        }
+    }
+
+    /// The file of the loaded video.
+    pub fn path(&self) -> Option<&Path> {
+        self.session.as_ref().map(|session| session.path.as_path())
     }
 
     /// The loaded video's message and file.

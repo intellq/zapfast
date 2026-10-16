@@ -4,7 +4,7 @@
 //! out of views and giving the archive a stable shape.
 
 use crate::i18n::tr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -1010,6 +1010,110 @@ pub const GROUP_NAME_LIMIT: usize = whatsapp_rust::wacore::iq::groups::GROUP_SUB
 /// WhatsApp's longest live location share, in seconds.
 pub const LIVE_LOCATION_LIMIT: i64 = 8 * 60 * 60;
 
+/// One photo or playable clip of a chat, as the archive lists them for the
+/// full-window viewer's album (`Command::LoadChatMedia`): what it is, when it
+/// arrived, and what a strip or grid needs to draw it before the file itself
+/// is loaded. Any view that lists a chat's photos and clips reads these.
+#[derive(Clone, Debug)]
+pub struct MediaItem {
+    pub id: String,
+    /// For an interactive message's picture, which one: `None` for the
+    /// message's own attachment or a card's header image, and the carousel
+    /// card's index otherwise, as `Action::Download` counts them.
+    pub card: Option<usize>,
+    pub timestamp: i64,
+    pub video: bool,
+    /// `None` until the attachment is downloaded.
+    pub path: Option<std::path::PathBuf>,
+    /// The stored thumbnail, drawn instead of decoding the file.
+    pub thumbnail: Option<Vec<u8>>,
+}
+
+impl MediaItem {
+    /// The album items one message holds, in the order it shows them: a photo
+    /// or a playable clip, or an interactive message's card images.
+    ///
+    /// `exists` is asked once per recorded path: an attachment that was deleted
+    /// or moved is reported as missing, so the item offers Download again
+    /// instead of drawing a dead frame. A downloaded file the viewer cannot
+    /// decode (a bmp, a tif) is not an item: the bubble sends it to the system
+    /// viewer. A card image is an item only once it is downloaded, as the card
+    /// downloads its own pictures.
+    pub fn of_content(
+        id: &str,
+        timestamp: i64,
+        content: &Content,
+        thumbnail: Option<&[u8]>,
+        exists: impl Fn(&Path) -> bool,
+    ) -> Vec<MediaItem> {
+        let item = |card, video, path, thumbnail: Option<&[u8]>| MediaItem {
+            id: id.to_owned(),
+            card,
+            timestamp,
+            video,
+            path,
+            thumbnail: thumbnail.map(<[u8]>::to_vec),
+        };
+        if let Some(kind) = content.gallery_kind() {
+            let path = content
+                .media()
+                .and_then(|media| media.path.clone())
+                .filter(|path| exists(path));
+            if path
+                .as_ref()
+                .is_some_and(|path| gallery_kind_for_path(path).is_none())
+            {
+                return Vec::new();
+            }
+            return vec![item(None, kind == GalleryKind::Video, path, thumbnail)];
+        }
+        let Content::Interactive {
+            card: Some(card), ..
+        } = content
+        else {
+            return Vec::new();
+        };
+        std::iter::once((None, &**card))
+            .chain(
+                card.carousel
+                    .iter()
+                    .enumerate()
+                    .map(|(index, entry)| (Some(index), entry)),
+            )
+            .filter_map(|(index, entry)| {
+                let path = entry.image.as_ref()?.path.clone().filter(|path| {
+                    gallery_kind_for_path(path) == Some(GalleryKind::Photo) && exists(path)
+                })?;
+                // Each card keeps its own preview; the header image may only
+                // have the message's.
+                let preview = entry
+                    .thumbnail
+                    .as_deref()
+                    .or(thumbnail.filter(|_| index.is_none()));
+                Some(item(index, false, Some(path), preview))
+            })
+            .collect()
+    }
+
+    /// The album items of a message already in memory, checking its files.
+    pub fn of_message(message: &Message) -> Vec<MediaItem> {
+        Self::of_content(
+            &message.id,
+            message.timestamp,
+            &message.content,
+            message.thumbnail.as_deref(),
+            Path::is_file,
+        )
+    }
+}
+
+/// A photo or a playable video, as the in-app viewer album counts them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GalleryKind {
+    Photo,
+    Video,
+}
+
 impl Content {
     /// Whether a live location sent at `sent` has stopped by `now`: its
     /// sender ended it, or it has outlived the longest share.
@@ -1296,6 +1400,18 @@ impl Content {
         }
     }
 
+    /// Whether this message belongs in the viewer album, and as what.
+    ///
+    /// A GIF is not a video here: it plays inline as an animation, so it is
+    /// left out.
+    pub fn gallery_kind(&self) -> Option<GalleryKind> {
+        match self {
+            Self::Image { .. } => Some(GalleryKind::Photo),
+            Self::Video { gif: false, .. } => Some(GalleryKind::Video),
+            _ => None,
+        }
+    }
+
     /// Carries downloaded file paths over from `old` when rederiving content
     /// from the raw protobuf: the main attachment and each carousel card's image.
     pub fn keep_local_paths(&mut self, old: &Content) {
@@ -1392,6 +1508,27 @@ pub fn unsupported_kind(what: &str) -> String {
         other => other,
     }
     .to_owned()
+}
+
+/// The viewer kind of a file on disk, from its name alone.
+pub(crate) fn gallery_kind_for_path(path: &Path) -> Option<GalleryKind> {
+    gallery_file(&path.file_name()?.to_string_lossy())
+}
+
+/// The viewer kind of a file, from its name. A GIF is an inline animation, not
+/// a clip, so it is left out, and a photo is only a format the image crate is
+/// built to draw (`jpeg`, `png`, `webp`): a `bmp` or a `tif` opens the viewer
+/// and fails to decode, where the system viewer draws it.
+fn gallery_file(file_name: &str) -> Option<GalleryKind> {
+    let ext = Path::new(file_name)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase())?;
+    match ext.as_str() {
+        "jpg" | "jpeg" | "png" | "webp" => Some(GalleryKind::Photo),
+        "mp4" | "m4v" | "mov" | "webm" | "mkv" | "3gp" | "3gpp" => Some(GalleryKind::Video),
+        _ => None,
+    }
 }
 
 /// What a video is called in previews.
@@ -2396,19 +2533,13 @@ pub enum Action {
     CycleVideoSpeed,
     /// The video sound slider moved to this level, 0 to 1.
     SetVideoVolume(f32),
-    /// Shows a loaded video over the window, nearly as tall as it.
-    ExpandVideo(String),
-    /// Closes the image preview and plays a motion photo's downloaded clip
-    /// over the whole window, with sound.
-    ExpandMotion {
+    /// Plays a downloaded video, or a motion photo's clip (`message` is then
+    /// the photo), in the full-window viewer, starting it if it is not the
+    /// one loaded. Closing the viewer puts a video back in its message.
+    ExpandVideo {
         message: String,
         path: PathBuf,
     },
-    /// Returns the expanded video to its message.
-    CollapseVideo,
-    /// Closes the expanded video and stops it, leaving its message as it
-    /// was before playing.
-    CloseVideo,
     /// Starts, cancels, or sends a voice recording.
     StartRecording,
     CancelRecording,
@@ -2430,9 +2561,24 @@ pub enum Action {
     /// extension and existence are checked here, and anything else opens
     /// externally; an image that then fails to decode shows a message with an
     /// Open externally button inside the preview.
-    PreviewImage(PathBuf),
-    PreviousImage,
-    NextImage,
+    PreviewImage {
+        path: PathBuf,
+        /// The chat whose album the viewer browses from here.
+        chat: ChatId,
+        /// The message this picture came from, so the album can be positioned.
+        message: String,
+        /// Which of an interactive message's pictures, as `MediaItem::card`.
+        card: Option<usize>,
+    },
+    /// Moves the viewer to the next (`1`) or previous (`-1`) item of the album:
+    /// the Right and Left arrow keys, and the arrows over the picture.
+    ViewerStep(i8),
+    /// Shows one item of the album the viewer already has, by message id.
+    ViewImage {
+        message: String,
+        /// Which of an interactive message's pictures, as `MediaItem::card`.
+        card: Option<usize>,
+    },
     ZoomImageIn,
     /// Scales the previewed image by a factor, as the wheel or a pinch asks.
     ZoomImageBy(f32),
@@ -3464,6 +3610,36 @@ mod tests {
             path: None,
             state: MediaState::Idle,
         }
+    }
+
+    /// The album holds photos and playable clips: an image, and a video that
+    /// is not a GIF, which plays inline as an animation instead. A file the
+    /// sender attached is a document, not an album item, whatever its name.
+    #[test]
+    fn the_album_holds_photos_and_playable_clips() {
+        use super::{Content, GalleryKind};
+        let picture = Content::Image {
+            caption: None,
+            media: media(),
+            motion: None,
+        };
+        assert_eq!(picture.gallery_kind(), Some(GalleryKind::Photo));
+        let clip = |gif: bool| Content::Video {
+            caption: None,
+            media: media(),
+            seconds: None,
+            gif,
+            note: false,
+        };
+        assert_eq!(clip(false).gallery_kind(), Some(GalleryKind::Video));
+        assert_eq!(clip(true).gallery_kind(), None, "a GIF plays inline");
+        let file = Content::Document {
+            media: media(),
+            file_name: "holiday.jpg".into(),
+            caption: None,
+            pages: None,
+        };
+        assert_eq!(file.gallery_kind(), None);
     }
 
     #[test]

@@ -1929,6 +1929,18 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
             }
             "carousel" => carousel_sample(app, 3),
             "carousel-pair" => carousel_sample(app, 2),
+            // A carousel card's picture in the viewer, among the chat's album.
+            "carousel-viewer" => {
+                carousel_sample(app, 3);
+                let chat = SAMPLES[0].id.to_owned();
+                let card = app.conversations[&chat].messages[0].clone();
+                app.viewer_media = crate::model::MediaItem::of_message(&card);
+                app.viewer_media_chat = Some(chat.clone());
+                let path = app.viewer_media.get(1).and_then(|item| item.path.clone());
+                app.image_preview = Some(
+                    crate::image_preview::PreviewState::new(path, chat, card.id).with_card(Some(1)),
+                );
+            }
             "poll-empty" => poll_sample(app, false, false),
             "poll-voted" => poll_sample(app, true, false),
             "poll-results" => poll_sample(app, true, true),
@@ -1948,9 +1960,20 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
             "motion-playing" => motion_sample(app, true),
             "motion-preview" => {
                 motion_sample(app, false);
-                app.actions.push(crate::model::Action::PreviewImage(
-                    app.dirs.media_cache_dir().join("demo-motion.jpg"),
-                ));
+                app.actions.push(crate::model::Action::PreviewImage {
+                    path: app.dirs.media_cache_dir().join("demo-motion.jpg"),
+                    chat: SAMPLES[0].id.into(),
+                    message: "demo-motion".into(),
+                    card: None,
+                });
+            }
+            // The motion photo's clip playing over the photo in the viewer.
+            "motion-viewer" => {
+                motion_sample(app, false);
+                app.actions.push(crate::model::Action::ExpandVideo {
+                    message: "demo-motion".into(),
+                    path: app.dirs.media_cache_dir().join("demo-video.mp4"),
+                });
             }
             "video" => video_sample(app, None),
             "video-playing" => video_sample(app, Some("demo-video")),
@@ -3100,6 +3123,8 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
             "recording" => app.recording = Some(crate::audio::Recorder::rehearsal()),
             // Shows the native image preview over the demo chat.
             "preview" => {
+                // Three photos with a text between the second and the third,
+                // the viewer open on the second over the chat's album.
                 let chat = app.open_chat.clone().expect("demo chat");
                 let (sample, _) = sample_files(app);
                 let now = crate::util::now();
@@ -3136,10 +3161,18 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
                         Content::text("One more photo below."),
                     ),
                 );
-                let selected = rows[1].content.media().unwrap().path.clone().unwrap();
+                let selected = rows[1].content.media().unwrap().path.clone();
+                app.viewer_media = rows
+                    .iter()
+                    .flat_map(crate::model::MediaItem::of_message)
+                    .collect();
                 app.conversations.get_mut(&chat).unwrap().messages = rows;
-                app.actions
-                    .push(crate::model::Action::PreviewImage(selected));
+                app.viewer_media_chat = Some(chat.clone());
+                app.image_preview = Some(crate::image_preview::PreviewState::new(
+                    selected,
+                    chat,
+                    "preview-1".to_owned(),
+                ));
             }
             "compose-emoji" => {
                 app.composer = "Andiamo 😊 con due 👍🏽 e poi testo normale".to_owned();
@@ -5641,6 +5674,7 @@ mod tests {
             "app-lock-setup",
             "new-chat",
             "new-contact-number",
+            "carousel-viewer",
             "media-album",
             "media-album-before",
             "media-album-oversized",
@@ -5666,6 +5700,7 @@ mod tests {
             "motion",
             "motion-playing",
             "motion-preview",
+            "motion-viewer",
             "video",
             "video-playing",
             "shared-contact",
@@ -7663,8 +7698,12 @@ mod tests {
         assert_eq!(app.composer, "draft");
 
         let (photo, _) = sample_files(&app);
-        app.actions
-            .push(crate::model::Action::PreviewImage(photo.clone()));
+        app.actions.push(crate::model::Action::PreviewImage {
+            card: None,
+            path: photo.clone(),
+            chat: crate::demo::SAMPLES[0].id.to_owned(),
+            message: "ada-photo".to_owned(),
+        });
         // Enter in the very frame the preview opens, before egui knows about
         // the modal layer.
         frame_with(
@@ -7690,19 +7729,14 @@ mod tests {
             .expect("Tab focuses a preview control");
         assert_eq!(focused.layer_id.id, egui::Id::new("image-preview"));
 
-        // The first control is 100%; Enter activates it.
+        // The first control is Close; Enter activates it.
         frame_with(
             &mut app,
             &ctx,
             vec![key(egui::Key::Enter, egui::Modifiers::NONE)],
         );
         render(&mut app, &ctx);
-        assert!(
-            app.image_preview
-                .as_ref()
-                .is_some_and(|preview| !preview.is_fit()),
-            "Enter activates 100%"
-        );
+        assert!(app.image_preview.is_none(), "Enter activates Close");
         assert_eq!(app.composer, "draft");
     }
 
@@ -7714,19 +7748,38 @@ mod tests {
         apply_flags(&mut app, Some("preview"));
         app.composer = "unsent draft".into();
         render(&mut app, &ctx);
-        let initial = app.image_preview.as_ref().unwrap().path().to_owned();
+        let initial = app
+            .image_preview
+            .as_ref()
+            .unwrap()
+            .path()
+            .map(std::path::Path::to_owned);
         frame_with(
             &mut app,
             &ctx,
             vec![key(egui::Key::ArrowRight, egui::Modifiers::NONE)],
         );
-        assert_ne!(app.image_preview.as_ref().unwrap().path(), initial);
+        assert_ne!(
+            app.image_preview
+                .as_ref()
+                .unwrap()
+                .path()
+                .map(std::path::Path::to_owned),
+            initial
+        );
         frame_with(
             &mut app,
             &ctx,
             vec![key(egui::Key::ArrowLeft, egui::Modifiers::NONE)],
         );
-        assert_eq!(app.image_preview.as_ref().unwrap().path(), initial);
+        assert_eq!(
+            app.image_preview
+                .as_ref()
+                .unwrap()
+                .path()
+                .map(std::path::Path::to_owned),
+            initial
+        );
         frame_with(
             &mut app,
             &ctx,
@@ -7734,6 +7787,188 @@ mod tests {
         );
         assert!(app.image_preview.is_none());
         assert_eq!(app.composer, "unsent draft");
+    }
+
+    /// A sticker shown large offers the favorite toggle that matches its
+    /// state, and a click on the sticker itself closes it.
+    #[test]
+    fn a_large_sticker_toggles_its_favorite_and_closes_on_click() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        apply_flags(&mut app, Some("sticker-view"));
+        app.backend.record_demo_commands();
+        render(&mut app, &ctx);
+        let received = app.sticker_view.as_ref().expect("open").path().to_owned();
+        let click = |app: &mut App, pos: egui::Pos2| {
+            let press = |pressed| egui::Event::PointerButton {
+                pos,
+                pressed,
+                button: egui::PointerButton::Primary,
+                modifiers: egui::Modifiers::NONE,
+            };
+            frame_with(app, &ctx, vec![egui::Event::PointerMoved(pos), press(true)]);
+            frame_with(app, &ctx, vec![press(false)]);
+            render(app, &ctx);
+        };
+        let button = || {
+            ctx.data(|data| {
+                data.get_temp::<egui::Rect>(crate::ui::image_preview::sticker_favorite_id())
+            })
+            .expect("the favorite button is drawn")
+        };
+
+        click(&mut app, button().center());
+        let commands = app.backend.take_demo_commands();
+        assert!(
+            commands.iter().any(
+                |command| matches!(command, crate::backend::Command::SaveSticker { path } if *path == received)
+            ),
+            "{commands:?}"
+        );
+
+        // Once the favorite copy arrives, the same button removes it.
+        let copy = app.dirs.media_cache_dir().join(format!(
+            "{}.webp",
+            crate::backend::sticker_store::content_hash(&std::fs::read(&received).unwrap())
+        ));
+        app.stickers_saved.push(copy.clone());
+        render(&mut app, &ctx);
+        click(&mut app, button().center());
+        let commands = app.backend.take_demo_commands();
+        assert!(
+            commands.iter().any(
+                |command| matches!(command, crate::backend::Command::ForgetSticker { path } if *path == copy)
+            ),
+            "{commands:?}"
+        );
+        assert!(app.sticker_view.is_some(), "the buttons leave it open");
+
+        let above = button().center_top() - egui::vec2(0.0, 120.0);
+        click(&mut app, above);
+        assert!(
+            app.sticker_view.is_none(),
+            "a click on the sticker closes it"
+        );
+    }
+
+    /// The viewer steps through an animated sticker's frames on its own.
+    #[test]
+    fn an_animated_sticker_plays_in_the_viewer() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        animated_sticker_sample(&mut app);
+        app.picker = None;
+        let path = app.stickers[0].clone();
+        render(&mut app, &ctx);
+        app.actions
+            .push(crate::model::Action::PreviewSticker(path.clone()));
+        let drawn = |app: &mut App| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1180.0, 780.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    let ctx = ui.ctx().clone();
+                    app.background_frame(&ctx);
+                    app.frame_ui(ui);
+                },
+            );
+            output.textures_delta.clear();
+            output
+                .shapes
+                .iter()
+                .map(|clipped| clipped.shape.texture_id())
+                .collect::<std::collections::HashSet<_>>()
+        };
+        let first = drawn(&mut app);
+        assert!(app.sticker_view.as_ref().expect("open").animated());
+        let mut seen = std::collections::HashSet::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while seen.len() < 3 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            seen.extend(drawn(&mut app).difference(&first).copied());
+        }
+        assert!(
+            seen.len() >= 3,
+            "the viewer showed {} new frames",
+            seen.len()
+        );
+    }
+
+    /// Escape closes a large sticker without reaching the chat behind it.
+    #[test]
+    fn escape_closes_a_large_sticker() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        apply_flags(&mut app, Some("sticker-view"));
+        render(&mut app, &ctx);
+        assert!(app.sticker_view.is_some());
+        frame_with(
+            &mut app,
+            &ctx,
+            vec![key(egui::Key::Escape, egui::Modifiers::NONE)],
+        );
+        render(&mut app, &ctx);
+        assert!(app.sticker_view.is_none());
+        assert!(app.open_chat.is_some(), "the chat stays open");
+    }
+
+    /// "Show in the chat" closes the viewer and brings the message it was
+    /// showing into view. Closing alone left the chat where it was, so after
+    /// stepping back through the album the message the button names stayed out
+    /// of sight.
+    #[test]
+    fn showing_the_previewed_message_in_the_chat_scrolls_to_it() {
+        use egui::accesskit::Role;
+        let mut app = app();
+        // The demo page that opens the viewer over the sample chat's album:
+        // the header's message actions only exist when the viewer has an item.
+        apply_flags(&mut app, Some("preview"));
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        assert!(app.image_preview.is_some(), "the viewer is open");
+        assert!(
+            !app.viewer_media.is_empty(),
+            "the album the actions belong to is loaded"
+        );
+
+        let at = accessible_nodes(&mut app, &ctx, Vec::new())
+            .into_iter()
+            .find(|(label, role, _)| label == "Show in the chat" && *role == Role::Button)
+            .map(|(_, _, centre)| centre)
+            .expect("the viewer offers Show in the chat");
+        let press = |pressed| egui::Event::PointerButton {
+            pos: at,
+            pressed,
+            button: egui::PointerButton::Primary,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame_with(
+            &mut app,
+            &ctx,
+            vec![egui::Event::PointerMoved(at), press(true)],
+        );
+        frame_with(&mut app, &ctx, vec![press(false)]);
+        render(&mut app, &ctx);
+
+        assert!(app.image_preview.is_none(), "the viewer closes");
+        // The anchor itself is consumed by the frame that scrolls to it, so
+        // the highlight is what still names the message here.
+        let highlight = app
+            .jump_highlight
+            .as_ref()
+            .expect("the chat is brought to the message the viewer was showing");
+        assert_eq!(highlight.message, "preview-1");
+        assert_eq!(highlight.chat, crate::demo::SAMPLES[0].id);
     }
 
     /// Ctrl++ zooms the picture, not the whole interface, including when the
@@ -7775,14 +8010,281 @@ mod tests {
         assert_eq!(ctx.zoom_factor(), interface_zoom);
     }
 
+    /// In a narrow window a long image name stays clear of the preview's
+    /// buttons: cut before the first of them, it rests at its start, scrolls
+    /// to its end, rests, and scrolls back.
+    #[test]
+    fn a_long_image_name_scrolls_beside_the_preview_buttons() {
+        long_image_name_scrolls(
+            "holiday_photo_from_the_beach_with_everyone_at_sunset.jpg",
+            false,
+        );
+    }
+
+    /// A right-to-left name begins at its right edge, so it rests there first
+    /// and scrolls towards its end on the left.
+    #[test]
+    fn a_long_right_to_left_image_name_starts_at_its_right_edge() {
+        long_image_name_scrolls("תמונה_מהחופשה_בים_עם_כל_המשפחה_בשקיעה_הארוכה.jpg", true);
+    }
+
+    fn long_image_name_scrolls(name: &str, rtl: bool) {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        let (photo, _) = sample_files(&app);
+        let long = photo.with_file_name(name);
+        std::fs::copy(&photo, &long).unwrap();
+        // A chat with no name, so the viewer's title is the file's name. The
+        // viewer shows the open chat's media and closes when it is left.
+        app.open_chat = Some("unknown@s.whatsapp.net".into());
+        app.actions.push(crate::model::Action::PreviewImage {
+            card: None,
+            path: long,
+            chat: "unknown@s.whatsapp.net".into(),
+            message: "long-name".into(),
+        });
+        let mut narrow = |time: f64| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(360.0, 640.0),
+                    )),
+                    time: Some(time),
+                    ..Default::default()
+                },
+                |ui| {
+                    let ctx = ui.ctx().clone();
+                    app.background_frame(&ctx);
+                    app.frame_ui(ui);
+                },
+            );
+            output.textures_delta.clear();
+            output.shapes
+        };
+        // Where a text was painted, its width, and the rect it was clipped to.
+        let find = |shapes: &[egui::epaint::ClippedShape], text: &str| {
+            shapes
+                .iter()
+                .find_map(|clipped| match &clipped.shape {
+                    egui::Shape::Text(shape) if shape.galley.job.text == text => {
+                        Some((shape.pos.x, shape.galley.size().x, clipped.clip_rect))
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{text} was not painted"))
+        };
+        narrow(0.0);
+        let shapes = narrow(0.0);
+        let (x, width, clip) = find(&shapes, name);
+        let (fit, _, _) = find(&shapes, "Fit");
+        assert!(clip.right() < fit, "the name runs under the buttons");
+        assert!(
+            width > clip.width(),
+            "the name should not fit in 360 points"
+        );
+        // Where the name's start and end show when the line rests at either.
+        let (start, finish) = (clip.left(), clip.right() - width);
+        let (start, finish) = if rtl {
+            (finish, start)
+        } else {
+            (start, finish)
+        };
+        assert!((x - start).abs() < 0.5, "the name starts at its start");
+
+        let travel = f64::from(width - clip.width()) / 40.0;
+        assert_eq!(find(&narrow(2.9), name).0, x, "it rests three seconds");
+        let (end, _, end_clip) = find(&narrow(3.0 + travel + 1.0), name);
+        assert!(
+            (end - finish).abs() < 0.5,
+            "the name's end shows at the far edge"
+        );
+        assert_eq!(end_clip, clip, "the name stays inside its room");
+        assert_eq!(find(&narrow(3.0 + travel + 2.9), name).0, end);
+        let (back, _, _) = find(&narrow(2.0 * (3.0 + travel) + 0.5), name);
+        assert_eq!(back, x, "and it scrolls back to its start");
+    }
+
+    #[test]
+    fn preview_navigation_overlays_the_photo_on_hover() {
+        fn controls(shapes: &[egui::epaint::ClippedShape]) -> Vec<egui::Rect> {
+            fn collect(shape: &egui::Shape, out: &mut Vec<egui::Rect>) {
+                match shape {
+                    egui::Shape::Circle(circle) if (circle.radius - 20.0).abs() < 1.1 => {
+                        out.push(egui::Rect::from_center_size(
+                            circle.center,
+                            egui::Vec2::splat(40.0),
+                        ));
+                    }
+                    egui::Shape::Vec(shapes) => {
+                        for shape in shapes {
+                            collect(shape, out);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let mut out = Vec::new();
+            for clipped in shapes {
+                collect(&clipped.shape, &mut out);
+            }
+            out
+        }
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        apply_flags(&mut app, Some("preview"));
+        render(&mut app, &ctx);
+        let paths: Vec<_> = app.conversations[app.open_chat.as_ref().unwrap()]
+            .messages
+            .iter()
+            .filter_map(|message| message.content.media()?.path.as_ref())
+            .map(|path| crate::util::image_uri(path))
+            .collect();
+        for _ in 0..200 {
+            render(&mut app, &ctx);
+            let ready = paths.iter().all(|uri| {
+                matches!(
+                    ctx.try_load_texture(
+                        uri,
+                        egui::TextureOptions::default(),
+                        egui::SizeHint::default()
+                    ),
+                    Ok(egui::load::TexturePoll::Ready { .. })
+                )
+            });
+            if ready {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        render(&mut app, &ctx);
+        app.composer = "unsent draft".into();
+        let picture = preview_frame(&mut app, &ctx, vec![]);
+        let initial = app
+            .image_preview
+            .as_ref()
+            .unwrap()
+            .path()
+            .map(std::path::Path::to_owned);
+        let hidden = frame_sized(
+            &mut app,
+            &ctx,
+            780.0,
+            vec![egui::Event::PointerMoved(egui::pos2(5.0, 5.0))],
+        );
+        assert!(
+            controls(&hidden).is_empty(),
+            "outside the modal hides the arrows"
+        );
+        let beside = egui::pos2(picture.left() - 5.0, picture.center().y);
+        let hidden = frame_sized(
+            &mut app,
+            &ctx,
+            780.0,
+            vec![egui::Event::PointerMoved(beside)],
+        );
+        assert!(
+            controls(&hidden).is_empty(),
+            "beside the photo hides the arrows"
+        );
+        frame_sized(
+            &mut app,
+            &ctx,
+            780.0,
+            vec![egui::Event::PointerMoved(picture.center())],
+        );
+        let shown = frame_sized(&mut app, &ctx, 780.0, vec![]);
+        let buttons = controls(&shown);
+        assert_eq!(buttons.len(), 2);
+        assert!(
+            buttons.iter().all(|button| picture.contains_rect(*button)),
+            "the arrows sit on the photo"
+        );
+        assert!(buttons[0].center().x < picture.center().x);
+        assert!(buttons[1].center().x > picture.center().x);
+
+        let next = buttons[1].center();
+        frame_sized(&mut app, &ctx, 780.0, vec![egui::Event::PointerMoved(next)]);
+        let hovered = frame_sized(&mut app, &ctx, 780.0, vec![]);
+        assert_eq!(
+            controls(&hovered).len(),
+            2,
+            "hovering an arrow keeps it visible"
+        );
+        frame_sized(&mut app, &ctx, 780.0, vec![primary(next, true)]);
+        frame_sized(&mut app, &ctx, 780.0, vec![primary(next, false)]);
+        assert_ne!(
+            app.image_preview
+                .as_ref()
+                .unwrap()
+                .path()
+                .map(std::path::Path::to_owned),
+            initial
+        );
+        assert!(app.image_preview.as_ref().unwrap().is_fit());
+        let other = preview_frame(
+            &mut app,
+            &ctx,
+            vec![egui::Event::PointerMoved(picture.center())],
+        );
+        let shown = frame_sized(&mut app, &ctx, 780.0, vec![]);
+        let buttons = controls(&shown);
+        assert_eq!(buttons.len(), 2);
+        assert!(
+            buttons.iter().all(|button| other.contains_rect(*button)),
+            "the arrows follow the photo on screen"
+        );
+        let previous = buttons[0].center();
+        frame_sized(
+            &mut app,
+            &ctx,
+            780.0,
+            vec![egui::Event::PointerMoved(previous)],
+        );
+        frame_sized(&mut app, &ctx, 780.0, vec![primary(previous, true)]);
+        frame_sized(&mut app, &ctx, 780.0, vec![primary(previous, false)]);
+        assert_eq!(
+            app.image_preview
+                .as_ref()
+                .unwrap()
+                .path()
+                .map(std::path::Path::to_owned),
+            initial
+        );
+        assert_eq!(app.composer, "unsent draft");
+        app.actions.push(crate::model::Action::ImageActualSize);
+        preview_frame(
+            &mut app,
+            &ctx,
+            vec![egui::Event::PointerMoved(picture.center())],
+        );
+        let zoomed = frame_sized(&mut app, &ctx, 780.0, vec![]);
+        assert_eq!(
+            controls(&zoomed).len(),
+            2,
+            "a zoomed photo keeps its arrows"
+        );
+        let gone = frame_sized(&mut app, &ctx, 780.0, vec![egui::Event::PointerGone]);
+        assert!(
+            controls(&gone).is_empty(),
+            "leaving the window hides the arrows"
+        );
+    }
+
     /// Opens the sample photo in the preview and waits for it to decode, so
     /// input meets a settled, fitted picture. Returns the fitted scale.
     fn open_sample_preview(app: &mut App, ctx: &egui::Context) -> f32 {
         app.attach(ctx);
         render(app, ctx);
         let (photo, _) = sample_files(app);
-        app.actions
-            .push(crate::model::Action::PreviewImage(photo.clone()));
+        app.actions.push(crate::model::Action::PreviewImage {
+            card: None,
+            path: photo.clone(),
+            chat: crate::demo::SAMPLES[0].id.to_owned(),
+            message: "ada-photo".to_owned(),
+        });
         wait_for_picture(app, ctx, &photo);
         app.image_preview.as_ref().unwrap().scale()
     }
