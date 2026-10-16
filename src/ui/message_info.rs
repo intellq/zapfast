@@ -72,13 +72,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, chat: &str, id: &str) {
 /// The message, then who received, read, or played it.
 fn receipts(app: &mut App, ui: &mut egui::Ui, chat: &str, id: &str, message: &Message) {
     let palette = app.palette;
-    let delivery = super::conversation::display_delivery(
-        message.status,
-        message.from_me,
-        crate::model::ChatKind::from_id(chat),
-        app.account_receipts_off,
-    );
-    preview(ui, &palette, message, delivery);
+    preview(ui, &palette, message);
     if crate::model::ChatKind::from_id(chat) != crate::model::ChatKind::Group {
         direct(app, ui, message);
         return;
@@ -100,7 +94,7 @@ fn receipts(app: &mut App, ui: &mut egui::Ui, chat: &str, id: &str, message: &Me
 }
 
 /// The message as its bubble shows it, shortened to a few lines.
-fn preview(ui: &mut egui::Ui, palette: &Palette, message: &Message, delivery: Delivery) {
+fn preview(ui: &mut egui::Ui, palette: &Palette, message: &Message) {
     let text = widgets::line(
         ui,
         &message.content.summary(),
@@ -117,7 +111,7 @@ fn preview(ui: &mut egui::Ui, palette: &Palette, message: &Message, delivery: De
         |ui| {
             // Room for the tail, which reaches out past the bubble's side.
             ui.add_space(widgets::TAIL_WIDTH);
-            bubble(ui, palette, message, text, width, delivery);
+            bubble(ui, palette, message, text, width);
         },
     );
 }
@@ -128,7 +122,6 @@ fn bubble(
     message: &Message,
     text: widgets::Line,
     width: f32,
-    delivery: Delivery,
 ) {
     // Drawn as the chat draws our own messages: shadow, raised edge, tail.
     let backdrop = ui.painter().add(egui::Shape::Noop);
@@ -147,7 +140,7 @@ fn bubble(
                 egui::pos2(rect.right() - 16.0, rect.bottom() - 16.0),
                 vec2(16.0, 16.0),
             );
-            widgets::ticks(ui, palette, ticks, delivery);
+            widgets::ticks(ui, palette, ticks, message.status);
             ui.painter().galley(
                 egui::pos2(
                     ticks.left() - 4.0 - clock.size().x,
@@ -172,30 +165,15 @@ fn bubble(
 fn direct(app: &App, ui: &mut egui::Ui, message: &Message) {
     let palette = app.palette;
     let locale = app.locale;
-    let delivery = super::conversation::display_delivery(
-        message.status,
-        message.from_me,
-        crate::model::ChatKind::from_id(&message.chat),
-        app.account_receipts_off,
-    );
-    let read = matches!(delivery, Delivery::Read | Delivery::Played);
-    let delivered = read || delivery == Delivery::Delivered;
-    let label = if delivery == Delivery::Played {
+    let read = matches!(message.status, Delivery::Read | Delivery::Played);
+    let delivered = read || message.status == Delivery::Delivered;
+    let label = if message.status == Delivery::Played {
         gettext(locale, "Played")
     } else {
         gettext(locale, "Read")
     };
     let stages = [
-        (
-            label,
-            read,
-            message.read_at,
-            if read {
-                palette.read
-            } else {
-                palette.secondary
-            },
-        ),
+        (label, read, message.read_at, palette.read),
         (
             gettext(locale, "Delivered"),
             delivered,
