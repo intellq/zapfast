@@ -45,8 +45,9 @@ sozinho a partir das Releases do fork (não das do upstream).
   sessão, o histórico e as configurações).
 - **Windows:** o pacote `…-x86_64-pc-windows-msvc.msi` (Windows Installer,
   sem administrador). Desde a 0.19.8 é o único instalador: o `-setup.exe` e o
-  `.zip` portátil saíram, e as cópias instaladas por eles chegam ao MSI pela
-  atualização automática, passando pela 0.19.7.
+  `.zip` portátil saíram. Uma cópia instalada pelo `-setup.exe` chega ao MSI
+  pela atualização automática, passando pela 0.19.7; uma cópia portátil não
+  se atualiza mais e deve ser trocada pelo MSI à mão.
 - **Máquina virtual Windows sem aceleração 3D:** extraia
   `zapfast-vX.Y.Z-windows-opengl-vm.zip` dentro da pasta do ZapFast (OpenGL
   por software do Mesa).
