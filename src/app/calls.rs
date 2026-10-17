@@ -96,6 +96,21 @@ impl App {
         self.waker.clone()
     }
 
+    /// Moves a ringing call from the card to its own window when the main
+    /// window is in the tray or minimized, with Decline and Accept. Open,
+    /// focused or not, the card in its corner is enough; once the main window
+    /// is minimized, the card makes way for the call window for good, so the
+    /// call is never offered in two places.
+    pub(crate) fn arm_call_window(&mut self) {
+        if (self.window_hidden || self.window_minimized)
+            && let Some(call) = self.call.as_ref().filter(|call| {
+                call.phase == CallPhase::Incoming && self.call_alert == Some(call.generation)
+            })
+        {
+            self.call_windowed = Some(call.generation);
+        }
+    }
+
     /// Hands the call window what to show, and takes back what it asked for.
     ///
     /// Runs every frame the app runs, including those in which the main
@@ -696,19 +711,7 @@ impl App {
             }
             self.handle_call_update(call.not_placed());
         }
-        // A call that rings while the main window is in the tray, minimized,
-        // or behind other windows rings in the call window in the corner of
-        // the screen, with Decline and Accept, and leaves the main window
-        // where it is. In front, the card in its corner is enough; once the
-        // main window leaves the front, the card makes way for the call
-        // window for good, so the call is never offered in two places.
-        if (self.window_hidden || !self.window_focused)
-            && let Some(call) = self.call.as_ref().filter(|call| {
-                call.phase == CallPhase::Incoming && self.call_alert == Some(call.generation)
-            })
-        {
-            self.call_windowed = Some(call.generation);
-        }
+        self.arm_call_window();
         self.sync_call_tone();
         if let Some(until) = self.call_surface_until {
             // The farewell goes on time even with nothing else to draw.
@@ -918,13 +921,18 @@ mod tests {
         assert!(app.call_in_window(), "the running call is in its window");
     }
 
+    /// Behind other windows the card is enough; minimized, the call window pops up.
     #[test]
-    fn a_call_that_rings_behind_other_windows_rings_in_the_corner() {
+    fn a_call_that_rings_minimized_rings_in_the_corner() {
         let directory = tempfile::tempdir().unwrap();
         let (mut app, mut commands) = app(directory.path());
         let ctx = egui::Context::default();
+        app.window_hidden = false;
         app.window_focused = false;
         app.handle_call_update(update(1, CallPhase::Incoming));
+        app.tick_call(&ctx);
+        assert!(!app.call_in_window(), "out of focus, the card is enough");
+        app.window_minimized = true;
         app.tick_call(&ctx);
         assert!(
             app.call_in_window(),
@@ -1646,6 +1654,40 @@ mod tests {
         );
     }
 
+    /// The close button of the call window alone closes only that window: ZapFast stays in the
+    /// tray, and the call keeps ringing for the tray to bring back.
+    #[test]
+    fn closing_the_call_window_alone_keeps_zapfast_in_the_tray() {
+        use crate::ui::call::{Standalone, StandaloneWindow};
+        use fastframe_shell::{Closed, Resident};
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _events) = ringing_in_the_tray(directory.path());
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let mut window = StandaloneWindow::default();
+        let mut input = egui::RawInput::default();
+        input
+            .viewports
+            .entry(egui::ViewportId::ROOT)
+            .or_default()
+            .events
+            .push(egui::ViewportEvent::Close);
+        let mut next = None;
+        let mut output = ctx.run_ui(input, |ui| {
+            next = Some(window.logic(&mut app, ui.ctx()));
+            window.drawn();
+            crate::ui::call::standalone(ui, &app);
+        });
+        output.textures_delta.clear();
+        assert_eq!(next, Some(Standalone::Stay));
+        assert_eq!(app.closed(), Closed::Hide, "not Quit");
+        Resident::window_gone(&mut app);
+        app.sync_call_window(&ctx);
+        app.tick_call(&ctx);
+        assert!(app.call_live(), "the call still rings");
+        assert!(!app.call_window_alone(), "its window stays closed");
+    }
+
     /// A call window the compositor never draws gives way to the main window, so the call is
     /// never left ringing with nothing on screen to answer it.
     #[test]
@@ -1816,9 +1858,10 @@ mod tests {
         let mut app = ringing_in_front(directory.path());
         app.window_focused = false;
         app.tick_call(&ctx);
-        assert!(app.call_in_window());
+        assert!(!app.call_in_window(), "out of focus, the card is enough");
         app.test_tray_shown = Some(false);
         app.main_window_undrawn(&ctx);
+        assert!(app.call_in_window(), "not drawn is minimized");
         assert!(
             !app.hide_intent,
             "without a tray nothing would bring it back"

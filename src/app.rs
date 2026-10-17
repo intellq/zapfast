@@ -772,6 +772,9 @@ pub struct App {
     pub focus_settings_search: bool,
     pub quit_requested: bool,
     pub window_focused: bool,
+    /// Whether the main window is minimized, or open but not drawn for a
+    /// while (a compositor that does not say it is minimized).
+    pub window_minimized: bool,
     /// Whether the window had the system's focus last frame, lock screen or not.
     system_focused: bool,
     /// When the window last lost the system's focus. A click on the Windows
@@ -1696,6 +1699,7 @@ impl App {
             quit_requested: false,
             window_focused: false,
             system_focused: false,
+            window_minimized: false,
             focus_lost_at: None,
             tray_clicked_at: None,
             refocus_frames: 0,
@@ -2509,6 +2513,7 @@ impl App {
             self.refocus_frames = REFOCUS_FRAMES;
         }
         self.system_focused = false;
+        self.window_minimized = false;
         self.focus_lost_at = None;
         // A window is here, so a hidden start's wait for a panel is over.
         self.tray_wait = None;
@@ -6543,6 +6548,10 @@ impl App {
     /// screen, and the tray's Toggle would only hide it again. With a tray,
     /// the window goes there instead, and the call window opens alone.
     pub fn main_window_undrawn(&mut self, ctx: &egui::Context) {
+        // Not drawn is minimized where the compositor does not say so: a
+        // ringing call goes to its window then.
+        self.window_minimized = true;
+        self.arm_call_window();
         if self.call_in_window()
             && !self.call_window_gave_way
             && !self.quit_requested
@@ -9438,6 +9447,9 @@ impl App {
                 let viewport = input.viewport();
                 viewport.focused.unwrap_or(true) && viewport.minimized != Some(true)
             });
+            if ctx.input(|input| input.viewport().minimized == Some(true)) {
+                self.window_minimized = true;
+            }
             if self.system_focused && !in_front {
                 self.focus_lost_at = Some(Instant::now());
             }
@@ -10077,6 +10089,8 @@ impl App {
     }
 
     pub fn frame_ui(&mut self, ui: &mut egui::Ui) {
+        // Drawn again: no longer minimized.
+        self.window_minimized = false;
         // Tests and tours change `locale` directly; keep every thread in step.
         crate::i18n::set_current(self.locale);
         let ctx = ui.ctx().clone();

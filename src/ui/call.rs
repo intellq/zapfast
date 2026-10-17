@@ -579,6 +579,11 @@ impl StandaloneWindow {
             );
             self.shown = Some(shown);
         }
+        // Its close button closes only this window (the call goes as the button says, in `window`):
+        // ZapFast stays in the tray.
+        if ctx.input(|input| input.viewport().close_requested()) && !app.quit_requested {
+            app.hide_intent = true;
+        }
         let next = self.decide(app, Instant::now());
         if next == Standalone::Stay {
             // Events reach the app between frames: look again soon, as the tray would.
