@@ -43,11 +43,10 @@ sozinho a partir das Releases do fork (não das do upstream).
   com atalho no menu e na área de trabalho, e `~/.local/bin` entra no `PATH`
   se ainda não estiver. `./uninstall.sh` remove (com `--purge`, também a
   sessão, o histórico e as configurações).
-- **Windows:** o instalador `…-x86_64-pc-windows-msvc-setup.exe` (sem
-  administrador; atalho na área de trabalho marcado por padrão), o pacote
-  `….msi` (também sem administrador, para quem prefere o Windows Installer ou
-  tem o instalador marcado pelo antivírus) ou o `.zip` portátil, que se
-  atualiza na própria pasta.
+- **Windows:** o pacote `…-x86_64-pc-windows-msvc.msi` (Windows Installer,
+  sem administrador). Desde a 0.19.8 é o único instalador: o `-setup.exe` e o
+  `.zip` portátil saíram, e as cópias instaladas por eles chegam ao MSI pela
+  atualização automática, passando pela 0.19.7.
 - **Máquina virtual Windows sem aceleração 3D:** extraia
   `zapfast-vX.Y.Z-windows-opengl-vm.zip` dentro da pasta do ZapFast (OpenGL
   por software do Mesa).
@@ -554,6 +553,49 @@ Da sincronização com o upstream 0.18.2:
   fim ao enviar, para mostrá-la. `Shift+Insert` cola, como `Ctrl+V`, no
   compositor.
 
+Na 0.19.8, além do que veio desde a 0.19.7 (lista seguinte):
+
+- **Ligações de voz e vídeo, individuais e em grupo:** ligações de vídeo no
+  Linux e no Windows, ligações de grupo (com a câmera de cada participante no
+  vídeo) e entrada numa ligação por um link de chamada recebido numa mensagem.
+  As ligações aparecem na conversa e na página **Ligações**, com os filtros
+  **Todas** e **Perdidas** e um botão para começar uma ligação.
+- **Janela de ligação do fork, agora com vídeo:** a ligação tocando aparece no
+  cartão no canto da janela principal; com a janela minimizada ou fechada na
+  bandeja, aparece numa janela própria no canto da tela, com Recusar e Atender.
+  Fechar essa janela não encerra o ZapFast, e o clique na bandeja traz a
+  janela principal a qualquer momento, inclusive com a ligação tocando. Toque
+  de chamada próprio, independente do som das mensagens. A tela cheia de
+  ligação do upstream não é usada.
+- **Cabeçalho da lista de conversas:** avatar, **Conversas**, Ligações,
+  Arquivadas (sem contador de não lidas), Configurações (que vira um X
+  vermelho com as configurações abertas) e um menu com Mensagens com estrela,
+  Esconder a lista de conversas e Nova conversa. A barra lateral do upstream
+  fica como opção: clique direito no avatar ou **Configurações > Aparência**.
+- **Mensagens com estrela** (listadas no painel da esquerda) e **mensagens
+  fixadas** na conversa para todos.
+- **Responder em particular** a uma mensagem de grupo (com a conversa
+  bloqueada, pede o desbloqueio antes).
+- **Informações da conversa num painel lateral**, com mídia, links e
+  documentos.
+- **Conversar com um número não salvo**, e links de números de telefone e
+  `wa://` abrem a conversa; o que chega com o ZapFast bloqueado espera o
+  desbloqueio.
+- **Histórico antigo e seus arquivos baixados em segundo plano**, com a opção
+  em **Configurações > Conversas**.
+- **Imagens:** visualizador em janela inteira com o álbum da conversa e
+  navegação entre as fotos, álbuns de mídia agrupados como no WhatsApp,
+  recorte e rotação antes de enviar, colagem de imagens mais confiável e envio
+  de imagens como documento.
+- **Notificações nativas** em todas as plataformas (fastframe 0.6.0).
+- **Barra de título** desenhada pelo ZapFast no Linux e no Windows, como
+  opção.
+- **Tiques azuis de leitura** voltam a aparecer mesmo com as confirmações de
+  leitura da sua conta desligadas, como antes.
+- **Tradução:** textos que apareciam em inglês com o idioma pt-BR foram
+  traduzidos.
+- **Windows:** só o pacote MSI (ver **Instalar este fork**).
+
 Desde a 0.19.7 (sincronização com o upstream de 13 a 16/10/2026):
 
 - **Enviar localização:** **Enviar localização**, nas ferramentas da caixa de
@@ -609,7 +651,7 @@ Desde a 0.19.7 (sincronização com o upstream de 13 a 16/10/2026):
   cursor fica no fim ao editar uma mensagem enviada; uma mensagem enviada sem
   conexão volta à caixa de mensagem; uma edição inválida é recusada e o
   original se mantém se o envio falhar; os tiques de leitura somem quando os
-  recibos da conta estão desligados; uma conversa curta fica junto da caixa
+  recibos da conta estão desligados (desfeito na 0.19.8); uma conversa curta fica junto da caixa
   de mensagem; o nome do remetente numa mensagem de texto de grupo volta a
   abrir o painel ao clicar.
 - **Bibliotecas:** whatsapp-rust oficial na revisão `5e72baf`, rodio com
@@ -1567,7 +1609,7 @@ Builds for every release are on the
 | Platform | File |
 | --- | --- |
 | Linux x86_64 and arm64 | `zapfast-vX.Y.Z-<target>.tar.gz`, with the desktop file and icon in `packaging/` |
-| Windows x64 and arm64 | `zapfast-vX.Y.Z-<target>-setup.exe` (no administrator rights needed), or the `.zip` |
+| Windows x64 | `zapfast-vX.Y.Z-x86_64-pc-windows-msvc.msi` (no administrator rights needed) |
 | macOS, universal | `zapfast-vX.Y.Z-macos-universal.dmg` |
 
 ZapFast draws its window with OpenGL and needs a graphics driver that offers
