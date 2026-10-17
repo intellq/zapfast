@@ -1625,6 +1625,25 @@ mod tests {
             app.call_live(),
             "the call keeps ringing for the main window"
         );
+        // The shell closes the call window and opens the main window: the card rings.
+        // As `attach` does for the new main window.
+        app.window_hidden = false;
+        app.reopen = false;
+        app.window_focused = true;
+        app.sync_call_window(&ctx);
+        crate::ui::call::close_window(&mut app.call_window.lock().unwrap());
+        app.sync_call_window(&ctx);
+        app.tick_call(&ctx);
+        assert!(!app.call_in_window(), "on the card");
+        // Back to the tray: the call window comes back to answer it.
+        app.hide_intent = true;
+        assert_eq!(app.closed(), Closed::Hide);
+        Resident::window_gone(&mut app);
+        app.tick_call(&ctx);
+        assert!(
+            app.call_window_alone(),
+            "a second trip to the tray brings the call window back"
+        );
     }
 
     /// A call window the compositor never draws gives way to the main window, so the call is

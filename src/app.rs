@@ -2088,6 +2088,19 @@ impl App {
             self.search.clear();
             self.search_hits.clear();
         }
+        // The main window took the ringing call from the call window, which
+        // marked it as handed back to the card. With the main window gone the
+        // card is gone too: the call rings in its own window again.
+        if !self.window_hidden
+            && let Some(generation) = self
+                .call
+                .as_ref()
+                .filter(|call| call.phase == crate::calls::CallPhase::Incoming)
+                .map(|call| call.generation)
+        {
+            self.call_alert = Some(generation);
+            self.call_windowed = Some(generation);
+        }
         self.window_hidden = true;
         self.window_focused = false;
         self.hide_intent = false;
