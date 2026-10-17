@@ -1076,10 +1076,9 @@ fn wayland_session() -> bool {
     false
 }
 
-/// The app outlives its window: closing it with "keep running" on hides
-/// ZapFast, and the tray, a notification or another launch brings it back.
-impl fastframe_shell::Resident for App {
-    fn closed(&self) -> fastframe_shell::Closed {
+impl App {
+    /// What a closed window means: quit, hide to the tray, or open a fresh one.
+    fn closed_as(&self) -> fastframe_shell::Closed {
         if self.quit_requested {
             fastframe_shell::Closed::Quit
         } else if self.reopen {
@@ -1092,6 +1091,16 @@ impl fastframe_shell::Resident for App {
             fastframe_shell::Closed::Quit
         }
     }
+}
+
+/// The app outlives its window: closing it with "keep running" on hides
+/// ZapFast, and the tray, a notification or another launch brings it back.
+impl fastframe_shell::Resident for App {
+    fn closed(&self) -> fastframe_shell::Closed {
+        let closed = self.closed_as();
+        log::info!("[WINDOW] the window closed: {closed:?}");
+        closed
+    }
 
     fn window_gone(&mut self) {
         App::window_gone(self);
@@ -1102,9 +1111,11 @@ impl fastframe_shell::Resident for App {
         self.check_tray_wait(Instant::now());
         if self.quit_requested {
             fastframe_shell::Headless::Quit
-        } else if self.wants_show
-            || (self.call_window_alone() && crate::ui::call::standalone_ready(self))
-        {
+        } else if self.wants_show {
+            log::info!("[WINDOW] the main window was asked for: showing it");
+            fastframe_shell::Headless::Show
+        } else if self.call_window_alone() && crate::ui::call::standalone_ready(self) {
+            log::info!("[CALL] the call rings in the tray: showing its window");
             fastframe_shell::Headless::Show
         } else {
             fastframe_shell::Headless::Wait

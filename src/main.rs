@@ -404,6 +404,7 @@ fn run() -> eframe::Result<()> {
         .run(|lease| {
             // A call that rings while the main window is in the tray opens only the call window.
             if demo_persistence.is_none() && lease.peek(|app: &app::App| app.call_window_alone()) {
+                log::info!("[WINDOW] a call rings in the tray: opening the call window alone");
                 let viewport = lease.peek(zapfast::ui::call::standalone_viewport);
                 // eframe restores the size it stored for its first window whether or not it saves
                 // one, and the main window's lives under the app's name: a store of its own keeps
@@ -421,7 +422,10 @@ fn run() -> eframe::Result<()> {
                         let app = lease.take(&cc.egui_ctx);
                         zapfast::theme::set_font(&cc.egui_ctx, &app.settings.font);
                         zapfast::theme::install(&cc.egui_ctx);
-                        Ok(Box::new(CallShell { app }))
+                        Ok(Box::new(CallShell {
+                            app,
+                            window: Default::default(),
+                        }))
                     }),
                 );
             }
@@ -910,6 +914,7 @@ impl Shell {
 /// and makes way for the main window when that is asked for.
 struct CallShell {
     app: fastframe_shell::Held<app::App>,
+    window: zapfast::ui::call::StandaloneWindow,
 }
 
 impl eframe::App for CallShell {
@@ -918,23 +923,11 @@ impl eframe::App for CallShell {
     }
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let app = &mut *self.app;
-        app.background_frame(ctx);
-        if app.quit_requested {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-        } else if app.wants_show {
-            app.reopen_window();
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-        } else if !app.call_in_window() {
-            app.hide_intent = true;
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-        } else {
-            // Events reach the app between frames: look again soon, as the tray would.
-            ctx.request_repaint_after(std::time::Duration::from_millis(250));
-        }
+        self.window.logic(&mut self.app, ctx);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.window.drawn();
         zapfast::ui::call::standalone(ui, &self.app);
     }
 

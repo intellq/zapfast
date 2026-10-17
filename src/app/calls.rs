@@ -1539,4 +1539,187 @@ mod tests {
         app.handle_call_update(update(1, CallPhase::Incoming));
         assert_eq!(app.call_tone(), None, "a muted chat does not ring");
     }
+
+    /// The main window in the tray, and a call that rings: the headless loop is woken by the
+    /// call's event and asks for the call window alone, which rings with Decline and Accept.
+    fn ringing_in_the_tray(
+        directory: &std::path::Path,
+    ) -> (App, std::sync::mpsc::Sender<crate::backend::Event>) {
+        use fastframe_shell::{Headless, Resident};
+        let (mut app, _) = app(directory);
+        let (backend, _commands, events) = Backend::recording_with_events();
+        app.backend = backend;
+        let headless = egui::Context::default();
+        Resident::window_gone(&mut app);
+        assert_eq!(app.headless_frame(&headless), Headless::Wait);
+        events
+            .send(crate::backend::Event::Call(Box::new(update(
+                1,
+                CallPhase::Incoming,
+            ))))
+            .unwrap();
+        assert_eq!(app.headless_frame(&headless), Headless::Show);
+        assert!(
+            app.call_window_alone(),
+            "the shell opens the call window, not the main one"
+        );
+        assert_eq!(app.call_tone(), Some(Tone::Ringtone));
+        let view = app.call_window.lock().unwrap().view.clone();
+        assert!(view.is_some_and(|view| view.answerable));
+        (app, events)
+    }
+
+    /// One frame of the standalone call window, drawn or (as a compositor that gives it no
+    /// frames leaves it) only its logic: what it decided, whether it asked to close, and when it
+    /// asked for its next frame.
+    fn standalone_frame(
+        window: &mut crate::ui::call::StandaloneWindow,
+        app: &mut App,
+        ctx: &egui::Context,
+        drawn: bool,
+    ) -> (crate::ui::call::Standalone, bool, Duration) {
+        crate::theme::install(ctx);
+        let mut next = None;
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            next = Some(window.logic(app, ui.ctx()));
+            if drawn {
+                window.drawn();
+                crate::ui::call::standalone(ui, app);
+            }
+        });
+        output.textures_delta.clear();
+        let root = &output.viewport_output[&egui::ViewportId::ROOT];
+        let closes = root.commands.contains(&egui::ViewportCommand::Close);
+        (next.unwrap(), closes, root.repaint_delay)
+    }
+
+    /// The tray's Show while the call rings in its window alone closes that window for the main
+    /// one, drawn or not, and asks for the frame that closes it at once.
+    #[test]
+    fn the_tray_shows_the_main_window_while_a_call_rings_alone() {
+        use crate::ui::call::{Standalone, StandaloneWindow};
+        use fastframe_shell::{Closed, Resident};
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _events) = ringing_in_the_tray(directory.path());
+        let ctx = egui::Context::default();
+        let mut window = StandaloneWindow::default();
+        for drawn in [true, false] {
+            let (next, closes, _) = standalone_frame(&mut window, &mut app, &ctx, drawn);
+            assert_eq!(next, Standalone::Stay);
+            assert!(!closes);
+        }
+        app.actions.extend(crate::app::tray_action(
+            fastframe_tray::Event::Toggle,
+            app.window_hidden,
+            false,
+        ));
+        let (next, closes, repaint) = standalone_frame(&mut window, &mut app, &ctx, false);
+        assert_eq!(next, Standalone::Main);
+        assert!(closes);
+        assert_eq!(repaint, Duration::ZERO, "the close goes through at once");
+        assert_eq!(app.closed(), Closed::Reopen);
+        assert!(
+            !app.call_window_alone(),
+            "the shell opens the main window next"
+        );
+        assert!(
+            app.call_live(),
+            "the call keeps ringing for the main window"
+        );
+    }
+
+    /// A call window the compositor never draws gives way to the main window, so the call is
+    /// never left ringing with nothing on screen to answer it.
+    #[test]
+    fn a_call_window_never_drawn_gives_way_to_the_main_window() {
+        use crate::ui::call::{Standalone, StandaloneWindow};
+        use fastframe_shell::{Closed, Resident};
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _events) = ringing_in_the_tray(directory.path());
+        let ctx = egui::Context::default();
+        let mut fresh = StandaloneWindow::default();
+        let (next, _, _) = standalone_frame(&mut fresh, &mut app, &ctx, false);
+        assert_eq!(next, Standalone::Stay, "a new window has time to be drawn");
+        let mut drawn = StandaloneWindow::opened_at(Instant::now() - Duration::from_secs(10));
+        drawn.drawn();
+        let (next, _, _) = standalone_frame(&mut drawn, &mut app, &ctx, false);
+        assert_eq!(next, Standalone::Stay, "one that was drawn stays");
+        let mut undrawn = StandaloneWindow::opened_at(Instant::now() - Duration::from_secs(10));
+        let (next, closes, repaint) = standalone_frame(&mut undrawn, &mut app, &ctx, false);
+        assert_eq!(next, Standalone::Main);
+        assert!(closes);
+        assert_eq!(repaint, Duration::ZERO);
+        assert_eq!(app.closed(), Closed::Reopen);
+        assert!(!app.call_window_alone());
+    }
+
+    /// Answered in the call window alone, the call stays there; once it ends there, the window
+    /// closes at once and ZapFast goes back to the tray.
+    #[test]
+    fn a_call_answered_alone_stays_in_its_window_and_ends_in_the_tray() {
+        use crate::ui::call::{Standalone, StandaloneWindow};
+        use fastframe_shell::{Closed, Headless, Resident};
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, events) = ringing_in_the_tray(directory.path());
+        let ctx = egui::Context::default();
+        let mut window = StandaloneWindow::default();
+        events
+            .send(crate::backend::Event::Call(Box::new(update(
+                1,
+                CallPhase::Active,
+            ))))
+            .unwrap();
+        let (next, _, _) = standalone_frame(&mut window, &mut app, &ctx, true);
+        assert_eq!(
+            next,
+            Standalone::Stay,
+            "the answered call stays in its window"
+        );
+        assert!(app.call_in_window());
+        events
+            .send(crate::backend::Event::Call(Box::new(ended(
+                1,
+                CallOutcome::Answered,
+            ))))
+            .unwrap();
+        let (next, _, _) = standalone_frame(&mut window, &mut app, &ctx, true);
+        assert_eq!(next, Standalone::Stay, "the farewell is shown there");
+        app.call_surface_until = Some(Instant::now() - Duration::from_secs(1));
+        let (next, closes, repaint) = standalone_frame(&mut window, &mut app, &ctx, false);
+        assert_eq!(next, Standalone::Hide);
+        assert!(closes);
+        assert_eq!(repaint, Duration::ZERO);
+        assert_eq!(app.closed(), Closed::Hide);
+        Resident::window_gone(&mut app);
+        assert_eq!(
+            app.headless_frame(&egui::Context::default()),
+            Headless::Wait
+        );
+    }
+
+    /// A call that stops ringing, answered on the phone or given up, takes its window with it.
+    #[test]
+    fn a_call_resolved_elsewhere_closes_its_window_alone() {
+        use crate::ui::call::{Standalone, StandaloneWindow};
+        use fastframe_shell::{Closed, Resident};
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, events) = ringing_in_the_tray(directory.path());
+        let ctx = egui::Context::default();
+        let mut window = StandaloneWindow::default();
+        events
+            .send(crate::backend::Event::Call(Box::new(ended(
+                1,
+                CallOutcome::AnsweredElsewhere,
+            ))))
+            .unwrap();
+        standalone_frame(&mut window, &mut app, &ctx, true);
+        assert_eq!(app.call_tone(), None, "the ringing stops");
+        // Once its farewell is over.
+        app.call_surface_until = Some(Instant::now() - Duration::from_secs(1));
+        let (next, closes, repaint) = standalone_frame(&mut window, &mut app, &ctx, false);
+        assert!(closes);
+        assert_eq!(repaint, Duration::ZERO);
+        assert_eq!(next, Standalone::Hide);
+        assert_eq!(app.closed(), Closed::Hide);
+    }
 }

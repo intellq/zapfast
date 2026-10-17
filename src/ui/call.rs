@@ -526,6 +526,111 @@ pub fn standalone(ui: &mut egui::Ui, app: &App) {
     window(ui, &app.call_window, &app.waker(), app.main_monitor, false);
 }
 
+/// How long the standalone call window may go without being drawn before the main window opens in
+/// its place. A compositor that never shows a new window gives it no frames, and eframe then only
+/// runs its logic: the call would ring with nothing on screen to answer it.
+const UNDRAWN_WAIT: Duration = Duration::from_secs(3);
+
+/// What the standalone call window does after a frame of the app's logic.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Standalone {
+    /// The call is still shown here.
+    Stay,
+    /// ZapFast quits.
+    Quit,
+    /// The main window was asked for, or this one was never drawn: it opens in this one's place.
+    Main,
+    /// The call is no longer shown here: back to the tray.
+    Hide,
+}
+
+/// The standalone call window's own state between frames.
+#[derive(Debug)]
+pub struct StandaloneWindow {
+    opened: Instant,
+    drawn: bool,
+    closing: Option<Standalone>,
+    shown: Option<(Option<bool>, Option<bool>)>,
+}
+
+impl Default for StandaloneWindow {
+    fn default() -> Self {
+        Self {
+            opened: Instant::now(),
+            drawn: false,
+            closing: None,
+            shown: None,
+        }
+    }
+}
+
+impl StandaloneWindow {
+    /// Runs the app's logic for one frame of the standalone call window and closes the window when
+    /// it has no more reason to be open. Closing takes one more frame, which the close asks for.
+    pub fn logic(&mut self, app: &mut App, ctx: &egui::Context) -> Standalone {
+        app.background_frame(ctx);
+        let shown = ctx.input(|input| (input.viewport().minimized, input.viewport().occluded));
+        if self.shown != Some(shown) {
+            log::info!(
+                "[WINDOW] call window minimized={:?} occluded={:?} drawn={}",
+                shown.0,
+                shown.1,
+                self.drawn
+            );
+            self.shown = Some(shown);
+        }
+        let next = self.decide(app, Instant::now());
+        if next == Standalone::Stay {
+            // Events reach the app between frames: look again soon, as the tray would.
+            ctx.request_repaint_after(Duration::from_millis(250));
+        } else {
+            if self.closing != Some(next) {
+                log::info!("[WINDOW] closing the call window: {next:?}");
+                self.closing = Some(next);
+            }
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        next
+    }
+
+    /// A window opened at `opened`, for tests that need it to have waited.
+    #[cfg(test)]
+    pub(crate) fn opened_at(opened: Instant) -> Self {
+        Self {
+            opened,
+            ..Self::default()
+        }
+    }
+
+    /// Records that the window drew a frame.
+    pub fn drawn(&mut self) {
+        self.drawn = true;
+    }
+
+    fn decide(&self, app: &mut App, now: Instant) -> Standalone {
+        if app.quit_requested {
+            Standalone::Quit
+        } else if app.wants_show {
+            app.reopen_window();
+            Standalone::Main
+        } else if !app.call_in_window() {
+            app.hide_intent = true;
+            Standalone::Hide
+        } else if !self.drawn && now.duration_since(self.opened) >= UNDRAWN_WAIT {
+            if self.closing.is_none() {
+                log::warn!(
+                    "[WINDOW] the call window was not drawn in {UNDRAWN_WAIT:?}; opening the main window"
+                );
+            }
+            app.wants_show = true;
+            app.reopen_window();
+            Standalone::Main
+        } else {
+            Standalone::Stay
+        }
+    }
+}
+
 /// Whether the call window may open. On KDE Plasma under Wayland a new one waits until KWin is
 /// ready to move it to its corner as it appears, so it opens there instead of in the middle of the
 /// screen and then jumping; after [`PLACE_WAIT`] it opens anyway, and is moved once it is there.
