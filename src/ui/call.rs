@@ -622,6 +622,8 @@ impl StandaloneWindow {
                     "[WINDOW] the call window was not drawn in {UNDRAWN_WAIT:?}; opening the main window"
                 );
             }
+            // The main window keeps the call then, drawn or not.
+            app.call_window_gave_way = true;
             app.wants_show = true;
             app.reopen_window();
             Standalone::Main

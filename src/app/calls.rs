@@ -79,9 +79,8 @@ impl App {
         self.reopen = true;
     }
 
-    /// Whether a call needs the main window to stay: the ringing card lives
-    /// in it, and the call window is its child, which goes with it. Closing
-    /// it to the tray minimizes it instead.
+    /// Whether a call needs the main window to stay when there is no tray to
+    /// go to: hiding it then only minimizes it.
     pub(super) fn call_keeps_window(&self) -> bool {
         self.call_live()
     }
@@ -1721,5 +1720,99 @@ mod tests {
         assert_eq!(repaint, Duration::ZERO);
         assert_eq!(next, Standalone::Hide);
         assert_eq!(app.closed(), Closed::Hide);
+    }
+
+    /// The main window open, with a tray, and a call ringing on its card.
+    fn ringing_in_front(directory: &std::path::Path) -> App {
+        let (mut app, _) = app(directory);
+        app.test_tray_shown = Some(true);
+        app.window_hidden = false;
+        app.window_focused = true;
+        app.handle_call_update(update(1, CallPhase::Incoming));
+        app.tick_call(&egui::Context::default());
+        assert!(app.call_live() && !app.call_in_window(), "on the card");
+        app
+    }
+
+    /// From the tray to the call window alone, as the shell does once the main window is gone.
+    fn hidden_to_the_call_window(app: &mut App) {
+        use fastframe_shell::{Closed, Headless, Resident};
+        assert_eq!(app.closed(), Closed::Hide);
+        Resident::window_gone(app);
+        assert_eq!(
+            app.headless_frame(&egui::Context::default()),
+            Headless::Show
+        );
+        assert!(app.call_window_alone());
+    }
+
+    /// The tray's Toggle while a call rings on the main window used to only minimize it, where
+    /// eframe draws nothing: no call window, and every later Toggle minimized it again until the
+    /// call stopped ringing. It now goes to the tray, and the call to its window alone.
+    #[test]
+    fn the_tray_hides_the_main_window_during_a_call_and_the_call_rings_alone() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = ringing_in_front(directory.path());
+        let ctx = egui::Context::default();
+        let action =
+            crate::app::tray_action(fastframe_tray::Event::Toggle, app.window_hidden, true);
+        assert!(matches!(action, Some(Action::HideWindow)));
+        app.apply(action.unwrap(), &ctx);
+        assert!(app.hide_intent, "to the tray, not minimized");
+        hidden_to_the_call_window(&mut app);
+    }
+
+    /// Closing the main window while a call rings sends it to the tray too.
+    #[test]
+    fn closing_the_main_window_during_a_call_hides_it_to_the_tray() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = ringing_in_front(directory.path());
+        let ctx = egui::Context::default();
+        let mut input = egui::RawInput::default();
+        input
+            .viewports
+            .entry(egui::ViewportId::ROOT)
+            .or_default()
+            .events
+            .push(egui::ViewportEvent::Close);
+        let mut output = ctx.run_ui(input, |ui| app.window_logic(ui.ctx()));
+        output.textures_delta.clear();
+        let root = &output.viewport_output[&egui::ViewportId::ROOT];
+        assert!(!root.commands.contains(&egui::ViewportCommand::CancelClose));
+        hidden_to_the_call_window(&mut app);
+    }
+
+    /// A main window that stops being drawn (minimized) while the call is in its window hands
+    /// the call to the call window alone; without a call, or without a tray, it stays.
+    #[test]
+    fn a_main_window_no_longer_drawn_hands_its_call_to_the_tray() {
+        let directory = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let (mut app, _) = app(directory.path());
+        app.test_tray_shown = Some(true);
+        app.window_hidden = false;
+        app.main_window_undrawn(&ctx);
+        assert!(!app.hide_intent, "no call, nothing to hand over");
+
+        let mut app = ringing_in_front(directory.path());
+        app.window_focused = false;
+        app.tick_call(&ctx);
+        assert!(app.call_in_window());
+        app.test_tray_shown = Some(false);
+        app.main_window_undrawn(&ctx);
+        assert!(
+            !app.hide_intent,
+            "without a tray nothing would bring it back"
+        );
+        app.test_tray_shown = Some(true);
+        // A call window that was never drawn gave the call back: the main
+        // window keeps it rather than bouncing it between the two.
+        app.call_window_gave_way = true;
+        app.main_window_undrawn(&ctx);
+        assert!(!app.hide_intent);
+        app.call_window_gave_way = false;
+        app.main_window_undrawn(&ctx);
+        assert!(app.hide_intent);
+        hidden_to_the_call_window(&mut app);
     }
 }

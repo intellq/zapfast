@@ -473,6 +473,8 @@ fn run() -> eframe::Result<()> {
                     Ok(Box::new(Shell {
                         app,
                         window_recovery_checked: false,
+                        undrawn_pass: false,
+                        undrawn_since: None,
                         stalls: Default::default(),
                         update_receipt: receipt,
                         #[cfg(target_os = "windows")]
@@ -710,6 +712,11 @@ fn fit_to_monitor(ctx: &egui::Context, frame: &eframe::Frame) {
 struct Shell {
     /// Whether this window's first frame checked that a monitor shows it.
     window_recovery_checked: bool,
+    /// Whether the last logic pass has not been drawn yet: eframe runs only
+    /// the logic of a minimized, occluded or never shown window.
+    undrawn_pass: bool,
+    /// Since when every pass ran without drawing the window.
+    undrawn_since: Option<std::time::Instant>,
     /// Logs an update that froze the window for a moment.
     stalls: fastframe_shell::StallWatch,
     update_receipt: Option<fastframe_update::Receipt>,
@@ -842,6 +849,16 @@ impl Shell {
         }
         app.background_frame(ctx);
         app.window_logic(ctx);
+        // A window nobody sees (minimized, occluded, or never shown by the
+        // compositor) leaves a call to the call window alone.
+        if std::mem::replace(&mut self.undrawn_pass, true) {
+            let since = *self
+                .undrawn_since
+                .get_or_insert_with(std::time::Instant::now);
+            if since.elapsed() >= std::time::Duration::from_secs(2) {
+                app.main_window_undrawn(ctx);
+            }
+        }
         #[cfg(target_os = "windows")]
         if let (Some(window), Some(count)) = (frame.winit_window(), app.taskbar_badge_count())
             && let Some(at) = self.taskbar.show(window, count, app.locale)
@@ -872,6 +889,8 @@ impl Shell {
     }
 
     fn window_ui(&mut self, ui: &mut egui::Ui) {
+        self.undrawn_pass = false;
+        self.undrawn_since = None;
         let app = &mut *self.app;
         #[cfg(feature = "demo")]
         if std::mem::take(&mut self.open_phone_menu) {

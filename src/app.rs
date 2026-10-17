@@ -872,6 +872,9 @@ pub struct App {
     pub hide_intent: bool,
     /// Whether a headless app should create a window.
     pub wants_show: bool,
+    /// Whether the call window was never drawn during this call and gave
+    /// it to the main window, which then keeps it even unseen.
+    pub call_window_gave_way: bool,
     /// A hidden start whose tray item no panel shows yet waits until then
     /// for one to appear, and shows the window if none has (#429).
     tray_wait: Option<Instant>,
@@ -1224,9 +1227,10 @@ const TRAY_DOUBLE_CLICK: Duration = Duration::from_millis(500);
 const REFOCUS_FRAMES: u8 = 3;
 
 /// What a tray click asks for: a left click on Linux and macOS, or the menu's
-/// first entry, toggles the window; a Dock click on macOS shows it. A left
-/// click on Windows shows it too, unless the window was the one in front
-/// (`in_front`), which it hides, as the taskbar button does.
+/// first entry, toggles the window: it hides the window in front
+/// (`in_front`) and shows any other. A Dock click on macOS shows it. A left
+/// click on Windows shows it too, unless the window was the one in front,
+/// which it hides, as the taskbar button does.
 fn tray_action(
     event: fastframe_tray::Event,
     window_hidden: bool,
@@ -1234,9 +1238,11 @@ fn tray_action(
 ) -> Option<Action> {
     use fastframe_tray::Event;
     Some(match event {
-        Event::Show if in_front && !window_hidden => Action::HideWindow,
+        Event::Show if cfg!(windows) && in_front && !window_hidden => Action::HideWindow,
         Event::Show => Action::ShowWindow,
-        Event::Toggle | Event::Menu(TRAY_SHOW) if window_hidden => Action::ShowWindow,
+        // A window that is not the one in front (behind others, minimized,
+        // or never shown by the compositor) comes forward rather than going.
+        Event::Toggle | Event::Menu(TRAY_SHOW) if window_hidden || !in_front => Action::ShowWindow,
         Event::Toggle | Event::Menu(TRAY_SHOW) => Action::HideWindow,
         Event::Menu(TRAY_LOCK) => Action::LockApp,
         Event::Menu(TRAY_QUIT) => Action::Quit,
@@ -1728,6 +1734,7 @@ impl App {
             window_hidden: false,
             hide_intent: false,
             wants_show: false,
+            call_window_gave_way: false,
             tray_wait: None,
             wayland: wayland_session(),
             reopen: false,
@@ -2162,11 +2169,11 @@ impl App {
         };
         let hidden = self.window_hidden;
         let now = Instant::now();
-        let in_front = cfg!(windows)
-            && (self.system_focused
-                || self
-                    .focus_lost_at
-                    .is_some_and(|at| now.duration_since(at) < TRAY_FOCUS_GRACE));
+        // A click on the tray may take the focus before it arrives.
+        let in_front = self.system_focused
+            || self
+                .focus_lost_at
+                .is_some_and(|at| now.duration_since(at) < TRAY_FOCUS_GRACE);
         for event in events {
             if cfg!(windows) && event == fastframe_tray::Event::Show {
                 if self
@@ -2177,7 +2184,16 @@ impl App {
                 }
                 self.tray_clicked_at = Some(now);
             }
-            self.actions.extend(tray_action(event, hidden, in_front));
+            let action = tray_action(event, hidden, in_front);
+            log::info!(
+                "[WINDOW] tray {event:?} hidden={hidden} in_front={in_front} -> {:?}",
+                action.as_ref().map(|action| match action {
+                    Action::ShowWindow => "show",
+                    Action::HideWindow => "hide",
+                    _ => "other",
+                })
+            );
+            self.actions.extend(action);
         }
     }
 
@@ -2189,8 +2205,12 @@ impl App {
             std::mem::take(&mut *queue.lock().unwrap_or_else(|p| p.into_inner()));
         for command in commands {
             match command {
-                ControlCommand::Show => self.actions.push(Action::ShowWindow),
+                ControlCommand::Show => {
+                    log::info!("[WINDOW] another launch asked for the window");
+                    self.actions.push(Action::ShowWindow);
+                }
                 ControlCommand::Open(link) => {
+                    log::info!("[WINDOW] another launch opened a link");
                     self.actions.push(Action::ShowWindow);
                     if let Some(link) = crate::wa_link::parse(&link) {
                         self.open_wa_link(link);
@@ -2282,6 +2302,7 @@ impl App {
                 .unwrap_or_else(|p| p.into_inner()),
         );
         for target in opened {
+            log::info!("[WINDOW] a notification was opened");
             // Behind the app lock nothing changes yet: the message, with its
             // account, opens once unlocked.
             if self.app_lock.is_locked() {
@@ -6492,19 +6513,33 @@ impl App {
         // Close the window and continue headless when background mode is
         // enabled. Decided here rather than in `frame_ui`, which eframe skips
         // for a minimized window: closing one from the taskbar quit instead.
+        // During a call too: the call goes on in the call window alone, which
+        // the shell opens once this one is gone, and which the tray's Show
+        // gives back to this window.
         if ctx.input(|input| input.viewport().close_requested())
             && !self.quit_requested
             && self.hides_to_tray()
         {
-            if self.call_keeps_window() {
-                // The call window is this window's child and would close with
-                // it, so during a call the window is minimized instead of
-                // going to the tray.
-                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
-            } else {
-                self.hide_intent = true;
-            }
+            self.hide_intent = true;
+        }
+    }
+
+    /// The main window stopped being drawn (minimized, or hidden by the
+    /// compositor) while it holds a call: its call window is a child viewport
+    /// that only a drawn pass opens, so the call would ring with nothing on
+    /// screen, and the tray's Toggle would only hide it again. With a tray,
+    /// the window goes there instead, and the call window opens alone.
+    pub fn main_window_undrawn(&mut self, ctx: &egui::Context) {
+        if self.call_in_window()
+            && !self.call_window_gave_way
+            && !self.quit_requested
+            && !self.hide_intent
+            && !self.reopen
+            && self.hides_to_tray()
+        {
+            log::info!("[WINDOW] the main window is not drawn during a call: to the tray");
+            self.hide_intent = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
     }
 
@@ -9112,6 +9147,7 @@ impl App {
             Action::ShowWindow => {
                 if self.window_hidden {
                     // The headless loop in `main` will create the window.
+                    log::info!("[WINDOW] show: the window is hidden, creating it");
                     self.wants_show = true;
                 } else if self.wayland && self.raise_on_compositor() {
                     // The compositor (niri) focused the existing window and
@@ -9122,6 +9158,7 @@ impl App {
                     // forward that way. Close it and let the shell open a
                     // fresh one at once: the compositor raises a new toplevel,
                     // and a notification click lands on a visible window.
+                    log::info!("[WINDOW] show: reopening the window on Wayland");
                     self.reopen = true;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 } else {
@@ -9147,13 +9184,15 @@ impl App {
                 }
             }
             Action::HideWindow => {
-                if self.call_keeps_window() {
-                    // A call's card and window go with the main window, so it
-                    // only steps aside.
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
-                } else if self.tray_shown() {
+                if self.tray_shown() {
+                    // A live call goes on in the call window alone, which the
+                    // shell opens once this one is gone.
                     self.hide_intent = true;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                } else if self.call_keeps_window() {
+                    // Without a tray nothing would bring the call back, so the
+                    // window only steps aside.
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                 }
             }
             // Route through the configured window-close behavior.
@@ -9376,6 +9415,21 @@ impl App {
         self.sync_anonymous();
         self.report_presence();
         self.handle_power();
+        if !self.call_in_window() {
+            self.call_window_gave_way = false;
+        }
+        // Logic-only passes (minimized, occluded) keep the tray's view of
+        // which window is in front, since frame_ui does not run for them.
+        if !self.window_hidden {
+            let in_front = ctx.input(|input| {
+                let viewport = input.viewport();
+                viewport.focused.unwrap_or(true) && viewport.minimized != Some(true)
+            });
+            if self.system_focused && !in_front {
+                self.focus_lost_at = Some(Instant::now());
+            }
+            self.system_focused = in_front;
+        }
         self.handle_tray();
         #[cfg(target_os = "macos")]
         self.actions.extend(crate::macos::drain(self.window_hidden));
@@ -15401,8 +15455,14 @@ mod tests {
                 super::tray_action(event, true, false),
                 Some(Action::ShowWindow)
             ));
+            // An open window behind others, minimized or never shown comes
+            // forward; only the one in front hides.
             assert!(matches!(
                 super::tray_action(event, false, false),
+                Some(Action::ShowWindow)
+            ));
+            assert!(matches!(
+                super::tray_action(event, false, true),
                 Some(Action::HideWindow)
             ));
         }
@@ -15412,11 +15472,14 @@ mod tests {
         ));
         assert!(super::tray_action(Event::Menu("other"), false, false).is_none());
         // A Windows left click on the window in front hides it, and on a
-        // hidden window shows it.
-        assert!(matches!(
-            super::tray_action(Event::Show, false, true),
-            Some(Action::HideWindow)
-        ));
+        // hidden window shows it. A Dock click elsewhere always shows it.
+        assert_eq!(
+            matches!(
+                super::tray_action(Event::Show, false, true),
+                Some(Action::HideWindow)
+            ),
+            cfg!(windows)
+        );
         assert!(matches!(
             super::tray_action(Event::Show, true, true),
             Some(Action::ShowWindow)
